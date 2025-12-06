@@ -1,0 +1,170 @@
+-- Goldfish database schema
+-- All tables live in a single SQLite database: .goldfish/goldfish.db
+
+-- Audit trail for all state-changing operations
+CREATE TABLE IF NOT EXISTS audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    slot TEXT,
+    workspace TEXT,
+    reason TEXT NOT NULL,
+    details TEXT,  -- JSON
+    CHECK(length(reason) >= 15)
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_workspace ON audit(workspace);
+CREATE INDEX IF NOT EXISTS idx_audit_operation ON audit(operation);
+
+
+-- Data source registry
+CREATE TABLE IF NOT EXISTS sources (
+    id TEXT PRIMARY KEY,              -- e.g., "synth_v11"
+    name TEXT NOT NULL,
+    description TEXT,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,         -- "job:{job_id}" or "external"
+    gcs_location TEXT NOT NULL,
+    size_bytes INTEGER,
+    status TEXT NOT NULL DEFAULT 'available',
+    metadata TEXT                     -- JSON for future schema info
+);
+
+CREATE INDEX IF NOT EXISTS idx_sources_status ON sources(status);
+CREATE INDEX IF NOT EXISTS idx_sources_created_by ON sources(created_by);
+
+
+-- Source lineage tracking
+CREATE TABLE IF NOT EXISTS source_lineage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL,
+    parent_source_id TEXT,            -- Input source that was used (NULL for external)
+    job_id TEXT,                      -- Job that produced this source (NULL for external)
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (source_id) REFERENCES sources(id),
+    FOREIGN KEY (parent_source_id) REFERENCES sources(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lineage_source ON source_lineage(source_id);
+CREATE INDEX IF NOT EXISTS idx_lineage_parent ON source_lineage(parent_source_id);
+CREATE INDEX IF NOT EXISTS idx_lineage_job ON source_lineage(job_id);
+
+
+-- Job tracking (supplements the existing infra registry)
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,              -- e.g., "job-20251204-153000"
+    workspace TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    script TEXT NOT NULL,
+    experiment_dir TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    log_uri TEXT,
+    artifact_uri TEXT,
+    error TEXT,
+    metadata TEXT                     -- JSON for config overrides, etc.
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_workspace ON jobs(workspace);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_started ON jobs(started_at);
+
+
+-- Job input sources (many-to-many relationship)
+CREATE TABLE IF NOT EXISTS job_inputs (
+    job_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    input_name TEXT NOT NULL,         -- Name in job config (e.g., "raw")
+    PRIMARY KEY (job_id, source_id, input_name),
+    FOREIGN KEY (job_id) REFERENCES jobs(id),
+    FOREIGN KEY (source_id) REFERENCES sources(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_inputs_job ON job_inputs(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_inputs_source ON job_inputs(source_id);
+
+
+-- Workspace goals (persisted across sessions)
+CREATE TABLE IF NOT EXISTS workspace_goals (
+    workspace TEXT PRIMARY KEY,
+    goal TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_goals_updated ON workspace_goals(updated_at);
+
+
+-- Workspace lineage (tracks workspace creation and branching)
+CREATE TABLE IF NOT EXISTS workspace_lineage (
+    workspace_name TEXT PRIMARY KEY,
+    parent_workspace TEXT,            -- Parent workspace if branched
+    parent_version TEXT,              -- Version branched from
+    created_at TEXT NOT NULL,
+    description TEXT,
+    FOREIGN KEY (parent_workspace) REFERENCES workspace_lineage(workspace_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_lineage_parent ON workspace_lineage(parent_workspace);
+
+
+-- Workspace versions (git tags, auto-versioned on runs)
+CREATE TABLE IF NOT EXISTS workspace_versions (
+    workspace_name TEXT,
+    version TEXT,                     -- v1, v2, v3, etc.
+    git_tag TEXT NOT NULL,            -- Git tag name (e.g., baseline_lstm-v1)
+    git_sha TEXT NOT NULL,            -- Git commit SHA
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,         -- 'run', 'checkpoint', 'manual'
+    job_id TEXT,                      -- Job that triggered version (if created_by='run')
+    description TEXT,
+    PRIMARY KEY (workspace_name, version),
+    FOREIGN KEY (workspace_name) REFERENCES workspace_lineage(workspace_name),
+    FOREIGN KEY (job_id) REFERENCES jobs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_versions_workspace ON workspace_versions(workspace_name);
+CREATE INDEX IF NOT EXISTS idx_workspace_versions_created ON workspace_versions(created_at);
+
+
+-- Stage runs (individual stage executions within jobs)
+CREATE TABLE IF NOT EXISTS stage_runs (
+    id TEXT PRIMARY KEY,              -- e.g., "stage-abc123"
+    job_id TEXT,                      -- Parent job (optional, for grouping)
+    workspace_name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    stage_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    log_uri TEXT,
+    error TEXT,
+    config_override TEXT,             -- JSON of config overrides
+    FOREIGN KEY (workspace_name, version) REFERENCES workspace_versions(workspace_name, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stage_runs_workspace ON stage_runs(workspace_name);
+CREATE INDEX IF NOT EXISTS idx_stage_runs_status ON stage_runs(status);
+CREATE INDEX IF NOT EXISTS idx_stage_runs_started ON stage_runs(started_at);
+CREATE INDEX IF NOT EXISTS idx_stage_runs_job ON stage_runs(job_id);
+
+
+-- Signal lineage (tracks data flow between stages)
+CREATE TABLE IF NOT EXISTS signal_lineage (
+    stage_run_id TEXT,
+    signal_name TEXT,                 -- Output signal name (e.g., "tokens", "features")
+    signal_type TEXT,                 -- npy, csv, directory, file, dataset
+    storage_location TEXT,            -- GCS path, local path, etc.
+    size_bytes INTEGER,
+    consumed_by TEXT,                 -- Stage run ID that consumed this (NULL if not consumed yet)
+    is_artifact BOOLEAN DEFAULT 0,    -- 1 if marked as permanent artifact
+    PRIMARY KEY (stage_run_id, signal_name),
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id),
+    FOREIGN KEY (consumed_by) REFERENCES stage_runs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_lineage_stage ON signal_lineage(stage_run_id);
+CREATE INDEX IF NOT EXISTS idx_signal_lineage_consumed ON signal_lineage(consumed_by);
+CREATE INDEX IF NOT EXISTS idx_signal_lineage_artifact ON signal_lineage(is_artifact);
