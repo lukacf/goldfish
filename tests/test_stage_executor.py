@@ -47,6 +47,7 @@ class TestInputResolution:
             config=test_config,
             workspace_manager=workspace_manager,
             pipeline_manager=pipeline_manager,
+            project_root=Path("/tmp"),
             dataset_registry=dataset_registry
         )
 
@@ -102,6 +103,7 @@ class TestInputResolution:
             config=test_config,
             workspace_manager=MagicMock(),
             pipeline_manager=pipeline_manager,
+            project_root=Path("/tmp"),
             dataset_registry=MagicMock()
         )
 
@@ -137,6 +139,7 @@ class TestInputResolution:
             config=test_config,
             workspace_manager=MagicMock(),
             pipeline_manager=pipeline_manager,
+            project_root=Path("/tmp"),
             dataset_registry=MagicMock()
         )
 
@@ -179,6 +182,7 @@ class TestInputResolution:
             config=test_config,
             workspace_manager=MagicMock(),
             pipeline_manager=pipeline_manager,
+            project_root=Path("/tmp"),
             dataset_registry=MagicMock()
         )
 
@@ -202,14 +206,16 @@ class TestAutoVersioning:
 
         # Mock git operations
         workspace_manager = MagicMock()
-        workspace_manager.git_layer.get_current_sha.return_value = "abc123"
-        workspace_manager.git_layer.create_tag = MagicMock()
+        workspace_manager.get_workspace_path.return_value = Path("/tmp/test_workspace")
+        workspace_manager.git.get_head_sha.return_value = "abc123"
+        workspace_manager.git.create_tag = MagicMock()
 
         executor = StageExecutor(
             db=test_db,
             config=test_config,
             workspace_manager=workspace_manager,
             pipeline_manager=pipeline_manager,
+            project_root=Path("/tmp"),
             dataset_registry=MagicMock()
         )
 
@@ -218,7 +224,7 @@ class TestAutoVersioning:
 
         # Verify
         assert version == "v1"
-        workspace_manager.git_layer.create_tag.assert_called_once()
+        workspace_manager.git.create_tag.assert_called_once()
         # Verify database record
         db_version = test_db.get_version("test_workspace", "v1")
         assert db_version["git_sha"] == "abc123"
@@ -236,14 +242,16 @@ class TestAutoVersioning:
 
         # Mock git operations
         workspace_manager = MagicMock()
-        workspace_manager.git_layer.get_current_sha.return_value = "abc123"
-        workspace_manager.git_layer.create_tag = MagicMock()
+        workspace_manager.get_workspace_path.return_value = Path("/tmp/test_workspace")
+        workspace_manager.git.get_head_sha.return_value = "abc123"
+        workspace_manager.git.create_tag = MagicMock()
 
         executor = StageExecutor(
             db=test_db,
             config=test_config,
             workspace_manager=workspace_manager,
             pipeline_manager=pipeline_manager,
+            project_root=Path("/tmp"),
             dataset_registry=MagicMock()
         )
 
@@ -269,6 +277,7 @@ class TestStageRunRecords:
             config=test_config,
             workspace_manager=MagicMock(),
             pipeline_manager=pipeline_manager,
+            project_root=Path("/tmp"),
             dataset_registry=MagicMock()
         )
 
@@ -336,14 +345,16 @@ class TestStageExecution:
 
         # Mock git operations
         workspace_manager = MagicMock()
-        workspace_manager.git_layer.get_current_sha.return_value = "abc123"
-        workspace_manager.git_layer.create_tag = MagicMock()
+        workspace_manager.get_workspace_path.return_value = Path("/tmp/test_workspace")
+        workspace_manager.git.get_head_sha.return_value = "abc123"
+        workspace_manager.git.create_tag = MagicMock()
 
         executor = StageExecutor(
             db=test_db,
             config=test_config,
             workspace_manager=workspace_manager,
             pipeline_manager=pipeline_manager,
+            project_root=Path("/tmp"),
             dataset_registry=dataset_registry
         )
 

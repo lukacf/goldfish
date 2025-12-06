@@ -365,6 +365,19 @@ class GitLayer:
 
         return snapshot_id
 
+    def create_tag(self, branch_or_slot: str, tag_name: str, commit_sha: str) -> None:
+        """Create a git tag on a specific commit.
+
+        Args:
+            branch_or_slot: Branch name or slot (unused, for API compatibility)
+            tag_name: Name of the tag to create
+            commit_sha: SHA of the commit to tag
+
+        This is used for workspace versioning (e.g., "workspace-v1").
+        """
+        # Create tag in the dev repo (not in worktree)
+        self._run_git("tag", tag_name, commit_sha, cwd=self.dev_repo)
+
     def get_latest_snapshot(self, slot_path: Path) -> Optional[str]:
         """Get the most recent snapshot tag."""
         try:
