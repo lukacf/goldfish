@@ -1,7 +1,12 @@
 """GCE (Google Compute Engine) launcher for Goldfish stage execution.
 
 Ported from legacy infra/resource_launcher.py and infra/_launch.py
-Provides basic GCE instance launching, monitoring, and cleanup.
+Provides full GCE functionality:
+- Capacity-aware multi-zone search
+- Disk management (hyperdisk support)
+- GCS integration
+- GPU support
+- Instance monitoring and cleanup
 """
 
 import json
@@ -9,9 +14,11 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from goldfish.errors import GoldfishError
+from goldfish.infra.resource_launcher import ResourceLauncher, run_gcloud
+from goldfish.infra.startup_builder import build_startup_script
 
 
 def run_gcloud(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
