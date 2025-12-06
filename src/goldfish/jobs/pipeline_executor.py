@@ -55,10 +55,22 @@ class PipelineExecutor:
             runs.append(stage_run)
 
             # Wait for completion before starting next stage
-            # TODO: Implement in Phase 6 (job monitoring)
-            # self._wait_for_completion(stage_run.stage_run_id)
+            self._wait_for_completion(stage_run.stage_run_id)
 
         return runs
+
+    def _wait_for_completion(self, stage_run_id: str) -> None:
+        """Wait for stage run to complete.
+
+        Args:
+            stage_run_id: Stage run identifier
+
+        Raises:
+            Exception: If stage fails
+        """
+        status = self.stage_executor.wait_for_completion(stage_run_id)
+        if status == "failed":
+            raise Exception(f"Stage run {stage_run_id} failed")
 
     def run_partial_pipeline(
         self,
@@ -114,7 +126,19 @@ class PipelineExecutor:
             runs.append(stage_run)
 
             # Wait for completion before starting next stage
-            # TODO: Implement in Phase 6 (job monitoring)
-            # self._wait_for_completion(stage_run.stage_run_id)
+            self._wait_for_completion(stage_run.stage_run_id)
 
         return runs
+
+    def _wait_for_completion(self, stage_run_id: str) -> None:
+        """Wait for stage run to complete.
+
+        Args:
+            stage_run_id: Stage run identifier
+
+        Raises:
+            Exception: If stage fails
+        """
+        status = self.stage_executor.wait_for_completion(stage_run_id)
+        if status == "failed":
+            raise Exception(f"Stage run {stage_run_id} failed")
