@@ -91,6 +91,13 @@ Understanding these five concepts is critical to working with Goldfish:
 - **Lineage**: Tracked in `signal_lineage` table (stage_run → signal → consumed_by)
 - **Storage**: Can be local, GCS, or hyperdisk (abstracted from Claude)
 
+### 6. Resource Profiles = Compute Abstraction
+- **What**: Pre-defined GCE machine configurations (cpu-small, h100-spot, a100-on-demand)
+- **Built-in profiles**: Goldfish ships with optimized profiles for ML workloads
+- **Stage usage**: Claude specifies `profile: "h100-spot"` in stage config, Goldfish handles machine types/zones/disks
+- **Customization**: Users can override profiles in goldfish.yaml if needed
+- **Key insight**: Claude doesn't see GCE internals (machine types, accelerator strings, disk types)
+
 ## Critical Implementation Details
 
 ### Git Layer is Internal
@@ -203,6 +210,77 @@ Each tool:
 2. Performs operation via managers (`workspace/`, `jobs/`, etc.)
 3. Records audit log entry
 4. Returns structured result (success + data OR error)
+
+## Resource Profiles (GCE Compute)
+
+### Built-in Profiles
+
+Goldfish ships with optimized GCE profiles for ML workloads:
+
+**CPU Profiles:**
+- `cpu-small` - n2-standard-4 for light compute
+- `cpu-large` - c4-highcpu-192 for heavy CPU workloads
+
+**GPU Profiles:**
+- `h100-spot` - H100 GPU, preemptible (cost-optimized)
+- `h100-on-demand` - H100 GPU, on-demand (reliability)
+- `a100-spot` - A100 GPU, preemptible
+- `a100-on-demand` - A100 GPU, on-demand
+
+### Using Profiles in Stage Configs
+
+Claude specifies profiles by name in stage configs:
+
+```yaml
+# workspaces/w1/configs/train.yaml
+compute:
+  profile: "h100-spot"  # Simple! No GCE internals
+
+env:
+  EPOCHS: "100"
+  LEARNING_RATE: "0.001"
+```
+
+Goldfish automatically resolves to:
+- Machine type: `a3-highgpu-1g`
+- GPU: `nvidia-h100-80gb` (1x)
+- Zones: `[us-central1-a, us-central1-b, us-central1-c, us-west4-a]`
+- Disks: `hyperdisk-balanced` 600GB boot + data
+- Preemptibility: spot-first with fallback
+
+### Customizing Profiles (Optional)
+
+Power users can override profiles in goldfish.yaml:
+
+```yaml
+gce:
+  project_id: "my-gcp-project"
+
+  # Override zones for a built-in profile
+  profile_overrides:
+    h100-spot:
+      zones: ["us-west1-a"]  # Restrict to one zone
+
+    # Or define a completely custom profile
+    my-custom-machine:
+      machine_type: "n2-standard-16"
+      zones: ["us-east1-b"]
+      gpu:
+        type: "none"
+        count: 0
+      boot_disk:
+        type: "pd-ssd"
+        size_gb: 200
+      data_disk:
+        type: "pd-ssd"
+        size_gb: 500
+```
+
+### Implementation Files
+
+- `infra/profiles.py` - Built-in profiles and ProfileResolver
+- `config.py` - GCEConfig with profile_overrides
+- Stage configs reference profiles by name
 
 ## Common Patterns
 
