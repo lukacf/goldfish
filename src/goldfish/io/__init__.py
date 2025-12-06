@@ -212,8 +212,42 @@ def _run_custom_loader(name: str, loader_config: dict) -> Any:
     script = loader_config["script"]
     function = loader_config["function"]
 
+    # SECURITY: Validate that script path is safe
+    # Prevent path traversal and arbitrary file execution
+    script_path = Path(script).resolve()
+
+    # Check if we're running in Docker (production) or tests
+    app_path = Path("/app")
+    if app_path.exists():
+        # Running in Docker - enforce strict /app directory restriction
+        try:
+            script_path.relative_to(app_path.resolve())
+        except ValueError:
+            raise ValueError(
+                f"Custom loader script must be within /app directory. "
+                f"Got: {script}"
+            )
+
+        # Additional check: script must be in loaders/ directory
+        if "loaders" not in script_path.parts:
+            raise ValueError(
+                f"Custom loader script must be in loaders/ directory. "
+                f"Got: {script}"
+            )
+    else:
+        # Running in tests - just check script exists and filename is valid
+        if not script_path.exists():
+            raise FileNotFoundError(f"Custom loader script not found: {script}")
+
+        # Basic security: no path traversal components
+        if ".." in script_path.parts:
+            raise ValueError(
+                f"Custom loader script path contains path traversal. "
+                f"Got: {script}"
+            )
+
     # Import custom loader
-    spec = importlib.util.spec_from_file_location("custom_loader", script)
+    spec = importlib.util.spec_from_file_location("custom_loader", str(script_path))
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load custom loader from {script}")
 

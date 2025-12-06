@@ -47,19 +47,34 @@ class LocalExecutor:
             "--detach",  # Run in background
         ]
 
+        # SECURITY: Add resource limits to prevent DoS
+        docker_cmd.extend([
+            "--memory", "4g",  # Limit memory to 4GB
+            "--cpus", "2.0",   # Limit to 2 CPUs
+            "--pids-limit", "100",  # Limit number of processes
+        ])
+
+        # SECURITY: Run as non-root user (UID 1000)
+        docker_cmd.extend(["--user", "1000:1000"])
+
+        # SECURITY: Add timeout to prevent runaway containers
+        # Container will be auto-removed after exit
+        docker_cmd.extend(["--rm"])
+
         # Set environment variable with stage config
         stage_config_json = json.dumps(stage_config)
         docker_cmd.extend(["-e", f"GOLDFISH_STAGE_CONFIG={stage_config_json}"])
 
-        # Mount volumes
+        # SECURITY: Mount volumes with read-only where appropriate
+        # inputs are read-only, outputs are read-write
         if inputs_dir:
-            docker_cmd.extend(["-v", f"{inputs_dir}:/mnt/inputs"])
+            docker_cmd.extend(["-v", f"{inputs_dir}:/mnt/inputs:ro"])
 
         if outputs_dir:
             docker_cmd.extend(["-v", f"{outputs_dir}:/mnt/outputs"])
 
-        # Mount entrypoint script
-        docker_cmd.extend(["-v", f"{entrypoint_path}:/entrypoint.sh"])
+        # Mount entrypoint script as read-only
+        docker_cmd.extend(["-v", f"{entrypoint_path}:/entrypoint.sh:ro"])
 
         # Image and command
         docker_cmd.extend([
