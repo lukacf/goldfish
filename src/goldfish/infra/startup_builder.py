@@ -12,6 +12,13 @@ import shlex
 from pathlib import Path
 from typing import List, Sequence, Tuple, Mapping
 
+# Configuration constants
+GPU_DRIVER_MAX_ATTEMPTS = 160  # Maximum attempts to wait for GPU driver
+GPU_DRIVER_RETRY_SLEEP_SEC = 15  # Seconds to sleep between GPU driver retries
+GCSFUSE_MAX_ATTEMPTS = 5  # Maximum attempts to mount gcsfuse
+GCSFUSE_RETRY_SLEEP_SEC = 2  # Seconds to sleep between gcsfuse retries
+DEFAULT_SHM_SIZE = "16g"  # Default Docker shared memory size
+
 
 def gpu_driver_section() -> str:
     """Install NVIDIA drivers when a GPU is present (safe on CPU nodes).
@@ -19,7 +26,7 @@ def gpu_driver_section() -> str:
     Returns:
         Shell script fragment
     """
-    return """
+    return f"""
 GPU_PRESENT=0
 if lspci | grep -i nvidia >/dev/null 2>&1; then
   GPU_PRESENT=1
@@ -37,23 +44,23 @@ if [[ "$GPU_PRESENT" == "1" ]]; then
       jammy|noble|focal) CUDA_REPO="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/" ;;
       *) CUDA_REPO="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/" ;;
     esac
-    curl -fsSL "${CUDA_REPO}/3bf863cc.pub" | gpg --dearmor -o /usr/share/keyrings/cuda-archive-keyring.gpg
-    echo "deb [signed-by=/usr/share/keyrings/cuda-archive-keyring.gpg] ${CUDA_REPO} /" > /etc/apt/sources.list.d/cuda.list
+    curl -fsSL "${{CUDA_REPO}}/3bf863cc.pub" | gpg --dearmor -o /usr/share/keyrings/cuda-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/cuda-archive-keyring.gpg] ${{CUDA_REPO}} /" > /etc/apt/sources.list.d/cuda.list
     apt-get update -y
     apt-get install -y cuda-drivers nvidia-container-toolkit
     nvidia-ctk runtime configure --runtime=docker --set-as-default || true
     systemctl restart docker || true
     log_stage "driver_wait"
     DRIVER_READY=0
-    for attempt in $(seq 1 160); do
+    for attempt in $(seq 1 {GPU_DRIVER_MAX_ATTEMPTS}); do
       if command -v nvidia-smi >/dev/null 2>&1; then
         if nvidia-smi >/tmp/nvidia-smi.log 2>&1; then
           DRIVER_READY=1
           break
         fi
       fi
-      echo "nvidia-smi not ready (attempt ${attempt}); sleeping 15s"
-      sleep 15
+      echo "nvidia-smi not ready (attempt ${{attempt}}); sleeping {GPU_DRIVER_RETRY_SLEEP_SEC}s"
+      sleep {GPU_DRIVER_RETRY_SLEEP_SEC}
     done
     if [[ "$DRIVER_READY" -ne 1 ]]; then
       echo "NVIDIA driver failed to initialize" >&2
@@ -84,15 +91,15 @@ echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.clou
 apt-get update -y
 timeout 120 apt-get install -y gcsfuse || true
 mkdir -p {mount_point}
-for attempt in $(seq 1 5); do
+for attempt in $(seq 1 {GCSFUSE_MAX_ATTEMPTS}); do
   if gcsfuse {bucket} {mount_point}; then
     if mountpoint -q {mount_point}; then
       break
     fi
   fi
-  echo "gcsfuse mount retry $attempt failed; sleeping 2s" >&2
+  echo "gcsfuse mount retry $attempt failed; sleeping {GCSFUSE_RETRY_SLEEP_SEC}s" >&2
   fusermount -u {mount_point} 2>/dev/null || true
-  sleep 2
+  sleep {GCSFUSE_RETRY_SLEEP_SEC}
 done
 if ! mountpoint -q {mount_point}; then
   echo "Failed to mount {bucket} at {mount_point}" >&2
@@ -143,7 +150,7 @@ def docker_run_section(
     env_keys: Sequence[str],
     mounts: Sequence[Tuple[str, str]],
     entrypoint: str,
-    shm_size: str = "16g",
+    shm_size: str = DEFAULT_SHM_SIZE,
 ) -> str:
     """Generate Docker run command with GPU detection.
 
@@ -152,7 +159,7 @@ def docker_run_section(
         env_keys: Environment variable names to pass through
         mounts: List of (host_path, container_path) tuples
         entrypoint: Container entrypoint command
-        shm_size: Shared memory size (default "16g")
+        shm_size: Shared memory size (default from DEFAULT_SHM_SIZE)
 
     Returns:
         Shell script fragment defining DOCKER_CMD array
@@ -209,7 +216,7 @@ def build_startup_script(
     mounts: Sequence[Tuple[str, str]] = (),
     bucket_mount: str = "/mnt/gcs",
     gcsfuse: bool = True,
-    shm_size: str = "16g",
+    shm_size: str = DEFAULT_SHM_SIZE,
     disk_mounts: Sequence[Tuple[str, str, str]] = (),
     pre_run_cmds: Sequence[str] = (),
     post_run_cmds: Sequence[str] = (),
@@ -226,7 +233,7 @@ def build_startup_script(
         mounts: Additional volume mounts (host_path, container_path)
         bucket_mount: Local mount point for gcsfuse (default "/mnt/gcs")
         gcsfuse: Enable gcsfuse mounting (default True)
-        shm_size: Shared memory size (default "16g")
+        shm_size: Shared memory size (default from DEFAULT_SHM_SIZE)
         disk_mounts: List of (disk_id, mount_point, mode) tuples
         pre_run_cmds: Commands to run before Docker
         post_run_cmds: Commands to run after Docker
