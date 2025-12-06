@@ -38,6 +38,34 @@ class GCSConfig(BaseModel):
     datasets_prefix: str = "datasets/"
 
 
+class GCEConfig(BaseModel):
+    """GCE (Google Compute Engine) configuration."""
+
+    project_id: str
+
+    # Optional: global zone preferences (applies to all profiles)
+    zones: Optional[list[str]] = None
+
+    # Optional: profile overrides and custom profiles
+    # Example:
+    # profile_overrides:
+    #   h100-spot:
+    #     zones: ["us-west1-a"]  # Override zones for h100-spot
+    #   my-custom:
+    #     machine_type: "n2-standard-16"
+    #     zones: ["us-east1-b"]
+    #     ...
+    profile_overrides: Optional[dict[str, dict]] = None
+
+    # Runtime preferences
+    gpu_preference: list[str] = Field(default_factory=lambda: ["h100", "a100", "none"])
+    preemptible_preference: str = "on_demand_first"  # or "spot_first"
+    search_timeout_sec: int = 900
+    initial_backoff_sec: int = 10
+    backoff_multiplier: float = 1.5
+    max_attempts: int = 150
+
+
 class GoldfishConfig(BaseModel):
     """Main Goldfish configuration."""
 
@@ -49,6 +77,7 @@ class GoldfishConfig(BaseModel):
     audit: AuditConfig = Field(default_factory=AuditConfig)
     jobs: JobsConfig = Field(default_factory=JobsConfig)
     gcs: Optional[GCSConfig] = None
+    gce: Optional[GCEConfig] = None
     invariants: list[str] = Field(default_factory=list)
 
     @classmethod
