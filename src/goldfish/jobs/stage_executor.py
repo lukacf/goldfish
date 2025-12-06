@@ -28,12 +28,14 @@ class StageExecutor:
         config: GoldfishConfig,
         workspace_manager: WorkspaceManager,
         pipeline_manager: PipelineManager,
+        project_root: Path,
         dataset_registry: Optional[DatasetRegistry] = None,
     ):
         self.db = db
         self.config = config
         self.workspace_manager = workspace_manager
         self.pipeline_manager = pipeline_manager
+        self.project_root = project_root
         self.dataset_registry = dataset_registry
 
         # Initialize execution infrastructure
@@ -209,15 +211,18 @@ class StageExecutor:
                 workspace_name=workspace, description=f"Auto-created for {stage_name}"
             )
 
-        # Get current git SHA
-        git_sha = self.workspace_manager.git_layer.get_current_sha(workspace)
+        # Get workspace path (must be mounted)
+        workspace_path = self.workspace_manager.get_workspace_path(workspace)
+
+        # Get current git SHA from the workspace
+        git_sha = self.workspace_manager.git.get_head_sha(workspace_path, short=False)
 
         # Get next version number
         next_version = self.db.get_next_version_number(workspace)
 
         # Create git tag
         git_tag = f"{workspace}-{next_version}"
-        self.workspace_manager.git_layer.create_tag(workspace, git_tag, git_sha)
+        self.workspace_manager.git.create_tag(workspace, git_tag, git_sha)
 
         # Create version record
         description = reason or f"Auto-version for {stage_name} run"
@@ -299,7 +304,7 @@ class StageExecutor:
 
         if backend == "local":
             # Create work directory for this run
-            run_dir = self.config.project_root / ".goldfish" / "runs" / stage_run_id
+            run_dir = self.project_root / ".goldfish" / "runs" / stage_run_id
             run_dir.mkdir(parents=True, exist_ok=True)
 
             # Create inputs and outputs directories
@@ -356,7 +361,7 @@ echo "Stage completed successfully"
                     "inputs": inputs,
                     "outputs": {}
                 },
-                work_dir=self.config.project_root / ".goldfish" / "runs" / stage_run_id
+                work_dir=self.project_root / ".goldfish" / "runs" / stage_run_id
             )
         else:
             raise ValueError(f"Unknown backend: {backend}")

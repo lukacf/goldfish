@@ -185,6 +185,31 @@ class WorkspaceManager:
         """Count how many slots have mounted workspaces."""
         return sum(1 for s in self.get_all_slots() if s.state == SlotState.MOUNTED)
 
+    def get_workspace_path(self, workspace: str) -> Path:
+        """Get filesystem path for a workspace.
+
+        The workspace must be mounted to a slot to have a path.
+
+        Args:
+            workspace: Workspace name
+
+        Returns:
+            Path to the mounted workspace
+
+        Raises:
+            GoldfishError: If workspace is not currently mounted
+        """
+        # Find which slot this workspace is mounted to
+        for slot_info in self.get_all_slots():
+            if slot_info.workspace == workspace and slot_info.state == SlotState.MOUNTED:
+                return self._slot_path(slot_info.slot)
+
+        # Workspace not mounted
+        raise GoldfishError(
+            f"Workspace '{workspace}' is not currently mounted. "
+            f"Mount it to a slot first using mount()."
+        )
+
     def _regenerate_state_md(self) -> str:
         """Regenerate STATE.md and return content."""
         if self.state_manager:
