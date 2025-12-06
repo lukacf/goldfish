@@ -329,5 +329,13 @@ from goldfish.server_tools.utility_tools import (  # noqa: F401
 
 def run_server(project_root: Path) -> None:
     """Run the MCP server."""
-    _init_server(project_root)
+    from goldfish.errors import ProjectNotInitializedError
+
+    try:
+        _init_server(project_root)
+    except ProjectNotInitializedError:
+        # Server starts without initialization - user must call initialize_project() first
+        logger.info(f"Starting uninitialized server in {project_root}. Call initialize_project() to set up.")
+        pass
+
     mcp.run(transport="stdio")
