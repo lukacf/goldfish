@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
+import yaml
 from goldfish.config import GoldfishConfig
 from goldfish.db.database import Database
 from goldfish.datasets.registry import DatasetRegistry
@@ -14,6 +15,7 @@ from goldfish.errors import GoldfishError
 from goldfish.infra.docker_builder import DockerBuilder
 from goldfish.infra.local_executor import LocalExecutor
 from goldfish.infra.gce_launcher import GCELauncher
+from goldfish.infra.profiles import ProfileResolver
 from goldfish.models import StageDef, StageRunInfo
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.workspace.manager import WorkspaceManager
@@ -42,6 +44,12 @@ class StageExecutor:
         self.docker_builder = DockerBuilder()
         self.local_executor = LocalExecutor()
 
+        # Initialize profile resolver
+        profile_overrides = None
+        if config.gce and config.gce.profile_overrides:
+            profile_overrides = config.gce.profile_overrides
+        self.profile_resolver = ProfileResolver(profile_overrides=profile_overrides)
+
         # Initialize GCE launcher with full config
         gce_bucket = None
         gce_project = None
@@ -51,21 +59,16 @@ class StageExecutor:
         if config.gcs:
             gce_bucket = config.gcs.bucket
 
-        if hasattr(config, 'gcp_project'):
-            gce_project = config.gcp_project
-
-        if hasattr(config.jobs, 'gce_zone'):
-            gce_zone = config.jobs.gce_zone
-
-        # Load resource catalog if available (for capacity search)
-        if hasattr(config, 'gce_resources'):
-            gce_resources = config.gce_resources
+        if config.gce:
+            gce_project = config.gce.project_id
+            if config.gce.zones:
+                gce_zone = config.gce.zones[0]
 
         self.gce_launcher = GCELauncher(
             project_id=gce_project,
             zone=gce_zone,
             bucket=gce_bucket,
-            resources=gce_resources,
+            resources=gce_resources,  # Will be set per-stage
         )
 
     def run_stage(
@@ -291,6 +294,52 @@ class StageExecutor:
 
         return image_tag
 
+    def _load_stage_config(self, workspace: str, stage_name: str) -> dict:
+        """Load stage config from configs/{stage}.yaml.
+
+        Args:
+            workspace: Workspace name
+            stage_name: Stage name
+
+        Returns:
+            Stage config dict (or empty dict if config doesn't exist)
+        """
+        workspace_path = self.workspace_manager.get_workspace_path(workspace)
+        config_path = workspace_path / "configs" / f"{stage_name}.yaml"
+
+        if not config_path.exists():
+            return {}
+
+        try:
+            with open(config_path) as f:
+                return yaml.safe_load(f) or {}
+        except Exception as e:
+            # Log warning but don't fail - config is optional
+            return {}
+
+    def _resolve_profile_from_config(self, stage_config: dict) -> Optional[dict]:
+        """Resolve profile from stage config.
+
+        Args:
+            stage_config: Stage config dict
+
+        Returns:
+            Resolved profile dict, or None if no profile specified
+        """
+        compute = stage_config.get("compute", {})
+
+        # Check if profile is specified
+        if "profile" not in compute:
+            return None
+
+        profile_name = compute["profile"]
+
+        # Resolve profile using ProfileResolver
+        try:
+            return self.profile_resolver.resolve(profile_name)
+        except Exception as e:
+            raise GoldfishError(f"Failed to resolve profile '{profile_name}': {e}")
+
     def _launch_container(
         self,
         stage_run_id: str,
@@ -343,6 +392,37 @@ echo "Stage completed successfully"
             )
 
         elif backend == "gce":
+            # Load stage config and resolve profile
+            stage_config_yaml = self._load_stage_config(workspace, stage_name)
+            profile = self._resolve_profile_from_config(stage_config_yaml)
+
+            # Prepare launch parameters
+            machine_type = "n1-standard-4"
+            gpu_type = None
+            gpu_count = 0
+            zones = None
+            use_capacity_search = False
+
+            if profile:
+                # Use profile for GCE launch
+                machine_type = profile["machine_type"]
+                gpu_info = profile.get("gpu", {})
+                if gpu_info.get("type") != "none":
+                    gpu_type = gpu_info.get("accelerator")
+                    gpu_count = gpu_info.get("count", 0)
+                zones = profile.get("zones")
+                use_capacity_search = True
+
+                # Update GCE launcher with profile as resource
+                self.gce_launcher.resources = [profile]
+
+                # Apply runtime preferences from config
+                if self.config.gce:
+                    # GPU preference ordering for capacity search
+                    gpu_preference = self.config.gce.gpu_preference
+                    # Note: ResourceLauncher will use these preferences
+                    # when searching for capacity
+
             # Launch on GCE
             self.gce_launcher.launch_instance(
                 image_tag=image_tag,
@@ -361,7 +441,12 @@ echo "Stage completed successfully"
                     "inputs": inputs,
                     "outputs": {}
                 },
-                work_dir=self.project_root / ".goldfish" / "runs" / stage_run_id
+                work_dir=self.project_root / ".goldfish" / "runs" / stage_run_id,
+                machine_type=machine_type,
+                gpu_type=gpu_type,
+                gpu_count=gpu_count,
+                zones=zones,
+                use_capacity_search=use_capacity_search,
             )
         else:
             raise ValueError(f"Unknown backend: {backend}")
