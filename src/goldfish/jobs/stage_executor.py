@@ -39,7 +39,23 @@ class StageExecutor:
         # Initialize execution infrastructure
         self.docker_builder = DockerBuilder()
         self.local_executor = LocalExecutor()
-        self.gce_launcher = GCELauncher()  # GCE support (stub for now)
+
+        # Initialize GCE launcher with config
+        gce_bucket = None
+        gce_project = None
+        gce_zone = "us-central1-a"
+        if config.gcs:
+            gce_bucket = config.gcs.bucket
+        if hasattr(config, 'gcp_project'):
+            gce_project = config.gcp_project
+        if hasattr(config.jobs, 'gce_zone'):
+            gce_zone = config.jobs.gce_zone
+
+        self.gce_launcher = GCELauncher(
+            project_id=gce_project,
+            zone=gce_zone,
+            bucket=gce_bucket,
+        )
 
     def run_stage(
         self,
@@ -313,13 +329,11 @@ echo "Stage completed successfully"
             )
 
         elif backend == "gce":
-            # Launch on GCE (stub implementation)
-            # Note: This will raise NotImplementedError - see gce_launcher.py
-            try:
-                self.gce_launcher.launch_instance(
-                    image_tag=image_tag,
-                    stage_run_id=stage_run_id,
-                    entrypoint_script=f"""#!/bin/bash
+            # Launch on GCE
+            self.gce_launcher.launch_instance(
+                image_tag=image_tag,
+                stage_run_id=stage_run_id,
+                entrypoint_script=f"""#!/bin/bash
 set -euo pipefail
 
 echo "Running stage: {stage_name}"
@@ -328,18 +342,13 @@ python -m modules.{stage_name}
 
 echo "Stage completed successfully"
 """,
-                    stage_config={
-                        "stage": stage_name,
-                        "inputs": inputs,
-                        "outputs": {}
-                    },
-                    work_dir=self.config.project_root / ".goldfish" / "runs" / stage_run_id
-                )
-            except NotImplementedError:
-                raise GoldfishError(
-                    "GCE backend not yet fully implemented. "
-                    "Use backend='local' in config.yaml for now."
-                )
+                stage_config={
+                    "stage": stage_name,
+                    "inputs": inputs,
+                    "outputs": {}
+                },
+                work_dir=self.config.project_root / ".goldfish" / "runs" / stage_run_id
+            )
         else:
             raise ValueError(f"Unknown backend: {backend}")
 
@@ -405,6 +414,45 @@ echo "Stage completed successfully"
                 else:
                     # Unknown status
                     raise GoldfishError(f"Unknown container status: {status}")
+
+            elif backend == "gce":
+                status = self.gce_launcher.get_instance_status(stage_run_id)
+
+                if status == "running":
+                    # Still running, update status in db
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id, status="running"
+                    )
+                    time.sleep(poll_interval)
+                    elapsed += poll_interval
+                    continue
+
+                elif status == "completed":
+                    # Success!
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id,
+                        status="completed",
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    return "completed"
+
+                elif status == "failed":
+                    # Failed - get logs
+                    logs = self.gce_launcher.get_instance_logs(stage_run_id)
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id,
+                        status="failed",
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        error=logs[-1000:],  # Last 1000 chars
+                    )
+                    return "failed"
+
+                elif status == "not_found":
+                    raise GoldfishError(f"Instance {stage_run_id} not found")
+
+                else:
+                    # Unknown status
+                    raise GoldfishError(f"Unknown instance status: {status}")
 
             else:
                 raise GoldfishError(f"Backend {backend} not supported for monitoring")
