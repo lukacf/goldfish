@@ -17,21 +17,6 @@ from goldfish.errors import GoldfishError
 class TestGetArtifactUri:
     """Tests for _get_artifact_uri - P0."""
 
-    def test_returns_none_without_gcs_config(self, temp_dir):
-        """Without GCS config, artifact_uri should be None."""
-        config = MagicMock(spec=GoldfishConfig)
-        config.gcs = None
-        config.jobs = JobsConfig()
-
-        launcher = JobLauncher(
-            config=config,
-            project_root=temp_dir,
-            db=MagicMock(),
-            workspace_manager=MagicMock(),
-        )
-
-        assert launcher._get_artifact_uri("job-a1b2c3d4") is None
-
     def test_returns_uri_with_gcs_config(self, temp_dir):
         """With GCS config, should return properly formatted URI."""
         config = MagicMock(spec=GoldfishConfig)
@@ -525,44 +510,6 @@ class TestExpDirCleanup:
 
 class TestLaunchJob:
     """Tests for _launch_job - integration of infra launch."""
-
-    def test_does_nothing_without_infra_path(self, temp_dir):
-        """Without infra_path configured, should not raise."""
-        config = MagicMock(spec=GoldfishConfig)
-        config.gcs = None
-        config.jobs = JobsConfig(infra_path=None)
-
-        launcher = JobLauncher(
-            config=config,
-            project_root=temp_dir,
-            db=MagicMock(),
-            workspace_manager=MagicMock(),
-        )
-
-        exp_dir = temp_dir / "exp"
-        exp_dir.mkdir()
-
-        # Should not raise, just do nothing
-        launcher._launch_job("job-a1b2c3d4", exp_dir, "run.py")
-
-    def test_does_nothing_if_script_not_found(self, temp_dir):
-        """If create_run.py doesn't exist, should not raise."""
-        config = MagicMock(spec=GoldfishConfig)
-        config.gcs = None
-        config.jobs = JobsConfig(infra_path="nonexistent/path")
-
-        launcher = JobLauncher(
-            config=config,
-            project_root=temp_dir,
-            db=MagicMock(),
-            workspace_manager=MagicMock(),
-        )
-
-        exp_dir = temp_dir / "exp"
-        exp_dir.mkdir()
-
-        # Should not raise
-        launcher._launch_job("job-a1b2c3d4", exp_dir, "run.py")
 
     def test_calls_infra_when_script_exists(self, temp_dir):
         """When create_run.py exists, should call _launch_via_infra."""

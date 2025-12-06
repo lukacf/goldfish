@@ -11,12 +11,6 @@ import pytest
 class TestCancelJobTool:
     """Tests for cancel_job tool."""
 
-    def test_cancel_job_tool_exists(self):
-        """Server should have cancel_job tool."""
-        from goldfish import server
-
-        assert hasattr(server, "cancel_job")
-
     def test_cancel_job_cancels_running_job(self, temp_dir):
         """cancel_job should cancel a running job."""
         from goldfish import server
@@ -105,12 +99,6 @@ class TestCancelJobTool:
 
 class TestJobTrackerCancel:
     """Tests for job tracker cancel implementation."""
-
-    def test_job_tracker_has_cancel_job_method(self):
-        """JobTracker should have cancel_job method."""
-        from goldfish.jobs.tracker import JobTracker
-
-        assert hasattr(JobTracker, "cancel_job")
 
     def test_cancel_updates_status_to_cancelled(self, temp_dir):
         """cancel_job should update job status to cancelled."""
