@@ -11,6 +11,8 @@ from goldfish.config import GoldfishConfig
 from goldfish.db.database import Database
 from goldfish.datasets.registry import DatasetRegistry
 from goldfish.errors import GoldfishError
+from goldfish.infra.docker_builder import DockerBuilder
+from goldfish.infra.local_executor import LocalExecutor
 from goldfish.models import StageDef, StageRunInfo
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.workspace.manager import WorkspaceManager
@@ -25,13 +27,17 @@ class StageExecutor:
         config: GoldfishConfig,
         workspace_manager: WorkspaceManager,
         pipeline_manager: PipelineManager,
-        dataset_registry: DatasetRegistry,
+        dataset_registry: Optional[DatasetRegistry] = None,
     ):
         self.db = db
         self.config = config
         self.workspace_manager = workspace_manager
         self.pipeline_manager = pipeline_manager
         self.dataset_registry = dataset_registry
+
+        # Initialize execution infrastructure
+        self.docker_builder = DockerBuilder()
+        self.local_executor = LocalExecutor()
 
     def run_stage(
         self,
@@ -225,22 +231,32 @@ class StageExecutor:
             config_override=config_override,
         )
 
-        # Record input signals
+        # Record input signals in lineage
         for input_name, storage_location in inputs.items():
-            # Note: We don't have the source stage_run_id here for signals,
-            # so we just record the location. Proper lineage tracking will
-            # be added in Phase 5.
-            pass
+            # Add signal to lineage table
+            self.db.add_signal(
+                stage_run_id=stage_run_id,
+                signal_name=input_name,
+                signal_type="input",
+                storage_location=storage_location
+            )
 
     def _build_docker_image(self, workspace: str, version: str) -> str:
         """Build Docker image for this run.
 
         Returns image tag.
-
-        Note: Actual implementation in Phase 6.
         """
-        image_tag = f"goldfish-{workspace}-{version}"
-        # TODO: Implement Docker image building in Phase 6
+        # Get workspace directory
+        workspace_dir = self.workspace_manager.get_workspace_path(workspace)
+
+        # Build image using DockerBuilder
+        image_tag = self.docker_builder.build_image(
+            workspace_dir=workspace_dir,
+            workspace_name=workspace,
+            version=version,
+            use_cache=True
+        )
+
         return image_tag
 
     def _launch_container(
@@ -251,18 +267,51 @@ class StageExecutor:
         image_tag: str,
         inputs: dict,
     ):
-        """Launch Docker container (local) or GCE instance.
-
-        Note: Actual implementation in Phase 6.
-        """
-        # TODO: Implement container launching in Phase 6
+        """Launch Docker container (local) or GCE instance."""
         backend = self.config.jobs.backend
 
         if backend == "local":
-            # Will launch local Docker container
-            pass
+            # Create work directory for this run
+            run_dir = self.config.project_root / ".goldfish" / "runs" / stage_run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            # Create inputs and outputs directories
+            inputs_dir = run_dir / "inputs"
+            outputs_dir = run_dir / "outputs"
+            inputs_dir.mkdir(exist_ok=True)
+            outputs_dir.mkdir(exist_ok=True)
+
+            # Generate entrypoint script
+            entrypoint_script = f"""#!/bin/bash
+set -euo pipefail
+
+echo "Running stage: {stage_name}"
+cd /app
+python -m modules.{stage_name}
+
+echo "Stage completed successfully"
+"""
+
+            # Generate stage config
+            stage_config = {
+                "stage": stage_name,
+                "inputs": inputs,
+                "outputs": {}  # Will be populated by module
+            }
+
+            # Launch container using LocalExecutor
+            self.local_executor.launch_container(
+                image_tag=image_tag,
+                stage_run_id=stage_run_id,
+                entrypoint_script=entrypoint_script,
+                stage_config=stage_config,
+                work_dir=run_dir,
+                inputs_dir=inputs_dir,
+                outputs_dir=outputs_dir
+            )
+
         elif backend == "gce":
-            # Will launch GCE instance
-            pass
+            # GCE launching not yet implemented
+            raise GoldfishError("GCE backend not yet implemented")
         else:
             raise ValueError(f"Unknown backend: {backend}")

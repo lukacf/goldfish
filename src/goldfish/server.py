@@ -74,6 +74,8 @@ from goldfish.utils import parse_datetime, parse_optional_datetime
 from goldfish.workspace.manager import WorkspaceManager
 from goldfish.jobs.launcher import JobLauncher
 from goldfish.jobs.tracker import JobTracker
+from goldfish.jobs.stage_executor import StageExecutor
+from goldfish.jobs.pipeline_executor import PipelineExecutor
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.pipeline.parser import PipelineNotFoundError, PipelineValidationError
 from goldfish.datasets.registry import DatasetRegistry
@@ -105,6 +107,13 @@ def _get_workspace_manager() -> WorkspaceManager:
     if not has_context():
         raise GoldfishError("Server not initialized")
     return get_context().workspace_manager
+
+
+def _get_pipeline_manager() -> PipelineManager:
+    """Get pipeline manager from context or raise GoldfishError."""
+    if not has_context():
+        raise GoldfishError("Server not initialized")
+    return get_context().pipeline_manager
 
 
 def _get_state_manager() -> StateManager:
@@ -221,6 +230,19 @@ def _init_server(project_root: Path) -> None:
     # Initialize pipeline manager with dataset registry for validation
     pipeline_manager = PipelineManager(db, workspace_manager, dataset_registry=dataset_registry)
 
+    # Initialize execution components
+    stage_executor = StageExecutor(
+        db=db,
+        config=config,
+        workspace_manager=workspace_manager,
+        pipeline_manager=pipeline_manager,
+        dataset_registry=dataset_registry
+    )
+    pipeline_executor = PipelineExecutor(
+        stage_executor=stage_executor,
+        pipeline_manager=pipeline_manager
+    )
+
     # Create and set context
     ctx = ServerContext(
         project_root=project_root,
@@ -232,6 +254,8 @@ def _init_server(project_root: Path) -> None:
         job_tracker=job_tracker,
         pipeline_manager=pipeline_manager,
         dataset_registry=dataset_registry,
+        stage_executor=stage_executor,
+        pipeline_executor=pipeline_executor,
     )
     set_context(ctx)
 
@@ -1826,6 +1850,177 @@ def branch_workspace(
         "parent": from_workspace,
         "parent_version": from_version
     }
+
+
+@mcp.tool()
+def run_stage(
+    workspace: str,
+    stage: str,
+    config_override: Optional[dict] = None,
+    inputs_override: Optional[dict] = None,
+    reason: Optional[str] = None
+) -> dict:
+    """Run a single pipeline stage.
+
+    Args:
+        workspace: Workspace name (e.g., "baseline_lstm") or slot (e.g., "w1")
+        stage: Stage name (e.g., "tokenize")
+        config_override: Override config env vars (e.g., {"VOCAB_SIZE": "20000"})
+        inputs_override: Override input sources for debugging
+        reason: Why running this stage (min 15 chars)
+
+    Returns:
+        Dict with:
+        - stage_run_id: Stage run identifier
+        - workspace: Workspace name
+        - version: Auto-created version (e.g., "v1")
+        - stage: Stage name
+        - status: Job status ("running", "pending")
+
+    Auto-creates workspace version (git tag).
+    """
+    config = _get_config()
+    db = _get_db()
+    workspace_manager = _get_workspace_manager()
+    pipeline_manager = _get_pipeline_manager()
+
+    validate_workspace_name(workspace)
+    if reason:
+        validate_reason(reason, config.audit.min_reason_length)
+
+    # Resolve workspace (could be slot like "w1")
+    workspace_name = workspace_manager.get_workspace_for_slot(workspace)
+    if not workspace_name:
+        workspace_name = workspace
+
+    stage_executor = StageExecutor(
+        db=db,
+        config=config,
+        workspace_manager=workspace_manager,
+        pipeline_manager=pipeline_manager
+    )
+
+    stage_run = stage_executor.run_stage(
+        workspace=workspace_name,
+        stage_name=stage,
+        config_override=config_override or {},
+        inputs_override=inputs_override or {},
+        reason=reason or "Manual stage run"
+    )
+
+    return stage_run
+
+
+@mcp.tool()
+def run_pipeline(
+    workspace: str,
+    config_override: Optional[dict] = None,
+    reason: Optional[str] = None
+) -> dict:
+    """Run full pipeline (all stages in sequence).
+
+    Args:
+        workspace: Workspace name or slot
+        config_override: Dict of {stage_name: {var: value}}
+        reason: Why running this pipeline (min 15 chars)
+
+    Returns:
+        Dict with:
+        - runs: List of stage run info dicts
+
+    Auto-creates workspace version (git tag).
+    """
+    config = _get_config()
+    db = _get_db()
+    workspace_manager = _get_workspace_manager()
+    pipeline_manager = _get_pipeline_manager()
+
+    validate_workspace_name(workspace)
+    if reason:
+        validate_reason(reason, config.audit.min_reason_length)
+
+    # Resolve workspace
+    workspace_name = workspace_manager.get_workspace_for_slot(workspace)
+    if not workspace_name:
+        workspace_name = workspace
+
+    stage_executor = StageExecutor(
+        db=db,
+        config=config,
+        workspace_manager=workspace_manager,
+        pipeline_manager=pipeline_manager
+    )
+
+    pipeline_executor = PipelineExecutor(
+        stage_executor=stage_executor,
+        pipeline_manager=pipeline_manager
+    )
+
+    runs = pipeline_executor.run_pipeline(
+        workspace=workspace_name,
+        config_override=config_override or {},
+        reason=reason or "Manual pipeline run"
+    )
+
+    return {"runs": runs}
+
+
+@mcp.tool()
+def run_partial_pipeline(
+    workspace: str,
+    from_stage: str,
+    to_stage: str,
+    config_override: Optional[dict] = None,
+    reason: Optional[str] = None
+) -> dict:
+    """Run stages from_stage through to_stage (inclusive).
+
+    Args:
+        workspace: Workspace name or slot
+        from_stage: First stage to run
+        to_stage: Last stage to run (inclusive)
+        config_override: Dict of {stage_name: {var: value}}
+        reason: Why running these stages (min 15 chars)
+
+    Returns:
+        Dict with:
+        - runs: List of stage run info dicts
+    """
+    config = _get_config()
+    db = _get_db()
+    workspace_manager = _get_workspace_manager()
+    pipeline_manager = _get_pipeline_manager()
+
+    validate_workspace_name(workspace)
+    if reason:
+        validate_reason(reason, config.audit.min_reason_length)
+
+    # Resolve workspace
+    workspace_name = workspace_manager.get_workspace_for_slot(workspace)
+    if not workspace_name:
+        workspace_name = workspace
+
+    stage_executor = StageExecutor(
+        db=db,
+        config=config,
+        workspace_manager=workspace_manager,
+        pipeline_manager=pipeline_manager
+    )
+
+    pipeline_executor = PipelineExecutor(
+        stage_executor=stage_executor,
+        pipeline_manager=pipeline_manager
+    )
+
+    runs = pipeline_executor.run_partial_pipeline(
+        workspace=workspace_name,
+        from_stage=from_stage,
+        to_stage=to_stage,
+        config_override=config_override or {},
+        reason=reason or "Manual partial pipeline run"
+    )
+
+    return {"runs": runs}
 
 
 # ============== ENTRY POINT ==============

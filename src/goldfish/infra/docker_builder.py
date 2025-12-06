@@ -123,4 +123,8 @@ CMD ["/bin/bash"]
         # Sanitize workspace name (Docker tags allow: [a-z0-9._-])
         sanitized_workspace = re.sub(r'[^a-z0-9._-]', '_', workspace_name.lower())
 
-        return f"goldfish-{sanitized_workspace}-{version}"
+        # SECURITY: Sanitize version to prevent command injection
+        # Docker tags allow: [a-z0-9._-]
+        sanitized_version = re.sub(r'[^a-z0-9._-]', '_', version.lower())
+
+        return f"goldfish-{sanitized_workspace}-{sanitized_version}"
