@@ -65,7 +65,12 @@ def main():
 
     elif args.command == "serve" or args.command is None:
         # Default to serve if no command given
-        project_root = getattr(args, "project", None) or Path.cwd()
+        # Use project arg if provided, otherwise use CWD
+        if hasattr(args, 'project') and args.project:
+            project_root = args.project
+        else:
+            project_root = Path.cwd()
+
         from goldfish.server import run_server
 
         run_server(project_root)
