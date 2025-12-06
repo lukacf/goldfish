@@ -19,6 +19,10 @@ from goldfish.errors import GoldfishError
 from goldfish.infra.resource_launcher import ResourceLauncher, run_gcloud, cleanup_disk
 from goldfish.infra.startup_builder import build_startup_script
 
+# Configuration constants for hyperdisk
+HYPERDISK_PROVISIONED_IOPS = 80000  # IOPS for hyperdisk-balanced
+HYPERDISK_PROVISIONED_THROUGHPUT = 2400  # MB/s for hyperdisk-balanced
+
 
 class GCELauncher:
     """Launch stage runs on Google Compute Engine with full infrastructure support.
@@ -293,8 +297,8 @@ class GCELauncher:
         if disk_type == "hyperdisk-balanced":
             cmd.extend(
                 [
-                    "--provisioned-iops=80000",
-                    "--provisioned-throughput=2400",
+                    f"--provisioned-iops={HYPERDISK_PROVISIONED_IOPS}",
+                    f"--provisioned-throughput={HYPERDISK_PROVISIONED_THROUGHPUT}",
                 ]
             )
 

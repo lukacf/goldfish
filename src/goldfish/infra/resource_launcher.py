@@ -47,6 +47,9 @@ class LaunchResult:
     selection: LaunchSelection
     timings: Dict[str, float]
     attempt_log: List[Dict[str, Any]]
+    run_id: Optional[str] = None  # Run identifier for tracking
+    log_uri: Optional[str] = None  # GCS URI for logs
+    artifact_uri: Optional[str] = None  # GCS URI for artifacts
 
 
 def run_gcloud(
