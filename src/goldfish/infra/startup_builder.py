@@ -8,6 +8,7 @@ Composable functions that build shell script fragments for:
 - Docker execution with proper environment
 """
 
+import shlex
 from pathlib import Path
 from typing import List, Sequence, Tuple, Mapping
 
@@ -242,12 +243,12 @@ def build_startup_script(
     stage_uri = f"gs://{bucket}/{bucket_path}/logs/stage_times.log"
     log_file = f"{bucket_mount}/{bucket_path}/logs/train.log"
 
-    # Export environment variables
+    # Export environment variables with proper shell escaping
     env_exports = []
     for k, v in env_map.items():
-        # Escape single quotes
-        safe_v = str(v).replace("'", "'\"'\"'")
-        env_exports.append(f"export {k}='{safe_v}'")
+        # Use shlex.quote for proper shell escaping (prevents command injection)
+        safe_v = shlex.quote(str(v))
+        env_exports.append(f"export {k}={safe_v}")
 
     env_exports_block = "\n".join(env_exports)
     env_keys = list(env_map.keys())

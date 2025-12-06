@@ -213,19 +213,33 @@ def _run_custom_loader(name: str, loader_config: dict) -> Any:
     function = loader_config["function"]
 
     # SECURITY: Validate that script path is safe
-    # Prevent path traversal and arbitrary file execution
-    script_path = Path(script).resolve()
+    # Prevent path traversal, symlink attacks, and arbitrary file execution
+    script_path = Path(script)
+
+    # CRITICAL: Check for symlinks BEFORE resolving
+    if script_path.is_symlink():
+        raise ValueError(
+            f"Custom loader script cannot be a symlink (security risk). "
+            f"Got: {script}"
+        )
+
+    # Resolve path (but we already checked it's not a symlink)
+    try:
+        script_path = script_path.resolve(strict=True)
+    except (OSError, RuntimeError) as e:
+        raise ValueError(f"Invalid custom loader script path: {e}")
 
     # Check if we're running in Docker (production) or tests
     app_path = Path("/app")
     if app_path.exists():
         # Running in Docker - enforce strict /app directory restriction
+        app_resolved = app_path.resolve()
         try:
-            script_path.relative_to(app_path.resolve())
+            script_path.relative_to(app_resolved)
         except ValueError:
             raise ValueError(
                 f"Custom loader script must be within /app directory. "
-                f"Got: {script}"
+                f"Got: {script}, resolved to: {script_path}"
             )
 
         # Additional check: script must be in loaders/ directory
@@ -234,6 +248,13 @@ def _run_custom_loader(name: str, loader_config: dict) -> Any:
                 f"Custom loader script must be in loaders/ directory. "
                 f"Got: {script}"
             )
+
+        # Verify no intermediate symlinks in the resolved path
+        for parent in script_path.parents:
+            if parent.is_symlink() and parent != app_resolved:
+                raise ValueError(
+                    f"Custom loader path contains symlink: {parent}"
+                )
     else:
         # Running in tests - just check script exists and filename is valid
         if not script_path.exists():
@@ -245,6 +266,13 @@ def _run_custom_loader(name: str, loader_config: dict) -> Any:
                 f"Custom loader script path contains path traversal. "
                 f"Got: {script}"
             )
+
+    # Validate function name (prevent calling private/dangerous functions)
+    if not function.isidentifier() or function.startswith("_"):
+        raise ValueError(
+            f"Invalid function name: {function}. "
+            "Must be a valid identifier and not start with underscore."
+        )
 
     # Import custom loader
     spec = importlib.util.spec_from_file_location("custom_loader", str(script_path))
