@@ -63,6 +63,7 @@ def initialize_project(
     """
     from pathlib import Path
     from goldfish.init import init_project, init_from_existing
+    from goldfish.server import _init_server
 
     try:
         project_path = Path.cwd()
@@ -74,6 +75,9 @@ def initialize_project(
         else:
             config = init_project(project_name, project_path)
             message = f"Initialized '{project_name}'"
+
+        # Initialize the server context now that project is set up
+        _init_server(project_path)
 
         return {
             "success": True,
