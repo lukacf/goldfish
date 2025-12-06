@@ -40,21 +40,30 @@ class StageExecutor:
         self.docker_builder = DockerBuilder()
         self.local_executor = LocalExecutor()
 
-        # Initialize GCE launcher with config
+        # Initialize GCE launcher with full config
         gce_bucket = None
         gce_project = None
         gce_zone = "us-central1-a"
+        gce_resources = []
+
         if config.gcs:
             gce_bucket = config.gcs.bucket
+
         if hasattr(config, 'gcp_project'):
             gce_project = config.gcp_project
+
         if hasattr(config.jobs, 'gce_zone'):
             gce_zone = config.jobs.gce_zone
+
+        # Load resource catalog if available (for capacity search)
+        if hasattr(config, 'gce_resources'):
+            gce_resources = config.gce_resources
 
         self.gce_launcher = GCELauncher(
             project_id=gce_project,
             zone=gce_zone,
             bucket=gce_bucket,
+            resources=gce_resources,
         )
 
     def run_stage(
