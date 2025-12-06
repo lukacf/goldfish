@@ -1,8 +1,0 @@
-default_bucket: gs://mlm-artifacts-king-dev
-
-path_templates:
-  processed: processed/{name}/
-  tbpe: tbpe/{name}/
-  models: models/{name}/
-  logs: logs/{name}/
-  runs: runs/{name}/

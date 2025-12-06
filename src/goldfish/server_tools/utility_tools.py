@@ -45,6 +45,54 @@ from goldfish.errors import GoldfishError, validate_reason
 
 
 @mcp.tool()
+def initialize_project(
+    project_name: str,
+    from_existing: Optional[str] = None
+) -> dict:
+    """Initialize a new Goldfish project in the current directory.
+
+    Creates the necessary directory structure, git repository, and configuration.
+    This must be called before using other Goldfish tools in a new project.
+
+    Args:
+        project_name: Name for the project
+        from_existing: Optional path to import existing code from
+
+    Returns:
+        dict with success status and project details
+    """
+    from pathlib import Path
+    from goldfish.init import init_project, init_from_existing
+
+    try:
+        project_path = Path.cwd()
+
+        if from_existing:
+            source_path = Path(from_existing)
+            config = init_from_existing(project_path, source_path)
+            message = f"Initialized '{project_name}' with code from {from_existing}"
+        else:
+            config = init_project(project_name, project_path)
+            message = f"Initialized '{project_name}'"
+
+        return {
+            "success": True,
+            "message": message,
+            "project_path": str(project_path),
+            "dev_repo": str(project_path / config.dev_repo_path),
+            "config_file": str(project_path / "goldfish.yaml"),
+            "state_file": str(project_path / config.state_md.path),
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to initialize project: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@mcp.tool()
 def status() -> StatusResponse:
     """Get current status: slots, jobs, sources, and STATE.md content.
 

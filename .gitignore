@@ -39,5 +39,10 @@ Thumbs.db
 .goldfish/
 *.db
 
-# References (keep for now, but don't track all of it)
-references/examples/
+# Test coverage
+htmlcov/
+.coverage
+.pytest_cache/
+
+# Ruff cache
+.ruff_cache/
