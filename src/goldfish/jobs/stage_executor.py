@@ -13,6 +13,7 @@ from goldfish.datasets.registry import DatasetRegistry
 from goldfish.errors import GoldfishError
 from goldfish.infra.docker_builder import DockerBuilder
 from goldfish.infra.local_executor import LocalExecutor
+from goldfish.infra.gce_launcher import GCELauncher
 from goldfish.models import StageDef, StageRunInfo
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.workspace.manager import WorkspaceManager
@@ -38,6 +39,7 @@ class StageExecutor:
         # Initialize execution infrastructure
         self.docker_builder = DockerBuilder()
         self.local_executor = LocalExecutor()
+        self.gce_launcher = GCELauncher()  # GCE support (stub for now)
 
     def run_stage(
         self,
@@ -311,7 +313,103 @@ echo "Stage completed successfully"
             )
 
         elif backend == "gce":
-            # GCE launching not yet implemented
-            raise GoldfishError("GCE backend not yet implemented")
+            # Launch on GCE (stub implementation)
+            # Note: This will raise NotImplementedError - see gce_launcher.py
+            try:
+                self.gce_launcher.launch_instance(
+                    image_tag=image_tag,
+                    stage_run_id=stage_run_id,
+                    entrypoint_script=f"""#!/bin/bash
+set -euo pipefail
+
+echo "Running stage: {stage_name}"
+cd /app
+python -m modules.{stage_name}
+
+echo "Stage completed successfully"
+""",
+                    stage_config={
+                        "stage": stage_name,
+                        "inputs": inputs,
+                        "outputs": {}
+                    },
+                    work_dir=self.config.project_root / ".goldfish" / "runs" / stage_run_id
+                )
+            except NotImplementedError:
+                raise GoldfishError(
+                    "GCE backend not yet fully implemented. "
+                    "Use backend='local' in config.yaml for now."
+                )
         else:
             raise ValueError(f"Unknown backend: {backend}")
+
+    def wait_for_completion(
+        self, stage_run_id: str, poll_interval: int = 5, timeout: int = 3600
+    ) -> str:
+        """Wait for stage run to complete.
+
+        Polls container status and updates database.
+
+        Args:
+            stage_run_id: Stage run identifier
+            poll_interval: Seconds between polls (default 5)
+            timeout: Maximum seconds to wait (default 3600 = 1 hour)
+
+        Returns:
+            Final status: "completed" or "failed"
+
+        Raises:
+            GoldfishError: If timeout exceeded or container not found
+        """
+        import time
+
+        backend = self.config.jobs.backend
+
+        elapsed = 0
+        while elapsed < timeout:
+            if backend == "local":
+                status = self.local_executor.get_container_status(stage_run_id)
+
+                if status == "running":
+                    # Still running, update status in db
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id, status="running"
+                    )
+                    time.sleep(poll_interval)
+                    elapsed += poll_interval
+                    continue
+
+                elif status == "completed":
+                    # Success!
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id,
+                        status="completed",
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    return "completed"
+
+                elif status == "failed":
+                    # Failed - get logs
+                    logs = self.local_executor.get_container_logs(stage_run_id)
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id,
+                        status="failed",
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        error=logs[-1000:],  # Last 1000 chars
+                    )
+                    return "failed"
+
+                elif status == "not_found":
+                    raise GoldfishError(f"Container {stage_run_id} not found")
+
+                else:
+                    # Unknown status
+                    raise GoldfishError(f"Unknown container status: {status}")
+
+            else:
+                raise GoldfishError(f"Backend {backend} not supported for monitoring")
+
+        # Timeout exceeded
+        raise GoldfishError(
+            f"Stage run {stage_run_id} timed out after {timeout} seconds"
+        )
