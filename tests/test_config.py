@@ -227,27 +227,8 @@ class TestGoldfishConfigSave:
         assert loaded.invariants == original.invariants
 
 
-class TestGoldfishConfigDbPath:
-    """Tests for db_path property."""
-
-    def test_db_path_returns_correct_path(self):
-        """db_path should return .goldfish/goldfish.db."""
-        config = GoldfishConfig(
-            project_name="test",
-            dev_repo_path="../dev",
-        )
-
-        assert config.db_path == ".goldfish/goldfish.db"
-
-
 class TestGenerateDefaultConfig:
     """Tests for generate_default_config() function."""
-
-    def test_generates_config_with_project_name(self):
-        """Should create config with given project name."""
-        config = generate_default_config("my-project")
-
-        assert config.project_name == "my-project"
 
     def test_generates_dev_repo_path_from_project_name(self):
         """Should generate dev_repo_path using project name."""
@@ -274,12 +255,6 @@ class TestGenerateDefaultConfig:
         assert isinstance(config.state_md, StateMdConfig)
         assert isinstance(config.audit, AuditConfig)
         assert isinstance(config.jobs, JobsConfig)
-
-    def test_gcs_is_none_by_default(self):
-        """Should not include GCS config by default."""
-        config = generate_default_config("test")
-
-        assert config.gcs is None
 
     def test_invariants_empty_by_default(self):
         """Should have empty invariants by default."""

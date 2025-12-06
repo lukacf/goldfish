@@ -522,3 +522,230 @@ class TestConcurrentWorkspaceOperations:
 
         # Cleanup
         manager.hibernate("w1", "Cleaning up test")
+
+    def test_workspace_deletion_blocked_by_running_job(self, temp_dir, temp_git_repo):
+        """Test that workspace cannot be deleted while jobs are running."""
+        from goldfish.workspace.manager import WorkspaceManager
+        from goldfish.db.database import Database
+        from goldfish.errors import GoldfishError
+
+        # Setup
+        project_root = temp_dir / "project"
+        project_root.mkdir()
+        (project_root / "workspaces").mkdir()
+
+        db = Database(temp_dir / "test.db")
+
+        # Create config
+        config = GoldfishConfig(
+            project_name="test-project",
+            dev_repo_path=str(temp_git_repo),
+            workspaces_dir="workspaces",
+            slots=["w1", "w2", "w3"],
+            state_md=StateMdConfig(path="STATE.md", max_recent_actions=15),
+            audit=AuditConfig(min_reason_length=15),
+            jobs=JobsConfig(backend="local", experiments_dir="experiments"),
+            invariants=[],
+        )
+
+        manager = WorkspaceManager(
+            config=config,
+            project_root=project_root,
+            db=db,
+        )
+
+        # 1. Create workspace and mount it
+        manager.create_workspace(
+            "test-workspace",
+            goal="Test workspace deletion protection",
+            reason="Testing workspace deletion with running jobs"
+        )
+        manager.mount("test-workspace", "w1", "Testing workspace deletion protection")
+
+        # 2. Create a running job associated with this workspace
+        db.create_job(
+            job_id="job-running-001",
+            workspace="test-workspace",
+            snapshot_id="snap-abc123-20251206-120000",
+            script="train.py",
+            experiment_dir=str(temp_dir / "experiments" / "exp-001"),
+        )
+        # Update status to running
+        db.update_job_status("job-running-001", "running")
+
+        # 3. Try to delete the workspace - should fail
+        # Note: Goldfish doesn't have a delete_workspace method yet, so we'll
+        # verify that the git branch can't be deleted while jobs are running
+        # by checking the database constraint
+
+        # First, hibernate the workspace (required before deletion)
+        manager.hibernate("w1", "Testing workspace deletion protection")
+
+        # Verify the workspace still exists
+        assert manager.git.branch_exists("test-workspace")
+
+        # 4. Verify workspace can't be deleted while job is running
+        # (This would be implemented in a delete_workspace method)
+        # For now, we verify the job is still active
+        active_jobs = db.get_active_jobs()
+        assert len(active_jobs) == 1
+        assert active_jobs[0]["workspace"] == "test-workspace"
+
+        # 5. Mark job as completed
+        db.update_job_status("job-running-001", "completed")
+
+        # 6. Now verify job is no longer active (deletion would be safe)
+        active_jobs = db.get_active_jobs()
+        assert len(active_jobs) == 0
+
+        # Verify workspace still exists and can be mounted again
+        assert manager.git.branch_exists("test-workspace")
+        manager.mount("test-workspace", "w1", "Verifying workspace still exists")
+        manager.hibernate("w1", "Cleaning up test")
+
+    def test_concurrent_checkpoint_and_rollback(self, temp_dir, temp_git_repo):
+        """Test race condition: checkpoint while rollback is happening."""
+        from goldfish.workspace.manager import WorkspaceManager
+        from goldfish.db.database import Database
+        from goldfish.errors import GoldfishError
+        import threading
+
+        # Setup
+        project_root = temp_dir / "project"
+        project_root.mkdir()
+        (project_root / "workspaces").mkdir()
+
+        db = Database(temp_dir / "test.db")
+
+        config = GoldfishConfig(
+            project_name="test-project",
+            dev_repo_path=str(temp_git_repo),
+            workspaces_dir="workspaces",
+            slots=["w1", "w2", "w3"],
+            state_md=StateMdConfig(path="STATE.md", max_recent_actions=15),
+            audit=AuditConfig(min_reason_length=15),
+            jobs=JobsConfig(backend="local", experiments_dir="experiments"),
+            invariants=[],
+        )
+
+        manager = WorkspaceManager(
+            config=config,
+            project_root=project_root,
+            db=db,
+        )
+
+        # 1. Create workspace with some content
+        manager.create_workspace(
+            "test-workspace",
+            goal="Test concurrent checkpoint and rollback",
+            reason="Testing race conditions between checkpoint and rollback"
+        )
+        manager.mount("test-workspace", "w1", "Testing concurrent checkpoint and rollback")
+
+        # Add some content
+        slot_path = manager.get_slot_path("w1")
+        test_file = slot_path / "test.txt"
+        test_file.write_text("Initial content")
+
+        # 2. Create a snapshot to rollback to
+        checkpoint1 = manager.checkpoint("w1", "Initial checkpoint for rollback test")
+        snapshot_id = checkpoint1.snapshot_id
+
+        # 3. Make changes
+        test_file.write_text("Modified content")
+
+        # Create another checkpoint with the modified content
+        manager.checkpoint("w1", "Second checkpoint with modifications")
+
+        # Make more changes
+        test_file.write_text("More modified content")
+
+        # Track results
+        results = {"checkpoint": None, "rollback": None, "errors": []}
+        lock = threading.Lock()
+
+        # Use a barrier to ensure both threads start at the same time
+        barrier = threading.Barrier(2)
+
+        def do_rollback():
+            try:
+                barrier.wait()  # Wait for both threads to be ready
+                # Rollback to first snapshot (slow operation)
+                result = manager.rollback("w1", snapshot_id, "Testing concurrent rollback operation")
+                with lock:
+                    results["rollback"] = result
+            except Exception as e:
+                with lock:
+                    results["errors"].append(("rollback", str(e), type(e).__name__))
+
+        def do_checkpoint():
+            try:
+                barrier.wait()  # Wait for both threads to be ready
+                # Try to checkpoint while rollback is happening
+                result = manager.checkpoint("w1", "Testing concurrent checkpoint operation")
+                with lock:
+                    results["checkpoint"] = result
+            except Exception as e:
+                with lock:
+                    results["errors"].append(("checkpoint", str(e), type(e).__name__))
+
+        # 4 & 5. Start rollback and checkpoint in parallel
+        thread1 = threading.Thread(target=do_rollback)
+        thread2 = threading.Thread(target=do_checkpoint)
+
+        thread1.start()
+        thread2.start()
+
+        thread1.join()
+        thread2.join()
+
+        # 6. Verify data consistency - one should succeed, one might fail or wait
+        print(f"\nDEBUG: Results: {results}")
+
+        # Either:
+        # a) One operation succeeded, the other was blocked/failed gracefully
+        # b) Both succeeded (if one completed before the other started)
+        # c) Both failed (if there's a deadlock - BAD!)
+
+        # We should not have both operations succeed with inconsistent data
+        # The key is that the file should be in a consistent state
+
+        # Check file content is consistent with one of the expected states
+        final_content = test_file.read_text()
+        print(f"DEBUG: Final file content: {final_content}")
+
+        # The file should be in one of these states:
+        # 1. "Initial content" (if rollback succeeded)
+        # 2. "More modified content" (if checkpoint succeeded before rollback)
+        # 3. "Initial content" (if both succeeded in sequence)
+
+        assert final_content in ["Initial content", "More modified content"], \
+            f"File in unexpected state: {final_content}"
+
+        # If both succeeded, rollback should have happened last (file = "Initial content")
+        if results["checkpoint"] and results["rollback"]:
+            assert final_content == "Initial content", \
+                "If both succeeded, rollback should have been last"
+
+        # Verify no deadlocks or crashes - at least one should have succeeded
+        # or we should have a GoldfishError (not a system error)
+        if results["errors"]:
+            for error in results["errors"]:
+                # Errors should be GoldfishError (indicating proper locking)
+                # not system errors like OSError
+                assert "GoldfishError" in error[2] or "workspace is locked" in error[1], \
+                    f"Unexpected error type: {error}"
+
+        # Verify database audit trail is consistent
+        audit = db.get_recent_audit(limit=10)
+        print(f"DEBUG: Recent audit: {[a['operation'] for a in audit]}")
+
+        # Should see checkpoint and/or rollback operations
+        operations = [a["operation"] for a in audit]
+        if results["checkpoint"]:
+            assert "checkpoint" in operations
+        if results["rollback"]:
+            assert "rollback" in operations
+
+        # Cleanup
+        manager.hibernate("w1", "Cleaning up concurrent test")

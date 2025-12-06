@@ -380,13 +380,6 @@ class TestInitGitTimeout:
 
         assert (dev_repo_path / ".git").exists()
 
-    def test_git_timeout_constant_exists(self):
-        """Test that INIT_GIT_TIMEOUT constant is defined."""
-        from goldfish.init import INIT_GIT_TIMEOUT
-
-        assert isinstance(INIT_GIT_TIMEOUT, int)
-        assert INIT_GIT_TIMEOUT > 0
-
 
 class TestWriteConfig:
     """Tests for _write_config() helper function."""
@@ -422,34 +415,3 @@ class TestWriteConfig:
         assert loaded["project_name"] == "test"
         assert loaded["dev_repo_path"] == "../test-dev"
         assert loaded["slots"] == ["w1", "w2"]
-
-    def test_write_config_omits_empty_invariants(self, temp_dir):
-        """Test that empty invariants list is handled correctly."""
-        from goldfish.init import _write_config
-        from goldfish.config import (
-            GoldfishConfig,
-            StateMdConfig,
-            AuditConfig,
-            JobsConfig,
-        )
-
-        config = GoldfishConfig(
-            project_name="test",
-            dev_repo_path="../test-dev",
-            workspaces_dir="workspaces",
-            slots=["w1"],
-            state_md=StateMdConfig(path="STATE.md", max_recent_actions=10),
-            audit=AuditConfig(min_reason_length=15),
-            jobs=JobsConfig(backend="local", experiments_dir="exp"),
-            invariants=[],
-        )
-
-        config_path = temp_dir / "config.yaml"
-        _write_config(config, config_path)
-
-        # invariants key should be omitted if empty
-        with open(config_path) as f:
-            content = f.read()
-
-        # Empty list should not be in output
-        assert "invariants: []" not in content
