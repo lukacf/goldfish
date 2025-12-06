@@ -517,7 +517,7 @@ def validate_log_path(log_uri: str, project_root: "Path") -> "Path":
     Log URIs must:
     - Be file:// URIs or absolute paths
     - Resolve to a path within the project_root
-    - Not contain path traversal patterns
+    - Not contain path traversal patterns or symlinks
 
     Args:
         log_uri: The log URI to validate (e.g., "file:///path/to/log" or "/path/to/log")
@@ -548,8 +548,21 @@ def validate_log_path(log_uri: str, project_root: "Path") -> "Path":
     if not path_str.startswith("/"):
         raise InvalidLogPathError(log_uri, "must be an absolute path")
 
-    # Resolve to catch symlinks and remaining traversal
-    log_path = Path(path_str).resolve()
+    # Create path object
+    log_path = Path(path_str)
+
+    # SECURITY: Check for symlinks before resolving
+    if log_path.exists() and log_path.is_symlink():
+        raise InvalidLogPathError(
+            log_uri, "log path cannot be a symlink (security risk)"
+        )
+
+    # Resolve path
+    try:
+        log_path = log_path.resolve(strict=False)  # strict=False allows non-existent paths
+    except (OSError, RuntimeError) as e:
+        raise InvalidLogPathError(log_uri, f"invalid path: {e}")
+
     project_resolved = project_root.resolve()
 
     # Check that resolved path is within project_root
@@ -557,8 +570,17 @@ def validate_log_path(log_uri: str, project_root: "Path") -> "Path":
         log_path.relative_to(project_resolved)
     except ValueError:
         raise InvalidLogPathError(
-            log_uri, f"path must be within project directory"
+            log_uri, f"path must be within project directory (got: {log_path})"
         )
+
+    # Verify no intermediate symlinks in the path hierarchy
+    for parent in log_path.parents:
+        if parent == project_resolved or parent == project_resolved.parent:
+            break
+        if parent.exists() and parent.is_symlink():
+            raise InvalidLogPathError(
+                log_uri, f"path contains symlink: {parent}"
+            )
 
     return log_path
 

@@ -137,13 +137,6 @@ def _get_job_tracker() -> JobTracker:
     return get_context().job_tracker
 
 
-def _get_pipeline_manager() -> PipelineManager:
-    """Get pipeline manager from context or raise GoldfishError."""
-    if not has_context():
-        raise GoldfishError("Server not initialized")
-    return get_context().pipeline_manager
-
-
 def _get_dataset_registry() -> DatasetRegistry:
     """Get dataset registry from context or raise GoldfishError."""
     if not has_context():
