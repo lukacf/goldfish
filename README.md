@@ -12,23 +12,8 @@ Goldfish provides:
 - **Workspace Management**: Isolated git branches for parallel experimentation with version control
 - **Automated Versioning**: Every pipeline run creates an immutable snapshot with full provenance
 - **Data Lineage**: Track complete provenance from raw data → processing → models → artifacts
-- **Infrastructure Abstraction**: Runs locally or on GCE with Docker containerization (hidden from Claude)
+- **Infrastructure Abstraction**: Runs locally or on GCE with Docker containerization
 - **Context Recovery**: Auto-generated STATE.md for resuming work after summarization
-- **Production-Ready**: 556 tests, comprehensive security, concurrent operation support
-
-## Current Implementation Status
-
-✅ **100% Complete** (Phases 0-8 implemented)
-
-- ✅ Foundation layer (database, validation, security)
-- ✅ Pipeline layer (YAML definitions, stage parsing, validation)
-- ✅ Dataset management (project-level data sources)
-- ✅ Goldfish IO library (storage abstraction for modules)
-- ✅ Job execution engine (stage executor, pipeline executor, signal chaining)
-- ✅ Lineage tracking (workspace/version/run provenance)
-- ✅ Infrastructure layer (Docker builder, local executor, GCE launcher with full parity)
-- ✅ STATE.md enhancement (lineage display)
-- ✅ Test coverage: 556 tests passing, 0% test theatre, excellent security coverage
 
 ## Architecture Overview
 
@@ -359,10 +344,6 @@ Goldfish has comprehensive security measures:
 - ✅ Git index locking (prevents concurrent git operations)
 - ✅ Thread-safe database operations
 
-### Test Coverage
-- 556 tests passing (0% test theatre)
-- 40% critical tests (security, data integrity, concurrency)
-- 60% good to have tests (API features, edge cases)
 
 ## Development
 
@@ -500,26 +481,11 @@ MIT License - See LICENSE file for details
 ## Contributing
 
 Contributions welcome! Please:
-1. Write tests for new features (maintain >95% coverage)
+1. Write tests for new features
 2. Follow existing code style
 3. Update documentation
 4. Add audit logging for new operations
 5. Include security considerations
-
-## Test Quality
-
-Our test suite maintains high quality standards:
-
-- **556 tests** (all passing)
-- **0% test theatre** (no hasattr checks, no over-mocked tests)
-- **40% critical tests** (security, data integrity, concurrency)
-- **60% good tests** (API features, edge cases, error handling)
-
-Critical test categories:
-- Security validation (command injection, path traversal, symlink attacks)
-- Concurrency safety (race conditions, TOCTOU, lock conflicts)
-- Data integrity (transaction atomicity, lineage consistency)
-- Failure handling (partial failures, cleanup on errors, retry logic)
 
 ## Acknowledgments
 
@@ -530,6 +496,3 @@ Built with:
 - Docker - Containerization
 - Google Cloud Platform - Infrastructure
 
----
-
-**Status**: Production-ready. All phases complete, comprehensive test coverage, security hardened, infrastructure parity achieved.
