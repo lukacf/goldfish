@@ -1,18 +1,31 @@
 #!/bin/bash
-# Quick-start script for running deluxe E2E tests
+# Run deluxe E2E test in Docker container with MCP client
+#
+# This tests the full stack: MCP Client → MCP Server → Goldfish → GCE
 #
 # Usage:
-#   ./run_deluxe_tests.sh             # Run tests
+#   ./run_deluxe_tests.sh             # Run test
 #   ./run_deluxe_tests.sh --dry-run   # Dry-run mode (no GCE launch)
+#   ./run_deluxe_tests.sh --build     # Rebuild Docker image first
 
 set -e
 
-# Check if running in dry-run mode
+# Parse arguments
 DRY_RUN=0
-if [[ "$1" == "--dry-run" ]]; then
-    DRY_RUN=1
-    echo "Running in DRY-RUN mode (no GCE instances will be launched)"
-fi
+BUILD=0
+
+for arg in "$@"; do
+    case $arg in
+        --dry-run)
+            DRY_RUN=1
+            echo "Running in DRY-RUN mode (no GCE instances will be launched)"
+            ;;
+        --build)
+            BUILD=1
+            echo "Will rebuild Docker image"
+            ;;
+    esac
+done
 
 # Check required environment variables
 if [[ -z "$GOLDFISH_GCE_PROJECT" ]]; then
@@ -21,10 +34,10 @@ if [[ -z "$GOLDFISH_GCE_PROJECT" ]]; then
     echo "Set required environment variables:"
     echo "  export GOLDFISH_GCE_PROJECT=\"your-gcp-project-id\""
     echo "  export GOLDFISH_GCS_BUCKET=\"gs://your-bucket-name\""
-    echo "  export GOLDFISH_DELUXE_TEST_ENABLED=\"1\""
     echo ""
-    echo "Optional:"
-    echo "  export GOLDFISH_DELUXE_ZONE=\"us-central1-a\"  # Override default zone"
+    echo "For GCP authentication:"
+    echo "  export GOOGLE_APPLICATION_CREDENTIALS=\"/path/to/service-account-key.json\""
+    echo "  OR run: gcloud auth application-default login"
     exit 1
 fi
 
@@ -33,32 +46,42 @@ if [[ -z "$GOLDFISH_GCS_BUCKET" ]]; then
     exit 1
 fi
 
-# Enable deluxe tests
-export GOLDFISH_DELUXE_TEST_ENABLED=1
-
-# Set dry-run mode if requested
-if [[ $DRY_RUN -eq 1 ]]; then
-    export GOLDFISH_DELUXE_DRY_RUN=1
+# Check GCP authentication
+if [[ -z "$GOOGLE_APPLICATION_CREDENTIALS" ]]; then
+    # Try to use application default credentials
+    ADC_PATH="$HOME/.config/gcloud/application_default_credentials.json"
+    if [[ -f "$ADC_PATH" ]]; then
+        export GOOGLE_APPLICATION_CREDENTIALS="$ADC_PATH"
+        echo "Using application default credentials: $ADC_PATH"
+    else
+        echo "ERROR: No GCP credentials found"
+        echo "Either:"
+        echo "  1. export GOOGLE_APPLICATION_CREDENTIALS=\"/path/to/key.json\""
+        echo "  2. Run: gcloud auth application-default login"
+        exit 1
+    fi
 fi
 
-# Verify GCP authentication
-echo "Verifying GCP authentication..."
-ACTIVE_ACCOUNT=$(gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>/dev/null || echo "")
-if [[ -z "$ACTIVE_ACCOUNT" ]]; then
-    echo "ERROR: No active GCP authentication"
-    echo "Run: gcloud auth login"
+if [[ ! -f "$GOOGLE_APPLICATION_CREDENTIALS" ]]; then
+    echo "ERROR: Credentials file not found: $GOOGLE_APPLICATION_CREDENTIALS"
     exit 1
 fi
-echo "✓ Authenticated as: $ACTIVE_ACCOUNT"
+
+echo "✓ Found GCP credentials: $GOOGLE_APPLICATION_CREDENTIALS"
 
 # Display configuration
 echo ""
 echo "Configuration:"
 echo "  GCP Project:  $GOLDFISH_GCE_PROJECT"
 echo "  GCS Bucket:   $GOLDFISH_GCS_BUCKET"
-echo "  Zone:         ${GOLDFISH_DELUXE_ZONE:-us-central1-a (default)}"
-echo "  Dry-run:      ${GOLDFISH_DELUXE_DRY_RUN:-0}"
+echo "  Dry-run:      $DRY_RUN"
+echo "  Credentials:  $GOOGLE_APPLICATION_CREDENTIALS"
 echo ""
+
+# Set dry-run mode if requested
+if [[ $DRY_RUN -eq 1 ]]; then
+    export GOLDFISH_DELUXE_DRY_RUN=1
+fi
 
 # Estimate cost
 if [[ $DRY_RUN -eq 0 ]]; then
@@ -74,13 +97,24 @@ if [[ $DRY_RUN -eq 0 ]]; then
     fi
 fi
 
-# Run tests
+# Change to tests/deluxe directory
+cd "$(dirname "$0")"
+
+# Build Docker image if requested
+if [[ $BUILD -eq 1 ]]; then
+    echo ""
+    echo "Building Docker image..."
+    docker-compose build
+fi
+
+# Run test in Docker container
 echo ""
-echo "Running deluxe E2E tests..."
+echo "=" * 70
+echo "Running Deluxe E2E Test in Docker Container"
+echo "=" * 70
 echo ""
 
-cd "$(dirname "$0")/../.."
-pytest -m deluxe_gce tests/deluxe/ -v -s
+docker-compose run --rm deluxe-test
 
 echo ""
-echo "✓ Tests complete"
+echo "✓ Test complete"

@@ -1,16 +1,31 @@
 # Deluxe E2E Tests
 
-Comprehensive end-to-end tests that validate Goldfish with **real GCE execution**. These tests are opt-in and not run during regular CI due to cloud resource requirements.
+Comprehensive end-to-end tests that validate Goldfish with **real GCE execution** and **actual MCP protocol usage**. These tests run in a Docker container and use the MCP client to interact with the Goldfish MCP server, exactly as Claude Code would.
+
+## Architecture
+
+```
+Docker Container
+├── MCP Client (simulates Claude Code)
+├── Goldfish MCP Server (stdio connection)
+├── GCP credentials (mounted)
+└── Test orchestrator (sends MCP tool calls)
+
+Flow: MCP Client → MCP Protocol → Goldfish Server → GCE
+```
+
+This validates the **complete integration stack**, not just internal Python APIs.
 
 ## What These Tests Do
 
-The deluxe tests simulate a realistic ML research workflow:
+The deluxe tests simulate Claude Code using Goldfish for ML research:
 
-1. **Initialize Goldfish Project** - Create a new project with ML pipeline
-2. **Run Baseline Pipeline** - Execute all stages (generate_data → preprocess → train → evaluate)
-3. **Iterate on Results** - Create new workspace, adjust hyperparameters, re-run
-4. **Compare Results** - Use lineage tracking to compare baseline vs improved metrics
-5. **Validate Features** - Test profiles, workspaces, checkpoints, signal lineage
+1. **Connect to MCP Server** - Establish stdio connection to Goldfish
+2. **Initialize Project** - Call `initialize_project` MCP tool
+3. **Create Workspace** - Call `create_workspace` and `mount` MCP tools
+4. **Run Pipeline** - Call `run_stage` MCP tools for all stages
+5. **Monitor Jobs** - Call `job_status` MCP tool to track progress
+6. **Verify Results** - Validate complete workflow execution
 
 ## ML Pipeline
 
@@ -68,31 +83,53 @@ export GOLDFISH_DELUXE_DRY_RUN="1"
 
 ## Running the Tests
 
-### Full Test Run
+### Full Test Run with Docker
 
 ```bash
 # Set environment variables
 export GOLDFISH_GCE_PROJECT="my-project"
 export GOLDFISH_GCS_BUCKET="gs://my-bucket"
-export GOLDFISH_DELUXE_TEST_ENABLED="1"
 
-# Run deluxe tests
-pytest -m deluxe_gce tests/deluxe/ -v -s
+# Run in Docker container
+cd tests/deluxe
+./run_deluxe_tests.sh
 ```
+
+The script will:
+1. Check GCP credentials
+2. Build Docker image (if needed)
+3. Start container with MCP server
+4. Run MCP client orchestrator
+5. Execute full workflow
+6. Clean up resources
 
 ### Dry-Run Mode
 
 Test the setup without actually launching GCE instances:
 
 ```bash
-export GOLDFISH_DELUXE_DRY_RUN="1"
-pytest -m deluxe_gce tests/deluxe/ -v -s
+./run_deluxe_tests.sh --dry-run
 ```
 
-### Run Specific Test
+### Rebuild Docker Image
+
+Force rebuild of the Docker image:
 
 ```bash
-pytest -m deluxe_gce tests/deluxe/test_gce_e2e_full.py::TestDeluxeGCEEndToEnd::test_full_ml_workflow -v -s
+./run_deluxe_tests.sh --build
+```
+
+### Manual Docker Commands
+
+```bash
+# Build image
+docker-compose build
+
+# Run test
+docker-compose run --rm deluxe-test
+
+# Run with dry-run
+GOLDFISH_DELUXE_DRY_RUN=1 docker-compose run --rm deluxe-test
 ```
 
 ## Cost Estimation

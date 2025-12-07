@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  deluxe-test:
+    build:
+      context: ../..
+      dockerfile: tests/deluxe/Dockerfile
+    environment:
+      - GOLDFISH_GCE_PROJECT=${GOLDFISH_GCE_PROJECT}
+      - GOLDFISH_GCS_BUCKET=${GOLDFISH_GCS_BUCKET}
+      - GOLDFISH_DELUXE_TEST_ENABLED=1
+      - GOLDFISH_DELUXE_DRY_RUN=${GOLDFISH_DELUXE_DRY_RUN:-0}
+      - GOOGLE_APPLICATION_CREDENTIALS=/gcp/credentials.json
+    volumes:
+      # Mount GCP credentials
+      - ${GOOGLE_APPLICATION_CREDENTIALS}:/gcp/credentials.json:ro
+      # Mount test results output
+      - ./results:/test-workspace/results
+    network_mode: host
