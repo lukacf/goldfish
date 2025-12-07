@@ -1,0 +1,45 @@
+name: ml-classification-pipeline
+description: Multi-stage ML pipeline for classification with synthetic data
+
+stages:
+  - name: generate_data
+    inputs: {}
+    outputs:
+      raw_data:
+        type: directory
+        storage: local
+
+  - name: preprocess
+    inputs:
+      raw_data:
+        from_stage: generate_data
+        type: directory
+    outputs:
+      processed:
+        type: directory
+        storage: local
+
+  - name: train
+    inputs:
+      processed:
+        from_stage: preprocess
+        type: directory
+    outputs:
+      model:
+        type: directory
+        storage: local
+        artifact: true
+
+  - name: evaluate
+    inputs:
+      processed:
+        from_stage: preprocess
+        type: directory
+      model:
+        from_stage: train
+        type: directory
+    outputs:
+      metrics:
+        type: directory
+        storage: local
+        artifact: true
