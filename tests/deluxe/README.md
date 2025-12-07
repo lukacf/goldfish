@@ -101,49 +101,49 @@ brew install docker docker-compose
 apt-get install docker.io docker-compose
 ```
 
-### 5. Configuration File
+### 5. Configuration
 
-Create `.env` file with your actual values:
+The test uses your existing `.env` file from the repository root.
 
-```bash
-cd tests/deluxe
-cp .env.example .env
-# Edit .env with your actual values
-```
-
-**Example `.env`:**
+**Required variables in your `.env`:**
 ```bash
 ANTHROPIC_API_KEY=sk-ant-api03-xxxxx
 GOLDFISH_GCE_PROJECT=my-gcp-project-123
 GOLDFISH_GCS_BUCKET=gs://my-goldfish-bucket
 ```
 
-**IMPORTANT**: Replace the placeholder values with your actual:
-- Anthropic API key
-- GCP project ID
-- GCS bucket name (must already exist)
+If you don't have a `.env` file yet:
+```bash
+cd /path/to/goldfish
+cp .env.example .env
+# Edit with your actual values
+```
+
+The Docker container will automatically load all variables from your existing `.env` file.
 
 ## Running the Tests
 
 ### Full Test Run with Docker
 
 ```bash
-# Set environment variables
-export GOLDFISH_GCE_PROJECT="my-project"
-export GOLDFISH_GCS_BUCKET="gs://my-bucket"
+# Your .env file in repository root must have:
+# - ANTHROPIC_API_KEY
+# - GOLDFISH_GCE_PROJECT
+# - GOLDFISH_GCS_BUCKET
 
-# Run in Docker container
 cd tests/deluxe
 ./run_deluxe_tests.sh
 ```
 
 The script will:
-1. Check GCP credentials
-2. Build Docker image (if needed)
-3. Start container with MCP server
-4. Run MCP client orchestrator
-5. Execute full workflow
-6. Clean up resources
+1. Load configuration from `../../.env`
+2. Validate all required variables are set
+3. Check GCP credentials
+4. Build Docker image (if needed)
+5. Start container with Claude Code + MCP server
+6. Send prompts to Claude Code
+7. Claude Code uses Goldfish MCP tools
+8. Verify results and clean up
 
 ### Dry-Run Mode
 

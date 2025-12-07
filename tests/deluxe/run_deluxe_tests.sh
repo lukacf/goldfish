@@ -36,21 +36,25 @@ echo "DELUXE E2E TEST RUNNER"
 echo "======================================================================"
 echo ""
 
-# Check for .env file
-if [[ ! -f .env ]]; then
-    echo "ERROR: .env file not found"
+# Check for .env file in repository root
+if [[ ! -f ../../.env ]]; then
+    echo "ERROR: .env file not found in repository root"
     echo ""
-    echo "Create a .env file with your configuration:"
+    echo "Expected location: $(pwd)/../../.env"
+    echo ""
+    echo "Create it with:"
+    echo "  cd ../.."
     echo "  cp .env.example .env"
     echo "  # Edit .env with your actual values"
-    echo ""
-    cat .env.example
     echo ""
     exit 1
 fi
 
-# Load .env file
-export $(grep -v '^#' .env | xargs)
+echo "✓ Found .env file in repository root"
+echo ""
+
+# Load .env file to check values
+source ../../.env
 
 # Validate required variables
 MISSING=0
@@ -60,19 +64,19 @@ if [[ -z "$ANTHROPIC_API_KEY" ]]; then
     MISSING=1
 fi
 
-if [[ -z "$GOLDFISH_GCE_PROJECT" ]] || [[ "$GOLDFISH_GCE_PROJECT" == "your-gcp-project-id" ]]; then
-    echo "ERROR: GOLDFISH_GCE_PROJECT not set or still has placeholder value"
+if [[ -z "$GOLDFISH_GCE_PROJECT" ]]; then
+    echo "ERROR: GOLDFISH_GCE_PROJECT not set in .env"
     MISSING=1
 fi
 
-if [[ -z "$GOLDFISH_GCS_BUCKET" ]] || [[ "$GOLDFISH_GCS_BUCKET" == "gs://your-gcs-bucket" ]]; then
-    echo "ERROR: GOLDFISH_GCS_BUCKET not set or still has placeholder value"
+if [[ -z "$GOLDFISH_GCS_BUCKET" ]]; then
+    echo "ERROR: GOLDFISH_GCS_BUCKET not set in .env"
     MISSING=1
 fi
 
 if [[ $MISSING -eq 1 ]]; then
     echo ""
-    echo "Please edit .env with your actual values"
+    echo "Please edit ../../.env with your actual values"
     exit 1
 fi
 
@@ -98,7 +102,7 @@ if [[ ! -f "$GOOGLE_APPLICATION_CREDENTIALS" ]]; then
     exit 1
 fi
 
-echo "✓ Configuration loaded from .env"
+echo "✓ Configuration loaded from repository .env"
 echo ""
 
 # Display configuration
