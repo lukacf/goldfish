@@ -29,3 +29,6 @@ packages = ["src/goldfish"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "deluxe_gce: Deluxe E2E tests with real GCE execution (opt-in, requires cloud resources)",
+]

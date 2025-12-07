@@ -1,0 +1,14 @@
+# Evaluate Stage Configuration
+# Uses GCE with cpu-small profile
+
+compute:
+  profile: "cpu-small"
+
+storage:
+  outputs:
+    metrics:
+      storage: local
+      artifact: true
+
+env:
+  # No environment variables needed

@@ -1,0 +1,13 @@
+# Preprocess Stage Configuration
+# Uses GCE with cpu-small profile
+
+compute:
+  profile: "cpu-small"
+
+storage:
+  outputs:
+    processed:
+      storage: local
+
+env:
+  # No environment variables needed

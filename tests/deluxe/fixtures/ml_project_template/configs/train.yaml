@@ -1,0 +1,15 @@
+# Train Stage Configuration
+# Uses GCE with cpu-small profile (can be overridden to use GPU)
+
+compute:
+  profile: "cpu-small"
+
+storage:
+  outputs:
+    model:
+      storage: local
+      artifact: true
+
+env:
+  MAX_ITER: "100"
+  C: "1.0"

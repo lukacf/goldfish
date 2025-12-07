@@ -1,0 +1,16 @@
+# Generate Data Stage Configuration
+# This stage runs locally (no heavy compute needed)
+
+compute:
+  cpu: 2
+  memory: 4GB
+  gpu: none
+  disk: 10GB
+
+storage:
+  outputs:
+    raw_data:
+      storage: local
+
+env:
+  # No environment variables needed
