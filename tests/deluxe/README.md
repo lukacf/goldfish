@@ -6,26 +6,49 @@ Comprehensive end-to-end tests that validate Goldfish with **real GCE execution*
 
 ```
 Docker Container
-├── MCP Client (simulates Claude Code)
-├── Goldfish MCP Server (stdio connection)
+├── Claude Code CLI (installed)
+├── Goldfish MCP Server (configured via mcp.json)
 ├── GCP credentials (mounted)
-└── Test orchestrator (sends MCP tool calls)
+└── Test script that:
+    1. Configures Claude Code to use Goldfish MCP
+    2. Sends prompts to Claude Code
+    3. Claude Code uses MCP tools automatically
+    4. Verifies results
 
-Flow: MCP Client → MCP Protocol → Goldfish Server → GCE
+Flow: Prompt → Claude Code → MCP Protocol → Goldfish → GCE
 ```
 
-This validates the **complete integration stack**, not just internal Python APIs.
+This tests the **actual user experience**, not simulations or internal APIs.
 
 ## What These Tests Do
 
-The deluxe tests simulate Claude Code using Goldfish for ML research:
+The deluxe test runs actual Claude Code with prompts:
 
-1. **Connect to MCP Server** - Establish stdio connection to Goldfish
-2. **Initialize Project** - Call `initialize_project` MCP tool
-3. **Create Workspace** - Call `create_workspace` and `mount` MCP tools
-4. **Run Pipeline** - Call `run_stage` MCP tools for all stages
-5. **Monitor Jobs** - Call `job_status` MCP tool to track progress
-6. **Verify Results** - Validate complete workflow execution
+1. **Setup Phase**
+   - Configure Claude Code with Goldfish MCP server (`claude mcp add`)
+   - Authenticate with GCP
+
+2. **Task Claude** (via `claude -p` prompts)
+   - "Initialize a Goldfish project..."
+   - "Create a workspace called baseline..."
+   - "Create a 4-stage ML pipeline..."
+   - "Run the full pipeline..."
+
+3. **Claude Code Actions**
+   - Connects to Goldfish MCP server
+   - Uses MCP tools: `initialize_project`, `create_workspace`, `run_stage`, etc.
+   - Launches real GCE instances
+   - Monitors job completion
+
+4. **Verification**
+   - Check workspace was created
+   - Check pipeline.yaml exists
+   - Check jobs completed successfully
+   - Verify GCE instances were launched
+
+5. **Cleanup**
+   - Delete GCE instances
+   - Clean up resources
 
 ## ML Pipeline
 
@@ -38,20 +61,24 @@ The test uses a simple classification pipeline:
 
 ## Requirements
 
-### 1. GCP Setup
+### 1. Anthropic API Key
+
+Get your API key from: https://console.anthropic.com/
+
+### 2. GCP Setup
 
 You need a GCP project with:
 - Compute Engine API enabled
 - Cloud Storage API enabled
-- A GCS bucket for artifacts
-- Service account with permissions:
+- A GCS bucket for artifacts (must already exist)
+- Permissions:
   - `compute.instances.create`
   - `compute.instances.delete`
   - `compute.disks.create`
   - `storage.objects.create`
   - `storage.objects.delete`
 
-### 2. Authentication
+### 3. GCP Authentication
 
 Authenticate with GCP:
 ```bash
@@ -63,23 +90,38 @@ Or use a service account:
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
 ```
 
-### 3. Environment Variables
+### 4. Docker
 
-Set required environment variables:
+Install Docker and docker-compose:
 ```bash
-export GOLDFISH_GCE_PROJECT="your-gcp-project-id"
-export GOLDFISH_GCS_BUCKET="gs://your-bucket-name"
-export GOLDFISH_DELUXE_TEST_ENABLED="1"
+# macOS
+brew install docker docker-compose
+
+# Linux
+apt-get install docker.io docker-compose
 ```
 
-Optional variables:
-```bash
-# Override default zone (default: us-central1-a)
-export GOLDFISH_DELUXE_ZONE="us-west1-a"
+### 5. Configuration File
 
-# Dry-run mode (test setup without launching GCE)
-export GOLDFISH_DELUXE_DRY_RUN="1"
+Create `.env` file with your actual values:
+
+```bash
+cd tests/deluxe
+cp .env.example .env
+# Edit .env with your actual values
 ```
+
+**Example `.env`:**
+```bash
+ANTHROPIC_API_KEY=sk-ant-api03-xxxxx
+GOLDFISH_GCE_PROJECT=my-gcp-project-123
+GOLDFISH_GCS_BUCKET=gs://my-goldfish-bucket
+```
+
+**IMPORTANT**: Replace the placeholder values with your actual:
+- Anthropic API key
+- GCP project ID
+- GCS bucket name (must already exist)
 
 ## Running the Tests
 
