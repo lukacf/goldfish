@@ -1,0 +1,10 @@
+# Don't commit actual credentials or configuration
+.env
+results/
+
+# Don't commit pytest cache from old approach
+.pytest_cache/
+__pycache__/
+conftest.py
+test_gce_e2e_full.py
+mcp_client_orchestrator.py

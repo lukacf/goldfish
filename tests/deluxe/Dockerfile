@@ -1,5 +1,5 @@
-# Dockerfile for deluxe E2E test with Claude Code + MCP
-# Tests full integration: Claude Code → MCP → Goldfish → GCE
+# Dockerfile for deluxe E2E test
+# Tests Claude Code using Goldfish MCP server with real GCE execution
 
 FROM python:3.12-slim
 
@@ -9,35 +9,39 @@ RUN apt-get update && apt-get install -y \
     curl \
     nodejs \
     npm \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Google Cloud SDK
 RUN curl -sSL https://sdk.cloud.google.com | bash
 ENV PATH="/root/google-cloud-sdk/bin:${PATH}"
 
-# Install Claude Code CLI (if available) or MCP SDK for client
-RUN pip install mcp anthropic
+# Install uv (Python package manager used by Claude Code)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Set working directory
-WORKDIR /workspace
+# Install Claude Code CLI
+# Note: This assumes claude-code is available via npm
+# Alternative: Use Anthropic API with tool use if Claude Code CLI isn't available
+RUN npm install -g @anthropic-ai/claude-code || echo "Claude Code CLI not available, will use API"
+
+WORKDIR /goldfish
 
 # Copy Goldfish source
 COPY . /goldfish
-WORKDIR /goldfish
 
-# Install Goldfish with MCP server
-RUN pip install -e .
+# Install Goldfish
+RUN uv pip install --system -e .
 
-# Install test dependencies
-RUN pip install pytest pytest-asyncio
+# Create workspace directory
+RUN mkdir -p /workspace
 
-# Create test workspace
-RUN mkdir -p /test-workspace
+WORKDIR /workspace
 
-WORKDIR /test-workspace
+# Copy test scripts
+COPY tests/deluxe/setup_claude.sh /usr/local/bin/setup_claude.sh
+COPY tests/deluxe/run_test.sh /usr/local/bin/run_test.sh
+RUN chmod +x /usr/local/bin/*.sh
 
-# Copy MCP client configuration
-COPY tests/deluxe/mcp_config.json /root/.config/claude/
-
-# Entry point runs the orchestrator
-ENTRYPOINT ["python", "/goldfish/tests/deluxe/mcp_client_orchestrator.py"]
+# Entry point sets up Claude Code and runs test
+ENTRYPOINT ["/usr/local/bin/run_test.sh"]

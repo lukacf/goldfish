@@ -6,14 +6,31 @@ services:
       context: ../..
       dockerfile: tests/deluxe/Dockerfile
     environment:
-      - GOLDFISH_GCE_PROJECT=${GOLDFISH_GCE_PROJECT}
-      - GOLDFISH_GCS_BUCKET=${GOLDFISH_GCS_BUCKET}
-      - GOLDFISH_DELUXE_TEST_ENABLED=1
+      # Anthropic API key for Claude Code
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+
+      # GCP configuration - REPLACE THESE WITH YOUR ACTUAL VALUES
+      - GOLDFISH_GCE_PROJECT=${GOLDFISH_GCE_PROJECT:-your-gcp-project-id}
+      - GOLDFISH_GCS_BUCKET=${GOLDFISH_GCS_BUCKET:-gs://your-gcs-bucket}
+
+      # Test configuration
       - GOLDFISH_DELUXE_DRY_RUN=${GOLDFISH_DELUXE_DRY_RUN:-0}
+
+      # GCP authentication
       - GOOGLE_APPLICATION_CREDENTIALS=/gcp/credentials.json
+      - CLOUDSDK_CORE_PROJECT=${GOLDFISH_GCE_PROJECT:-your-gcp-project-id}
+
     volumes:
-      # Mount GCP credentials
-      - ${GOOGLE_APPLICATION_CREDENTIALS}:/gcp/credentials.json:ro
-      # Mount test results output
-      - ./results:/test-workspace/results
+      # Mount GCP credentials from host
+      # Default location after "gcloud auth application-default login"
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-~/.config/gcloud/application_default_credentials.json}:/gcp/credentials.json:ro
+
+      # Mount results directory for output
+      - ./results:/workspace/results
+
+    # Use host network for GCP API access
     network_mode: host
+
+    # Set TTY for Claude Code interactive output
+    tty: true
+    stdin_open: true
