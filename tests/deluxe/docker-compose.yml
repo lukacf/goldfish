@@ -27,9 +27,9 @@ services:
       # Mount results directory for output
       - ./results:/ml-project-test-repo/results
 
-    # Add user to Docker socket group for access
+    # Add user to root group for Docker socket access
     group_add:
-      - "1"  # Docker socket group on macOS (staff/wheel)
+      - "0"  # root group (Docker socket is owned by root:root inside container)
 
     # Use host network for GCP API access
     network_mode: host

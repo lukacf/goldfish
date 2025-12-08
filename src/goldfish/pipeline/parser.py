@@ -136,19 +136,9 @@ class PipelineParser:
 
             # Validate inputs
             for input_name, input_def in stage.inputs.items():
-                if input_def.type == "dataset":
-                    # Check dataset exists
-                    if not input_def.dataset:
-                        errors.append(
-                            f"Stage '{stage.name}' input '{input_name}': "
-                            f"dataset type requires 'dataset' field"
-                        )
-                    elif dataset_exists_fn and not dataset_exists_fn(input_def.dataset):
-                        errors.append(
-                            f"Stage '{stage.name}' input '{input_name}': "
-                            f"dataset '{input_def.dataset}' not found"
-                        )
-                elif input_def.from_stage:
+                # Check from_stage FIRST - it takes precedence over type
+                # This allows dataset-type signals to be passed between stages
+                if input_def.from_stage:
                     # Check signal from previous stage
                     signal_ref = f"{input_def.from_stage}.{input_name}"
                     if signal_ref not in available_signals:
@@ -174,6 +164,19 @@ class PipelineParser:
                                 f"type mismatch. Expected '{input_def.type}', "
                                 f"got '{source_signal.type}' from '{signal_ref}'"
                             )
+                elif input_def.type == "dataset":
+                    # External dataset (not from previous stage)
+                    # Check dataset exists
+                    if not input_def.dataset:
+                        errors.append(
+                            f"Stage '{stage.name}' input '{input_name}': "
+                            f"dataset type requires 'dataset' field"
+                        )
+                    elif dataset_exists_fn and not dataset_exists_fn(input_def.dataset):
+                        errors.append(
+                            f"Stage '{stage.name}' input '{input_name}': "
+                            f"dataset '{input_def.dataset}' not found"
+                        )
                 else:
                     # Input must be either dataset or from_stage
                     errors.append(
