@@ -504,6 +504,21 @@ class WorkspaceManager:
         self._validate_slot(slot)
         return self._get_slot_state(slot)
 
+    def get_workspace_for_slot(self, workspace_or_slot: str) -> Optional[str]:
+        """Resolve workspace name from slot or workspace name.
+
+        Args:
+            workspace_or_slot: Either a slot name (e.g., "w1") or workspace name (e.g., "baseline")
+
+        Returns:
+            Workspace name if input is a slot with a mounted workspace, None otherwise
+        """
+        # Check if it's a valid slot
+        if workspace_or_slot in self.config.slots:
+            slot_info = self._get_slot_state(workspace_or_slot)
+            return slot_info.workspace  # Will be None if slot is empty
+        return None
+
     def diff(self, slot: str) -> DiffResponse:
         """Show changes in a slot since last checkpoint.
 
