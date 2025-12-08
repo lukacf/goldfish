@@ -46,6 +46,10 @@ from goldfish.errors import (
     validate_reason,
     WorkspaceNotFoundError,
 )
+from goldfish.pipeline.parser import (
+    PipelineNotFoundError,
+    PipelineValidationError,
+)
 
 
 @mcp.tool()
