@@ -56,16 +56,39 @@ class PipelineParser:
                 stages = []
                 for stage_data in data["stages"]:
                     # Convert input/output dicts to SignalDef objects
+                    # Handle both dict format: {name: {type: ...}} and list format: [{name: ..., type: ...}]
                     if "inputs" in stage_data:
-                        stage_data["inputs"] = {
-                            name: SignalDef(name=name, **sig_data)
-                            for name, sig_data in stage_data["inputs"].items()
-                        }
+                        inputs_raw = stage_data["inputs"]
+                        if isinstance(inputs_raw, list):
+                            # Convert list to dict: [{name: "x", ...}] -> {"x": SignalDef(...)}
+                            stage_data["inputs"] = {
+                                item["name"]: SignalDef(**item)
+                                for item in inputs_raw
+                            }
+                        elif isinstance(inputs_raw, dict):
+                            # Dict format: {name: {type: ...}} -> {name: SignalDef(name=name, ...)}
+                            stage_data["inputs"] = {
+                                name: SignalDef(name=name, **sig_data)
+                                for name, sig_data in inputs_raw.items()
+                            }
+                        else:
+                            stage_data["inputs"] = {}
                     if "outputs" in stage_data:
-                        stage_data["outputs"] = {
-                            name: SignalDef(name=name, **sig_data)
-                            for name, sig_data in stage_data["outputs"].items()
-                        }
+                        outputs_raw = stage_data["outputs"]
+                        if isinstance(outputs_raw, list):
+                            # Convert list to dict: [{name: "y", ...}] -> {"y": SignalDef(...)}
+                            stage_data["outputs"] = {
+                                item["name"]: SignalDef(**item)
+                                for item in outputs_raw
+                            }
+                        elif isinstance(outputs_raw, dict):
+                            # Dict format: {name: {type: ...}} -> {name: SignalDef(name=name, ...)}
+                            stage_data["outputs"] = {
+                                name: SignalDef(name=name, **sig_data)
+                                for name, sig_data in outputs_raw.items()
+                            }
+                        else:
+                            stage_data["outputs"] = {}
                     stages.append(StageDef(**stage_data))
                 data["stages"] = stages
 
