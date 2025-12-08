@@ -3,6 +3,7 @@
 Creates the project structure and dev repository.
 """
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -14,6 +15,8 @@ INIT_GIT_TIMEOUT = 60
 
 from goldfish.config import (
     AuditConfig,
+    GCSConfig,
+    GCEConfig,
     GoldfishConfig,
     JobsConfig,
     StateMdConfig,
@@ -65,6 +68,18 @@ def init_project(
     goldfish_dir = project_path / ".goldfish"
     goldfish_dir.mkdir(exist_ok=True)
 
+    # Read GCS/GCE config from environment variables (optional)
+    gcs_config = None
+    gce_config = None
+
+    gcs_bucket = os.getenv("GOLDFISH_GCS_BUCKET")
+    if gcs_bucket:
+        gcs_config = GCSConfig(bucket=gcs_bucket)
+
+    gce_project = os.getenv("GOLDFISH_GCE_PROJECT")
+    if gce_project:
+        gce_config = GCEConfig(project_id=gce_project)
+
     # Create config
     config = GoldfishConfig(
         project_name=project_name,
@@ -83,6 +98,8 @@ def init_project(
             backend="gce",
             experiments_dir="experiments",
         ),
+        gcs=gcs_config,
+        gce=gce_config,
         invariants=[],
     )
 
