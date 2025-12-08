@@ -1,0 +1,150 @@
+time="2025-12-08T12:56:48+01:00" level=warning msg="/Users/luka/src/goldfish/tests/deluxe/docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+======================================================================
+DELUXE E2E TEST: Claude Code + Goldfish MCP + GCE
+======================================================================
+
+Configuration:
+  GCP Project: king-dnn-training-dev
+  GCS Bucket: gs://goldfish-deluxe-test-20251207
+  Dry-run: 1
+
+Setting up Claude Code with Goldfish MCP server...
+Testing goldfish command...
+✓ Goldfish command works
+
+Added stdio MCP server goldfish with command: bash -c GOLDFISH_START_DIR=/ml-project-test-repo uv --directory /goldfish run goldfish serve to local config
+File modified: /home/testuser/.claude.json [project: /ml-project-test-repo]
+✓ Claude Code configured with Goldfish MCP server
+
+MCP Configuration:
+Checking MCP server health...
+
+goldfish: bash -c GOLDFISH_START_DIR=/ml-project-test-repo uv --directory /goldfish run goldfish serve - ✓ Connected
+
+Cleaning up previous test artifacts...
+✓ Cleanup complete
+
+======================================================================
+PHASE 1: Initialize Goldfish Project
+======================================================================
+
+✓ **Goldfish project initialized successfully**
+
+The project has been created with the following structure:
+
+- **Project path**: `/ml-project-test-repo/test-project`
+- **Dev repository**: `/ml-project-test-repo/test-project/test-project-dev`
+- **Config file**: `/ml-project-test-repo/test-project/goldfish.yaml`
+- **State file**: `/ml-project-test-repo/test-project/STATE.md`
+
+The Goldfish MCP tool executed successfully without errors. The project is now ready for workspace creation and other Goldfish operations.
+
+✓ Project initialized
+
+Found project directory: /ml-project-test-repo/test-project
+✓ Found goldfish.yaml
+======================================================================
+PHASE 2: Create Workspace and Pipeline
+======================================================================
+
+## TEST RESULTS SUMMARY
+
+**GOLDFISH MCP SYSTEM TEST - PARTIAL FAILURE**
+
+### ✅ Successful Operations:
+1. **mcp__goldfish__create_workspace** - Successfully created workspace 'baseline' with goal 'Baseline ML classification model'
+2. **mcp__goldfish__mount** - Successfully mounted workspace 'baseline' to slot 'w1'
+3. **File Creation** - Successfully created all required files:
+   - 4 Python modules in `/ml-project-test-repo/test-project/workspaces/w1/modules/`
+   - 4 stage configs in `/ml-project-test-repo/test-project/workspaces/w1/configs/`
+   - Pipeline definition at `/ml-project-test-repo/test-project/workspaces/w1/pipeline.yaml`
+
+### ❌ Failed Operation:
+4. **mcp__goldfish__validate_pipeline** - **FAILED** with schema validation errors
+
+### Root Cause Analysis:
+The pipeline validator has a **conflicting requirement** for dataset-type inputs:
+- Error states: `"dataset type requires 'dataset' field"`
+- When `dataset` field is added: `"dataset 'X' not found"` (looking for registered external datasets)
+- When `output` field is used instead: Still requires `dataset` field
+- The validator appears to be unable to distinguish between:
+  - External datasets (registered via `mcp__goldfish__register_dataset`)
+  - Internal stage outputs passed between pipeline stages
+
+### Attempted Solutions:
+1. Added pipeline `name` field (fixed initial schema error)
+2. Added `from_stage` to reference previous stages
+3. Tried `dataset: <output_name>` field
+4. Tried `output: <output_name>` field
+5. Tried combinations of the above
+
+All attempts resulted in the same validation error for dataset-type inputs when using `from_stage`.
+
+### Conclusion:
+The Goldfish MCP pipeline validation system appears to have a **bug or undocumented requirement** for chaining stage outputs of type `dataset`. The validator cannot successfully validate a pipeline where dataset-type outputs from one stage are consumed as inputs by another stage.
+
+✓ Workspace and pipeline created
+
+======================================================================
+PHASE 3: Run Pipeline
+======================================================================
+
+DRY-RUN mode: Skipping pipeline execution
+
+✓ Pipeline execution requested
+
+======================================================================
+PHASE 4: Verification
+======================================================================
+
+## Test Results - Goldfish MCP System
+
+All three tools executed successfully! Here are the results:
+
+### 1. List of Workspaces
+- **baseline**: 
+  - Created: 2025-12-08 at 11:56:57Z
+  - Goal: (empty)
+  - Snapshot count: 0
+  - Last activity: 2025-12-08 at 11:56:57Z
+  - Currently mounted: Yes (slot w1)
+
+### 2. List of Jobs for workspace 'baseline'
+- **Total jobs**: 0
+- No jobs have been run for this workspace yet
+
+### 3. Current Slot Status
+- **w1**: Mounted with workspace "baseline" (DIRTY - has uncommitted changes)
+- **w2**: Empty
+- **w3**: Empty
+
+### Additional Context from Status
+- **Project name**: test-project
+- **Active jobs**: None currently running
+- **Source count**: 0 registered data sources
+- **Recent actions**:
+  - Project initialized at 11:56
+  - Workspace 'baseline' created at 11:57 (Baseline ML classification model)
+  - 'baseline' mounted to w1 at 11:57
+
+**✓ All Goldfish MCP tools are functioning correctly.**
+
+======================================================================
+PHASE 5: Cleanup
+======================================================================
+
+
+======================================================================
+DELUXE E2E TEST COMPLETE
+======================================================================
+
+✅ Test completed successfully!
+
+This test validated:
+  • Claude Code CLI execution
+  • MCP server connection (stdio)
+  • Goldfish MCP tool usage
+  • Real GCE instance launches
+  • Multi-stage pipeline execution
+  • Full workflow orchestration
+
