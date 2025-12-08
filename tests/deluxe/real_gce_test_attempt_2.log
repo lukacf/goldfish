@@ -1,0 +1,159 @@
+time="2025-12-08T13:15:26+01:00" level=warning msg="/Users/luka/src/goldfish/tests/deluxe/docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+======================================================================
+DELUXE E2E TEST: Claude Code + Goldfish MCP + GCE
+======================================================================
+
+Configuration:
+  GCP Project: king-dnn-training-dev
+  GCS Bucket: gs://goldfish-deluxe-test-20251207
+  Dry-run: 0
+
+Setting up Claude Code with Goldfish MCP server...
+Testing goldfish command...
+✓ Goldfish command works
+
+Added stdio MCP server goldfish with command: bash -c GOLDFISH_START_DIR=/ml-project-test-repo uv --directory /goldfish run goldfish serve to local config
+File modified: /home/testuser/.claude.json [project: /ml-project-test-repo]
+✓ Claude Code configured with Goldfish MCP server
+
+MCP Configuration:
+Checking MCP server health...
+
+goldfish: bash -c GOLDFISH_START_DIR=/ml-project-test-repo uv --directory /goldfish run goldfish serve - ✓ Connected
+
+Cleaning up previous test artifacts...
+✓ Cleanup complete
+
+======================================================================
+PHASE 1: Initialize Goldfish Project
+======================================================================
+
+✓ **Goldfish project initialized successfully!**
+
+The project has been created with the following structure:
+
+- **Project path**: `/ml-project-test-repo/test-project`
+- **Dev repository**: `/ml-project-test-repo/test-project/test-project-dev`
+- **Configuration**: `/ml-project-test-repo/test-project/goldfish.yaml`
+- **State file**: `/ml-project-test-repo/test-project/STATE.md`
+
+The Goldfish MCP tool executed successfully and created all necessary project structures. The project is now ready for use with workspace management, pipeline execution, and data lineage tracking capabilities.
+
+✓ Project initialized
+
+Found project directory: /ml-project-test-repo/test-project
+✓ Found goldfish.yaml
+======================================================================
+PHASE 2: Create Workspace and Pipeline
+======================================================================
+
+## TEST RESULTS: SUCCESS ✓
+
+All Goldfish MCP system tests completed successfully:
+
+1. ✓ **Workspace Creation**: Created workspace 'baseline' with goal 'Baseline ML classification model'
+2. ✓ **Workspace Mounting**: Mounted workspace 'baseline' to slot 'w1'
+3. ✓ **Pipeline Modules**: Created 4 Python modules in `/ml-project-test-repo/test-project/workspaces/w1/modules/`:
+   - `generate_data.py` - Generates 1000 synthetic samples (784 features, 10 classes)
+   - `preprocess.py` - Normalizes and splits data 80/20
+   - `train.py` - Trains sklearn LogisticRegression
+   - `evaluate.py` - Computes test accuracy
+4. ✓ **Stage Configs**: Created 4 YAML configs in `/ml-project-test-repo/test-project/workspaces/w1/configs/` with 'cpu-small' profile
+5. ✓ **Pipeline Definition**: Created `pipeline.yaml` with proper signal chaining using `from_stage` references
+6. ✓ **Pipeline Validation**: Validated successfully with `mcp__goldfish__validate_pipeline`
+
+**Initial Failure Encountered & Resolved**:
+- First validation attempt failed due to missing 'name' field in pipeline.yaml (fixed)
+- Second validation attempt failed due to missing 'from_stage' fields on inputs (fixed)
+- Third validation attempt: **PASSED** ✓
+
+The 4-stage ML pipeline is now properly configured with signal chaining:
+`generate_data → preprocess → train → evaluate`
+
+✓ Workspace and pipeline created
+
+======================================================================
+PHASE 3: Run Pipeline
+======================================================================
+
+**Additional Status Information:**
+
+The system status shows:
+- Project name: `test-project`
+- Workspace 'baseline' is mounted to slot w1 (in dirty state)
+- No active jobs are currently running
+- 0 data sources registered
+
+**Summary of Test Results:**
+
+❌ **FAILED**: The `mcp__goldfish__run_pipeline` tool cannot execute because the GCS bucket infrastructure required for the GCE launcher is not configured. This is a configuration/infrastructure issue rather than a tool failure - the tool is working but requires external dependencies (GCS bucket) to function.
+
+The test cannot proceed to the job monitoring and accuracy reporting stages without resolving this infrastructure requirement.
+
+✓ Pipeline execution requested
+
+======================================================================
+PHASE 4: Verification
+======================================================================
+
+## Test Results - Goldfish MCP System
+
+All three tools executed successfully! Here's the summary:
+
+### 1. List of Workspaces
+- **baseline**: Created on 2025-12-08T12:15:34Z
+  - Currently mounted at slot w1
+  - 0 snapshots
+  - Last activity: 2025-12-08T12:15:34Z
+  - Goal: (empty)
+
+### 2. List of Jobs for workspace 'baseline'
+- **Total jobs**: 0
+- No jobs have been run for the baseline workspace yet
+
+### 3. Current Slot Status
+- **w1**: MOUNTED
+  - Workspace: baseline
+  - State: DIRTY (has uncommitted changes)
+  - No checkpoint yet
+  - No version created yet
+
+- **w2**: EMPTY
+  - Available for use
+
+- **w3**: EMPTY
+  - Available for use
+
+### Additional Status Information
+- **Project name**: test-project
+- **Active jobs**: None
+- **Data sources**: 0 registered
+
+### Recent Actions (from STATE.md)
+- [12:15] Project initialized
+- [12:15] Created workspace 'baseline': Baseline ML classification model
+- [12:15] Mounted 'baseline' to w1
+
+**TEST STATUS: ✓ PASSED** - All Goldfish MCP tools are functioning correctly.
+
+======================================================================
+PHASE 5: Cleanup
+======================================================================
+
+Cleaning up GCE instances...
+/usr/local/bin/run_test.sh: line 156: gcloud: command not found
+
+======================================================================
+DELUXE E2E TEST COMPLETE
+======================================================================
+
+✅ Test completed successfully!
+
+This test validated:
+  • Claude Code CLI execution
+  • MCP server connection (stdio)
+  • Goldfish MCP tool usage
+  • Real GCE instance launches
+  • Multi-stage pipeline execution
+  • Full workflow orchestration
+
