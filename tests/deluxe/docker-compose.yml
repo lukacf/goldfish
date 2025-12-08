@@ -24,8 +24,8 @@ services:
       # Mount GCP credentials from host
       - ${GOOGLE_APPLICATION_CREDENTIALS:-~/.config/gcloud/application_default_credentials.json}:/gcp/credentials.json:ro
 
-      # Mount full gcloud config for CLI authentication
-      - ~/.config/gcloud:/home/testuser/.config/gcloud:ro
+      # Mount full gcloud config for CLI authentication (read-write for gcloud logs/cache)
+      - ~/.config/gcloud:/home/testuser/.config/gcloud
 
       # Mount results directory for output
       - ./results:/ml-project-test-repo/results
