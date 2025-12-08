@@ -20,16 +20,21 @@ class DockerBuilder:
         Returns:
             Dockerfile content as string
         """
-        # Check for optional loaders directory
+        # Check for optional files/directories
+        has_requirements = (workspace_dir / "requirements.txt").exists()
         has_loaders = (workspace_dir / "loaders").exists()
 
-        dockerfile = f"""FROM python:3.11-slim
+        dockerfile = "FROM python:3.11-slim\n\n"
 
-# Install dependencies
+        # Install dependencies (optional)
+        if has_requirements:
+            dockerfile += """# Install dependencies
 COPY requirements.txt /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Install Goldfish IO library
+"""
+
+        dockerfile += """# Install Goldfish IO library
 # TODO: Package goldfish.io separately and install from wheel
 # For now, assume it's available in the image or mounted
 
