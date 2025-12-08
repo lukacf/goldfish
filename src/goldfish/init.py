@@ -221,6 +221,23 @@ def _write_config(config: GoldfishConfig, config_path: Path) -> None:
         },
     }
 
+    if config.gcs:
+        config_dict["gcs"] = {
+            "bucket": config.gcs.bucket,
+            "sources_prefix": config.gcs.sources_prefix,
+            "artifacts_prefix": config.gcs.artifacts_prefix,
+            "snapshots_prefix": config.gcs.snapshots_prefix,
+            "datasets_prefix": config.gcs.datasets_prefix,
+        }
+
+    if config.gce:
+        gce_dict = {"project_id": config.gce.project_id}
+        if config.gce.zones:
+            gce_dict["zones"] = config.gce.zones
+        if config.gce.profile_overrides:
+            gce_dict["profile_overrides"] = config.gce.profile_overrides
+        config_dict["gce"] = gce_dict
+
     if config.invariants:
         config_dict["invariants"] = config.invariants
 
