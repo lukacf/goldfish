@@ -18,11 +18,18 @@ services:
       - GOOGLE_APPLICATION_CREDENTIALS=/gcp/credentials.json
 
     volumes:
+      # Mount Docker socket for building and pushing container images
+      - /var/run/docker.sock:/var/run/docker.sock
+
       # Mount GCP credentials from host
       - ${GOOGLE_APPLICATION_CREDENTIALS:-~/.config/gcloud/application_default_credentials.json}:/gcp/credentials.json:ro
 
       # Mount results directory for output
       - ./results:/ml-project-test-repo/results
+
+    # Add user to Docker socket group for access
+    group_add:
+      - "1"  # Docker socket group on macOS (staff/wheel)
 
     # Use host network for GCP API access
     network_mode: host
