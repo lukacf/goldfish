@@ -25,9 +25,10 @@ RUN install -m 0755 -d /etc/apt/keyrings && \
     apt-get install -y docker-ce-cli docker-buildx-plugin && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Google Cloud SDK
-RUN curl -sSL https://sdk.cloud.google.com | bash
-ENV PATH="/root/google-cloud-sdk/bin:${PATH}"
+# Install Google Cloud SDK (system-wide so testuser can access it)
+RUN curl -sSL https://sdk.cloud.google.com | bash -s -- --install-dir=/opt && \
+    chmod -R a+rX /opt/google-cloud-sdk
+ENV PATH="/opt/google-cloud-sdk/bin:${PATH}"
 
 # Install uv (Python package manager used by Claude Code)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
