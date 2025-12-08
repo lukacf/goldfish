@@ -1,0 +1,138 @@
+time="2025-12-08T13:01:06+01:00" level=warning msg="/Users/luka/src/goldfish/tests/deluxe/docker-compose.yml: the attribute `version` is obsolete, it will be ignored, please remove it to avoid potential confusion"
+======================================================================
+DELUXE E2E TEST: Claude Code + Goldfish MCP + GCE
+======================================================================
+
+Configuration:
+  GCP Project: your-gcp-project
+  GCS Bucket: gs://your-bucket
+  Dry-run: 1
+
+Setting up Claude Code with Goldfish MCP server...
+Testing goldfish command...
+✓ Goldfish command works
+
+Added stdio MCP server goldfish with command: bash -c GOLDFISH_START_DIR=/ml-project-test-repo uv --directory /goldfish run goldfish serve to local config
+File modified: /home/testuser/.claude.json [project: /ml-project-test-repo]
+✓ Claude Code configured with Goldfish MCP server
+
+MCP Configuration:
+Checking MCP server health...
+
+goldfish: bash -c GOLDFISH_START_DIR=/ml-project-test-repo uv --directory /goldfish run goldfish serve - ✓ Connected
+
+Cleaning up previous test artifacts...
+✓ Cleanup complete
+
+======================================================================
+PHASE 1: Initialize Goldfish Project
+======================================================================
+
+✅ **Goldfish project initialization successful!**
+
+The tool executed successfully and created:
+- Project path: `/ml-project-test-repo/test-project`
+- Dev repository: `/ml-project-test-repo/test-project/test-project-dev`
+- Config file: `/ml-project-test-repo/test-project/goldfish.yaml`
+- State file: `/ml-project-test-repo/test-project/STATE.md`
+
+The Goldfish MCP `initialize_project` tool is working correctly.
+
+✓ Project initialized
+
+Found project directory: /ml-project-test-repo/test-project
+✓ Found goldfish.yaml
+======================================================================
+PHASE 2: Create Workspace and Pipeline
+======================================================================
+
+## TEST RESULTS: ✅ SUCCESS
+
+All test steps completed successfully:
+
+1. ✅ **Created workspace 'baseline'** with goal "Baseline ML classification model"
+2. ✅ **Mounted workspace to slot w1** 
+3. ✅ **Created 4-stage ML pipeline**:
+   - Stage 1: `generate_data` - Generates 1000 synthetic samples (28x28=784 features, 10 classes)
+   - Stage 2: `preprocess` - Normalizes and splits data 80/20 train/test
+   - Stage 3: `train` - Trains sklearn LogisticRegression
+   - Stage 4: `evaluate` - Computes test accuracy
+4. ✅ **Created Python modules** in `/ml-project-test-repo/test-project/workspaces/w1/modules/`
+5. ✅ **Created stage configs** in `/ml-project-test-repo/test-project/workspaces/w1/configs/` with profile 'cpu-small'
+6. ✅ **Created pipeline.yaml** with proper signal chaining (raw_data → processed_data → model + processed_data → metrics)
+7. ✅ **Pipeline validation passed** - No errors found
+
+**Note**: Initial validation failed due to missing 'name' field in pipeline.yaml. This was corrected by adding `name: baseline_classification` at the top level of the YAML file. After the fix, validation succeeded with no errors.
+
+✓ Workspace and pipeline created
+
+======================================================================
+PHASE 3: Run Pipeline
+======================================================================
+
+DRY-RUN mode: Skipping pipeline execution
+
+✓ Pipeline execution requested
+
+======================================================================
+PHASE 4: Verification
+======================================================================
+
+## Goldfish MCP Test Results
+
+All three tools executed successfully! Here's what they returned:
+
+### 1. List of Workspaces
+- **baseline**: Created on 2025-12-08T12:01:17Z
+  - Goal: (empty)
+  - Snapshot count: 0
+  - Currently mounted: Yes (slot w1)
+  - Last activity: 2025-12-08T12:01:17Z
+
+### 2. List of Jobs for workspace 'baseline'
+- **No jobs found** (0 total jobs)
+- Filters applied: workspace='baseline'
+
+### 3. Current Slot Status
+- **w1**: MOUNTED
+  - Workspace: baseline
+  - State: dirty (has uncommitted changes)
+  - Last checkpoint: null
+  - Current version: null
+  
+- **w2**: EMPTY
+  - No workspace mounted
+  
+- **w3**: EMPTY
+  - No workspace mounted
+
+### Additional Context from Status
+- **Project name**: test-project
+- **Active jobs**: None
+- **Source count**: 0
+- **Recent actions**:
+  - Project initialized at 12:01
+  - Created workspace 'baseline': Baseline ML classification model
+  - Mounted 'baseline' to w1
+
+**TEST STATUS: ✓ PASSED** - All Goldfish MCP tools are functioning correctly.
+
+======================================================================
+PHASE 5: Cleanup
+======================================================================
+
+
+======================================================================
+DELUXE E2E TEST COMPLETE
+======================================================================
+
+✅ Test completed successfully!
+
+This test validated:
+  • Claude Code CLI execution
+  • MCP server connection (stdio)
+  • Goldfish MCP tool usage
+  • Real GCE instance launches
+  • Multi-stage pipeline execution
+  • Full workflow orchestration
+
