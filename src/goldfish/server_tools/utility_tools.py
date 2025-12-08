@@ -21,6 +21,7 @@ from goldfish.server import (
     _get_job_tracker,
     _get_dataset_registry,
     _get_state_md,
+    _get_project_root,
 )
 
 # Import models
@@ -47,15 +48,17 @@ from goldfish.errors import GoldfishError, validate_reason
 @mcp.tool()
 def initialize_project(
     project_name: str,
+    project_root: str,
     from_existing: Optional[str] = None
 ) -> dict:
-    """Initialize a new Goldfish project in the current directory.
+    """Initialize a new Goldfish project in the specified directory.
 
     Creates the necessary directory structure, git repository, and configuration.
     This must be called before using other Goldfish tools in a new project.
 
     Args:
         project_name: Name for the project
+        project_root: Root directory where the project should be created
         from_existing: Optional path to import existing code from
 
     Returns:
@@ -66,7 +69,9 @@ def initialize_project(
     from goldfish.server import _init_server
 
     try:
-        project_path = Path.cwd()
+        # Create project as subdirectory of the specified root
+        root_dir = Path(project_root).resolve()
+        project_path = root_dir / project_name
 
         if from_existing:
             source_path = Path(from_existing)

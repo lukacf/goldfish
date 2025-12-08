@@ -33,8 +33,14 @@ echo ""
 # Setup Claude Code with MCP
 /usr/local/bin/setup_claude.sh
 
-# Change to workspace directory
-cd /workspace
+# Change to test repo directory
+cd /ml-project-test-repo
+
+# Clean up any existing test project from previous runs
+echo "Cleaning up previous test artifacts..."
+rm -rf test-project test-project-dev 2>/dev/null || true
+echo "✓ Cleanup complete"
+echo ""
 
 echo "======================================================================"
 echo "PHASE 1: Initialize Goldfish Project"
@@ -42,48 +48,63 @@ echo "======================================================================"
 echo ""
 
 # Prompt Claude to initialize project
-claude -p "Initialize a new Goldfish project in the current directory (/workspace) called 'deluxe-ml-test'. \
-Configure it with: \
-- GCE backend for job execution \
-- GCP project ID: $GOLDFISH_GCE_PROJECT \
-- GCS bucket: $GOLDFISH_GCS_BUCKET \
-Use the initialize_project MCP tool from the goldfish server."
+# IMPORTANT: This is a TEST of the Goldfish system - Claude must report any tool failures directly
+claude -p --dangerously-skip-permissions "IMPORTANT: This is a TEST of the Goldfish MCP system. You must use the Goldfish MCP tools and report any failures directly. Do NOT create files manually or compensate for missing tools.
+
+Initialize a new Goldfish project using the mcp__goldfish__initialize_project tool with project_name='test-project' and project_root='/ml-project-test-repo'."
 
 echo ""
 echo "✓ Project initialized"
 echo ""
 
-# Verify goldfish.yaml was created
-if [[ ! -f goldfish.yaml ]]; then
-    echo "ERROR: goldfish.yaml not created"
+# Verify the created project directory exists
+if [[ -d "test-project" ]]; then
+    echo "Found project directory: /ml-project-test-repo/test-project"
+else
+    echo "ERROR: test-project directory not found"
+    ls -la /ml-project-test-repo
     exit 1
 fi
+
+# Verify goldfish.yaml was created
+if [[ ! -f test-project/goldfish.yaml ]]; then
+    echo "ERROR: goldfish.yaml not created"
+    ls -la test-project/
+    exit 1
+fi
+
+echo "✓ Found goldfish.yaml"
+
+# IMPORTANT: Stay in /ml-project-test-repo where MCP config is, use relative paths for test-project
 
 echo "======================================================================"
 echo "PHASE 2: Create Workspace and Pipeline"
 echo "======================================================================"
 echo ""
 
-# Prompt Claude to create workspace and pipeline
-claude -p "Using the Goldfish MCP tools: \
-1. Create a new workspace called 'baseline' with goal 'Baseline ML classification model' \
-2. Mount it to slot 'w1' \
-3. In the mounted workspace (workspaces/w1), create a 4-stage ML pipeline: \
+# Prompt Claude to create workspace and pipeline in the test-project
+# IMPORTANT: This is a TEST - Claude must report failures, not compensate
+claude -p --dangerously-skip-permissions "IMPORTANT: This is a TEST of the Goldfish MCP system. You must use the Goldfish MCP tools and report any failures directly. Do NOT create files manually or compensate for missing tools.
+
+For the Goldfish project at /ml-project-test-repo/test-project: \
+1. Use mcp__goldfish__create_workspace to create workspace 'baseline' with goal 'Baseline ML classification model' and reason 'E2E test baseline workspace' \
+2. Use mcp__goldfish__mount to mount workspace 'baseline' to slot 'w1' with reason 'Testing baseline pipeline' \
+3. In the mounted workspace at /ml-project-test-repo/test-project/workspaces/w1, create a 4-stage ML pipeline: \
    - Stage 1 'generate_data': Generate 1000 synthetic samples (28x28 features, 10 classes) \
    - Stage 2 'preprocess': Normalize and split data (80/20) \
    - Stage 3 'train': Train sklearn LogisticRegression \
    - Stage 4 'evaluate': Compute test accuracy \
-4. Create Python modules in workspaces/w1/modules/ for each stage \
-5. Create stage configs in workspaces/w1/configs/ using profile 'cpu-small' \
-6. Create pipeline.yaml with proper signal chaining \
-7. Validate the pipeline"
+4. Create Python modules in /ml-project-test-repo/test-project/workspaces/w1/modules/ for each stage using Write tool \
+5. Create stage configs in /ml-project-test-repo/test-project/workspaces/w1/configs/ for each stage using Write tool with profile 'cpu-small' \
+6. Create /ml-project-test-repo/test-project/workspaces/w1/pipeline.yaml with proper signal chaining using Write tool \
+7. Use mcp__goldfish__validate_pipeline to validate the pipeline for workspace 'baseline'"
 
 echo ""
 echo "✓ Workspace and pipeline created"
 echo ""
 
 # Verify pipeline was created
-if [[ ! -f workspaces/w1/pipeline.yaml ]]; then
+if [[ ! -f test-project/workspaces/w1/pipeline.yaml ]]; then
     echo "ERROR: pipeline.yaml not created"
     exit 1
 fi
@@ -96,16 +117,11 @@ echo ""
 if [[ "${GOLDFISH_DELUXE_DRY_RUN:-0}" == "1" ]]; then
     echo "DRY-RUN mode: Skipping pipeline execution"
 else
-    # Prompt Claude to run the pipeline
-    claude -p "Using the Goldfish MCP tools: \
-1. Run the full pipeline for workspace 'baseline': \
-   - Run stage 'generate_data' \
-   - Run stage 'preprocess' (will use GCE with cpu-small profile) \
-   - Run stage 'train' (will use GCE) \
-   - Run stage 'evaluate' (will use GCE) \
-2. Monitor job status for each stage \
-3. Wait for completion \
-4. Report the final test accuracy from the evaluate stage"
+    # Prompt Claude to run the pipeline (explicitly name the MCP tools)
+    # IMPORTANT: This is a TEST - Claude must report failures, not compensate
+    claude -p --dangerously-skip-permissions "IMPORTANT: This is a TEST of the Goldfish MCP system. You must use the Goldfish MCP tools and report any failures directly. Do NOT compensate for missing tools.
+
+Use the mcp__goldfish__run_pipeline tool to run the full pipeline for workspace 'baseline'. Then use mcp__goldfish__list_jobs to monitor job status. Wait for completion and report the final test accuracy."
 fi
 
 echo ""
@@ -117,8 +133,11 @@ echo "PHASE 4: Verification"
 echo "======================================================================"
 echo ""
 
-# Verify results using Goldfish MCP status tool
-claude -p "Using the Goldfish MCP tools, check the status and show: \
+# Verify results using Goldfish MCP status tool (explicitly name the tools)
+# IMPORTANT: This is a TEST - Claude must report failures, not compensate
+claude -p --dangerously-skip-permissions "IMPORTANT: This is a TEST of the Goldfish MCP system. You must use the Goldfish MCP tools and report any failures directly. Do NOT compensate for missing tools.
+
+Use the mcp__goldfish__status tool to check the current status. Then use mcp__goldfish__list_workspaces and mcp__goldfish__list_jobs with workspace='baseline' to show: \
 1. List of workspaces \
 2. List of jobs for workspace 'baseline' \
 3. Current slot status"

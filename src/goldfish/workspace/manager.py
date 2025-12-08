@@ -53,8 +53,8 @@ class WorkspaceManager:
         self.db = db
         self.state_manager = state_manager
 
-        # Resolve dev repo path
-        dev_repo = (project_root / config.dev_repo_path).resolve()
+        # Resolve dev repo path (relative to project parent, not project itself)
+        dev_repo = (project_root.parent / config.dev_repo_path).resolve()
         self.workspaces_dir = project_root / config.workspaces_dir
 
         self.git = GitLayer(dev_repo, project_root, config.workspaces_dir)

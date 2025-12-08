@@ -18,12 +18,21 @@ ENV PATH="/root/google-cloud-sdk/bin:${PATH}"
 
 # Install uv (Python package manager used by Claude Code)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.cargo/bin:${PATH}"
+ENV PATH="/root/.local/bin:${PATH}"
+
+# Configure git (required for Goldfish workspace operations)
+RUN git config --global user.email "deluxe-test@goldfish.local" && \
+    git config --global user.name "Goldfish Deluxe Test"
 
 # Install Claude Code CLI
 # Note: This assumes claude-code is available via npm
 # Alternative: Use Anthropic API with tool use if Claude Code CLI isn't available
 RUN npm install -g @anthropic-ai/claude-code || echo "Claude Code CLI not available, will use API"
+
+# Create non-root user for running tests (Claude Code requires non-root for --dangerously-skip-permissions)
+RUN useradd -m -u 1000 -s /bin/bash testuser && \
+    mkdir -p /ml-project-test-repo && \
+    chown -R testuser:testuser /ml-project-test-repo
 
 WORKDIR /goldfish
 
@@ -33,15 +42,29 @@ COPY . /goldfish
 # Install Goldfish
 RUN uv pip install --system -e .
 
-# Create workspace directory
-RUN mkdir -p /workspace
+# Create test repo directory (NOT called "workspace" to avoid confusion with Goldfish workspace concept)
+RUN mkdir -p /ml-project-test-repo
 
-WORKDIR /workspace
+WORKDIR /ml-project-test-repo
 
-# Copy test scripts
+# Copy test scripts and make them executable by everyone
 COPY tests/deluxe/setup_claude.sh /usr/local/bin/setup_claude.sh
 COPY tests/deluxe/run_test.sh /usr/local/bin/run_test.sh
-RUN chmod +x /usr/local/bin/*.sh
+RUN chmod 755 /usr/local/bin/setup_claude.sh /usr/local/bin/run_test.sh
+
+# Make goldfish directory accessible to testuser
+RUN chown -R testuser:testuser /goldfish
+
+# Switch to non-root user
+USER testuser
+
+# Install uv for testuser and update PATH
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/home/testuser/.local/bin:${PATH}"
+
+# Configure git for testuser
+RUN git config --global user.email "deluxe-test@goldfish.local" && \
+    git config --global user.name "Goldfish Deluxe Test"
 
 # Entry point sets up Claude Code and runs test
 ENTRYPOINT ["/usr/local/bin/run_test.sh"]

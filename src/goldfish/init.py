@@ -173,6 +173,15 @@ env/
         timeout=INIT_GIT_TIMEOUT,
     )
 
+    # Ensure the branch is named 'main' (git may default to 'master' or other names)
+    subprocess.run(
+        ["git", "branch", "-M", "main"],
+        cwd=dev_repo_path,
+        capture_output=True,
+        check=True,
+        timeout=INIT_GIT_TIMEOUT,
+    )
+
 
 def _write_config(config: GoldfishConfig, config_path: Path) -> None:
     """Write config to YAML file."""

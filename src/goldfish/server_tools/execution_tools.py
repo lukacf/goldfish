@@ -20,6 +20,8 @@ from goldfish.server import (
     _get_job_launcher,
     _get_job_tracker,
     _get_dataset_registry,
+    _get_stage_executor,
+    _get_pipeline_executor,
     _get_state_md,
 )
 
@@ -328,9 +330,8 @@ def run_stage(
     Auto-creates workspace version (git tag).
     """
     config = _get_config()
-    db = _get_db()
     workspace_manager = _get_workspace_manager()
-    pipeline_manager = _get_pipeline_manager()
+    stage_executor = _get_stage_executor()
 
     validate_workspace_name(workspace)
     if reason:
@@ -340,13 +341,6 @@ def run_stage(
     workspace_name = workspace_manager.get_workspace_for_slot(workspace)
     if not workspace_name:
         workspace_name = workspace
-
-    stage_executor = StageExecutor(
-        db=db,
-        config=config,
-        workspace_manager=workspace_manager,
-        pipeline_manager=pipeline_manager
-    )
 
     stage_run = stage_executor.run_stage(
         workspace=workspace_name,
@@ -378,9 +372,8 @@ def run_pipeline(
     Auto-creates workspace version (git tag).
     """
     config = _get_config()
-    db = _get_db()
     workspace_manager = _get_workspace_manager()
-    pipeline_manager = _get_pipeline_manager()
+    pipeline_executor = _get_pipeline_executor()
 
     validate_workspace_name(workspace)
     if reason:
@@ -390,18 +383,6 @@ def run_pipeline(
     workspace_name = workspace_manager.get_workspace_for_slot(workspace)
     if not workspace_name:
         workspace_name = workspace
-
-    stage_executor = StageExecutor(
-        db=db,
-        config=config,
-        workspace_manager=workspace_manager,
-        pipeline_manager=pipeline_manager
-    )
-
-    pipeline_executor = PipelineExecutor(
-        stage_executor=stage_executor,
-        pipeline_manager=pipeline_manager
-    )
 
     runs = pipeline_executor.run_pipeline(
         workspace=workspace_name,
@@ -433,9 +414,8 @@ def run_partial_pipeline(
         - runs: List of stage run info dicts
     """
     config = _get_config()
-    db = _get_db()
     workspace_manager = _get_workspace_manager()
-    pipeline_manager = _get_pipeline_manager()
+    pipeline_executor = _get_pipeline_executor()
 
     validate_workspace_name(workspace)
     if reason:
@@ -445,18 +425,6 @@ def run_partial_pipeline(
     workspace_name = workspace_manager.get_workspace_for_slot(workspace)
     if not workspace_name:
         workspace_name = workspace
-
-    stage_executor = StageExecutor(
-        db=db,
-        config=config,
-        workspace_manager=workspace_manager,
-        pipeline_manager=pipeline_manager
-    )
-
-    pipeline_executor = PipelineExecutor(
-        stage_executor=stage_executor,
-        pipeline_manager=pipeline_manager
-    )
 
     runs = pipeline_executor.run_partial_pipeline(
         workspace=workspace_name,

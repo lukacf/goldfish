@@ -22,7 +22,7 @@ services:
       - ${GOOGLE_APPLICATION_CREDENTIALS:-~/.config/gcloud/application_default_credentials.json}:/gcp/credentials.json:ro
 
       # Mount results directory for output
-      - ./results:/workspace/results
+      - ./results:/ml-project-test-repo/results
 
     # Use host network for GCP API access
     network_mode: host
