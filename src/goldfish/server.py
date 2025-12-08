@@ -83,9 +83,25 @@ from goldfish.datasets.registry import DatasetRegistry
 # Initialize FastMCP server
 mcp = FastMCP("goldfish")
 
+# Module-level variable to store project root (set when server starts)
+_project_root: Optional[Path] = None
+
 
 # ============== CONTEXT ACCESSORS ==============
 # These provide type-safe access to context components with clear error messages
+
+
+def _set_project_root(project_root: Path) -> None:
+    """Set the project root directory."""
+    global _project_root
+    _project_root = project_root.resolve()
+
+
+def _get_project_root() -> Path:
+    """Get the project root directory."""
+    if _project_root is None:
+        raise GoldfishError("Server not initialized with project root")
+    return _project_root
 
 
 def _get_config() -> GoldfishConfig:
@@ -142,6 +158,20 @@ def _get_dataset_registry() -> DatasetRegistry:
     if not has_context():
         raise GoldfishError("Server not initialized")
     return get_context().dataset_registry
+
+
+def _get_stage_executor():
+    """Get stage executor from context or raise GoldfishError."""
+    if not has_context():
+        raise GoldfishError("Server not initialized")
+    return get_context().stage_executor
+
+
+def _get_pipeline_executor():
+    """Get pipeline executor from context or raise GoldfishError."""
+    if not has_context():
+        raise GoldfishError("Server not initialized")
+    return get_context().pipeline_executor
 
 
 def configure_server(
@@ -202,6 +232,10 @@ def reset_server() -> None:
 def _init_server(project_root: Path) -> None:
     """Initialize server components."""
     project_root = project_root.resolve()
+
+    # Update the module-level project root
+    _set_project_root(project_root)
+
     config = GoldfishConfig.load(project_root)
     db = Database(project_root / config.db_path)
 
@@ -229,11 +263,13 @@ def _init_server(project_root: Path) -> None:
         config=config,
         workspace_manager=workspace_manager,
         pipeline_manager=pipeline_manager,
+        project_root=project_root,
         dataset_registry=dataset_registry
     )
     pipeline_executor = PipelineExecutor(
         stage_executor=stage_executor,
-        pipeline_manager=pipeline_manager
+        pipeline_manager=pipeline_manager,
+        db=db
     )
 
     # Create and set context
@@ -321,6 +357,7 @@ from goldfish.server_tools.lineage_tools import (  # noqa: F401
     get_run_provenance
 )
 from goldfish.server_tools.utility_tools import (  # noqa: F401
+    initialize_project,
     status,
     get_audit_log,
     log_thought
@@ -331,11 +368,40 @@ def run_server(project_root: Path) -> None:
     """Run the MCP server."""
     from goldfish.errors import ProjectNotInitializedError
 
+    # Debug logging
+    try:
+        with open("/tmp/goldfish_run_server.log", "a") as f:
+            f.write(f"run_server called with project_root: {project_root}\n")
+    except:
+        pass
+
+    # Store project root so it's available to tools even before initialization
+    _set_project_root(project_root)
+
     try:
         _init_server(project_root)
-    except ProjectNotInitializedError:
+        # Debug: Log successful initialization
+        try:
+            with open("/tmp/goldfish_run_server.log", "a") as f:
+                f.write(f"✓ Server initialized successfully for {project_root}\n")
+        except:
+            pass
+    except ProjectNotInitializedError as e:
         # Server starts without initialization - user must call initialize_project() first
         logger.info(f"Starting uninitialized server in {project_root}. Call initialize_project() to set up.")
+        try:
+            with open("/tmp/goldfish_run_server.log", "a") as f:
+                f.write(f"✗ Server NOT initialized: {e}\n")
+        except:
+            pass
         pass
+    except Exception as e:
+        # Log any other initialization errors
+        try:
+            with open("/tmp/goldfish_run_server.log", "a") as f:
+                f.write(f"✗ Server initialization failed with unexpected error: {type(e).__name__}: {e}\n")
+        except:
+            pass
+        raise
 
     mcp.run(transport="stdio")

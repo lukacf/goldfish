@@ -133,7 +133,7 @@ fi
 if [[ $BUILD -eq 1 ]]; then
     echo ""
     echo "Building Docker image..."
-    docker-compose build
+    docker compose build
 fi
 
 # Create results directory
@@ -153,7 +153,7 @@ echo "  4. Run pipeline stages on GCE"
 echo "  5. Verify results"
 echo ""
 
-docker-compose run --rm deluxe-test
+docker compose run --rm deluxe-test
 
 echo ""
 echo "======================================================================"
