@@ -54,6 +54,7 @@ class StageExecutor:
         gce_bucket = None
         gce_project = None
         gce_zone = "us-central1-a"
+        gce_zones = None
         gce_resources = []
 
         if config.gcs:
@@ -63,12 +64,14 @@ class StageExecutor:
             gce_project = config.gce.project_id
             if config.gce.zones:
                 gce_zone = config.gce.zones[0]
+                gce_zones = config.gce.zones  # Pass all zones for multi-zone lookups
 
         self.gce_launcher = GCELauncher(
             project_id=gce_project,
             zone=gce_zone,
             bucket=gce_bucket,
             resources=gce_resources,  # Will be set per-stage
+            zones=gce_zones,
         )
 
     def run_stage(
@@ -279,20 +282,44 @@ class StageExecutor:
     def _build_docker_image(self, workspace: str, version: str) -> str:
         """Build Docker image for this run.
 
-        Returns image tag.
+        Returns image tag (local for local backend, registry for GCE backend).
         """
         # Get workspace directory
         workspace_dir = self.workspace_manager.get_workspace_path(workspace)
 
         # Build image using DockerBuilder
-        image_tag = self.docker_builder.build_image(
+        local_image_tag = self.docker_builder.build_image(
             workspace_dir=workspace_dir,
             workspace_name=workspace,
             version=version,
             use_cache=True
         )
 
-        return image_tag
+        # If using GCE backend and artifact_registry is configured, push to registry
+        backend = self.config.jobs.backend
+        if backend == "gce":
+            if not self.config.gce:
+                raise GoldfishError(
+                    "GCE backend requires gce configuration in goldfish.yaml"
+                )
+
+            if not self.config.gce.artifact_registry:
+                raise GoldfishError(
+                    "GCE backend requires artifact_registry URL in gce configuration. "
+                    "Example: artifact_registry: us-docker.pkg.dev/{project_id}/goldfish"
+                )
+
+            # Push image to Artifact Registry
+            registry_image_tag = self.docker_builder.push_image(
+                local_tag=local_image_tag,
+                registry_url=self.config.gce.artifact_registry,
+                workspace_name=workspace,
+                version=version
+            )
+
+            return registry_image_tag
+
+        return local_image_tag
 
     def _load_stage_config(self, workspace: str, stage_name: str) -> dict:
         """Load stage config from configs/{stage}.yaml.
@@ -547,7 +574,20 @@ echo "Stage completed successfully"
                     return "failed"
 
                 elif status == "not_found":
-                    raise GoldfishError(f"Instance {stage_run_id} not found")
+                    # GCE API has eventual consistency - instance may take time to appear
+                    # Capacity search across multiple zones can take 10+ minutes
+                    # Treat "not_found" as transient and continue polling
+                    if elapsed % 60 == 0 and elapsed > 0:
+                        # Log every minute for visibility
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.info(
+                            f"Instance {stage_run_id} not yet visible in GCE API "
+                            f"(elapsed: {elapsed}s, may be launching or searching capacity)"
+                        )
+                    time.sleep(poll_interval)
+                    elapsed += poll_interval
+                    continue
 
                 else:
                     # Unknown status

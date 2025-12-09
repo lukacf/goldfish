@@ -84,8 +84,8 @@ CMD ["/bin/bash"]
         dockerfile_path = workspace_dir / "Dockerfile"
         dockerfile_path.write_text(dockerfile_content)
 
-        # Build image
-        build_cmd = ["docker", "build", "-t", image_tag]
+        # Build image for linux/amd64 (GCE target platform)
+        build_cmd = ["docker", "build", "--platform", "linux/amd64", "-t", image_tag]
 
         if not use_cache:
             build_cmd.append("--no-cache")
@@ -110,6 +110,83 @@ CMD ["/bin/bash"]
         except FileNotFoundError:
             raise GoldfishError(
                 "Docker not found. Please install Docker to build images."
+            )
+
+    def push_image(
+        self,
+        local_tag: str,
+        registry_url: str,
+        workspace_name: str,
+        version: str
+    ) -> str:
+        """Push Docker image to Artifact Registry.
+
+        Args:
+            local_tag: Local image tag (e.g., "goldfish-test_ws-v1")
+            registry_url: Registry URL (e.g., "us-docker.pkg.dev/project/goldfish")
+            workspace_name: Workspace name
+            version: Version identifier
+
+        Returns:
+            Full registry image tag
+
+        Raises:
+            GoldfishError: If push fails
+        """
+        # Generate sanitized image name
+        sanitized_workspace = re.sub(r'[^a-z0-9._-]', '_', workspace_name.lower())
+        sanitized_version = re.sub(r'[^a-z0-9._-]', '_', version.lower())
+        image_name = f"goldfish-{sanitized_workspace}-{sanitized_version}"
+
+        # Build full registry tag
+        registry_tag = f"{registry_url}/{image_name}"
+
+        try:
+            # Configure Docker authentication with gcloud (idempotent)
+            # Extract registry domain from URL (e.g., "us-docker.pkg.dev")
+            registry_domain = registry_url.split('/')[0]
+            auth_result = subprocess.run(
+                ["gcloud", "auth", "configure-docker", registry_domain, "--quiet"],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if auth_result.returncode != 0:
+                raise GoldfishError(
+                    f"Failed to configure Docker authentication: {auth_result.stderr}"
+                )
+
+            # Tag for registry
+            tag_result = subprocess.run(
+                ["docker", "tag", local_tag, registry_tag],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+
+            if tag_result.returncode != 0:
+                raise GoldfishError(
+                    f"Docker tag failed: {tag_result.stderr}"
+                )
+
+            # Push to registry
+            push_result = subprocess.run(
+                ["docker", "push", registry_tag],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+
+            if push_result.returncode != 0:
+                raise GoldfishError(
+                    f"Docker push failed: {push_result.stderr}"
+                )
+
+            return registry_tag
+
+        except FileNotFoundError:
+            raise GoldfishError(
+                "Docker not found. Please install Docker to push images."
             )
 
     def _generate_image_tag(self, workspace_name: str, version: str) -> str:
