@@ -75,6 +75,12 @@ fi
 
 echo "✓ Found goldfish.yaml"
 
+# Update goldfish.yaml to include artifact_registry
+echo "Updating goldfish.yaml with artifact_registry configuration..."
+claude -p --dangerously-skip-permissions "Edit the file /ml-project-test-repo/test-project/goldfish.yaml to add 'artifact_registry' field under the 'gce' section. Set it to 'us-docker.pkg.dev/$GOLDFISH_GCE_PROJECT/goldfish'"
+
+echo "✓ Updated goldfish.yaml with artifact_registry"
+
 # IMPORTANT: Stay in /ml-project-test-repo where MCP config is, use relative paths for test-project
 
 echo "======================================================================"
