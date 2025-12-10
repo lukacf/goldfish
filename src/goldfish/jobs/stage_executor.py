@@ -44,7 +44,7 @@ class StageExecutor:
         self.dataset_registry = dataset_registry
 
         # Initialize execution infrastructure
-        self.docker_builder = DockerBuilder()
+        self.docker_builder = DockerBuilder(config)
         self.local_executor = LocalExecutor()
 
         # Initialize profile resolver
@@ -142,9 +142,21 @@ class StageExecutor:
         )
 
         try:
+            # Emit phase progress: building image
+            self.db.update_stage_run_status(
+                stage_run_id=stage_run_id,
+                status="running",
+                progress="build",
+            )
             # 6. Build Docker image
             image_tag = self._build_docker_image(workspace, version)
 
+            # Emit phase progress: launching container/instance
+            self.db.update_stage_run_status(
+                stage_run_id=stage_run_id,
+                status="running",
+                progress="launch",
+            )
             # 7. Launch container
             self._launch_container(stage_run_id, workspace, stage_name, image_tag, inputs)
         except Exception as e:
@@ -167,6 +179,7 @@ class StageExecutor:
             status="running",
             started_at=datetime.now(timezone.utc),
             log_uri=str((self.project_root / ".goldfish" / "runs" / stage_run_id / "logs" / "output.log")),
+            progress="launch",
             profile=stage_config.get("compute", {}).get("profile") if 'compute' in stage_config else None,
             hints=stage_config.get("hints"),
             config=stage_config,
@@ -419,20 +432,48 @@ class StageExecutor:
             if output["is_artifact"]:
                 source_id = output["name"]  # simplistic name; could namespace later
                 source_name = f"{stage_name}_{output['name']}"
-                if not self.db.source_exists(source_id):
-                    try:
+                try:
+                    existing = self.db.get_source(source_id)
+                except Exception:
+                    existing = None
+
+                metadata = None
+                try:
+                    if existing and existing.get("metadata"):
+                        metadata = json.loads(existing["metadata"])
+                except Exception:
+                    metadata = None
+                if metadata is None:
+                    metadata = {}
+                metadata["produced_by_stage_run_id"] = stage_run_id
+
+                try:
+                    if existing:
+                        with self.db._conn() as conn:
+                            conn.execute(
+                                "UPDATE sources SET gcs_location=?, created_by=?, status=?, metadata=? WHERE id=?",
+                                (
+                                    output["storage_location"],
+                                    f"stage:{stage_run_id}",
+                                    "available",
+                                    json.dumps(metadata),
+                                    source_id,
+                                ),
+                            )
+                    else:
                         self.db.create_source(
                             source_id=source_id,
                             name=source_name,
                             gcs_location=output["storage_location"],
                             created_by=f"stage:{stage_run_id}",
                             description=f"Artifact from {stage_run_id}",
+                            metadata=metadata,
                         )
-                    except Exception as e:
-                        import logging
-                        logging.getLogger(__name__).warning(
-                            "Failed to auto-register artifact %s: %s", source_id, e
-                        )
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Failed to auto-register artifact %s: %s", source_id, e
+                    )
 
     def _persist_logs(self, stage_run_id: str, logs: str) -> str:
         """Write logs to local run directory and return path."""
@@ -653,18 +694,9 @@ echo "Stage completed successfully"
 
     def _finalize_stage_run(self, stage_run_id: str, backend: str, status: str) -> None:
         """Handle terminal status: record outputs, fetch logs, update status."""
-        # CAS: only finalize if not already terminal
-        with self.db._conn() as conn:
-            updated = conn.execute(
-                "UPDATE stage_runs SET status=?, completed_at=? WHERE id=? AND status NOT IN ('completed','failed','canceled')",
-                (status, datetime.now(timezone.utc).isoformat(), stage_run_id),
-            ).rowcount
-        if updated == 0:
-            return  # already finalized
-
-        # Re-fetch after CAS for fresh data
+        # Guard against double-finalize
         stage_run = self.db.get_stage_run(stage_run_id)
-        if not stage_run:
+        if not stage_run or stage_run.get("status") in ("completed", "failed", "canceled"):
             return
 
         workspace = stage_run["workspace_name"]
@@ -677,20 +709,43 @@ echo "Stage completed successfully"
             gcs_base = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/outputs"
 
         if status == "completed":
-            self._record_output_signals(stage_run_id, workspace, stage_name_from_db, gcs_base=gcs_base)
+            try:
+                self._record_output_signals(stage_run_id, workspace, stage_name_from_db, gcs_base=gcs_base)
+            except Exception as e:
+                # If outputs fail to record, mark run failed and surface error
+                error_msg = f"Output recording failed: {e}"
+                self.db.update_stage_run_status(
+                    stage_run_id=stage_run_id,
+                    status="failed",
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                    error=error_msg,
+                    progress="finalizing",
+                )
+                raise
 
         logs = ""
         try:
             if backend == "local":
                 logs = self.local_executor.get_container_logs(stage_run_id, tail_lines=1000)
             elif backend == "gce":
-                logs = self.gce_launcher.get_instance_logs(stage_run_id)
+                logs = self.gce_launcher.get_instance_logs(stage_run_id, tail_lines=1000)
                 if not logs:
                     logs = "[GCE logs unavailable - instance may have been deleted or logs not synced]"
         except Exception as e:
             logs = f"[Error fetching logs: {e}]"
 
-        log_uri = self._persist_logs(stage_run_id, logs) if logs is not None else None
+        if backend == "gce" and self.config.gcs and self.config.gcs.bucket:
+            bucket = self.config.gcs.bucket
+            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+            log_uri = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/train.log"
+            # Also persist a local copy for quick access/debugging
+            if logs is not None:
+                try:
+                    self._persist_logs(stage_run_id, logs)
+                except Exception:
+                    pass
+        else:
+            log_uri = self._persist_logs(stage_run_id, logs) if logs is not None else None
 
         self.db.update_stage_run_status(
             stage_run_id=stage_run_id,
@@ -698,6 +753,7 @@ echo "Stage completed successfully"
             completed_at=datetime.now(timezone.utc).isoformat(),
             log_uri=log_uri,
             error=(logs[-1000:] if (status == "failed" and logs) else None),
+            progress="finalizing",
         )
 
     def wait_for_completion(
@@ -738,13 +794,18 @@ echo "Stage completed successfully"
                 if status == "running":
                     # Still running, update status in db
                     self.db.update_stage_run_status(
-                        stage_run_id=stage_run_id, status="running"
+                        stage_run_id=stage_run_id, status="running", progress="running"
                     )
                     interval = self._poll_interval(int(elapsed))
                     time.sleep(interval)
                     continue
 
                 elif status in ("completed", "failed"):
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id,
+                        status="running",
+                        progress="finalizing",
+                    )
                     self._finalize_stage_run(stage_run_id, backend, status)
                     return status
 
@@ -761,13 +822,18 @@ echo "Stage completed successfully"
                 if status == "running":
                     # Still running, update status in db
                     self.db.update_stage_run_status(
-                        stage_run_id=stage_run_id, status="running"
+                        stage_run_id=stage_run_id, status="running", progress="running"
                     )
                     interval = self._poll_interval(int(elapsed))
                     time.sleep(interval)
                     continue
 
                 elif status in ("completed", "failed"):
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id,
+                        status="running",
+                        progress="finalizing",
+                    )
                     self._finalize_stage_run(stage_run_id, backend, status)
                     return status
 
@@ -807,13 +873,18 @@ echo "Stage completed successfully"
                 # CAS: only update if still running
                 with self.db._conn() as conn:
                     conn.execute(
-                        "UPDATE stage_runs SET status='running' WHERE id=? AND status!='completed' AND status!='failed' AND status!='canceled'",
+                        "UPDATE stage_runs SET status='running', progress='running' WHERE id=? AND status!='completed' AND status!='failed' AND status!='canceled'",
                         (stage_run_id,),
                     )
             elif status in ("completed", "failed"):
                 # Guard against double-finalize by only doing it if not terminal
                 current = self.db.get_stage_run(stage_run_id)
                 if current and current.get("status") not in ("completed", "failed", "canceled"):
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id,
+                        status="running",
+                        progress="finalizing",
+                    )
                     self._finalize_stage_run(stage_run_id, backend, status)
             return status
 
@@ -822,12 +893,17 @@ echo "Stage completed successfully"
             if status == "running":
                 with self.db._conn() as conn:
                     conn.execute(
-                        "UPDATE stage_runs SET status='running' WHERE id=? AND status!='completed' AND status!='failed' AND status!='canceled'",
+                        "UPDATE stage_runs SET status='running', progress='running' WHERE id=? AND status!='completed' AND status!='failed' AND status!='canceled'",
                         (stage_run_id,),
                     )
             elif status in ("completed", "failed"):
                 current = self.db.get_stage_run(stage_run_id)
                 if current and current.get("status") not in ("completed", "failed", "canceled"):
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id,
+                        status="running",
+                        progress="finalizing",
+                    )
                     self._finalize_stage_run(stage_run_id, backend, status)
             return status
 

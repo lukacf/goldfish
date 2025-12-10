@@ -7,6 +7,12 @@ from goldfish.db.database import Database
 from goldfish.models import JobInfo, StageRunInfo
 from goldfish.utils import parse_datetime, parse_optional_datetime
 import json
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1024)
+def _cached_json(val: str):
+    return json.loads(val)
 
 
 def job_dict_to_info(job: dict, db: Database) -> JobInfo:
@@ -44,7 +50,7 @@ def stage_run_dict_to_info(row: dict) -> StageRunInfo:
         if not val:
             return None
         try:
-            return json.loads(val)
+            return _cached_json(val)
         except json.JSONDecodeError:
             return None
 

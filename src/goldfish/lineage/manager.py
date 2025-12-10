@@ -156,7 +156,7 @@ class LineageManager:
         outputs = self.db.list_signals(stage_run_id=stage_run_id)
 
         # Parse config_override if it's a JSON string
-        config_override = run.get("config_override") or {}
+        config_override = run.get("config_override") or run.get("config_json") or {}
         if isinstance(config_override, str):
             import json
             config_override = json.loads(config_override) if config_override else {}

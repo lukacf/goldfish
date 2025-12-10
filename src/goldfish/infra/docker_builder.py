@@ -9,10 +9,16 @@ from pathlib import Path
 from typing import Optional
 
 from goldfish.errors import GoldfishError
+from typing import Optional
 
 
 class DockerBuilder:
     """Build Docker images for stage execution."""
+
+    def __init__(self, config: Optional[object] = None):
+        # Store config for backend checks (may be GoldfishConfig or partial)
+        self.config = config
+
 
     def generate_dockerfile(self, workspace_dir: Path) -> str:
         """Generate Dockerfile for workspace.
@@ -109,7 +115,8 @@ CMD ["/bin/bash"]
 
             # Build image; force amd64 only when targeting GCE
             build_cmd = ["docker", "build"]
-            if self.config.jobs.backend == "gce":
+            backend = getattr(getattr(self.config, "jobs", None), "backend", None) if self.config else None
+            if backend == "gce":
                 build_cmd += ["--platform", "linux/amd64"]
             build_cmd += ["-t", image_tag]
 
@@ -175,39 +182,21 @@ CMD ["/bin/bash"]
         registry_tag = f"{registry_url}/{image_name}"
 
         try:
-            # Configure Docker authentication with gcloud (idempotent)
-            # Extract registry domain from URL (e.g., "us-docker.pkg.dev")
+            # Configure Docker authentication with gcloud (idempotent but always validated)
             registry_domain = registry_url.split('/')[0]
             if not shutil.which("gcloud"):
                 raise GoldfishError("gcloud not found; configure gcloud before pushing images.")
 
-            def _has_docker_auth(domain: str) -> bool:
-                cfg = Path.home() / ".docker" / "config.json"
-                if not cfg.exists():
-                    return False
-                try:
-                    data = json.loads(cfg.read_text())
-                    if domain in data.get("auths", {}):
-                        return True
-                    if domain in data.get("credHelpers", {}):
-                        return True
-                except json.JSONDecodeError as e:
-                    raise GoldfishError(f"Invalid docker config.json: {e}")
-                except Exception:
-                    return False
-                return False
-
-            if not _has_docker_auth(registry_domain):
-                auth_result = subprocess.run(
-                    ["gcloud", "auth", "configure-docker", registry_domain, "--quiet"],
-                    capture_output=True,
-                    text=True,
-                    check=False
+            auth_result = subprocess.run(
+                ["gcloud", "auth", "configure-docker", registry_domain, "--quiet"],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if auth_result.returncode != 0:
+                raise GoldfishError(
+                    f"Failed to configure Docker authentication: {auth_result.stderr}"
                 )
-                if auth_result.returncode != 0:
-                    raise GoldfishError(
-                        f"Failed to configure Docker authentication: {auth_result.stderr}"
-                    )
 
             # Tag for registry
             tag_result = subprocess.run(

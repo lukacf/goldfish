@@ -524,7 +524,12 @@ class GCELauncher:
         except Exception:
             return 0
 
-    def get_instance_logs(self, instance_name: str) -> str:
+    def get_instance_logs(
+        self,
+        instance_name: str,
+        tail_lines: Optional[int] = None,
+        since: Optional[str] = None,
+    ) -> str:
         """Retrieve logs from GCE instance.
 
         Tries to fetch from GCS first, falls back to serial console.
@@ -535,22 +540,67 @@ class GCELauncher:
         Returns:
             Instance logs as string
         """
+        from collections import deque
+        from datetime import datetime, timezone
+
+        def _parse_dt(val: str) -> Optional[datetime]:
+            if not val:
+                return None
+            try:
+                iso = val.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(iso)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except Exception:
+                return None
+
+        def _line_ts(line: str) -> Optional[datetime]:
+            first = (line.split() or [""])[0]
+            return _parse_dt(first)
+
+        def _collect(stream, since_dt: Optional[datetime]):
+            if tail_lines:
+                buf = deque(maxlen=tail_lines)
+                for ln in stream:
+                    if since_dt:
+                        ts = _line_ts(ln)
+                        if ts and ts < since_dt:
+                            continue
+                    buf.append(ln)
+                return "".join(buf)
+            # No tail requested: keep all, optionally filter by since
+            out = []
+            for ln in stream:
+                if since_dt:
+                    ts = _line_ts(ln)
+                    if ts and ts < since_dt:
+                        continue
+                out.append(ln)
+            return "".join(out)
+
         instance_name = self._sanitize_name(instance_name)
+        since_dt = _parse_dt(since) if since else None
 
         # Try GCS first
         if self.bucket:
             try:
-                result = subprocess.run(
+                proc = subprocess.Popen(
                     [
                         "gsutil",
                         "cat",
                         f"{self.bucket}/runs/{instance_name}/logs/train.log",
                     ],
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
                     text=True,
-                    check=True,
                 )
-                return result.stdout
+                if not proc.stdout:
+                    raise RuntimeError("No stdout from gsutil cat")
+                with proc.stdout:
+                    output = _collect(proc.stdout, since_dt)
+                proc.wait()
+                if proc.returncode == 0:
+                    return output
             except Exception:
                 pass
 
@@ -573,7 +623,7 @@ class GCELauncher:
                 cmd.append(f"--project={self.project_id}")
 
             result = run_gcloud(cmd, check=False)
-            return result.stdout
+            return _collect(result.stdout.splitlines(keepends=True), since_dt)
         except Exception as e:
             return f"Failed to retrieve logs: {e}"
 
