@@ -1,22 +1,18 @@
 """Fixtures for deluxe E2E tests with real GCE execution."""
 
 import os
-import shutil
 import subprocess
-import tempfile
-import time
 from pathlib import Path
-from typing import List, Dict, Any
 from uuid import uuid4
 
 import pytest
 
-from goldfish.config import GoldfishConfig, GCEConfig, GCSConfig, JobsConfig
-from goldfish.db.database import Database
-from goldfish.workspace.manager import WorkspaceManager
-from goldfish.pipeline.manager import PipelineManager
+from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
 from goldfish.datasets.registry import DatasetRegistry
+from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
+from goldfish.pipeline.manager import PipelineManager
+from goldfish.workspace.manager import WorkspaceManager
 
 
 def skip_if_not_enabled():
@@ -74,7 +70,7 @@ def gce_cleanup():
 
             # ... test code that creates instance ...
     """
-    cleanup_handlers: List[callable] = []
+    cleanup_handlers: list[callable] = []
 
     yield cleanup_handlers
 

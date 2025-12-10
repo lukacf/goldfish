@@ -434,9 +434,9 @@ class TestExpDirCleanup:
 
             # The bug: exp_dir is NOT cleaned up, so it still exists
             # After fix: exp_dir SHOULD be deleted
-            assert len(exp_dirs) == 0, (
-                f"Expected exp_dir to be cleaned up after launch failure, but found: {[d.name for d in exp_dirs]}"
-            )
+            assert (
+                len(exp_dirs) == 0
+            ), f"Expected exp_dir to be cleaned up after launch failure, but found: {[d.name for d in exp_dirs]}"
 
     def test_exp_dir_cleanup_on_all_launch_exceptions(self, temp_dir):
         """Test cleanup happens for OSError, IOError, and unexpected errors."""
@@ -497,9 +497,9 @@ class TestExpDirCleanup:
 
                 # Verify exp_dir was cleaned up for this error type
                 exp_dirs = list(experiments_dir.iterdir()) if experiments_dir.exists() else []
-                assert len(exp_dirs) == 0, (
-                    f"Expected cleanup after {error_type}, but found: {[d.name for d in exp_dirs]}"
-                )
+                assert (
+                    len(exp_dirs) == 0
+                ), f"Expected cleanup after {error_type}, but found: {[d.name for d in exp_dirs]}"
 
 
 class TestLaunchJob:

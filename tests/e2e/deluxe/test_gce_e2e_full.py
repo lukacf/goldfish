@@ -13,13 +13,11 @@ Run only when GOLDFISH_DELUXE_TEST_ENABLED=1 is set.
 import json
 import shutil
 import subprocess
-import time
 from pathlib import Path
 
 import pytest
 
-from goldfish.config import GoldfishConfig
-from tests.e2e.deluxe.conftest import skip_if_not_enabled, is_dry_run
+from tests.e2e.deluxe.conftest import is_dry_run, skip_if_not_enabled
 
 
 @pytest.mark.deluxe_gce
@@ -123,11 +121,9 @@ class TestDeluxeGCEEndToEnd:
 
         # Wait for completion
         if not is_dry_run():
-            final_status = stage_executor.wait_for_completion(
-                run1.stage_run_id, poll_interval=5, timeout=300
-            )
+            final_status = stage_executor.wait_for_completion(run1.stage_run_id, poll_interval=5, timeout=300)
             assert final_status == "completed", f"generate_data failed: {final_status}"
-            print(f"✓ generate_data completed successfully")
+            print("✓ generate_data completed successfully")
 
         # Stage 2: preprocess (GCE with cpu-small)
         print("\n--- Running: preprocess ---")
@@ -141,15 +137,11 @@ class TestDeluxeGCEEndToEnd:
 
         # Register cleanup for GCE instance
         if not is_dry_run():
-            gce_cleanup.append(
-                lambda: self._cleanup_instance(run2.stage_run_id, gce_config["zone"])
-            )
+            gce_cleanup.append(lambda: self._cleanup_instance(run2.stage_run_id, gce_config["zone"]))
 
-            final_status = stage_executor.wait_for_completion(
-                run2.stage_run_id, poll_interval=10, timeout=600
-            )
+            final_status = stage_executor.wait_for_completion(run2.stage_run_id, poll_interval=10, timeout=600)
             assert final_status == "completed", f"preprocess failed: {final_status}"
-            print(f"✓ preprocess completed successfully")
+            print("✓ preprocess completed successfully")
 
         # Stage 3: train (GCE with cpu-small)
         print("\n--- Running: train ---")
@@ -162,15 +154,11 @@ class TestDeluxeGCEEndToEnd:
         print(f"✓ Launched train: {run3.stage_run_id}")
 
         if not is_dry_run():
-            gce_cleanup.append(
-                lambda: self._cleanup_instance(run3.stage_run_id, gce_config["zone"])
-            )
+            gce_cleanup.append(lambda: self._cleanup_instance(run3.stage_run_id, gce_config["zone"]))
 
-            final_status = stage_executor.wait_for_completion(
-                run3.stage_run_id, poll_interval=10, timeout=900
-            )
+            final_status = stage_executor.wait_for_completion(run3.stage_run_id, poll_interval=10, timeout=900)
             assert final_status == "completed", f"train failed: {final_status}"
-            print(f"✓ train completed successfully")
+            print("✓ train completed successfully")
 
         # Stage 4: evaluate (GCE with cpu-small)
         print("\n--- Running: evaluate ---")
@@ -183,15 +171,11 @@ class TestDeluxeGCEEndToEnd:
         print(f"✓ Launched evaluate: {run4.stage_run_id}")
 
         if not is_dry_run():
-            gce_cleanup.append(
-                lambda: self._cleanup_instance(run4.stage_run_id, gce_config["zone"])
-            )
+            gce_cleanup.append(lambda: self._cleanup_instance(run4.stage_run_id, gce_config["zone"]))
 
-            final_status = stage_executor.wait_for_completion(
-                run4.stage_run_id, poll_interval=10, timeout=600
-            )
+            final_status = stage_executor.wait_for_completion(run4.stage_run_id, poll_interval=10, timeout=600)
             assert final_status == "completed", f"evaluate failed: {final_status}"
-            print(f"✓ evaluate completed successfully")
+            print("✓ evaluate completed successfully")
 
         # ======================================================================
         # PHASE 3: Verify Baseline Results
@@ -202,9 +186,7 @@ class TestDeluxeGCEEndToEnd:
 
         if not is_dry_run():
             # Retrieve baseline metrics
-            baseline_metrics = self._get_metrics(
-                project_root, baseline_runs["evaluate"]
-            )
+            baseline_metrics = self._get_metrics(project_root, baseline_runs["evaluate"])
             print(f"✓ Baseline test accuracy: {baseline_metrics['test_accuracy']:.4f}")
             assert baseline_metrics["test_accuracy"] > 0.5, "Baseline accuracy too low"
 
@@ -295,15 +277,11 @@ class TestDeluxeGCEEndToEnd:
         print(f"✓ Launched train (improved): {run5.stage_run_id}")
 
         if not is_dry_run():
-            gce_cleanup.append(
-                lambda: self._cleanup_instance(run5.stage_run_id, gce_config["zone"])
-            )
+            gce_cleanup.append(lambda: self._cleanup_instance(run5.stage_run_id, gce_config["zone"]))
 
-            final_status = stage_executor.wait_for_completion(
-                run5.stage_run_id, poll_interval=10, timeout=900
-            )
+            final_status = stage_executor.wait_for_completion(run5.stage_run_id, poll_interval=10, timeout=900)
             assert final_status == "completed", f"train (improved) failed: {final_status}"
-            print(f"✓ train (improved) completed successfully")
+            print("✓ train (improved) completed successfully")
 
         print("\n--- Running: evaluate (improved) ---")
         run6 = stage_executor.run_stage(
@@ -319,15 +297,11 @@ class TestDeluxeGCEEndToEnd:
         print(f"✓ Launched evaluate (improved): {run6.stage_run_id}")
 
         if not is_dry_run():
-            gce_cleanup.append(
-                lambda: self._cleanup_instance(run6.stage_run_id, gce_config["zone"])
-            )
+            gce_cleanup.append(lambda: self._cleanup_instance(run6.stage_run_id, gce_config["zone"]))
 
-            final_status = stage_executor.wait_for_completion(
-                run6.stage_run_id, poll_interval=10, timeout=600
-            )
+            final_status = stage_executor.wait_for_completion(run6.stage_run_id, poll_interval=10, timeout=600)
             assert final_status == "completed", f"evaluate (improved) failed: {final_status}"
-            print(f"✓ evaluate (improved) completed successfully")
+            print("✓ evaluate (improved) completed successfully")
 
         # ======================================================================
         # PHASE 5: Compare Results
@@ -338,20 +312,14 @@ class TestDeluxeGCEEndToEnd:
 
         if not is_dry_run():
             # Retrieve improved metrics
-            improved_metrics = self._get_metrics(
-                project_root, improved_runs["evaluate"]
-            )
-            print(
-                f"✓ Improved test accuracy: {improved_metrics['test_accuracy']:.4f}"
-            )
+            improved_metrics = self._get_metrics(project_root, improved_runs["evaluate"])
+            print(f"✓ Improved test accuracy: {improved_metrics['test_accuracy']:.4f}")
 
             # Compare
             print("\nComparison:")
             print(f"  Baseline:  {baseline_metrics['test_accuracy']:.4f}")
             print(f"  Improved:  {improved_metrics['test_accuracy']:.4f}")
-            print(
-                f"  Delta:     {improved_metrics['test_accuracy'] - baseline_metrics['test_accuracy']:+.4f}"
-            )
+            print(f"  Delta:     {improved_metrics['test_accuracy'] - baseline_metrics['test_accuracy']:+.4f}")
 
             # Verify improvement (may not always improve, but should be close)
             assert (
