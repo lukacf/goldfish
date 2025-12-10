@@ -81,8 +81,19 @@ class Database:
             ],
         }
 
-        # Add missing columns
         with self._conn() as conn:
+            # Schema version tracking
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER NOT NULL
+                );
+                """
+            )
+            version_row = conn.execute("SELECT version FROM schema_version").fetchone()
+            current_version = version_row["version"] if version_row else 0
+
+            # Add missing columns
             for table, cols in required_columns.items():
                 existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
                 for col, col_type in cols:
@@ -120,6 +131,12 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_stage_runs_ws_stage_status ON stage_runs(workspace_name, stage_name, status);
                 """
             )
+            # Bump schema version
+            if current_version == 0:
+                if version_row:
+                    conn.execute("UPDATE schema_version SET version = 2")
+                else:
+                    conn.execute("INSERT INTO schema_version (version) VALUES (2)")
 
     @contextmanager
     def _conn(self) -> Generator[sqlite3.Connection, None, None]:

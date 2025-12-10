@@ -9,6 +9,8 @@ from goldfish.utils import parse_optional_datetime
 from concurrent.futures import ThreadPoolExecutor
 import atexit
 import threading
+import logging
+import os
 
 from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
@@ -19,8 +21,10 @@ from goldfish.pipeline.manager import PipelineManager
 class PipelineExecutor:
     """Execute full or partial pipelines."""
 
-    _pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pipeline-worker")
+    _pool_size = int(os.getenv("GOLDFISH_PIPELINE_WORKERS", "8"))
+    _pool = ThreadPoolExecutor(max_workers=_pool_size, thread_name_prefix="pipeline-worker")
     atexit.register(_pool.shutdown, wait=False)
+    _logger = logging.getLogger(__name__)
 
     def __init__(
         self,
@@ -148,6 +152,7 @@ class PipelineExecutor:
                 error_count = 0
             except Exception as e:
                 error_count += 1
+                self._logger.exception("Pipeline worker error (run=%s err#=%s)", pipeline_run_id, error_count)
                 if error_count >= max_errors:
                     with self.db._conn() as conn:
                         conn.execute(
@@ -259,6 +264,7 @@ class PipelineExecutor:
                     (datetime.now(timezone.utc).isoformat(), row["id"]),
                 ).rowcount
                 if updated == 0:
+                    self._logger.debug("Lost CAS claim for stage %s (run %s)", row["stage_name"], pipeline_run_id)
                     continue  # lost race
 
                 stage_config = None
