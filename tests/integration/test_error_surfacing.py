@@ -39,9 +39,9 @@ class TestStateMdWriteErrors:
                 manager.regenerate(slots=[], jobs=[], source_count=0)
 
         # Should have logged a warning
-        assert any("STATE.md" in record.message or "write" in record.message.lower() for record in caplog.records), (
-            "Expected warning about STATE.md write failure"
-        )
+        assert any(
+            "STATE.md" in record.message or "write" in record.message.lower() for record in caplog.records
+        ), "Expected warning about STATE.md write failure"
 
     def test_mkdir_failure_is_logged(self, temp_dir, caplog):
         """Directory creation failures should be logged."""
@@ -162,9 +162,9 @@ class TestGitMetadataErrors:
         assert result["commit_date"] is None
         assert result["message"] == ""
         # Should log warning about failure
-        assert any("snapshot" in record.message.lower() for record in caplog.records), (
-            "Expected warning about snapshot info retrieval failure"
-        )
+        assert any(
+            "snapshot" in record.message.lower() for record in caplog.records
+        ), "Expected warning about snapshot info retrieval failure"
 
     def test_list_snapshots_failure_logs_warning(self, temp_dir, caplog):
         """list_snapshots failures should be logged."""
@@ -211,9 +211,9 @@ slots:
 
         error_msg = str(exc_info.value)
         # Error should mention line number, location, or config position
-        assert "line" in error_msg.lower() or "yaml" in error_msg.lower() or "slots" in error_msg.lower(), (
-            f"Expected position info in error: {error_msg}"
-        )
+        assert (
+            "line" in error_msg.lower() or "yaml" in error_msg.lower() or "slots" in error_msg.lower()
+        ), f"Expected position info in error: {error_msg}"
 
     def test_missing_field_error_includes_field_name(self, temp_dir):
         """Missing field errors should include the field name."""

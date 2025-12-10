@@ -194,9 +194,9 @@ class TestLogReadingSymlinkSecurity:
         except (GoldfishError, OSError) as e:
             # Good - an error was raised
             error_msg = str(e).lower()
-            assert any(keyword in error_msg for keyword in ["symlink", "failed to read", "operation not permitted"]), (
-                f"Expected error about symlink but got: {e}"
-            )
+            assert any(
+                keyword in error_msg for keyword in ["symlink", "failed to read", "operation not permitted"]
+            ), f"Expected error about symlink but got: {e}"
 
     def test_log_reading_handles_missing_file(self, temp_dir):
         """Test that get_job_logs() handles missing log files gracefully."""
