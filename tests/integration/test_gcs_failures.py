@@ -96,9 +96,9 @@ class TestGCSUploadFailures:
         # 4. Verify job status - upload failure doesn't automatically mark job as failed
         # (In a real scenario, the infrastructure would mark the job as failed)
         job = db.get_job("job-test-001")
-        assert job["status"] == "running", (
-            "Job should still be running - infrastructure marks it as failed on upload error"
-        )
+        assert (
+            job["status"] == "running"
+        ), "Job should still be running - infrastructure marks it as failed on upload error"
 
         # Simulate infrastructure marking job as failed due to upload error
         tracker.update_job_status(
@@ -120,9 +120,9 @@ class TestGCSUploadFailures:
 
         # Verify no artifact_uri was set (upload failed)
         job = db.get_job("job-test-001")
-        assert job["artifact_uri"] is None or job["artifact_uri"] == "", (
-            "artifact_uri should not be set when upload fails"
-        )
+        assert (
+            job["artifact_uri"] is None or job["artifact_uri"] == ""
+        ), "artifact_uri should not be set when upload fails"
 
     def test_gcs_upload_partial_failure_consistency(self, temp_dir):
         """Test that partial upload failures leave database in consistent state."""

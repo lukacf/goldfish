@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
+
 from goldfish.config import AuditConfig, GoldfishConfig, JobsConfig, StateMdConfig
 from goldfish.db.database import Database
 from goldfish.state.state_md import StateManager

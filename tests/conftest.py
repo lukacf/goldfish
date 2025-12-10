@@ -7,6 +7,7 @@ from collections.abc import Generator
 from pathlib import Path
 
 import pytest
+
 from goldfish.config import AuditConfig, GCSConfig, GoldfishConfig, JobsConfig, StateMdConfig
 from goldfish.db.database import Database
 
