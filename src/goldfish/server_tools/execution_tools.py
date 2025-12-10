@@ -303,6 +303,46 @@ def stage_logs(stage_run_id: str, tail_lines: int = 200, since: Optional[str] = 
     # Prefer persisted log file if present
     log_uri = row.get("log_uri")
     logs: Optional[str] = None
+    def _parse_since(s: Optional[str]) -> Optional[datetime]:
+        if not s:
+            return None
+        try:
+            iso = s.replace("Z", "+00:00")
+            dt = parse_datetime(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return None
+
+    def _line_ts(line: str) -> Optional[datetime]:
+        token = (line.split() or [""])[0].strip()
+        if not token:
+            return None
+        try:
+            ts = parse_datetime(token.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return ts
+        except Exception:
+            return None
+
+    def _filter_lines(lines_iter, since_ts: Optional[datetime]) -> list[str]:
+        if since_ts is None:
+            return list(lines_iter)
+        filtered = []
+        for ln in lines_iter:
+            ts = _line_ts(ln)
+            if ts is None:
+                # If we can't parse the timestamp, keep the line to avoid hiding logs
+                filtered.append(ln)
+                continue
+            if ts >= since_ts:
+                filtered.append(ln)
+        return filtered
+
+    since_ts = _parse_since(since)
+
     if log_uri and log_uri.startswith("/"):
         try:
             from collections import deque
@@ -312,8 +352,7 @@ def stage_logs(stage_run_id: str, tail_lines: int = 200, since: Optional[str] = 
                     lines = deque(f, maxlen=tail_lines)
                 else:
                     lines = list(f)
-            if since:
-                lines = [ln for ln in lines if since in ln]
+            lines = _filter_lines(lines, since_ts)
             logs = "".join(lines)
         except FileNotFoundError:
             logs = None
@@ -327,17 +366,12 @@ def stage_logs(stage_run_id: str, tail_lines: int = 200, since: Optional[str] = 
                 logs = _get_stage_executor().local_executor.get_container_logs(
                     handle, tail_lines=tail_lines, since=since
                 )
-        elif backend == "gce":
-            logs_full = _get_stage_executor().gce_launcher.get_instance_logs(handle)
-            if tail_lines and logs_full:
-                from collections import deque
-
-                lines = deque(logs_full.splitlines(), maxlen=tail_lines)
-                if since:
-                    lines = [ln for ln in lines if since in ln]
-                logs = "\n".join(lines)
-            else:
-                logs = logs_full or "[GCE logs unavailable - not yet synced]"
+            elif backend == "gce":
+                logs = _get_stage_executor().gce_launcher.get_instance_logs(
+                    handle, tail_lines=tail_lines, since=since
+                )
+                if logs is None:
+                    logs = "[GCE logs unavailable - not yet synced]"
             else:
                 logs = "Logs not available"
         except Exception as e:
@@ -503,6 +537,12 @@ def run_stage(
         config_override: Override config env vars (e.g., {"VOCAB_SIZE": "20000"})
         inputs_override: Override input sources for debugging
         reason: Why running this stage (min 15 chars)
+        wait: When False (default) return immediately after launch; when True block until completion.
+
+    Non-blocking usage:
+        - wait=False returns as soon as the container/instance is launched
+        - use stage_status()/stage_logs() to monitor progress
+        - progress field will advance through build → launch → running → finalizing
 
     Returns:
         Dict with:
@@ -551,8 +591,15 @@ def run_pipeline(
 
     Args:
         workspace: Workspace name or slot
+        pipeline: Named pipeline file under pipelines/<name>.yaml (default pipeline.yaml)
         config_override: Dict of {stage_name: {var: value}}
         reason: Why running this pipeline (min 15 chars)
+        async_mode: True (default) enqueues stages and returns immediately; False runs sequentially and blocks.
+
+    Non-blocking usage:
+        - async_mode=True returns pipeline_run_id plus any immediately launched stages
+        - use list_runs(pipeline_run_id=...) and stage_status() to follow execution
+        - cancel_run(stage_run_id) and get_outputs() operate on returned stage_run_ids
 
     Returns:
         Dict with:
@@ -588,6 +635,7 @@ def run_partial_pipeline(
     workspace: str,
     from_stage: str,
     to_stage: str,
+    pipeline: Optional[str] = None,
     config_override: Optional[dict] = None,
     reason: Optional[str] = None,
     async_mode: bool = True,
@@ -596,6 +644,7 @@ def run_partial_pipeline(
 
     Args:
         workspace: Workspace name or slot
+        pipeline: Optional pipeline name (pipelines/<name>.yaml). Defaults to pipeline.yaml
         from_stage: First stage to run
         to_stage: Last stage to run (inclusive)
         config_override: Dict of {stage_name: {var: value}}
@@ -620,6 +669,7 @@ def run_partial_pipeline(
 
     runs = pipeline_executor.run_partial_pipeline(
         workspace=workspace_name,
+        pipeline_name=pipeline,
         from_stage=from_stage,
         to_stage=to_stage,
         config_override=config_override or {},
