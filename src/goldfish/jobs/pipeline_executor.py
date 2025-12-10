@@ -140,7 +140,7 @@ class PipelineExecutor:
         }
 
     def _worker_loop(self, pipeline_run_id, workspace, pipeline_name, config_override, reason):
-        elapsed = 0
+        start_time = time.time()
         error_count = 0
         while True:
             try:
@@ -166,9 +166,20 @@ class PipelineExecutor:
                     break
                 time.sleep(min(60, 5 * error_count))
                 continue
-            interval = self._poll_interval(elapsed)
+            elapsed = time.time() - start_time
+            if elapsed >= int(os.getenv("GOLDFISH_PIPELINE_MAX_ELAPSED_SECONDS", "86400")):
+                with self.db._conn() as conn:
+                    conn.execute(
+                        "UPDATE pipeline_stage_queue SET status='failed' WHERE pipeline_run_id=? AND status IN ('pending','running')",
+                        (pipeline_run_id,),
+                    )
+                    conn.execute(
+                        "UPDATE pipeline_runs SET status='failed', error=? WHERE id=?",
+                        ("Pipeline exceeded max elapsed time", pipeline_run_id),
+                    )
+                break
+            interval = self._poll_interval(int(elapsed))
             time.sleep(interval)
-            elapsed += interval
 
     def _pipeline_status(self, pipeline_run_id: str) -> dict:
         with self.db._conn() as conn:
