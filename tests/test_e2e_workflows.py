@@ -57,10 +57,10 @@ def e2e_setup(temp_dir):
     # Create database
     db = Database(project_root / ".goldfish" / "goldfish.db")
 
-    # Create config - dev_repo_path is relative to project_root
+    # Create config - dev_repo_path is relative to project_root.parent
     config = GoldfishConfig(
         project_name="test-project",
-        dev_repo_path="../project-dev",  # Relative to project_root
+        dev_repo_path="project-dev",  # Sibling of project_root (relative to parent)
         workspaces_dir="workspaces",
         slots=["w1", "w2", "w3"],
         state_md=StateMdConfig(path="STATE.md", max_recent_actions=15),
