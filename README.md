@@ -1,498 +1,350 @@
 # Goldfish
 
-**Goldfish** is an MCP (Model Context Protocol) server for pipeline-based ML experimentation. It enables Claude Code to autonomously conduct ML research by managing code workspaces, executing pipeline stages, tracking data lineage, and maintaining full experiment provenance—with built-in context recovery and comprehensive security.
+**ML Experimentation Platform for AI Agents**
 
-## What is Goldfish?
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![MCP Compatible](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io/)
+[![AGPL-3.0 License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![CI](https://github.com/lukacf/goldfish/actions/workflows/ci.yml/badge.svg)](https://github.com/lukacf/goldfish/actions)
 
-Goldfish solves the key challenge of ML development with AI assistants: **maintaining state and provenance across long experiments**. When working with Claude, you need a system that remembers workspace state, tracks data lineage, and can recover context after conversation summarization.
+[Key Features](#key-features) • [Core Concepts](#core-concepts) • [Quick Start](#quick-start) • [Limitations](#limitations) • [Documentation](#documentation)
 
-Goldfish provides:
+---
 
-- **Pipeline-Based Workflows**: Define ML workflows as YAML pipelines with automatic stage chaining
-- **Workspace Management**: Isolated git branches for parallel experimentation with version control
-- **Automated Versioning**: Every pipeline run creates an immutable snapshot with full provenance
-- **Data Lineage**: Track complete provenance from raw data → processing → models → artifacts
-- **Infrastructure Abstraction**: Runs locally or on GCE with Docker containerization
-- **Context Recovery**: Auto-generated STATE.md for resuming work after summarization
+## The Problem
 
-## Architecture Overview
+AI agents are increasingly capable of writing ML code, but they struggle with the **stateful, iterative nature of ML research**:
 
-### Conceptual Layers
+- Experiments span hours or days — longer than a single conversation
+- Data provenance must be tracked across dozens of pipeline runs
+- Reproducibility requires exact versioning of code, data, and configuration
+- Context is lost when conversations are summarized or restarted
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Claude Code (MCP Client)                  │
-│  "Add attention mechanism to transformer"                    │
-│  "Run tokenize stage with vocab_size=20000"                 │
-└────────────────────────────┬────────────────────────────────┘
-                             │ MCP Protocol (41 tools)
-┌────────────────────────────▼────────────────────────────────┐
-│                   Goldfish MCP Server                        │
-│  Tools: run_stage(), update_pipeline(), get_lineage()      │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │  Workspaces  │  │   Pipelines  │  │   Modules    │     │
-│  │ (git branch) │  │ (YAML flow)  │  │ (ML code)    │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘     │
-│                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │   Versions   │  │    Signals   │  │   Datasets   │     │
-│  │  (git tags)  │  │ (data flow)  │  │ (sources)    │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘     │
-│                                                              │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │           Job Execution Engine                      │   │
-│  │  - Stage running (partial/full pipeline)           │   │
-│  │  - Docker containerization (hidden from Claude)    │   │
-│  │  - Storage abstraction (GCS/hyperdisk/local)       │   │
-│  │  - Signal chaining (stage outputs → inputs)        │   │
-│  │  - Lineage tracking (full provenance)              │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                                                              │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │           Infrastructure Layer                       │   │
-│  │  - Docker builder (secure image generation)        │   │
-│  │  - Local executor (development mode)               │   │
-│  │  - GCE launcher (production with GPU support)      │   │
-│  │  - Resource launcher (capacity-aware multi-zone)   │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                                                              │
-├─────────────────────────────────────────────────────────────┤
-│  SQLite Database (jobs, sources, lineage, audit)            │
-├─────────────────────────────────────────────────────────────┤
-│  Git Repository (.goldfish/dev/ - branches + tags)          │
-└─────────────────────────────────────────────────────────────┘
-```
+## The Solution
 
-## How It Works
-
-### Core Concepts
-
-1. **Pipelines** - YAML workflow definitions:
-   - Sequence of stages (preprocess → tokenize → train)
-   - Signal wiring (stage outputs → next stage inputs)
-   - Claude edits directly, Goldfish validates
-
-2. **Modules** - Python scripts implementing stages:
-   - One module per stage (e.g., `modules/tokenize.py`)
-   - Uses Goldfish IO library for storage abstraction
-   - No infrastructure concerns - just ML logic
-
-3. **Workspaces** - Development environments:
-   - Git branch containing: pipeline + modules + configs
-   - Mounted to slots (w1, w2, w3) for editing
-   - Auto-versioned on every run
-
-4. **Datasets** - Project-level data sources:
-   - Registered once, shared across workspaces
-   - Goldfish manages upload to GCS/hyperdisk
-   - Immutable or versioned
-
-5. **Runs/Jobs** - Pipeline stage execution:
-   - Run single stage or full pipeline
-   - Full provenance tracked via lineage
-   - Docker/GCE completely hidden from Claude
-
-### Workspace Structure
+Goldfish gives AI agents the infrastructure to conduct **real ML research**:
 
 ```
-workspace/
-├── pipeline.yaml              # Pipeline definition (Claude edits)
-├── configs/
-│   ├── CLAUDE.md             # Config documentation
-│   ├── preprocess.yaml       # Stage config
-│   ├── tokenize.yaml
-│   └── train.yaml
-├── modules/
-│   ├── CLAUDE.md             # Module documentation
-│   ├── preprocess.py         # Stage implementation
-│   ├── tokenize.py
-│   └── train.py
-└── STATE.md                   # Workspace state + lineage
+You: "Implement and compare three attention mechanisms for protein
+      structure prediction: standard self-attention, axial attention,
+      and linear attention. Use the CASP14 dataset."
+
+AI Agent + Goldfish:
+  1. Creates isolated workspace for the experiment
+  2. Registers CASP14 dataset with lineage tracking
+  3. Defines pipeline: preprocess → train → evaluate
+  4. Implements each attention variant as a stage
+  5. Runs experiments in containers
+  6. Versions everything (code, config, outputs)
+  7. Compares results with full provenance
+  8. Can resume after any interruption
 ```
 
-### Workflow Example
+The agent writes pure ML code. Goldfish handles versioning, execution, and state.
+
+---
+
+## Key Features
+
+- **Pipeline Workflows** — Define ML workflows as YAML, run stages individually or end-to-end
+- **Workspace Isolation** — Each experiment is fully isolated; run multiple experiments in parallel
+- **Automatic Versioning** — Every run creates an immutable snapshot for reproducibility
+- **Data Lineage** — Track the complete journey: raw data → features → models → metrics
+- **Infrastructure Abstraction** — The agent sees ML concepts; containers and storage are hidden
+- **Context Recovery** — STATE.md regenerates automatically so agents can resume after interruption
+
+---
+
+## Core Concepts
+
+Goldfish has five core abstractions that work together:
+
+### Workspaces = Isolated Experiments
+
+A **workspace** is an isolated environment for one experiment. The agent can create multiple workspaces to explore different approaches in parallel without interference.
 
 ```
-1. Register dataset
-   └─> register_dataset("eurusd_raw_v3", "local:/data/eurusd.csv")
-
-2. Create workspace
-   └─> create_workspace("baseline_lstm", goal="Train baseline LSTM model")
-
-3. Mount to slot
-   └─> mount("baseline_lstm", "w1")
-
-4. Define pipeline
-   └─> Claude edits w1/pipeline.yaml:
-       stages:
-         - name: preprocess
-           inputs: {raw_data: {type: dataset, dataset: eurusd_raw_v3}}
-         - name: tokenize
-           inputs: {features: {from: preprocess.features}}
-         - name: train
-           inputs: {tokens: {from: tokenize.tokens}}
-
-5. Implement modules
-   └─> Claude writes w1/modules/preprocess.py, tokenize.py, train.py
-
-6. Run single stage (partial pipeline)
-   └─> run_stage("w1", "tokenize", config_override={"VOCAB_SIZE": "20000"})
-   └─> Auto-creates version: baseline_lstm-v1
-   └─> Launches Docker container with stage code
-   └─> Tracks input/output signals
-
-7. Run full pipeline
-   └─> run_pipeline("w1", reason="Full baseline training")
-   └─> Auto-creates version: baseline_lstm-v2
-   └─> Runs all stages in sequence
-   └─> Records complete lineage
-
-8. Promote artifact
-   └─> promote_artifact(job_id="job-123", output_name="trained_model",
-                        source_name="lstm_baseline_v1")
-   └─> Registers as reusable dataset
-
-9. Branch workspace
-   └─> branch_workspace("baseline_lstm", "v2", "baseline_lstm_attention")
-   └─> Experiment from known-good version
+create_workspace("axial_attention", goal="Test axial attention on CASP14")
+     ↓
+Creates isolated environment
+Mounts to slot w1 for file access
 ```
 
-## Installation
+Workspaces can be **mounted** (active, files accessible), **hibernated** (stored, freeing slots), or **branched** (forked for variations).
 
-### Prerequisites
+### Versions = Immutable Snapshots
 
-- Python 3.11+
-- Git
-- Docker (for job execution)
-- Claude Code (for MCP integration)
-- Optional: GCS access (for cloud artifacts)
+A **version** is an immutable snapshot of your experiment at a point in time. Goldfish auto-creates versions on every stage run, ensuring full reproducibility.
 
-### Install Goldfish
+```
+run_stage("w1", "train")
+     ↓
+Creates version: axial_attention-v3
+Captures: code, config, pipeline definition
+Tracks: output locations and lineage
+```
+
+You can always return to any version: `rollback("axial_attention", "v2")`
+
+### Pipelines = Workflow Definitions
+
+A **pipeline** is a YAML file defining stages and how data flows between them:
+
+```yaml
+# pipeline.yaml
+stages:
+  - name: preprocess
+    inputs:
+      raw_data: { type: dataset, dataset: casp14_proteins }
+    outputs:
+      features: { type: npy }
+      labels: { type: npy }
+
+  - name: train
+    inputs:
+      features: { from_stage: preprocess, signal: features }
+      labels: { from_stage: preprocess, signal: labels }
+    outputs:
+      model: { type: directory }
+      metrics: { type: csv }
+
+  - name: evaluate
+    inputs:
+      model: { from_stage: train, signal: model }
+      test_data: { type: dataset, dataset: casp14_test }
+    outputs:
+      report: { type: file }
+```
+
+The agent edits this file directly. Goldfish validates the DAG and wires data automatically.
+
+### Stages = Executable Steps
+
+A **stage** is a Python module that runs in an isolated container:
+
+```python
+# modules/train.py
+from goldfish.io import load_input, save_output
+
+def main():
+    # Inputs are automatically available from upstream stages or datasets
+    features = load_input("features")  # numpy array
+    labels = load_input("labels")
+
+    # Your ML code — completely standard Python
+    model = train_axial_attention(features, labels, config)
+    metrics = evaluate(model, features, labels)
+
+    # Outputs are tracked with full lineage
+    save_output("model", model_dir)
+    save_output("metrics", metrics_df)
+
+if __name__ == "__main__":
+    main()
+```
+
+The agent writes pure ML code. Goldfish handles containerization, input mounting, and output tracking.
+
+### Signals = Typed Data Flow
+
+**Signals** are typed data connectors between stages:
+
+| Type | Format | Use Case |
+|------|--------|----------|
+| `dataset` | External | Registered project data (immutable) |
+| `npy` | NumPy array | Features, embeddings, tensors |
+| `csv` | DataFrame | Metrics, tabular data |
+| `directory` | Folder | Model checkpoints, multi-file outputs |
+| `file` | Single file | Configs, reports, small outputs |
+
+Goldfish tracks every signal — you always know exactly which data produced which results.
+
+### How They Work Together
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         WORKSPACE                                   │
+│                    (isolated experiment environment)                │
+│                                                                     │
+│   ┌─────────────────────────────────────────────────────────────┐   │
+│   │                        PIPELINE                              │   │
+│   │                      (pipeline.yaml)                         │   │
+│   │                                                              │   │
+│   │    ┌──────────┐      ┌──────────┐      ┌──────────┐         │   │
+│   │    │  STAGE   │      │  STAGE   │      │  STAGE   │         │   │
+│   │    │preprocess│─npy─▶│  train   │─dir─▶│ evaluate │         │   │
+│   │    └──────────┘      └──────────┘      └──────────┘         │   │
+│   │         ▲                                    │               │   │
+│   │         │                                    ▼               │   │
+│   │    ┌─────────┐                         ┌─────────┐          │   │
+│   │    │ SIGNAL  │                         │ SIGNAL  │          │   │
+│   │    │(dataset)│                         │ (file)  │          │   │
+│   │    └─────────┘                         └─────────┘          │   │
+│   └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│   VERSION: axial_attn-v3 (immutable snapshot, auto-created)        │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Quick Start
+
+### 1. Install Goldfish
+
+**Option A: From Git (recommended for development)**
 
 ```bash
-# Clone the repository
-git clone <goldfish-repo-url>
+git clone https://github.com/lukacf/goldfish.git
 cd goldfish
-
-# Install in development mode
-pip install -e .
+pip install -e ".[dev]"
 ```
 
-## Adding to Claude Code
+**Option B: From PyPI**
 
-To use Goldfish with Claude Code, add it as an MCP server:
-
-### 1. Find Your Claude Code MCP Config
-
-The config file is located at:
-- **macOS/Linux**: `~/.config/claude-code/mcp_config.json`
-- **Windows**: `%APPDATA%\claude-code\mcp_config.json`
-
-### 2. Add Goldfish Server
-
-Edit `mcp_config.json` to add Goldfish:
-
-```json
-{
-  "mcpServers": {
-    "goldfish": {
-      "command": "python",
-      "args": [
-        "-m",
-        "goldfish",
-        "serve",
-        "--project",
-        "/path/to/your/ml-project"
-      ]
-    }
-  }
-}
+```bash
+pip install goldfish-mcp
 ```
 
-Replace `/path/to/your/ml-project` with the absolute path to your project directory.
+### 2. Initialize a Project
 
-### 3. Restart Claude Code
+```bash
+cd my-ml-project
+goldfish init
+```
 
-Restart Claude Code to load the MCP server. Goldfish tools will now be available.
+This creates:
+- `.goldfish/` — Internal state and tracking database
+- `goldfish.yaml` — Project configuration
+- `pipeline.yaml` — Default pipeline template
+- `modules/` — Directory for stage implementations
 
-## Available Tools (41 Total)
+### 3. Add to Claude Code
 
-Claude Code has access to these Goldfish tools:
+**Local installation:**
 
-### Workspace Management (15 tools)
-- `create_workspace()` - Create new workspace from main
-- `list_workspaces()` - List all workspaces
-- `get_workspace()` - Get workspace details
-- `mount()` - Mount workspace to slot
-- `hibernate()` - Save and unmount workspace
-- `checkpoint()` - Create snapshot manually
-- `rollback()` - Rollback to previous snapshot
-- `list_snapshots()` - List workspace snapshots with pagination
-- `get_snapshot()` - Get snapshot details
-- `diff()` - Show uncommitted changes
-- `delete_workspace()` - Delete workspace and snapshots
-- `delete_snapshot()` - Delete specific snapshot
-- `get_workspace_goal()` - Get workspace goal
-- `update_workspace_goal()` - Update workspace goal
-- `branch_workspace()` - Create workspace from specific version
+```bash
+claude mcp add goldfish -- uv run --directory /path/to/goldfish goldfish serve
+```
 
-### Pipeline & Execution (8 tools)
-- `get_pipeline()` - Get pipeline definition
-- `validate_pipeline()` - Validate pipeline YAML
-- `update_pipeline()` - Update pipeline definition
-- `run_stage()` - Run single pipeline stage
-- `run_pipeline()` - Run full pipeline
-- `run_partial_pipeline()` - Run stages from X to Y
-- `run_job()` - Launch job (legacy - use run_stage)
-- `job_status()` - Get job status
-- `get_job_logs()` - Retrieve job logs
-- `cancel_job()` - Cancel running job
-- `list_jobs()` - List jobs with filters
-- `delete_job()` - Delete completed job
+**From Git:**
 
-### Data Source Management (9 tools)
-- `register_dataset()` - Register project-level dataset
-- `list_datasets()` - List all datasets
-- `get_dataset()` - Get dataset details
-- `register_source()` - Register external data source (legacy)
-- `list_sources()` - List data sources with pagination
-- `get_source()` - Get source details
-- `promote_artifact()` - Promote job output to dataset
-- `get_source_lineage()` - Get source provenance
-- `delete_source()` - Delete data source
+```bash
+claude mcp add goldfish -- uvx --from git+https://github.com/lukacf/goldfish goldfish serve
+```
 
-### Lineage Tracking (3 tools)
-- `get_workspace_lineage()` - Get workspace evolution history
-- `get_version_diff()` - Compare two versions
-- `get_run_provenance()` - Get exact provenance of a stage run
+Goldfish automatically uses the current working directory as the project root — no path configuration needed.
 
-### Utilities (3 tools)
-- `status()` - Get overall project status + STATE.md
-- `get_audit_log()` - Get recent operations
-- `log_thought()` - Record reasoning for audit trail
+### 4. Start Experimenting
+
+```
+You: "Create a workspace for testing axial attention on protein folding"
+
+Agent: I'll create a workspace for the axial attention experiment.
+
+       [calls create_workspace("axial_attention", goal="...")]
+       [calls mount("axial_attention", "w1")]
+
+       Workspace 'axial_attention' created and mounted to slot w1.
+
+       I'll set up the initial pipeline structure with preprocessing,
+       training, and evaluation stages...
+```
+
+---
+
+## Limitations
+
+### Compute Backends
+
+Goldfish currently supports two execution backends:
+
+| Backend | Stages Run On | GPU Support | Setup Required |
+|---------|---------------|-------------|----------------|
+| **Local** | Your machine (Docker) | If available locally | Docker installed |
+| **GCE** | Google Compute Engine | H100, A100 profiles | GCP project + auth |
+
+### GCE Requirements
+
+To use GCE for GPU workloads:
+
+1. **GCP Project** with Compute Engine API enabled
+2. **Authentication**: Run `gcloud auth application-default login`
+3. **GPU Quota**: Request quota for your desired GPU type in your zones
+4. **Configuration** in `goldfish.yaml`:
+
+```yaml
+gce:
+  project_id: your-gcp-project
+  zones: [us-central1-a, us-central1-b]  # Zones with GPU quota
+```
+
+5. **Resource profiles** available:
+   - `cpu-small`, `cpu-large` — CPU-only instances
+   - `h100-spot`, `h100-on-demand` — H100 GPU
+   - `a100-spot`, `a100-on-demand` — A100 GPU
+
+### Not Yet Supported
+
+- AWS/Azure compute backends
+- Kubernetes execution
+- Multi-node distributed training
+- Real-time collaboration between agents
+
+---
 
 ## Configuration
 
-### goldfish.yaml Options
+Create `goldfish.yaml` in your project root:
 
 ```yaml
-project_name: string              # Project identifier
-
-dev_repo_path: .goldfish/dev      # Git repository path
-workspaces_dir: workspaces        # Workspace files location
-slots: [w1, w2, w3]               # Workspace slot names
-
-state_md:
-  path: STATE.md                  # Context recovery file
-  max_recent_actions: 15          # Actions to show
-  show_lineage: true              # Display lineage chains
-
-audit:
-  min_reason_length: 15           # Require descriptive reasons
+project_name: my_ml_project
 
 jobs:
-  backend: local                  # local or gce
-  experiments_dir: experiments    # Export directory
-  infra_path: infra               # Infrastructure scripts
+  backend: local  # "local" or "gce"
+  timeout: 86400  # Max stage runtime in seconds (default: 24h)
 
-gcs:                              # Optional GCS config
-  bucket: string                  # GCS bucket name
-  artifacts_prefix: string        # Artifact path prefix
-  datasets_prefix: string         # Dataset path prefix
-
-gce:                              # Optional GCE config
-  project_id: string              # GCP project
-  zones: [us-central1-a, ...]     # Preferred zones
-  machine_types:                  # Machine type preferences
-    cpu_only: [n2-standard-4, ...]
-    gpu: [n1-standard-8, ...]
-  gpu_types: [nvidia-tesla-t4]    # GPU types
-  boot_disk_size_gb: 200          # Boot disk size
-  timeout_minutes: 1440           # Max runtime (24 hours)
-
-invariants:                       # Configuration rules
-  - string                        # Things that must not change
+# Required only for GCE backend
+gce:
+  project_id: my-gcp-project
+  zones: [us-central1-a, us-central1-b]
 ```
 
-## Security Features
+See [CONTRIBUTING.md](CONTRIBUTING.md#configuration-reference) for all options.
 
-Goldfish has comprehensive security measures:
+---
 
-### Path Validation
-- ✅ Rejects path traversal attempts (`../../../etc/passwd`)
-- ✅ Validates all file paths before operations
-- ✅ Symlink detection and rejection (TOCTOU prevention)
-- ✅ Script path validation (no absolute paths)
+## Documentation
 
-### Command Injection Prevention
-- ✅ Workspace name validation (no shell metacharacters)
-- ✅ Snapshot ID validation (prevents git ref injection)
-- ✅ Output name validation (prevents directory traversal)
-- ✅ GCE startup script escaping with `shlex.quote()`
+| Document | Purpose |
+|----------|---------|
+| [README.md](README.md) | This file — overview and quick start |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, architecture, contribution guide |
+| [CLAUDE.md](CLAUDE.md) | Instructions for AI agents working on this codebase |
+| [llms.txt](llms.txt) | Machine-readable documentation index |
 
-### Resource Limits
-- ✅ File size limits (prevents DoS via memory exhaustion)
-- ✅ Docker resource limits (memory, CPU, PIDs)
-- ✅ Job timeouts (prevents runaway processes)
-- ✅ Database transaction limits
-
-### Concurrency Safety
-- ✅ Slot-level locking (prevents workspace corruption)
-- ✅ Database transactions (atomic operations)
-- ✅ Git index locking (prevents concurrent git operations)
-- ✅ Thread-safe database operations
-
-
-## Development
-
-### Running Tests
-
-```bash
-# Run all tests
-pytest tests/
-
-# Run specific test file
-pytest tests/test_workspace_manager.py
-
-# Run with coverage
-pytest --cov=goldfish tests/
-
-# Run security tests only
-pytest tests/test_security*.py tests/test_tracker_security.py tests/test_exporter_security.py
-```
-
-### Project Structure
-
-```
-goldfish/
-├── src/goldfish/
-│   ├── server.py              # MCP server entry point (271 lines)
-│   ├── server_tools/          # Tool modules (organized by function)
-│   │   ├── workspace_tools.py  # 15 workspace tools
-│   │   ├── execution_tools.py  # 8 execution tools
-│   │   ├── data_tools.py       # 9 data tools
-│   │   ├── pipeline_tools.py   # 3 pipeline tools
-│   │   ├── lineage_tools.py    # 3 lineage tools
-│   │   └── utility_tools.py    # 3 utility tools
-│   ├── config.py              # Configuration management
-│   ├── context.py             # Server context management
-│   ├── models.py              # Pydantic models
-│   ├── validation.py          # Input validation
-│   ├── errors.py              # Error classes
-│   ├── db/
-│   │   ├── database.py        # SQLite operations
-│   │   └── schema.sql         # Database schema
-│   ├── workspace/
-│   │   ├── manager.py         # High-level workspace ops
-│   │   └── git_layer.py       # Git operations
-│   ├── jobs/
-│   │   ├── launcher.py        # Job launching
-│   │   ├── tracker.py         # Status tracking
-│   │   ├── exporter.py        # Experiment export
-│   │   ├── stage_executor.py  # Stage execution
-│   │   └── pipeline_executor.py # Pipeline execution
-│   ├── pipeline/
-│   │   ├── parser.py          # Pipeline YAML parsing
-│   │   └── manager.py         # Pipeline management
-│   ├── datasets/
-│   │   └── registry.py        # Dataset management
-│   ├── lineage/
-│   │   └── manager.py         # Lineage tracking
-│   ├── infra/
-│   │   ├── docker_builder.py  # Docker image building
-│   │   ├── local_executor.py  # Local execution
-│   │   ├── gce_launcher.py    # GCE instance management
-│   │   ├── resource_launcher.py # Capacity-aware launcher
-│   │   └── startup_builder.py  # GCE startup scripts
-│   ├── io/
-│   │   └── __init__.py        # Goldfish IO library
-│   ├── state/
-│   │   └── state_md.py        # STATE.md generation
-│   └── cli.py                 # Command-line interface
-├── tests/                     # 556 tests (all passing)
-│   ├── test_security*.py      # Security tests
-│   ├── test_concurrent.py     # Concurrency tests
-│   ├── test_e2e_workflows.py  # Integration tests
-│   ├── test_gcs_failures.py   # GCS failure handling
-│   └── ...
-└── README.md                  # This file
-```
-
-## Design Principles
-
-1. **Pipeline-First Architecture** - Workflows are first-class citizens
-2. **Conversation Resilience** - STATE.md enables context recovery
-3. **Audit Everything** - All operations logged for reproducibility
-4. **Atomic Operations** - Transactions prevent partial state
-5. **Security First** - Path validation, injection prevention, resource limits
-6. **Git as Source of Truth** - Workspaces = branches, versions = tags
-7. **Infrastructure Abstraction** - Claude sees ML logic, not Docker/GCS
-8. **Full Provenance** - Track data from raw sources to final artifacts
-
-## Troubleshooting
-
-### MCP Server Not Loading
-
-Check Claude Code logs:
-- macOS/Linux: `~/.config/claude-code/logs/`
-- Windows: `%APPDATA%\claude-code\logs\`
-
-Common issues:
-- Wrong Python path in `mcp_config.json`
-- Project directory doesn't exist
-- Goldfish not installed (`pip install -e .`)
-
-### Git Errors
-
-```
-Error: fatal: not a git repository
-```
-
-Solution: Initialize project first:
-```bash
-python -m goldfish init myproject
-```
-
-### Docker Errors
-
-```
-Error: Docker daemon not running
-```
-
-Solution: Start Docker Desktop or Docker daemon
-
-### GCE Permission Errors
-
-```
-Error: 403 Forbidden - Insufficient permissions
-```
-
-Solution: Authenticate with GCP:
-```bash
-gcloud auth application-default login
-```
-
-## License
-
-MIT License - See LICENSE file for details
+---
 
 ## Contributing
 
-Contributions welcome! Please:
-1. Write tests for new features
-2. Follow existing code style
-3. Update documentation
-4. Add audit logging for new operations
-5. Include security considerations
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
 
-## Acknowledgments
+- Development environment setup
+- Architecture walkthrough
+- Code style and testing requirements
+- Pull request process
 
-Built with:
-- [FastMCP](https://github.com/jlowin/fastmcp) - MCP server framework
-- [GitPython](https://github.com/gitpython-developers/GitPython) - Git operations
-- SQLite - Embedded database
-- Docker - Containerization
-- Google Cloud Platform - Infrastructure
+```bash
+# Quick contribution workflow
+git clone https://github.com/lukacf/goldfish.git
+cd goldfish
+pip install -e ".[dev]"
+make install-hooks  # Required: sets up pre-commit hooks
+make ci             # Run full test suite
+```
 
+---
+
+## License
+
+AGPL-3.0 — see [LICENSE](LICENSE) for details.
