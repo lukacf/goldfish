@@ -38,6 +38,9 @@ Thumbs.db
 # Project specific
 .goldfish/
 *.db
+goldfish_autodiscovery.log
+tests/deluxe/*.log
+tests/deluxe/results/
 
 # Test coverage
 htmlcov/
