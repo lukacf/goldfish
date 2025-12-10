@@ -7,7 +7,6 @@ from collections.abc import Generator
 from pathlib import Path
 
 import pytest
-
 from goldfish.config import AuditConfig, GCSConfig, GoldfishConfig, JobsConfig, StateMdConfig
 from goldfish.db.database import Database
 
@@ -34,6 +33,9 @@ def temp_git_repo(temp_dir: Path) -> Generator[Path, None, None]:
     (repo_path / "README.md").write_text("# Test")
     subprocess.run(["git", "add", "-A"], cwd=repo_path, capture_output=True, check=True)
     subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=repo_path, capture_output=True, check=True)
+
+    # Ensure branch is named 'main' (git default may vary by system/version)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=repo_path, capture_output=True, check=True)
 
     yield repo_path
 
