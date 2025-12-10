@@ -36,6 +36,7 @@ class PipelineExecutor:
         self.pipeline_manager = pipeline_manager
         self.db = db
         self._recover_inflight_pipelines()
+        self._race_loss_counter = 0
 
     def _recover_inflight_pipelines(self) -> None:
         """On startup, reschedule any pipelines that were mid-flight."""
@@ -275,7 +276,14 @@ class PipelineExecutor:
                     (datetime.now(timezone.utc).isoformat(), row["id"]),
                 ).rowcount
                 if updated == 0:
-                    self._logger.debug("Lost CAS claim for stage %s (run %s)", row["stage_name"], pipeline_run_id)
+                    self._race_loss_counter += 1
+                    if self._race_loss_counter % 50 == 0:
+                        self._logger.debug(
+                            "Lost CAS claim %s times (latest stage %s, run %s)",
+                            self._race_loss_counter,
+                            row["stage_name"],
+                            pipeline_run_id,
+                        )
                     continue  # lost race
 
                 stage_config = None
