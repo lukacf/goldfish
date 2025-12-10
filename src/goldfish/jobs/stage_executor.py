@@ -651,6 +651,15 @@ echo "Stage completed successfully"
 
     def _finalize_stage_run(self, stage_run_id: str, backend: str, status: str) -> None:
         """Handle terminal status: record outputs, fetch logs, update status."""
+        # CAS: only finalize if not already terminal
+        with self.db._conn() as conn:
+            updated = conn.execute(
+                "UPDATE stage_runs SET status=?, completed_at=? WHERE id=? AND status NOT IN ('completed','failed','canceled')",
+                (status, datetime.now(timezone.utc).isoformat(), stage_run_id),
+            ).rowcount
+        if updated == 0:
+            return  # already finalized
+
         stage_run = self.db.get_stage_run(stage_run_id)
         if not stage_run:
             return
@@ -668,12 +677,15 @@ echo "Stage completed successfully"
             self._record_output_signals(stage_run_id, workspace, stage_name_from_db, gcs_base=gcs_base)
 
         logs = ""
-        if backend == "local":
-            logs = self.local_executor.get_container_logs(stage_run_id, tail_lines=1000)
-        elif backend == "gce":
-            logs = self.gce_launcher.get_instance_logs(stage_run_id)
-            if not logs:
-                logs = "[GCE logs unavailable - instance may have been deleted or logs not synced]"
+        try:
+            if backend == "local":
+                logs = self.local_executor.get_container_logs(stage_run_id, tail_lines=1000)
+            elif backend == "gce":
+                logs = self.gce_launcher.get_instance_logs(stage_run_id)
+                if not logs:
+                    logs = "[GCE logs unavailable - instance may have been deleted or logs not synced]"
+        except Exception as e:
+            logs = f"[Error fetching logs: {e}]"
 
         log_uri = self._persist_logs(stage_run_id, logs) if logs is not None else None
 

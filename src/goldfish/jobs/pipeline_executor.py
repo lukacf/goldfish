@@ -7,6 +7,7 @@ from uuid import uuid4
 from datetime import datetime, timezone
 from goldfish.utils import parse_optional_datetime
 from concurrent.futures import ThreadPoolExecutor
+import atexit
 import threading
 
 from goldfish.db.database import Database
@@ -19,6 +20,7 @@ class PipelineExecutor:
     """Execute full or partial pipelines."""
 
     _pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pipeline-worker")
+    atexit.register(_pool.shutdown, wait=False)
 
     def __init__(
         self,
@@ -134,12 +136,27 @@ class PipelineExecutor:
 
     def _worker_loop(self, pipeline_run_id, workspace, pipeline_name, config_override, reason):
         elapsed = 0
+        error_count = 0
+        max_errors = 10
         while True:
-            pending, running = self._pipeline_queue_counts(pipeline_run_id)
-            if pending == 0 and running == 0:
-                self._finalize_pipeline_run(pipeline_run_id)
-                break
-            self._process_pipeline_queue_once(pipeline_run_id, workspace, pipeline_name, config_override, reason)
+            try:
+                pending, running = self._pipeline_queue_counts(pipeline_run_id)
+                if pending == 0 and running == 0:
+                    self._finalize_pipeline_run(pipeline_run_id)
+                    break
+                self._process_pipeline_queue_once(pipeline_run_id, workspace, pipeline_name, config_override, reason)
+                error_count = 0
+            except Exception as e:
+                error_count += 1
+                if error_count >= max_errors:
+                    with self.db._conn() as conn:
+                        conn.execute(
+                            "UPDATE pipeline_runs SET status='failed', error=? WHERE id=?",
+                            (f"Worker loop crashed: {e}", pipeline_run_id),
+                        )
+                    break
+                time.sleep(min(60, 5 * error_count))
+                continue
             interval = self._poll_interval(elapsed)
             time.sleep(interval)
             elapsed += interval

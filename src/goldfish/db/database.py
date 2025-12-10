@@ -42,6 +42,7 @@ class Database:
                 operation="init",
             )
         self._init_schema()
+        self._migrate_schema()
 
     def _init_schema(self) -> None:
         """Initialize database schema."""
@@ -60,6 +61,64 @@ class Database:
             raise DatabaseError(
                 f"Cannot initialize database schema: {e}",
                 operation="init_schema",
+            )
+
+    def _migrate_schema(self) -> None:
+        """Lightweight, idempotent migrations for existing databases."""
+        required_columns = {
+            "stage_runs": [
+                ("pipeline_run_id", "TEXT"),
+                ("pipeline_name", "TEXT"),
+                ("progress", "TEXT"),
+                ("profile", "TEXT"),
+                ("hints_json", "TEXT"),
+                ("outputs_json", "TEXT"),
+                ("config_json", "TEXT"),
+                ("inputs_json", "TEXT"),
+                ("backend_type", "TEXT"),
+                ("backend_handle", "TEXT"),
+                ("artifact_uri", "TEXT"),
+            ],
+        }
+
+        # Add missing columns
+        with self._conn() as conn:
+            for table, cols in required_columns.items():
+                existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+                for col, col_type in cols:
+                    if col not in existing:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+
+            # Ensure pipeline tables exist (safe to run multiple times)
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS pipeline_runs (
+                    id TEXT PRIMARY KEY,
+                    workspace_name TEXT NOT NULL,
+                    pipeline_name TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_pipeline_runs_workspace ON pipeline_runs(workspace_name);
+                CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status);
+
+                CREATE TABLE IF NOT EXISTS pipeline_stage_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pipeline_run_id TEXT NOT NULL,
+                    stage_name TEXT NOT NULL,
+                    deps TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    stage_run_id TEXT,
+                    claimed_at TEXT,
+                    FOREIGN KEY (pipeline_run_id) REFERENCES pipeline_runs(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_pipeline_stage_queue_run ON pipeline_stage_queue(pipeline_run_id);
+                CREATE INDEX IF NOT EXISTS idx_pipeline_stage_queue_status ON pipeline_stage_queue(status);
+
+                CREATE INDEX IF NOT EXISTS idx_stage_runs_ws_stage_status ON stage_runs(workspace_name, stage_name, status);
+                """
             )
 
     @contextmanager
