@@ -155,6 +155,13 @@ CMD ["/bin/bash"]
         Raises:
             GoldfishError: If push fails
         """
+        # Validate registry URL format (must be host/path, no scheme)
+        if not registry_url or "://" in registry_url or "/" not in registry_url:
+            raise GoldfishError(
+                f"Invalid artifact_registry URL: {registry_url}. "
+                "Expected format like us-docker.pkg.dev/<project>/<repo>"
+            )
+
         # Generate sanitized image name
         sanitized_workspace = re.sub(r'[^a-z0-9._-]', '_', workspace_name.lower())
         sanitized_version = re.sub(r'[^a-z0-9._-]', '_', version.lower())
