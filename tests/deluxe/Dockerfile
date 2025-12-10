@@ -25,13 +25,14 @@ RUN install -m 0755 -d /etc/apt/keyrings && \
     apt-get install -y docker-ce-cli docker-buildx-plugin && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Google Cloud SDK
-RUN curl -sSL https://sdk.cloud.google.com | bash
-ENV PATH="/root/google-cloud-sdk/bin:${PATH}"
+# Install Google Cloud SDK (system-wide so testuser can access it)
+RUN curl -sSL https://sdk.cloud.google.com | bash -s -- --install-dir=/opt && \
+    chmod -R a+rX /opt/google-cloud-sdk
+ENV PATH="/opt/google-cloud-sdk/bin:${PATH}"
 
 # Install uv (Python package manager used by Claude Code)
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:${PATH}"
+ENV PATH="/opt/google-cloud-sdk/bin:/root/.local/bin:${PATH}"
 
 # Configure git (required for Goldfish workspace operations)
 RUN git config --global user.email "deluxe-test@goldfish.local" && \
@@ -73,7 +74,7 @@ USER testuser
 
 # Install uv for testuser and update PATH
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/home/testuser/.local/bin:${PATH}"
+ENV PATH="/opt/google-cloud-sdk/bin:/home/testuser/.local/bin:${PATH}"
 
 # Configure git for testuser
 RUN git config --global user.email "deluxe-test@goldfish.local" && \

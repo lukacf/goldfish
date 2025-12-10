@@ -43,6 +43,10 @@ class GCEConfig(BaseModel):
 
     project_id: str
 
+    # Optional: Artifact Registry URL for Docker images
+    # Example: "us-docker.pkg.dev/{project_id}/goldfish"
+    artifact_registry: Optional[str] = None
+
     # Optional: global zone preferences (applies to all profiles)
     zones: Optional[list[str]] = None
 

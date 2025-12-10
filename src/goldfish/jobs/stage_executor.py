@@ -5,6 +5,8 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+import os
+import time
 from uuid import uuid4
 
 import yaml
@@ -17,8 +19,12 @@ from goldfish.infra.local_executor import LocalExecutor
 from goldfish.infra.gce_launcher import GCELauncher
 from goldfish.infra.profiles import ProfileResolver
 from goldfish.models import StageDef, StageRunInfo
+from goldfish.utils import parse_optional_datetime
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.workspace.manager import WorkspaceManager
+
+
+STAGE_LOG_TAIL_FOR_FINALIZE = int(os.getenv("GOLDFISH_FINALIZE_LOG_TAIL", "1000"))
 
 
 class StageExecutor:
@@ -41,7 +47,7 @@ class StageExecutor:
         self.dataset_registry = dataset_registry
 
         # Initialize execution infrastructure
-        self.docker_builder = DockerBuilder()
+        self.docker_builder = DockerBuilder(config)
         self.local_executor = LocalExecutor()
 
         # Initialize profile resolver
@@ -54,6 +60,7 @@ class StageExecutor:
         gce_bucket = None
         gce_project = None
         gce_zone = "us-central1-a"
+        gce_zones = None
         gce_resources = []
 
         if config.gcs:
@@ -63,21 +70,26 @@ class StageExecutor:
             gce_project = config.gce.project_id
             if config.gce.zones:
                 gce_zone = config.gce.zones[0]
+                gce_zones = config.gce.zones  # Pass all zones for multi-zone lookups
 
         self.gce_launcher = GCELauncher(
             project_id=gce_project,
             zone=gce_zone,
             bucket=gce_bucket,
             resources=gce_resources,  # Will be set per-stage
+            zones=gce_zones,
         )
 
     def run_stage(
         self,
         workspace: str,
         stage_name: str,
+        pipeline_name: Optional[str] = None,
+        pipeline_run_id: Optional[str] = None,
         config_override: Optional[dict] = None,
         inputs_override: Optional[dict] = None,
         reason: Optional[str] = None,
+        wait: bool = False,
     ) -> StageRunInfo:
         """Run a single pipeline stage.
 
@@ -101,8 +113,14 @@ class StageExecutor:
         version = self._auto_version(workspace, stage_name, reason)
 
         # 2. Load pipeline and stage
-        pipeline = self.pipeline_manager.get_pipeline(workspace)
+        pipeline = self.pipeline_manager.get_pipeline(workspace, pipeline_name)
         stage = self._find_stage(pipeline, stage_name)
+
+        # 2b. Load stage config and apply override
+        stage_config = self._load_stage_config(workspace, stage_name) or {}
+        if config_override:
+            # shallow merge override
+            stage_config.update(config_override)
 
         # 3. Resolve inputs
         inputs = self._resolve_inputs(workspace, stage, inputs_override)
@@ -119,22 +137,74 @@ class StageExecutor:
             inputs=inputs,
             config_override=config_override,
             reason=reason,
+            pipeline_run_id=pipeline_run_id,
+            pipeline_name=pipeline_name,
+            profile=stage_config.get("compute", {}).get("profile") if 'compute' in stage_config else None,
+            hints=stage_config.get("hints"),
+            config=stage_config,
         )
 
-        # 6. Build Docker image (mocked for now - Phase 6)
-        image_tag = self._build_docker_image(workspace, version)
+        try:
+            # Emit phase progress: building image
+            self.db.update_stage_run_status(
+                stage_run_id=stage_run_id,
+                status="running",
+                progress="build",
+            )
+            # 6. Build Docker image
+            image_tag = self._build_docker_image(workspace, version)
 
-        # 7. Launch container (mocked for now - Phase 6)
-        self._launch_container(stage_run_id, workspace, stage_name, image_tag, inputs)
+            # Emit phase progress: launching container/instance
+            self.db.update_stage_run_status(
+                stage_run_id=stage_run_id,
+                status="running",
+                progress="launch",
+            )
+            # 7. Launch container
+            self._launch_container(stage_run_id, workspace, stage_name, image_tag, inputs)
+        except Exception as e:
+            # Mark failed immediately with error and re-raise
+            self.db.update_stage_run_status(
+                stage_run_id=stage_run_id,
+                status="failed",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                error=str(e),
+            )
+            raise
 
-        return StageRunInfo(
+        info = StageRunInfo(
             stage_run_id=stage_run_id,
+            pipeline_run_id=pipeline_run_id,
             workspace=workspace,
+            pipeline=pipeline_name,
             version=version,
             stage=stage_name,
             status="running",
             started_at=datetime.now(timezone.utc),
+            log_uri=str((self.project_root / ".goldfish" / "runs" / stage_run_id / "logs" / "output.log")),
+            progress="launch",
+            profile=stage_config.get("compute", {}).get("profile") if 'compute' in stage_config else None,
+            hints=stage_config.get("hints"),
+            config=stage_config,
+            inputs=inputs,
         )
+
+        if wait:
+            self.wait_for_completion(stage_run_id)
+            refreshed = self.db.get_stage_run(stage_run_id)
+            if refreshed:
+                return StageRunInfo(
+                    **info.model_dump(),
+                    status=refreshed.get("status", info.status),
+                    completed_at=parse_optional_datetime(refreshed.get("completed_at")),
+                    log_uri=refreshed.get("log_uri"),
+                    artifact_uri=refreshed.get("artifact_uri"),
+                    progress=refreshed.get("progress"),
+                    outputs=json.loads(refreshed.get("outputs_json")) if refreshed.get("outputs_json") else None,
+                    error=refreshed.get("error"),
+                )
+
+        return info
 
     def _resolve_inputs(
         self,
@@ -154,13 +224,8 @@ class StageExecutor:
                 inputs[input_name] = inputs_override[input_name]
                 continue
 
-            # Resolve based on type
-            if input_def.type == "dataset":
-                # Get dataset from registry
-                dataset = self.dataset_registry.get_dataset(input_def.dataset)
-                inputs[input_name] = dataset.gcs_location
-
-            elif input_def.from_stage:
+            # Resolve precedence: from_stage first, then dataset
+            if input_def.from_stage:
                 # Find output from previous stage
                 # Get most recent successful run of source stage
                 stage_runs = self.db.list_stage_runs(
@@ -195,6 +260,11 @@ class StageExecutor:
                     )
 
                 inputs[input_name] = signal["storage_location"]
+
+            elif input_def.type == "dataset":
+                # External dataset
+                dataset = self.dataset_registry.get_dataset(input_def.dataset)
+                inputs[input_name] = dataset.gcs_location
 
             else:
                 raise GoldfishError(f"Cannot resolve input: {input_name}")
@@ -256,6 +326,11 @@ class StageExecutor:
         inputs: dict,
         config_override: Optional[dict],
         reason: Optional[str],
+        pipeline_run_id: Optional[str],
+        pipeline_name: Optional[str],
+        profile: Optional[str],
+        hints: Optional[dict],
+        config: Optional[dict],
     ):
         """Create stage run record in database."""
         self.db.create_stage_run(
@@ -263,7 +338,14 @@ class StageExecutor:
             workspace_name=workspace,
             version=version,
             stage_name=stage_name,
-            config_override=config_override,
+            pipeline_run_id=pipeline_run_id,
+            pipeline_name=pipeline_name,
+            config=config,
+            inputs=inputs,
+            profile=profile,
+            hints=hints,
+            backend_type=self.config.jobs.backend,
+            backend_handle=stage_run_id,  # provisional handle for cancel/logs
         )
 
         # Record input signals in lineage
@@ -276,23 +358,175 @@ class StageExecutor:
                 storage_location=storage_location
             )
 
+    def _record_output_signals(
+        self,
+        stage_run_id: str,
+        workspace: str,
+        stage_name: str,
+        gcs_base: Optional[str] = None,
+    ):
+        """Record output signals after stage completion.
+
+        Reads output definitions from the pipeline and records them in the database
+        so subsequent stages can resolve inputs. When running on GCE, outputs are
+        assumed to be written to gs://{bucket}/runs/{stage_run_id}/outputs/{name}/
+        unless an explicit *.gcs_location marker is present.
+        """
+        # Load pipeline and find stage definition
+        try:
+            pipeline = self.pipeline_manager.get_pipeline(workspace)
+            stage = self._find_stage(pipeline, stage_name)
+        except GoldfishError:
+            # Pipeline or stage not found - skip output recording
+            return
+
+        # Get the outputs directory for this run (local backend)
+        run_dir = self.project_root / ".goldfish" / "runs" / stage_run_id
+        outputs_dir = run_dir / "outputs"
+
+        outputs_payload = []
+
+        # Record each output signal from the stage definition atomically
+        with self.db._conn() as conn:
+            for output_name, output_def in stage.outputs.items():
+                # Determine storage location
+                storage_location = str(outputs_dir / output_name)
+
+                # Check if GCS location was written by the stage
+                gcs_marker = outputs_dir / f"{output_name}.gcs_location"
+                if gcs_marker.exists():
+                    storage_location = gcs_marker.read_text().strip()
+                elif gcs_base:
+                    # Default GCS location for GCE runs
+                    storage_location = f"{gcs_base.rstrip('/')}/{output_name}/"
+
+                conn.execute(
+                    """
+                    INSERT INTO signal_lineage
+                    (stage_run_id, signal_name, signal_type, storage_location, is_artifact)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        stage_run_id,
+                        output_name,
+                        output_def.type or "directory",
+                        storage_location,
+                        int(bool(output_def.artifact)),
+                    ),
+                )
+
+                outputs_payload.append({
+                    "name": output_name,
+                    "type": output_def.type or "directory",
+                    "storage_location": storage_location,
+                    "from_stage_ref": f"{stage_name}/{output_name}",
+                    "is_artifact": bool(output_def.artifact),
+                })
+
+            # Attach outputs JSON to stage_run row (do not override status)
+            if outputs_payload:
+                conn.execute(
+                    "UPDATE stage_runs SET outputs_json=? WHERE id=?",
+                    (json.dumps(outputs_payload), stage_run_id),
+                )
+
+        # Auto-register artifacts
+        for output in outputs_payload:
+            if output["is_artifact"]:
+                source_id = output["name"]  # simplistic name; could namespace later
+                source_name = f"{stage_name}_{output['name']}"
+                try:
+                    existing = self.db.get_source(source_id)
+                except Exception:
+                    existing = None
+
+                metadata = None
+                try:
+                    if existing and existing.get("metadata"):
+                        metadata = json.loads(existing["metadata"])
+                except Exception:
+                    metadata = None
+                if metadata is None:
+                    metadata = {}
+                metadata["produced_by_stage_run_id"] = stage_run_id
+
+                try:
+                    if existing:
+                        with self.db._conn() as conn:
+                            conn.execute(
+                                "UPDATE sources SET gcs_location=?, created_by=?, status=?, metadata=? WHERE id=?",
+                                (
+                                    output["storage_location"],
+                                    f"stage:{stage_run_id}",
+                                    "available",
+                                    json.dumps(metadata),
+                                    source_id,
+                                ),
+                            )
+                    else:
+                        self.db.create_source(
+                            source_id=source_id,
+                            name=source_name,
+                            gcs_location=output["storage_location"],
+                            created_by=f"stage:{stage_run_id}",
+                            description=f"Artifact from {stage_run_id}",
+                            metadata=metadata,
+                        )
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "Failed to auto-register artifact %s: %s", source_id, e
+                    )
+
+    def _persist_logs(self, stage_run_id: str, logs: str) -> str:
+        """Write logs to local run directory and return path."""
+        run_dir = self.project_root / ".goldfish" / "runs" / stage_run_id / "logs"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        log_path = run_dir / "output.log"
+        log_path.write_text(logs or "")
+        return str(log_path)
+
     def _build_docker_image(self, workspace: str, version: str) -> str:
         """Build Docker image for this run.
 
-        Returns image tag.
+        Returns image tag (local for local backend, registry for GCE backend).
         """
         # Get workspace directory
         workspace_dir = self.workspace_manager.get_workspace_path(workspace)
 
         # Build image using DockerBuilder
-        image_tag = self.docker_builder.build_image(
+        local_image_tag = self.docker_builder.build_image(
             workspace_dir=workspace_dir,
             workspace_name=workspace,
             version=version,
             use_cache=True
         )
 
-        return image_tag
+        # If using GCE backend and artifact_registry is configured, push to registry
+        backend = self.config.jobs.backend
+        if backend == "gce":
+            if not self.config.gce:
+                raise GoldfishError(
+                    "GCE backend requires gce configuration in goldfish.yaml"
+                )
+
+            if not self.config.gce.artifact_registry:
+                raise GoldfishError(
+                    "GCE backend requires artifact_registry URL in gce configuration. "
+                    "Example: artifact_registry: us-docker.pkg.dev/{project_id}/goldfish"
+                )
+
+            # Push image to Artifact Registry
+            registry_image_tag = self.docker_builder.push_image(
+                local_tag=local_image_tag,
+                registry_url=self.config.gce.artifact_registry,
+                workspace_name=workspace,
+                version=version
+            )
+
+            return registry_image_tag
+
+        return local_image_tag
 
     def _load_stage_config(self, workspace: str, stage_name: str) -> dict:
         """Load stage config from configs/{stage}.yaml.
@@ -339,6 +573,16 @@ class StageExecutor:
             return self.profile_resolver.resolve(profile_name)
         except Exception as e:
             raise GoldfishError(f"Failed to resolve profile '{profile_name}': {e}")
+
+    @staticmethod
+    def _poll_interval(elapsed: int) -> int:
+        if elapsed < 60:
+            return 5
+        if elapsed < 600:
+            return 10
+        if elapsed < 3600:
+            return 30
+        return 60
 
     def _launch_container(
         self,
@@ -449,7 +693,80 @@ echo "Stage completed successfully"
                 use_capacity_search=use_capacity_search,
             )
         else:
-            raise ValueError(f"Unknown backend: {backend}")
+            raise GoldfishError(f"Backend {backend} not supported for launch")
+
+    def _finalize_stage_run(self, stage_run_id: str, backend: str, status: str) -> None:
+        """Handle terminal status: record outputs, fetch logs, update status."""
+        # CAS guard against double-finalize
+        with self.db._conn() as conn:
+            updated = conn.execute(
+                "UPDATE stage_runs SET status=?, completed_at=? WHERE id=? AND status NOT IN ('completed','failed','canceled')",
+                (status, datetime.now(timezone.utc).isoformat(), stage_run_id),
+            ).rowcount
+        if updated == 0:
+            return
+
+        # Re-read fresh row after CAS
+        stage_run = self.db.get_stage_run(stage_run_id)
+        if not stage_run:
+            return
+
+        workspace = stage_run["workspace_name"]
+        stage_name_from_db = stage_run["stage_name"]
+
+        gcs_base = None
+        if backend == "gce" and self.config.gcs and self.config.gcs.bucket:
+            bucket = self.config.gcs.bucket
+            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+            gcs_base = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/outputs"
+
+        if status == "completed":
+            try:
+                self._record_output_signals(stage_run_id, workspace, stage_name_from_db, gcs_base=gcs_base)
+            except Exception as e:
+                # If outputs fail to record, mark run failed and surface error
+                error_msg = f"Output recording failed: {e}"
+                self.db.update_stage_run_status(
+                    stage_run_id=stage_run_id,
+                    status="failed",
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                    error=error_msg,
+                    progress="finalizing",
+                )
+                raise
+
+        logs = ""
+        try:
+            if backend == "local":
+                logs = self.local_executor.get_container_logs(stage_run_id, tail_lines=STAGE_LOG_TAIL_FOR_FINALIZE)
+            elif backend == "gce":
+                logs = self.gce_launcher.get_instance_logs(stage_run_id, tail_lines=STAGE_LOG_TAIL_FOR_FINALIZE)
+                if not logs:
+                    logs = "[GCE logs unavailable - instance may have been deleted or logs not synced]"
+        except Exception as e:
+            logs = f"[Error fetching logs: {e}]"
+
+        if backend == "gce" and self.config.gcs and self.config.gcs.bucket:
+            bucket = self.config.gcs.bucket
+            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+            log_uri = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/train.log"
+            # Also persist a local copy for quick access/debugging
+            if logs is not None:
+                try:
+                    self._persist_logs(stage_run_id, logs)
+                except Exception:
+                    pass
+        else:
+            log_uri = self._persist_logs(stage_run_id, logs) if logs is not None else None
+
+        self.db.update_stage_run_status(
+            stage_run_id=stage_run_id,
+            status=status,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            log_uri=log_uri,
+            error=(logs[-STAGE_LOG_TAIL_FOR_FINALIZE:] if (status == "failed" and logs) else None),
+            progress="finalizing",
+        )
 
     def wait_for_completion(
         self, stage_run_id: str, poll_interval: int = 5, timeout: int = 3600
@@ -473,39 +790,36 @@ echo "Stage completed successfully"
 
         backend = self.config.jobs.backend
 
-        elapsed = 0
-        while elapsed < timeout:
+        start = time.time()
+        last_log = 0
+        not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
+
+        while True:
+            elapsed = time.time() - start
+            if elapsed >= timeout:
+                raise GoldfishError(
+                    f"Stage run {stage_run_id} timed out after {timeout} seconds"
+                )
             if backend == "local":
                 status = self.local_executor.get_container_status(stage_run_id)
 
                 if status == "running":
                     # Still running, update status in db
                     self.db.update_stage_run_status(
-                        stage_run_id=stage_run_id, status="running"
+                        stage_run_id=stage_run_id, status="running", progress="running"
                     )
-                    time.sleep(poll_interval)
-                    elapsed += poll_interval
+                    interval = self._poll_interval(int(elapsed))
+                    time.sleep(interval)
                     continue
 
-                elif status == "completed":
-                    # Success!
+                elif status in ("completed", "failed"):
                     self.db.update_stage_run_status(
                         stage_run_id=stage_run_id,
-                        status="completed",
-                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        status="running",
+                        progress="finalizing",
                     )
-                    return "completed"
-
-                elif status == "failed":
-                    # Failed - get logs
-                    logs = self.local_executor.get_container_logs(stage_run_id)
-                    self.db.update_stage_run_status(
-                        stage_run_id=stage_run_id,
-                        status="failed",
-                        completed_at=datetime.now(timezone.utc).isoformat(),
-                        error=logs[-1000:],  # Last 1000 chars
-                    )
-                    return "failed"
+                    self._finalize_stage_run(stage_run_id, backend, status)
+                    return status
 
                 elif status == "not_found":
                     raise GoldfishError(f"Container {stage_run_id} not found")
@@ -520,34 +834,37 @@ echo "Stage completed successfully"
                 if status == "running":
                     # Still running, update status in db
                     self.db.update_stage_run_status(
-                        stage_run_id=stage_run_id, status="running"
+                        stage_run_id=stage_run_id, status="running", progress="running"
                     )
-                    time.sleep(poll_interval)
-                    elapsed += poll_interval
+                    interval = self._poll_interval(int(elapsed))
+                    time.sleep(interval)
                     continue
 
-                elif status == "completed":
-                    # Success!
+                elif status in ("completed", "failed"):
                     self.db.update_stage_run_status(
                         stage_run_id=stage_run_id,
-                        status="completed",
-                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        status="running",
+                        progress="finalizing",
                     )
-                    return "completed"
-
-                elif status == "failed":
-                    # Failed - get logs
-                    logs = self.gce_launcher.get_instance_logs(stage_run_id)
-                    self.db.update_stage_run_status(
-                        stage_run_id=stage_run_id,
-                        status="failed",
-                        completed_at=datetime.now(timezone.utc).isoformat(),
-                        error=logs[-1000:],  # Last 1000 chars
-                    )
-                    return "failed"
+                    self._finalize_stage_run(stage_run_id, backend, status)
+                    return status
 
                 elif status == "not_found":
-                    raise GoldfishError(f"Instance {stage_run_id} not found")
+                    now = time.time()
+                    if now - last_log >= 60:
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.info(
+                            f"Instance {stage_run_id} not yet visible in GCE API "
+                            f"(elapsed: {int(elapsed)}s, may be launching or searching capacity)"
+                        )
+                        last_log = now
+                    if elapsed >= not_found_timeout:
+                        raise GoldfishError(
+                            f"GCE instance {stage_run_id} not found after {not_found_timeout} seconds; abandoning run"
+                        )
+                    time.sleep(poll_interval)
+                    continue
 
                 else:
                     # Unknown status
@@ -556,7 +873,50 @@ echo "Stage completed successfully"
             else:
                 raise GoldfishError(f"Backend {backend} not supported for monitoring")
 
-        # Timeout exceeded
-        raise GoldfishError(
-            f"Stage run {stage_run_id} timed out after {timeout} seconds"
-        )
+        # Should not reach here
+
+    def refresh_status_once(self, stage_run_id: str) -> Optional[str]:
+        """Single backend check to advance status/logs/outputs without blocking."""
+        backend = self.config.jobs.backend
+
+        if backend == "local":
+            status = self.local_executor.get_container_status(stage_run_id)
+            if status == "running":
+                # CAS: only update if still running
+                with self.db._conn() as conn:
+                    conn.execute(
+                        "UPDATE stage_runs SET status='running', progress='running' WHERE id=? AND status!='completed' AND status!='failed' AND status!='canceled'",
+                        (stage_run_id,),
+                    )
+            elif status in ("completed", "failed"):
+                # Guard against double-finalize by only doing it if not terminal
+                current = self.db.get_stage_run(stage_run_id)
+                if current and current.get("status") not in ("completed", "failed", "canceled"):
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id,
+                        status="running",
+                        progress="finalizing",
+                    )
+                    self._finalize_stage_run(stage_run_id, backend, status)
+            return status
+
+        if backend == "gce":
+            status = self.gce_launcher.get_instance_status(stage_run_id)
+            if status == "running":
+                with self.db._conn() as conn:
+                    conn.execute(
+                        "UPDATE stage_runs SET status='running', progress='running' WHERE id=? AND status!='completed' AND status!='failed' AND status!='canceled'",
+                        (stage_run_id,),
+                    )
+            elif status in ("completed", "failed"):
+                current = self.db.get_stage_run(stage_run_id)
+                if current and current.get("status") not in ("completed", "failed", "canceled"):
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id,
+                        status="running",
+                        progress="finalizing",
+                    )
+                    self._finalize_stage_run(stage_run_id, backend, status)
+            return status
+
+        return None

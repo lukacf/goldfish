@@ -377,6 +377,14 @@ class WorkspaceManager:
         # Create the branch
         self.git.create_branch(name, from_ref)
 
+        # Create workspace lineage record (tracks parent and history)
+        self.db.create_workspace_lineage(
+            workspace_name=name,
+            parent_workspace=from_ref if from_ref != "main" else None,
+            parent_version=None,  # No version when branching from ref
+            description=goal,
+        )
+
         # Log to audit
         self.db.log_audit(
             operation="create_workspace",
@@ -397,6 +405,36 @@ class WorkspaceManager:
             forked_from=from_ref,
             state_md=state_md,
         )
+
+    def branch_workspace(
+        self,
+        from_workspace: str,
+        from_version: str,
+        new_workspace: str,
+    ) -> None:
+        """Create new workspace branched from specific version.
+
+        Args:
+            from_workspace: Source workspace name
+            from_version: Version to branch from (e.g., "v3")
+            new_workspace: Name for new workspace
+
+        Raises:
+            GoldfishError: If version not found or workspace already exists
+        """
+        # Get version info from database
+        version = self.db.get_version(from_workspace, from_version)
+        if not version:
+            raise GoldfishError(
+                f"Version '{from_version}' not found in workspace '{from_workspace}'"
+            )
+
+        # Check new workspace doesn't already exist
+        if self.git.branch_exists(new_workspace):
+            raise GoldfishError(f"Workspace '{new_workspace}' already exists")
+
+        # Create branch from the version's git SHA
+        self.git.create_branch(new_workspace, version["git_sha"])
 
     def list_workspaces(self, limit: int = 50, offset: int = 0) -> list[WorkspaceInfo]:
         """List workspaces with pagination.
@@ -441,11 +479,14 @@ class WorkspaceManager:
                 else created_at
             )
 
+            # Get goal from database
+            goal = self.db.get_workspace_goal(name) or ""
+
             workspaces.append(
                 WorkspaceInfo(
                     name=name,
                     created_at=created_at,
-                    goal="",  # Would need separate storage for goals
+                    goal=goal,
                     snapshot_count=info["snapshot_count"],
                     last_activity=last_activity,
                     is_mounted=name in mounted_map,
@@ -616,6 +657,56 @@ class WorkspaceManager:
             snapshot_id=snapshot_id,
             files_reverted=files_reverted,
             state_md=state_md,
+        )
+
+    def get_workspace(self, name: str) -> WorkspaceInfo:
+        """Get detailed information about a specific workspace.
+
+        Args:
+            name: Workspace name
+
+        Returns:
+            WorkspaceInfo for the workspace
+
+        Raises:
+            WorkspaceNotFoundError: If workspace doesn't exist
+        """
+        # Check if workspace exists
+        if not self.git.branch_exists(name):
+            raise WorkspaceNotFoundError(f"Workspace '{name}' does not exist")
+
+        # Get workspace info from git
+        info = self.git.get_branch_info(name)
+
+        # Build map of mounted workspaces
+        mounted_map: dict[str, str] = {}  # workspace -> slot
+        for slot_info in self.get_all_slots():
+            if slot_info.workspace:
+                mounted_map[slot_info.workspace] = slot_info.slot
+
+        # Parse timestamps
+        created_at = (
+            datetime.fromisoformat(info["created_at"])
+            if info["created_at"]
+            else datetime.now(timezone.utc)
+        )
+        last_activity = (
+            datetime.fromisoformat(info["last_activity"])
+            if info["last_activity"]
+            else created_at
+        )
+
+        # Get goal from database
+        goal = self.db.get_workspace_goal(name) or ""
+
+        return WorkspaceInfo(
+            name=name,
+            created_at=created_at,
+            goal=goal,
+            snapshot_count=info["snapshot_count"],
+            last_activity=last_activity,
+            is_mounted=name in mounted_map,
+            mounted_slot=mounted_map.get(name),
         )
 
     def list_snapshots(
