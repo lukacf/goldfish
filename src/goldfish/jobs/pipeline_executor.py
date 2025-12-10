@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from goldfish.utils import parse_optional_datetime
 from concurrent.futures import ThreadPoolExecutor
 import atexit
-import threading
 import logging
 import os
 
@@ -22,6 +21,7 @@ class PipelineExecutor:
     """Execute full or partial pipelines."""
 
     _pool_size = int(os.getenv("GOLDFISH_PIPELINE_WORKERS", "8"))
+    MAX_WORKER_ERRORS = int(os.getenv("GOLDFISH_PIPELINE_MAX_ERRORS", "10"))
     _pool = ThreadPoolExecutor(max_workers=_pool_size, thread_name_prefix="pipeline-worker")
     atexit.register(_pool.shutdown, wait=True, cancel_futures=True)
     _logger = logging.getLogger(__name__)
@@ -141,7 +141,6 @@ class PipelineExecutor:
     def _worker_loop(self, pipeline_run_id, workspace, pipeline_name, config_override, reason):
         elapsed = 0
         error_count = 0
-        max_errors = 10
         while True:
             try:
                 pending, running = self._pipeline_queue_counts(pipeline_run_id)
@@ -153,8 +152,12 @@ class PipelineExecutor:
             except Exception as e:
                 error_count += 1
                 self._logger.exception("Pipeline worker error (run=%s err#=%s)", pipeline_run_id, error_count)
-                if error_count >= max_errors:
+                if error_count >= self.MAX_WORKER_ERRORS:
                     with self.db._conn() as conn:
+                        conn.execute(
+                            "UPDATE pipeline_stage_queue SET status='failed' WHERE pipeline_run_id=? AND status IN ('pending','running')",
+                            (pipeline_run_id,),
+                        )
                         conn.execute(
                             "UPDATE pipeline_runs SET status='failed', error=? WHERE id=?",
                             (f"Worker loop crashed: {e}", pipeline_run_id),
@@ -237,7 +240,7 @@ class PipelineExecutor:
                 placeholders = ",".join(["?"] * len(ids))
                 stage_rows = conn.execute(
                     f"SELECT id,status FROM stage_runs WHERE id IN ({placeholders})",
-                    ids,
+                    tuple(ids),
                 ).fetchall()
                 status_map = {r["id"]: r["status"] for r in stage_rows}
                 for row in running:
@@ -261,7 +264,7 @@ class PipelineExecutor:
                     placeholders = ",".join(["?"] * len(deps))
                     dep_states = conn.execute(
                         f"SELECT stage_name, status FROM pipeline_stage_queue WHERE pipeline_run_id = ? AND stage_name IN ({placeholders})",
-                        [pipeline_run_id, *deps],
+                        (pipeline_run_id, *deps),
                     ).fetchall()
                     if any(d["status"] != "completed" for d in dep_states):
                         continue
