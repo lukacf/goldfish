@@ -79,6 +79,8 @@ class PipelineExecutor:
         """
 
         pipeline = self.pipeline_manager.get_pipeline(workspace, pipeline_name)
+        effective_pipeline_name = pipeline_name or pipeline.name
+        effective_pipeline_name = pipeline_name or pipeline.name
 
         if not async_mode:
             runs: list[StageRunInfo] = []
@@ -87,7 +89,7 @@ class PipelineExecutor:
                 sr = self.stage_executor.run_stage(
                     workspace=workspace,
                     stage_name=stage.name,
-                    pipeline_name=pipeline_name,
+                    pipeline_name=effective_pipeline_name,
                     pipeline_run_id=None,
                     config_override=stage_config,
                     reason=reason,
@@ -106,7 +108,7 @@ class PipelineExecutor:
                 INSERT INTO pipeline_runs (id, workspace_name, pipeline_name, status, started_at)
                 VALUES (?, ?, ?, 'pending', ?)
                 """,
-                (pipeline_run_id, workspace, pipeline_name, now),
+                (pipeline_run_id, workspace, effective_pipeline_name, now),
             )
 
             prev = None
@@ -123,13 +125,13 @@ class PipelineExecutor:
                 )
                 prev = stage.name
 
-        launched = self._process_pipeline_queue_once(pipeline_run_id, workspace, pipeline_name, config_override, reason)
+        launched = self._process_pipeline_queue_once(pipeline_run_id, workspace, effective_pipeline_name, config_override, reason)
 
         self._pool.submit(
             self._worker_loop,
             pipeline_run_id,
             workspace,
-            pipeline_name,
+            effective_pipeline_name,
             config_override,
             reason,
         )
@@ -240,9 +242,12 @@ class PipelineExecutor:
         config_override: Optional[dict],
         reason: Optional[str],
     ) -> list[StageRunInfo]:
+        effective_pipeline_name = pipeline_name
         launched: list[StageRunInfo] = []
+
+        # First pass: update running items and claim new rows to launch
+        to_launch: list[tuple[str, str, Optional[dict]]] = []
         with self.db._conn() as conn:
-            # First, mark running items whose stage_run is finished
             running = conn.execute(
                 "SELECT id, stage_run_id FROM pipeline_stage_queue WHERE pipeline_run_id=? AND status='running' AND stage_run_id IS NOT NULL",
                 (pipeline_run_id,),
@@ -281,7 +286,6 @@ class PipelineExecutor:
                     if any(d["status"] != "completed" for d in dep_states):
                         continue
 
-                # Claim row with CAS
                 updated = conn.execute(
                     "UPDATE pipeline_stage_queue SET status='running', claimed_at=? WHERE id=? AND status='pending' AND (claimed_at IS NULL)",
                     (datetime.now(timezone.utc).isoformat(), row["id"]),
@@ -295,25 +299,28 @@ class PipelineExecutor:
                             row["stage_name"],
                             pipeline_run_id,
                         )
-                    continue  # lost race
+                    continue
 
                 stage_config = None
                 if config_override and row["stage_name"] in config_override:
                     stage_config = config_override[row["stage_name"]]
+                to_launch.append((row["id"], row["stage_name"], stage_config))
 
-                stage_run = self.stage_executor.run_stage(
-                    workspace=workspace,
-                    stage_name=row["stage_name"],
-                    pipeline_name=pipeline_name,
-                    pipeline_run_id=pipeline_run_id,
-                    config_override=stage_config,
-                    reason=reason,
-                )
-                launched.append(stage_run)
-
+        # Second pass: launch outside the transaction to avoid DB locks
+        for queue_id, stage_name, stage_config in to_launch:
+            stage_run = self.stage_executor.run_stage(
+                workspace=workspace,
+                stage_name=stage_name,
+                pipeline_name=effective_pipeline_name,
+                pipeline_run_id=pipeline_run_id,
+                config_override=stage_config,
+                reason=reason,
+            )
+            launched.append(stage_run)
+            with self.db._conn() as conn:
                 conn.execute(
                     "UPDATE pipeline_stage_queue SET stage_run_id = ? WHERE id = ?",
-                    (stage_run.stage_run_id, row["id"]),
+                    (stage_run.stage_run_id, queue_id),
                 )
 
         return launched
@@ -333,12 +340,14 @@ class PipelineExecutor:
         workspace: str,
         from_stage: str,
         to_stage: str,
+        pipeline_name: Optional[str] = None,
         config_override: Optional[dict] = None,
         reason: Optional[str] = None,
         async_mode: bool = True,
     ) -> dict:
         """Run a contiguous subset by constructing a temporary linear pipeline."""
-        pipeline = self.pipeline_manager.get_pipeline(workspace)
+        pipeline = self.pipeline_manager.get_pipeline(workspace, pipeline_name)
+        effective_pipeline_name = pipeline_name or pipeline.name
         names = [s.name for s in pipeline.stages]
         try:
             start_idx = names.index(from_stage)
@@ -354,7 +363,14 @@ class PipelineExecutor:
         stage_runs = []
         for stage in temp.stages:
             override = config_override.get(stage.name) if config_override else None
-            sr = self.stage_executor.run_stage(workspace, stage.name, pipeline_name=pipeline.name, config_override=override, reason=reason, wait=not async_mode)
+            sr = self.stage_executor.run_stage(
+                workspace,
+                stage.name,
+                pipeline_name=effective_pipeline_name,
+                config_override=override,
+                reason=reason,
+                wait=not async_mode,
+            )
             stage_runs.append(sr)
             if not async_mode:
                 self.stage_executor.refresh_status_once(sr.stage_run_id)

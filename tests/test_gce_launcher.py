@@ -391,12 +391,16 @@ def test_get_instance_status_not_found(mock_run_gcloud, launcher):
     assert status == "not_found"
 
 
-@patch("goldfish.infra.gce_launcher.subprocess.run")
-def test_get_instance_logs_from_gcs(mock_subprocess, launcher):
+@patch("goldfish.infra.gce_launcher.subprocess.Popen")
+def test_get_instance_logs_from_gcs(mock_popen, launcher):
     """Test log retrieval from GCS."""
-    mock_subprocess.return_value = Mock(
-        returncode=0, stdout="Training started\nEpoch 1 complete\n", stderr=""
-    )
+    import io
+
+    proc = Mock()
+    proc.stdout = io.StringIO("Training started\nEpoch 1 complete\n")
+    proc.wait = Mock(return_value=0)
+    proc.returncode = 0
+    mock_popen.return_value = proc
 
     logs = launcher.get_instance_logs("test-instance")
 
@@ -404,20 +408,18 @@ def test_get_instance_logs_from_gcs(mock_subprocess, launcher):
     assert "Epoch 1 complete" in logs
 
     # Verify gsutil cat was called
-    cmd = mock_subprocess.call_args[0][0]
+    cmd = mock_popen.call_args[0][0]
     assert cmd[0] == "gsutil"
     assert "cat" in cmd
     assert "gs://test-bucket/runs/test-instance/logs/train.log" in cmd
 
 
-@patch("goldfish.infra.gce_launcher.subprocess.run")
+@patch("goldfish.infra.gce_launcher.subprocess.Popen")
 @patch("goldfish.infra.gce_launcher.run_gcloud")
-def test_get_instance_logs_fallback_serial(mock_run_gcloud, mock_subprocess, launcher):
+def test_get_instance_logs_fallback_serial(mock_run_gcloud, mock_popen, launcher):
     """Test log retrieval falls back to serial console."""
-    # GCS fetch fails (raises exception because check=True)
-    mock_subprocess.side_effect = subprocess.CalledProcessError(
-        1, "gsutil", stderr="Not found"
-    )
+    # GCS fetch fails
+    mock_popen.side_effect = Exception("not found")
 
     # Serial console succeeds
     mock_run_gcloud.return_value = Mock(

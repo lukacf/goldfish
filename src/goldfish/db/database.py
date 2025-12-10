@@ -878,6 +878,7 @@ class Database:
         profile: Optional[str] = None,
         hints: Optional[dict] = None,
         config: Optional[dict] = None,
+        config_override: Optional[dict] = None,
         inputs: Optional[dict] = None,
         backend_type: Optional[str] = None,
         backend_handle: Optional[str] = None,
@@ -900,7 +901,11 @@ class Database:
             backend_handle: container_id or instance_name for cancel/logs
         """
         timestamp = datetime.now(timezone.utc).isoformat()
-        config_json = json.dumps(config) if config else None
+        effective_config = config_override if config_override is not None else config
+        if effective_config is not None:
+            config_json = json.dumps(effective_config)
+        else:
+            config_json = None
         hints_json = json.dumps(hints) if hints else None
         inputs_json = json.dumps(inputs) if inputs else None
 
