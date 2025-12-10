@@ -417,9 +417,13 @@ class GCELauncher:
             status = result.stdout.strip()
             if status:  # Instance found
                 return self._map_gce_status(status, instance_name)
+            return "not_found"
 
-        # Not found
-        return "not_found"
+        # Distinguish real errors from not-found
+        stderr = (result.stderr or "").lower()
+        if "not found" in stderr or "could not fetch resource" in stderr or not stderr:
+            return "not_found"
+        raise GoldfishError(f"Failed to query instance status: {result.stderr}")
 
     def _map_gce_status(self, status: str, instance_name: str) -> str:
         """Map GCE instance status to Goldfish status.
@@ -475,27 +479,22 @@ class GCELauncher:
         if result.returncode == 0:
             return self.default_zone
 
-        # Try all other zones
-        for zone in self.zones:
-            if zone == self.default_zone:
-                continue
+        # Zone-agnostic lookup to avoid N calls
+        cmd_list = [
+            "gcloud",
+            "compute",
+            "instances",
+            "list",
+            f"--filter=name={instance_name}",
+            "--format=value(zone)",
+        ]
+        if self.project_id:
+            cmd_list.append(f"--project={self.project_id}")
 
-            cmd_zone = [
-                "gcloud",
-                "compute",
-                "instances",
-                "describe",
-                instance_name,
-                f"--zone={zone}",
-                "--format=value(name)",
-            ]
-            if self.project_id:
-                cmd_zone.append(f"--project={self.project_id}")
-
-            result = run_gcloud(cmd_zone, check=False)
-            if result.returncode == 0:
-                return zone
-
+        result = run_gcloud(cmd_list, check=False)
+        if result.returncode == 0:
+            zone = result.stdout.strip()
+            return zone or None
         return None
 
     def _get_exit_code(self, instance_name: str) -> int:
