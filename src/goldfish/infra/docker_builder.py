@@ -159,7 +159,7 @@ CMD ["/bin/bash"]
         if not registry_url or "://" in registry_url or "/" not in registry_url:
             raise GoldfishError(
                 f"Invalid artifact_registry URL: {registry_url}. "
-                "Expected format like us-docker.pkg.dev/<project>/<repo>"
+                "Expected format: us-docker.pkg.dev/<project>/<repo>"
             )
 
         # Generate sanitized image name
