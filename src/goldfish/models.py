@@ -225,6 +225,13 @@ class ListSourcesResponse(BaseModel):
     filters_applied: dict = {}  # Filters that were applied (status, created_by)
 
 
+class RegisterDatasetResponse(BaseModel):
+    """Response from register_dataset() tool."""
+
+    success: bool
+    dataset: SourceInfo
+
+
 # --- Thought Logging ---
 
 
@@ -378,6 +385,7 @@ class SignalDef(BaseModel):
     dataset: Optional[str] = None  # For dataset type: dataset name
     storage: Optional[str] = None  # gcs, hyperdisk, local (hint)
     format: Optional[str] = None  # Override format detection
+    artifact: Optional[bool] = False  # Mark output as artifact for auto-registration
 
 
 class StageDef(BaseModel):
@@ -426,12 +434,22 @@ class StageRunInfo(BaseModel):
     """Information about a stage run."""
 
     stage_run_id: str
+    pipeline_run_id: Optional[str] = None
     workspace: str
+    pipeline: Optional[str] = None
     version: str
     stage: str
+    profile: Optional[str] = None
+    hints: Optional[dict] = None
     status: str  # pending, running, completed, failed
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    progress: Optional[str] = None
+    log_uri: Optional[str] = None
+    artifact_uri: Optional[str] = None
+    outputs: Optional[list] = None
+    config: Optional[dict] = None
+    inputs: Optional[dict] = None
     error: Optional[str] = None
 
 
@@ -447,3 +465,37 @@ class RunPipelineResponse(BaseModel):
 
     stage_runs: list[StageRunInfo]
     message: str = ""
+
+
+# --- Stage Run Observability Responses ---
+
+
+class ListRunsResponse(BaseModel):
+    runs: list[StageRunInfo]
+    total_count: int
+    has_more: bool
+
+
+class StageLogsResponse(BaseModel):
+    stage_run_id: str
+    status: Optional[str] = None
+    logs: Optional[str] = None
+    log_uri: Optional[str] = None
+
+
+class GetOutputsResponse(BaseModel):
+    stage_run_id: str
+    outputs: list
+
+
+class GetRunResponse(BaseModel):
+    stage_run: StageRunInfo
+    inputs: dict
+    outputs: list
+    config: dict
+
+
+class CancelRunResponse(BaseModel):
+    success: bool
+    previous_status: Optional[str] = None
+    error: Optional[str] = None

@@ -55,6 +55,20 @@ class PipelineParser:
             if "stages" in data:
                 stages = []
                 for stage_data in data["stages"]:
+                    def _normalize_input_item(item):
+                        if isinstance(item, str):
+                            item = {"name": item, "type": "dataset"}
+                        if "type" not in item:
+                            item = {"type": "dataset", **item}
+                        return item
+
+                    def _normalize_output_item(item):
+                        if isinstance(item, str):
+                            item = {"name": item, "type": "directory"}
+                        if "type" not in item:
+                            item = {"type": "directory", **item}
+                        return item
+
                     # Convert input/output dicts to SignalDef objects
                     # Handle both dict format: {name: {type: ...}} and list format: [{name: ..., type: ...}]
                     if "inputs" in stage_data:
@@ -62,13 +76,26 @@ class PipelineParser:
                         if isinstance(inputs_raw, list):
                             # Convert list to dict: [{name: "x", ...}] -> {"x": SignalDef(...)}
                             stage_data["inputs"] = {
-                                item["name"]: SignalDef(**item)
+                                _normalize_input_item(item)["name"]: SignalDef(
+                                    **_normalize_input_item(item)
+                                )
                                 for item in inputs_raw
                             }
                         elif isinstance(inputs_raw, dict):
                             # Dict format: {name: {type: ...}} -> {name: SignalDef(name=name, ...)}
                             stage_data["inputs"] = {
-                                name: SignalDef(name=name, **sig_data)
+                                name: SignalDef(
+                                    name=name,
+                                    **{
+                                        k: v
+                                        for k, v in _normalize_input_item(
+                                            {"name": name, "type": "dataset", "dataset": sig_data}
+                                            if isinstance(sig_data, str)
+                                            else {"name": name, **sig_data}
+                                        ).items()
+                                        if k != "name"
+                                    },
+                                )
                                 for name, sig_data in inputs_raw.items()
                             }
                         else:
@@ -78,13 +105,26 @@ class PipelineParser:
                         if isinstance(outputs_raw, list):
                             # Convert list to dict: [{name: "y", ...}] -> {"y": SignalDef(...)}
                             stage_data["outputs"] = {
-                                item["name"]: SignalDef(**item)
+                                _normalize_output_item(item)["name"]: SignalDef(
+                                    **_normalize_output_item(item)
+                                )
                                 for item in outputs_raw
                             }
                         elif isinstance(outputs_raw, dict):
                             # Dict format: {name: {type: ...}} -> {name: SignalDef(name=name, ...)}
                             stage_data["outputs"] = {
-                                name: SignalDef(name=name, **sig_data)
+                                name: SignalDef(
+                                    name=name,
+                                    **{
+                                        k: v
+                                        for k, v in _normalize_output_item(
+                                            {"name": name, "type": "directory"}
+                                            if not isinstance(sig_data, dict)
+                                            else {"name": name, **sig_data}
+                                        ).items()
+                                        if k != "name"
+                                    },
+                                )
                                 for name, sig_data in outputs_raw.items()
                             }
                         else:

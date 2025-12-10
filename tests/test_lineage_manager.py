@@ -101,12 +101,12 @@ class TestVersionComparison:
         test_db.create_version("test_ws", "v2", "tag-v2", "sha2", "run")
 
         workspace_manager = MagicMock()
-        workspace_manager.git_layer.diff.return_value = {
+        workspace_manager.git.diff_commits.return_value = {
             "commits": [
                 {"sha": "sha2", "message": "Update config"}
             ],
             "files": {
-                "configs/preprocess.yaml": {"changes": "+BATCH_SIZE: 128"}
+                "configs/preprocess.yaml": "M"
             }
         }
 
@@ -120,7 +120,7 @@ class TestVersionComparison:
         assert diff["to_version"] == "v2"
         assert len(diff["commits"]) == 1
         assert diff["commits"][0]["sha"] == "sha2"
-        workspace_manager.git_layer.diff.assert_called_once_with("sha1", "sha2")
+        workspace_manager.git.diff_commits.assert_called_once_with("sha1", "sha2")
 
 
 class TestRunProvenance:

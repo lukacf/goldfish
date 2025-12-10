@@ -43,6 +43,9 @@ from goldfish.validation import (
 # Import errors
 from goldfish.errors import GoldfishError, validate_reason
 
+# Import LineageManager
+from goldfish.lineage.manager import LineageManager
+
 
 @mcp.tool()
 def get_workspace_lineage(workspace: str) -> dict:

@@ -796,8 +796,15 @@ class Database:
         workspace_name: str,
         version: str,
         stage_name: str,
+        pipeline_run_id: Optional[str] = None,
+        pipeline_name: Optional[str] = None,
         job_id: Optional[str] = None,
-        config_override: Optional[dict] = None,
+        profile: Optional[str] = None,
+        hints: Optional[dict] = None,
+        config: Optional[dict] = None,
+        inputs: Optional[dict] = None,
+        backend_type: Optional[str] = None,
+        backend_handle: Optional[str] = None,
     ) -> None:
         """Create a new stage run.
 
@@ -806,20 +813,45 @@ class Database:
             workspace_name: Workspace name
             version: Workspace version
             stage_name: Stage name
-            job_id: Parent job ID (optional)
-            config_override: Config overrides as dict
+            pipeline_run_id: Pipeline grouping ID
+            pipeline_name: Named pipeline (train, inference, etc.)
+            job_id: Parent job ID (legacy run_job)
+            profile: Resolved profile name
+            hints: Hint dict
+            config: Effective config used
+            inputs: Resolved input URIs/refs
+            backend_type: local|gce
+            backend_handle: container_id or instance_name for cancel/logs
         """
         timestamp = datetime.now(timezone.utc).isoformat()
-        config_json = json.dumps(config_override) if config_override else None
+        config_json = json.dumps(config) if config else None
+        hints_json = json.dumps(hints) if hints else None
+        inputs_json = json.dumps(inputs) if inputs else None
 
         with self._conn() as conn:
             conn.execute(
                 """
                 INSERT INTO stage_runs
-                (id, job_id, workspace_name, version, stage_name, status, started_at, config_override)
-                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+                (id, job_id, pipeline_run_id, workspace_name, pipeline_name, version, stage_name, status,
+                 started_at, profile, hints_json, config_json, inputs_json, backend_type, backend_handle)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (stage_run_id, job_id, workspace_name, version, stage_name, timestamp, config_json),
+                (
+                    stage_run_id,
+                    job_id,
+                    pipeline_run_id,
+                    workspace_name,
+                    pipeline_name,
+                    version,
+                    stage_name,
+                    timestamp,
+                    profile,
+                    hints_json,
+                    config_json,
+                    inputs_json,
+                    backend_type,
+                    backend_handle,
+                ),
             )
 
     def update_stage_run_status(
@@ -828,6 +860,9 @@ class Database:
         status: str,
         completed_at: Optional[str] = None,
         log_uri: Optional[str] = None,
+        artifact_uri: Optional[str] = None,
+        progress: Optional[str] = None,
+        outputs_json: Optional[dict] = None,
         error: Optional[str] = None,
     ) -> None:
         """Update stage run status.
@@ -837,17 +872,37 @@ class Database:
             status: New status (pending, running, completed, failed)
             completed_at: Completion timestamp
             log_uri: Log file location
+            artifact_uri: Artifact URI if produced
+            progress: Progress string
+            outputs_json: Outputs map
             error: Error message if failed
         """
+        fields = ["status = ?"]
+        params: list = [status]
+        if completed_at is not None:
+            fields.append("completed_at = ?")
+            params.append(completed_at)
+        if log_uri is not None:
+            fields.append("log_uri = ?")
+            params.append(log_uri)
+        if artifact_uri is not None:
+            fields.append("artifact_uri = ?")
+            params.append(artifact_uri)
+        if progress is not None:
+            fields.append("progress = ?")
+            params.append(progress)
+        if outputs_json is not None:
+            fields.append("outputs_json = ?")
+            params.append(json.dumps(outputs_json))
+        if error is not None:
+            fields.append("error = ?")
+            params.append(error)
+
+        params.append(stage_run_id)
+        query = f"UPDATE stage_runs SET {', '.join(fields)} WHERE id = ?"
+
         with self._conn() as conn:
-            conn.execute(
-                """
-                UPDATE stage_runs
-                SET status = ?, completed_at = ?, log_uri = ?, error = ?
-                WHERE id = ?
-                """,
-                (status, completed_at, log_uri, error, stage_run_id),
-            )
+            conn.execute(query, params)
 
     def get_stage_run(self, stage_run_id: str) -> Optional[dict]:
         """Get a stage run by ID.
@@ -870,6 +925,7 @@ class Database:
         workspace_name: Optional[str] = None,
         stage_name: Optional[str] = None,
         status: Optional[str] = None,
+        pipeline_run_id: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
@@ -894,6 +950,9 @@ class Database:
         if stage_name:
             query += " AND stage_name = ?"
             params.append(stage_name)
+        if pipeline_run_id:
+            query += " AND pipeline_run_id = ?"
+            params.append(pipeline_run_id)
         if status:
             query += " AND status = ?"
             params.append(status)
@@ -904,6 +963,67 @@ class Database:
         with self._conn() as conn:
             rows = conn.execute(query, params).fetchall()
             return [dict(row) for row in rows]
+
+    def list_stage_runs_with_total(
+        self,
+        workspace_name: Optional[str] = None,
+        stage_name: Optional[str] = None,
+        status: Optional[str] = None,
+        pipeline_run_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        """List stage runs plus total_count using a window function (single query)."""
+        query = "SELECT *, COUNT(*) OVER() AS total_count FROM stage_runs WHERE 1=1"
+        params: list = []
+
+        if workspace_name:
+            query += " AND workspace_name = ?"
+            params.append(workspace_name)
+        if stage_name:
+            query += " AND stage_name = ?"
+            params.append(stage_name)
+        if pipeline_run_id:
+            query += " AND pipeline_run_id = ?"
+            params.append(pipeline_run_id)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+
+        query += " ORDER BY started_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        with self._conn() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
+
+    def count_stage_runs(
+        self,
+        workspace_name: Optional[str] = None,
+        stage_name: Optional[str] = None,
+        status: Optional[str] = None,
+        pipeline_run_id: Optional[str] = None,
+    ) -> int:
+        """Count stage runs for pagination."""
+        query = "SELECT COUNT(*) FROM stage_runs WHERE 1=1"
+        params: list = []
+
+        if workspace_name:
+            query += " AND workspace_name = ?"
+            params.append(workspace_name)
+        if stage_name:
+            query += " AND stage_name = ?"
+            params.append(stage_name)
+        if pipeline_run_id:
+            query += " AND pipeline_run_id = ?"
+            params.append(pipeline_run_id)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+
+        with self._conn() as conn:
+            row = conn.execute(query, params).fetchone()
+            return row[0] if row else 0
 
     def get_latest_stage_run(
         self,
@@ -966,6 +1086,23 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (stage_run_id, signal_name, signal_type, storage_location, size_bytes, is_artifact),
+            )
+
+    def set_stage_run_backend(
+        self,
+        stage_run_id: str,
+        backend_type: str,
+        backend_handle: str,
+    ) -> None:
+        """Persist backend info for cancellation/logging."""
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE stage_runs
+                SET backend_type = ?, backend_handle = ?
+                WHERE id = ?
+                """,
+                (backend_type, backend_handle, stage_run_id),
             )
 
     def get_signal(self, stage_run_id: str, signal_name: str) -> Optional[dict]:

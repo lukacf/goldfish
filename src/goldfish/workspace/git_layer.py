@@ -474,3 +474,42 @@ class GitLayer:
             return bool(stdout.strip())
         except GoldfishError:
             return False
+
+    def diff_commits(self, from_sha: str, to_sha: str) -> dict:
+        """Get diff between two commits.
+
+        Args:
+            from_sha: Starting commit SHA
+            to_sha: Ending commit SHA
+
+        Returns:
+            Dict with:
+            - commits: List of commits between from_sha and to_sha
+            - files: Dict of file changes {file_path: change_type}
+        """
+        # Get commits between the two SHAs
+        stdout, _ = self._run_git(
+            "log", "--oneline", "--format=%H|%s", f"{from_sha}..{to_sha}"
+        )
+        commits = []
+        for line in stdout.strip().split("\n"):
+            if line and "|" in line:
+                sha, message = line.split("|", 1)
+                commits.append({"sha": sha, "message": message})
+
+        # Get file changes
+        stdout, _ = self._run_git(
+            "diff", "--name-status", from_sha, to_sha
+        )
+        files = {}
+        for line in stdout.strip().split("\n"):
+            if line:
+                parts = line.split("\t")
+                if len(parts) >= 2:
+                    change_type, file_path = parts[0], parts[1]
+                    files[file_path] = change_type
+
+        return {
+            "commits": commits,
+            "files": files,
+        }

@@ -293,7 +293,12 @@ class TestStageRunRecords:
             stage_name="preprocess",
             inputs=inputs,
             config_override=config_override,
-            reason="Testing larger batch size"
+            reason="Testing larger batch size",
+            pipeline_run_id=None,
+            pipeline_name=None,
+            profile=None,
+            hints=None,
+            config=config_override,
         )
 
         # Verify
@@ -302,7 +307,7 @@ class TestStageRunRecords:
         assert record["version"] == "v1"
         assert record["stage_name"] == "preprocess"
         assert record["status"] == "pending"
-        assert json.loads(record["config_override"]) == config_override
+        assert json.loads(record["config_json"]) == config_override
 
 
 class TestStageExecution:
