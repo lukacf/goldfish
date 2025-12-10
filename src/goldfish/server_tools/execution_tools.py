@@ -327,15 +327,17 @@ def stage_logs(stage_run_id: str, tail_lines: int = 200, since: Optional[str] = 
                 logs = _get_stage_executor().local_executor.get_container_logs(
                     handle, tail_lines=tail_lines, since=since
                 )
-            elif backend == "gce":
-                logs_full = _get_stage_executor().gce_launcher.get_instance_logs(handle)
-                if tail_lines and logs_full:
-                    lines = logs_full.splitlines()
-                    if since:
-                        lines = [ln for ln in lines if since in ln]
-                    logs = "\n".join(lines[-tail_lines:]) if len(lines) > tail_lines else "\n".join(lines)
-                else:
-                    logs = logs_full or "[GCE logs unavailable - not yet synced]"
+        elif backend == "gce":
+            logs_full = _get_stage_executor().gce_launcher.get_instance_logs(handle)
+            if tail_lines and logs_full:
+                from collections import deque
+
+                lines = deque(logs_full.splitlines(), maxlen=tail_lines)
+                if since:
+                    lines = [ln for ln in lines if since in ln]
+                logs = "\n".join(lines)
+            else:
+                logs = logs_full or "[GCE logs unavailable - not yet synced]"
             else:
                 logs = "Logs not available"
         except Exception as e:
