@@ -7,6 +7,8 @@ from typing import Optional
 import logging
 from datetime import datetime, timezone
 
+from goldfish.utils import parse_datetime, parse_optional_datetime
+
 logger = logging.getLogger("goldfish.server")
 
 # Import server context helpers
@@ -430,7 +432,7 @@ def register_dataset(
     description: str,
     format: str,
     metadata: Optional[dict] = None,
-) -> dict:
+) -> RegisterDatasetResponse:
     """Register a project-level dataset.
 
     Datasets are immutable data sources shared across all workspaces.
@@ -470,17 +472,10 @@ def register_dataset(
             metadata=metadata,
         )
 
-        return {
-            "success": True,
-            "dataset": {
-                "name": dataset.name,
-                "gcs_location": dataset.gcs_location,
-                "description": dataset.description,
-                "format": format,
-                "created_at": dataset.created_at.isoformat(),
-                "size_bytes": dataset.size_bytes,
-            },
-        }
+        return RegisterDatasetResponse(
+            success=True,
+            dataset=dataset,
+        )
     except SourceAlreadyExistsError as e:
         raise GoldfishError(str(e)) from e
 

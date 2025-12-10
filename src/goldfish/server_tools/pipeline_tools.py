@@ -53,7 +53,7 @@ from goldfish.pipeline.parser import (
 
 
 @mcp.tool()
-def get_pipeline(workspace: str) -> PipelineResponse:
+def get_pipeline(workspace: str, pipeline: Optional[str] = None) -> PipelineResponse:
     """Get pipeline definition for a workspace.
 
     Returns the pipeline.yaml content as a structured object.
@@ -74,15 +74,15 @@ def get_pipeline(workspace: str) -> PipelineResponse:
         raise WorkspaceNotFoundError(f"Workspace not found: {workspace}")
 
     try:
-        pipeline = pipeline_manager.get_pipeline(workspace)
-        return PipelineResponse(workspace=workspace, pipeline=pipeline)
+        pipeline_def = pipeline_manager.get_pipeline(workspace, pipeline)
+        return PipelineResponse(workspace=workspace, pipeline=pipeline_def)
     except PipelineNotFoundError as e:
         raise GoldfishError(str(e)) from e
     except PipelineValidationError as e:
         raise GoldfishError(f"Pipeline is invalid: {e}") from e
 
 @mcp.tool()
-def validate_pipeline(workspace: str) -> ValidatePipelineResponse:
+def validate_pipeline(workspace: str, pipeline: Optional[str] = None) -> ValidatePipelineResponse:
     """Validate pipeline definition for a workspace.
 
     Checks:
@@ -107,7 +107,7 @@ def validate_pipeline(workspace: str) -> ValidatePipelineResponse:
         raise WorkspaceNotFoundError(f"Workspace not found: {workspace}")
 
     try:
-        errors = pipeline_manager.validate_pipeline(workspace)
+        errors = pipeline_manager.validate_pipeline(workspace, pipeline)
         return ValidatePipelineResponse(
             workspace=workspace,
             valid=len(errors) == 0,
@@ -117,7 +117,7 @@ def validate_pipeline(workspace: str) -> ValidatePipelineResponse:
         raise GoldfishError(str(e)) from e
 
 @mcp.tool()
-def update_pipeline(workspace: str, pipeline_yaml: str) -> UpdatePipelineResponse:
+def update_pipeline(workspace: str, pipeline_yaml: str, pipeline: Optional[str] = None) -> UpdatePipelineResponse:
     """Update pipeline.yaml in workspace.
 
     Validates the pipeline before writing. Will reject invalid pipelines.
@@ -139,14 +139,37 @@ def update_pipeline(workspace: str, pipeline_yaml: str) -> UpdatePipelineRespons
         raise WorkspaceNotFoundError(f"Workspace not found: {workspace}")
 
     try:
-        pipeline = pipeline_manager.update_pipeline(workspace, pipeline_yaml)
+        pipeline_def = pipeline_manager.update_pipeline(workspace, pipeline_yaml, pipeline)
         return UpdatePipelineResponse(
             success=True,
             workspace=workspace,
-            pipeline=pipeline,
+            pipeline=pipeline_def,
         )
     except PipelineValidationError as e:
         raise GoldfishError(f"Pipeline validation failed: {e}") from e
+
+
+@mcp.tool()
+def list_pipelines(workspace: str) -> dict:
+    """List available pipeline files in a workspace (default + pipelines/*.yaml)."""
+    workspace_manager = _get_workspace_manager()
+
+    validate_workspace_name(workspace)
+
+    workspace_name = workspace_manager.get_workspace_for_slot(workspace) or workspace
+    workspace_path = workspace_manager.get_workspace_path(workspace_name)
+
+    names = []
+    default_path = workspace_path / "pipeline.yaml"
+    if default_path.exists():
+        names.append({"name": "pipeline", "path": str(default_path.relative_to(workspace_path))})
+
+    pipelines_dir = workspace_path / "pipelines"
+    if pipelines_dir.exists():
+        for p in sorted(pipelines_dir.glob("*.yaml")):
+            names.append({"name": p.stem, "path": str(p.relative_to(workspace_path))})
+
+    return {"pipelines": names}
 
 
 # ============== DATASET TOOLS ==============

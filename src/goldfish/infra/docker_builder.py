@@ -1,7 +1,9 @@
 """Docker image building for Goldfish stage execution."""
 
 import re
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -64,6 +66,9 @@ CMD ["/bin/bash"]
     ) -> str:
         """Build Docker image for workspace.
 
+        Uses a temporary directory as build context to avoid dirtying
+        the workspace with a Dockerfile.
+
         Args:
             workspace_dir: Path to workspace directory
             workspace_name: Workspace name
@@ -79,38 +84,55 @@ CMD ["/bin/bash"]
         # Generate image tag
         image_tag = self._generate_image_tag(workspace_name, version)
 
-        # Generate Dockerfile
-        dockerfile_content = self.generate_dockerfile(workspace_dir)
-        dockerfile_path = workspace_dir / "Dockerfile"
-        dockerfile_path.write_text(dockerfile_content)
+        # Create temporary build context to avoid dirtying workspace
+        with tempfile.TemporaryDirectory(prefix="goldfish-docker-") as tmp_dir:
+            build_context = Path(tmp_dir)
 
-        # Build image for linux/amd64 (GCE target platform)
-        build_cmd = ["docker", "build", "--platform", "linux/amd64", "-t", image_tag]
+            # Copy required workspace files to build context
+            if (workspace_dir / "requirements.txt").exists():
+                shutil.copy2(workspace_dir / "requirements.txt", build_context / "requirements.txt")
 
-        if not use_cache:
-            build_cmd.append("--no-cache")
+            if (workspace_dir / "modules").exists():
+                shutil.copytree(workspace_dir / "modules", build_context / "modules")
 
-        build_cmd.append(str(workspace_dir))
+            if (workspace_dir / "configs").exists():
+                shutil.copytree(workspace_dir / "configs", build_context / "configs")
 
-        try:
-            result = subprocess.run(
-                build_cmd,
-                capture_output=True,
-                text=True,
-                check=False
-            )
+            if (workspace_dir / "loaders").exists():
+                shutil.copytree(workspace_dir / "loaders", build_context / "loaders")
 
-            if result.returncode != 0:
-                raise GoldfishError(
-                    f"Docker build failed: {result.stderr}"
+            # Generate Dockerfile in build context (not workspace)
+            dockerfile_content = self.generate_dockerfile(workspace_dir)
+            dockerfile_path = build_context / "Dockerfile"
+            dockerfile_path.write_text(dockerfile_content)
+
+            # Build image for linux/amd64 (GCE target platform)
+            build_cmd = ["docker", "build", "--platform", "linux/amd64", "-t", image_tag]
+
+            if not use_cache:
+                build_cmd.append("--no-cache")
+
+            build_cmd.append(str(build_context))
+
+            try:
+                result = subprocess.run(
+                    build_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False
                 )
 
-            return image_tag
+                if result.returncode != 0:
+                    raise GoldfishError(
+                        f"Docker build failed: {result.stderr}"
+                    )
 
-        except FileNotFoundError:
-            raise GoldfishError(
-                "Docker not found. Please install Docker to build images."
-            )
+                return image_tag
+
+            except FileNotFoundError:
+                raise GoldfishError(
+                    "Docker not found. Please install Docker to build images."
+                )
 
     def push_image(
         self,

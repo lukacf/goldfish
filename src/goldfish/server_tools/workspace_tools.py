@@ -47,6 +47,9 @@ from goldfish.errors import (
     WorkspaceNotFoundError,
 )
 
+# Import LineageManager
+from goldfish.lineage.manager import LineageManager
+
 
 @mcp.tool()
 def mount(workspace: str, slot: str, reason: str) -> MountResponse:

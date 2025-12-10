@@ -78,7 +78,15 @@ def init_project(
 
     gce_project = os.getenv("GOLDFISH_GCE_PROJECT")
     if gce_project:
-        gce_config = GCEConfig(project_id=gce_project)
+        # Prefer explicit registry env, otherwise default to the project-scoped "goldfish" repo
+        artifact_registry = os.getenv(
+            "GOLDFISH_ARTIFACT_REGISTRY",
+            f"us-docker.pkg.dev/{gce_project}/goldfish",
+        )
+        gce_config = GCEConfig(
+            project_id=gce_project,
+            artifact_registry=artifact_registry,
+        )
 
     # Create config
     config = GoldfishConfig(
@@ -232,6 +240,8 @@ def _write_config(config: GoldfishConfig, config_path: Path) -> None:
 
     if config.gce:
         gce_dict = {"project_id": config.gce.project_id}
+        if config.gce.artifact_registry:
+            gce_dict["artifact_registry"] = config.gce.artifact_registry
         if config.gce.zones:
             gce_dict["zones"] = config.gce.zones
         if config.gce.profile_overrides:
