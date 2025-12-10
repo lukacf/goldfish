@@ -24,6 +24,9 @@ from goldfish.pipeline.manager import PipelineManager
 from goldfish.workspace.manager import WorkspaceManager
 
 
+STAGE_LOG_TAIL_FOR_FINALIZE = int(os.getenv("GOLDFISH_FINALIZE_LOG_TAIL", "1000"))
+
+
 class StageExecutor:
     """Execute individual pipeline stages."""
 
@@ -690,13 +693,22 @@ echo "Stage completed successfully"
                 use_capacity_search=use_capacity_search,
             )
         else:
-            raise ValueError(f"Unknown backend: {backend}")
+            raise GoldfishError(f"Backend {backend} not supported for launch")
 
     def _finalize_stage_run(self, stage_run_id: str, backend: str, status: str) -> None:
         """Handle terminal status: record outputs, fetch logs, update status."""
-        # Guard against double-finalize
+        # CAS guard against double-finalize
+        with self.db._conn() as conn:
+            updated = conn.execute(
+                "UPDATE stage_runs SET status=?, completed_at=? WHERE id=? AND status NOT IN ('completed','failed','canceled')",
+                (status, datetime.now(timezone.utc).isoformat(), stage_run_id),
+            ).rowcount
+        if updated == 0:
+            return
+
+        # Re-read fresh row after CAS
         stage_run = self.db.get_stage_run(stage_run_id)
-        if not stage_run or stage_run.get("status") in ("completed", "failed", "canceled"):
+        if not stage_run:
             return
 
         workspace = stage_run["workspace_name"]
@@ -726,9 +738,9 @@ echo "Stage completed successfully"
         logs = ""
         try:
             if backend == "local":
-                logs = self.local_executor.get_container_logs(stage_run_id, tail_lines=1000)
+                logs = self.local_executor.get_container_logs(stage_run_id, tail_lines=STAGE_LOG_TAIL_FOR_FINALIZE)
             elif backend == "gce":
-                logs = self.gce_launcher.get_instance_logs(stage_run_id, tail_lines=1000)
+                logs = self.gce_launcher.get_instance_logs(stage_run_id, tail_lines=STAGE_LOG_TAIL_FOR_FINALIZE)
                 if not logs:
                     logs = "[GCE logs unavailable - instance may have been deleted or logs not synced]"
         except Exception as e:
@@ -752,7 +764,7 @@ echo "Stage completed successfully"
             status=status,
             completed_at=datetime.now(timezone.utc).isoformat(),
             log_uri=log_uri,
-            error=(logs[-1000:] if (status == "failed" and logs) else None),
+            error=(logs[-STAGE_LOG_TAIL_FOR_FINALIZE:] if (status == "failed" and logs) else None),
             progress="finalizing",
         )
 
