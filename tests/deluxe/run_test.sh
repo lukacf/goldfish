@@ -1,187 +1,98 @@
 #!/bin/bash
-# Run deluxe E2E test using actual Claude Code
+# Deluxe E2E driven by Claude CLI prompts (MCP server auto-started by Claude)
+set -euo pipefail
 
-set -e
-
-echo "======================================================================"
-echo "DELUXE E2E TEST: Claude Code + Goldfish MCP + GCE"
-echo "======================================================================"
-echo ""
-
-# Check required environment variables
-if [[ -z "$ANTHROPIC_API_KEY" ]]; then
-    echo "ERROR: ANTHROPIC_API_KEY not set"
-    exit 1
-fi
-
-if [[ -z "$GOLDFISH_GCE_PROJECT" ]]; then
-    echo "ERROR: GOLDFISH_GCE_PROJECT not set"
-    exit 1
-fi
-
-if [[ -z "$GOLDFISH_GCS_BUCKET" ]]; then
-    echo "ERROR: GOLDFISH_GCS_BUCKET not set"
-    exit 1
-fi
-
-echo "Configuration:"
-echo "  GCP Project: $GOLDFISH_GCE_PROJECT"
-echo "  GCS Bucket: $GOLDFISH_GCS_BUCKET"
-echo "  Dry-run: ${GOLDFISH_DELUXE_DRY_RUN:-0}"
-echo ""
-
-# Setup Claude Code with MCP
-/usr/local/bin/setup_claude.sh
-
-# Change to test repo directory
+# Run everything from repo root so Claude picks the right project
 cd /ml-project-test-repo
 
-# Clean up any existing test project from previous runs
-echo "Cleaning up previous test artifacts..."
-rm -rf test-project test-project-dev 2>/dev/null || true
-echo "✓ Cleanup complete"
-echo ""
+# Env vars are injected via docker compose env_file; just respect them
+export GOLDFISH_DELUXE_DRY_RUN=${GOLDFISH_DELUXE_DRY_RUN:-0}
 
-echo "======================================================================"
-echo "PHASE 1: Initialize Goldfish Project"
-echo "======================================================================"
-echo ""
+echo "Setting up Claude MCP..."
+# Remove stale Claude config to avoid wrong project bindings
+rm -f ~/.claude.json
+/usr/local/bin/setup_claude.sh
 
-# Prompt Claude to initialize project
-# IMPORTANT: This is a TEST of the Goldfish system - Claude must report any tool failures directly
-claude -p --dangerously-skip-permissions "IMPORTANT: This is a TEST of the Goldfish MCP system. You must use the Goldfish MCP tools and report any failures directly. Do NOT create files manually or compensate for missing tools.
+echo "Config:"
+echo "  Project: $GOLDFISH_GCE_PROJECT"
+echo "  Bucket : $GOLDFISH_GCS_BUCKET"
+echo "  DryRun : $GOLDFISH_DELUXE_DRY_RUN"
 
-Initialize a new Goldfish project using the mcp__goldfish__initialize_project tool with project_name='test-project' and project_root='/ml-project-test-repo'."
-
-echo ""
-echo "✓ Project initialized"
-echo ""
-
-# Verify the created project directory exists
-if [[ -d "test-project" ]]; then
-    echo "Found project directory: /ml-project-test-repo/test-project"
-else
-    echo "ERROR: test-project directory not found"
-    ls -la /ml-project-test-repo
-    exit 1
+# Ensure claude CLI present
+if ! command -v claude >/dev/null 2>&1; then
+  echo "claude CLI not found"; exit 1
 fi
 
-# Verify goldfish.yaml was created
-if [[ ! -f test-project/goldfish.yaml ]]; then
-    echo "ERROR: goldfish.yaml not created"
-    ls -la test-project/
-    exit 1
+# Helper: compact prompt function
+cprompt() {
+  claude -p --dangerously-skip-permissions "$1"
+}
+
+WORKDIR=/ml-project-test-repo
+PROJECT=$WORKDIR/test-project
+
+rm -rf "$PROJECT" "$PROJECT-dev" 2>/dev/null || true
+
+echo "=== Phase 1: init project ==="
+cprompt "Use Goldfish MCP tool initialize_project with project_name='test-project' and project_root='$WORKDIR'. After it finishes, open goldfish.yaml to CONFIRM artifact_registry is set to 'us-docker.pkg.dev/$GOLDFISH_GCE_PROJECT/goldfish' (do not restart the server or re-run init). Keep replies terse."
+
+if [[ ! -d "$PROJECT" ]]; then
+  echo "project missing; retrying init..."
+  cprompt "Call initialize_project now with project_name='test-project' and project_root='$WORKDIR'. Confirm creation at '$PROJECT'. Then verify artifact_registry is 'us-docker.pkg.dev/$GOLDFISH_GCE_PROJECT/goldfish' (no edits needed)."
 fi
 
-echo "✓ Found goldfish.yaml"
+test -d "$PROJECT" || { echo "project still missing"; exit 1; }
+test -f "$PROJECT/goldfish.yaml" || { echo "goldfish.yaml missing"; exit 1; }
 
-# Update goldfish.yaml to include artifact_registry
-echo "Updating goldfish.yaml with artifact_registry configuration..."
-claude -p --dangerously-skip-permissions "Edit the file /ml-project-test-repo/test-project/goldfish.yaml to add 'artifact_registry' field under the 'gce' section. Set it to 'us-docker.pkg.dev/$GOLDFISH_GCE_PROJECT/goldfish'"
+echo "=== Phase 2: workspace + pipeline setup ==="
+cprompt "Use Goldfish MCP tools (create_workspace, mount, validate_pipeline, run_stage) only. Steps: (1) create workspace 'baseline' goal 'deluxe e2e'; (2) mount to slot 'w1'; (3) write modules for stages generate_data, preprocess, train, evaluate that pass numpy arrays via /mnt/inputs and /mnt/outputs/<name>, train uses sklearn LogisticRegression, evaluate writes accuracy to a file; (4) write configs/<stage>.yaml with profile: cpu-small; (5) write pipeline.yaml with name: baseline, proper from_stage chaining, all signals type: dataset; (6) call validate_pipeline until valid. Keep outputs concise."
 
-echo "✓ Updated goldfish.yaml with artifact_registry"
+test -f "$PROJECT/workspaces/w1/pipeline.yaml" || { echo "pipeline missing"; exit 1; }
 
-# IMPORTANT: Stay in /ml-project-test-repo where MCP config is, use relative paths for test-project
-
-echo "======================================================================"
-echo "PHASE 2: Create Workspace and Pipeline"
-echo "======================================================================"
-echo ""
-
-# Prompt Claude to create workspace and pipeline in the test-project
-# IMPORTANT: This is a TEST - Claude must report failures, not compensate
-claude -p --dangerously-skip-permissions "IMPORTANT: This is a TEST of the Goldfish MCP system. You must use the Goldfish MCP tools and report any failures directly. Do NOT create files manually or compensate for missing tools.
-
-For the Goldfish project at /ml-project-test-repo/test-project: \
-1. Use mcp__goldfish__create_workspace to create workspace 'baseline' with goal 'Baseline ML classification model' and reason 'E2E test baseline workspace' \
-2. Use mcp__goldfish__mount to mount workspace 'baseline' to slot 'w1' with reason 'Testing baseline pipeline' \
-3. In the mounted workspace at /ml-project-test-repo/test-project/workspaces/w1, create a 4-stage ML pipeline: \
-   - Stage 1 'generate_data': Generate 1000 synthetic samples (28x28 features, 10 classes) \
-   - Stage 2 'preprocess': Normalize and split data (80/20) \
-   - Stage 3 'train': Train sklearn LogisticRegression \
-   - Stage 4 'evaluate': Compute test accuracy \
-4. Create Python modules in /ml-project-test-repo/test-project/workspaces/w1/modules/ for each stage using Write tool \
-5. Create stage configs in /ml-project-test-repo/test-project/workspaces/w1/configs/ for each stage using Write tool with profile 'cpu-small' \
-6. Create /ml-project-test-repo/test-project/workspaces/w1/pipeline.yaml with proper signal chaining using Write tool \
-7. Use mcp__goldfish__validate_pipeline to validate the pipeline for workspace 'baseline'"
-
-echo ""
-echo "✓ Workspace and pipeline created"
-echo ""
-
-# Verify pipeline was created
-if [[ ! -f test-project/workspaces/w1/pipeline.yaml ]]; then
-    echo "ERROR: pipeline.yaml not created"
-    exit 1
+echo "=== Phase 3: run stages sequentially (wait=true) ==="
+if [[ "$GOLDFISH_DELUXE_DRY_RUN" == "1" ]]; then
+  echo "Dry run: skip execution"; exit 0
 fi
 
-echo "======================================================================"
-echo "PHASE 3: Run Pipeline"
-echo "======================================================================"
-echo ""
+cprompt "Run stages generate_data, preprocess, train, evaluate in workspace 'baseline' using mcp__goldfish__run_stage with wait=true. After each run, call mcp__goldfish__get_outputs to confirm output path. Keep responses short."
 
-if [[ "${GOLDFISH_DELUXE_DRY_RUN:-0}" == "1" ]]; then
-    echo "DRY-RUN mode: Skipping pipeline execution"
-else
-    # Prompt Claude to run the pipeline (explicitly name the MCP tools)
-    # IMPORTANT: This is a TEST - Claude must report failures, not compensate
-    claude -p --dangerously-skip-permissions "IMPORTANT: This is a TEST of the Goldfish MCP system. You must use the Goldfish MCP tools and report any failures directly. Do NOT compensate for missing tools.
+# Verify all stage runs completed
+python - <<'PY'
+import sqlite3, sys, os, json
+db = "/ml-project-test-repo/test-project/.goldfish/goldfish.db"
+if not os.path.exists(db):
+    sys.exit("DB missing")
+conn = sqlite3.connect(db)
+rows = conn.execute("select stage_name,status from stage_runs where workspace_name='baseline' order by started_at").fetchall()
+print(rows)
+if not rows or any(s!="completed" for _,s in rows):
+    sys.exit("Stages not all completed")
+PY
 
-Use the mcp__goldfish__run_pipeline tool to run the full pipeline for workspace 'baseline'. Then use mcp__goldfish__list_jobs to monitor job status. Wait for completion and report the final test accuracy."
-fi
+echo "=== Cleanup: GCE instances and GCS artifacts (scoped to this run) ==="
+# Collect stage_run_ids from the test project DB
+python - <<'PY'
+import sqlite3, json, os, sys
+db = "/ml-project-test-repo/test-project/.goldfish/goldfish.db"
+if not os.path.exists(db):
+    sys.exit(0)
+conn = sqlite3.connect(db)
+rows = conn.execute("select id from stage_runs where workspace_name='baseline'").fetchall()
+for (rid,) in rows:
+    print(rid)
+PY > /tmp/stage_ids.txt
 
-echo ""
-echo "✓ Pipeline execution requested"
-echo ""
+# Delete only the instances and artifacts for those stage IDs
+while read -r sid; do
+  [ -z "$sid" ] && continue
+  gcloud compute instances delete "$sid" --zone us-central1-a --quiet || true
+  gsutil -m rm -r "${GOLDFISH_GCS_BUCKET%/}/runs/${sid}/**" >/dev/null 2>&1 || true
+done < /tmp/stage_ids.txt
 
-echo "======================================================================"
-echo "PHASE 4: Verification"
-echo "======================================================================"
-echo ""
+# Clean local run directories for these stage IDs
+while read -r sid; do
+  [ -z "$sid" ] && continue
+  rm -rf "/ml-project-test-repo/test-project/.goldfish/runs/${sid}" || true
+done < /tmp/stage_ids.txt
 
-# Verify results using Goldfish MCP status tool (explicitly name the tools)
-# IMPORTANT: This is a TEST - Claude must report failures, not compensate
-claude -p --dangerously-skip-permissions "IMPORTANT: This is a TEST of the Goldfish MCP system. You must use the Goldfish MCP tools and report any failures directly. Do NOT compensate for missing tools.
-
-Use the mcp__goldfish__status tool to check the current status. Then use mcp__goldfish__list_workspaces and mcp__goldfish__list_jobs with workspace='baseline' to show: \
-1. List of workspaces \
-2. List of jobs for workspace 'baseline' \
-3. Current slot status"
-
-echo ""
-echo "======================================================================"
-echo "PHASE 5: Cleanup"
-echo "======================================================================"
-echo ""
-
-# Cleanup GCE instances if they're still running
-if [[ "${GOLDFISH_DELUXE_DRY_RUN:-0}" != "1" ]]; then
-    echo "Cleaning up GCE instances..."
-
-    # List and delete any instances created by this test
-    gcloud compute instances list \
-        --filter="name~^goldfish-deluxe-*" \
-        --format="value(name,zone)" | \
-    while read -r name zone; do
-        if [[ -n "$name" ]]; then
-            echo "Deleting instance: $name (zone: $zone)"
-            gcloud compute instances delete "$name" --zone="$zone" --quiet || true
-        fi
-    done
-fi
-
-echo ""
-echo "======================================================================"
-echo "DELUXE E2E TEST COMPLETE"
-echo "======================================================================"
-echo ""
-echo "✅ Test completed successfully!"
-echo ""
-echo "This test validated:"
-echo "  • Claude Code CLI execution"
-echo "  • MCP server connection (stdio)"
-echo "  • Goldfish MCP tool usage"
-echo "  • Real GCE instance launches"
-echo "  • Multi-stage pipeline execution"
-echo "  • Full workflow orchestration"
-echo ""
+echo "Deluxe E2E prompts finished."

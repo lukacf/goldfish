@@ -58,14 +58,15 @@ class TestRunFullPipeline:
         )
 
         # Execute
-        runs = executor.run_pipeline(
+        result = executor.run_pipeline(
             workspace="test_ws",
-            reason="Test full pipeline"
+            reason="Test full pipeline",
+            async_mode=False,
         )
 
-        # Verify
-        assert len(runs) == 3
-        assert [r.stage for r in runs] == ["preprocess", "tokenize", "train"]
+        stage_runs = result["stage_runs"]
+        assert len(stage_runs) == 3
+        assert [r["stage"] for r in stage_runs] == ["preprocess", "tokenize", "train"]
         assert stage_executor.run_stage.call_count == 3
 
     def test_run_pipeline_applies_config_overrides(self, test_db):
@@ -103,10 +104,11 @@ class TestRunFullPipeline:
             "train": {"EPOCHS": "20"}
         }
 
-        runs = executor.run_pipeline(
+        executor.run_pipeline(
             workspace="test_ws",
             config_override=config_override,
-            reason="Test overrides"
+            reason="Test overrides",
+            async_mode=False,
         )
 
         # Verify config passed to each stage
@@ -149,16 +151,18 @@ class TestRunPartialPipeline:
         )
 
         # Execute
-        runs = executor.run_partial_pipeline(
+        result = executor.run_partial_pipeline(
             workspace="test_ws",
             from_stage="tokenize",
             to_stage="train",
-            reason="Test partial run"
+            reason="Test partial run",
+            async_mode=False,
         )
 
         # Verify
-        assert len(runs) == 2
-        assert [r.stage for r in runs] == ["tokenize", "train"]
+        stage_runs = result["stage_runs"]
+        assert len(stage_runs) == 2
+        assert [r["stage"] for r in stage_runs] == ["tokenize", "train"]
 
     def test_run_partial_pipeline_raises_on_invalid_stage_order(self, test_db):
         """Should raise error if from_stage comes after to_stage."""

@@ -115,7 +115,7 @@ class LineageManager:
             )
 
         # Get git diff
-        git_diff = self.workspace_manager.git_layer.diff(
+        git_diff = self.workspace_manager.git.diff_commits(
             from_row["git_sha"], to_row["git_sha"]
         )
 

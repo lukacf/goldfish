@@ -216,10 +216,60 @@ class StateManager:
             )
 
     def _write(self) -> None:
-        """Write current state (used for partial updates)."""
-        # This would regenerate, but we don't have slots/jobs here
-        # So we just write what we have
-        pass
+        """Write current state (used for partial updates like set_goal).
+
+        Reads existing STATE.md and updates the Active Goal section.
+        If STATE.md doesn't exist, creates a minimal version.
+        """
+        if not self.state_path.exists():
+            # Create minimal STATE.md with just the goal
+            content = "\n".join([
+                f"# {self.config.project_name}",
+                "",
+                "## Active Goal",
+                self._active_goal,
+                "",
+                "## Workspaces",
+                "- No workspaces mounted",
+                "",
+                "## Recent Actions",
+            ])
+            for action in reversed(list(self._recent_actions)):
+                content += f"\n- {action}"
+            if not self._recent_actions:
+                content += "\n- No recent actions"
+            content += "\n\n## Background Jobs\n- No active jobs"
+            self._write_content(content)
+            return
+
+        # Read existing content and update goal section
+        try:
+            content = self.state_path.read_text()
+        except (OSError, PermissionError):
+            return
+
+        # Update the Active Goal section
+        if "## Active Goal" in content:
+            # Split into before, goal section, and after
+            parts = content.split("## Active Goal", 1)
+            before = parts[0]
+            rest = parts[1]
+
+            # Find end of goal section (next ## header)
+            if "##" in rest[1:]:
+                # Find the next ## after the first character
+                next_section_idx = rest.index("##", 1)
+                after = rest[next_section_idx:]
+            else:
+                after = ""
+
+            # Reconstruct with new goal
+            content = f"{before}## Active Goal\n{self._active_goal}\n\n{after}"
+        else:
+            # No goal section - prepend it
+            content = f"## Active Goal\n{self._active_goal}\n\n{content}"
+
+        self._write_content(content)
 
     @classmethod
     def create_initial(cls, state_path: Path, config: GoldfishConfig) -> "StateManager":

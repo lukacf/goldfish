@@ -14,15 +14,17 @@ uv --directory /goldfish run goldfish --help > /dev/null 2>&1 || {
 echo "✓ Goldfish command works"
 echo ""
 
-# Add Goldfish MCP server using claude mcp add command
-# This properly registers the server with Claude Code
-# Use GOLDFISH_START_DIR to tell the server where to start (since uv --directory changes CWD)
+# Register Goldfish MCP server for project /ml-project-test-repo
+pushd /ml-project-test-repo >/dev/null
 claude mcp add --transport stdio goldfish -- bash -c 'GOLDFISH_START_DIR=/ml-project-test-repo uv --directory /goldfish run goldfish serve'
+popd >/dev/null
 
 echo "✓ Claude Code configured with Goldfish MCP server"
 echo ""
 
 # Verify configuration
 echo "MCP Configuration:"
+pushd /ml-project-test-repo >/dev/null
 claude mcp list
+popd >/dev/null
 echo ""
