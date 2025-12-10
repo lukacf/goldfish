@@ -280,7 +280,8 @@ class Database:
                 params.append(created_by)
 
             row = conn.execute(query, tuple(params)).fetchone()
-            return row[0] if row else 0
+            count: int = row[0] if row else 0
+            return count
 
     def list_sources(
         self,
@@ -495,7 +496,8 @@ class Database:
 
         with self._conn() as conn:
             result = conn.execute(query, params).fetchone()
-            return result[0] if result else 0
+            count: int = result[0] if result else 0
+            return count
 
     def get_active_jobs(self) -> list[JobRow]:
         """Get all running/pending jobs."""
@@ -1092,7 +1094,8 @@ class Database:
 
         with self._conn() as conn:
             row = conn.execute(query, params).fetchone()
-            return row[0] if row else 0
+            count: int = row[0] if row else 0
+            return count
 
     def get_latest_stage_run(
         self,

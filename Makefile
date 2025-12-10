@@ -22,9 +22,9 @@ install-hooks:
 	pre-commit install --hook-type pre-push
 
 lint:
-	ruff check .
-	ruff format . --check
-	mypy --install-types --non-interactive $(SOURCE_DIR)
+	pre-commit run ruff --all-files
+	pre-commit run ruff-format --all-files
+	pre-commit run mypy --all-files
 
 test:
 	$(PYTEST) tests/unit -q --tb=short -m "not slow"
