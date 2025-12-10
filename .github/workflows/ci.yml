@@ -68,7 +68,7 @@ jobs:
   integration-tests:
     needs: unit-tests
     runs-on: ubuntu-latest
-    # Only run on main, feature branches, or same-repo PRs (has secrets access)
+    # Run on main, feature branches, or same-repo PRs
     if: >
       github.ref == 'refs/heads/main' ||
       startsWith(github.ref, 'refs/heads/feature/') ||
