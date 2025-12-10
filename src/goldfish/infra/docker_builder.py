@@ -191,6 +191,8 @@ CMD ["/bin/bash"]
                         return True
                     if domain in data.get("credHelpers", {}):
                         return True
+                except json.JSONDecodeError as e:
+                    raise GoldfishError(f"Invalid docker config.json: {e}")
                 except Exception:
                     return False
                 return False
