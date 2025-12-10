@@ -80,7 +80,6 @@ class PipelineExecutor:
 
         pipeline = self.pipeline_manager.get_pipeline(workspace, pipeline_name)
         effective_pipeline_name = pipeline_name or pipeline.name
-        effective_pipeline_name = pipeline_name or pipeline.name
 
         if not async_mode:
             runs: list[StageRunInfo] = []
@@ -255,6 +254,7 @@ class PipelineExecutor:
             if running:
                 ids = [r["stage_run_id"] for r in running]
                 placeholders = ",".join(["?"] * len(ids))
+                # Safe: ids come from previously stored queue rows (not user input)
                 stage_rows = conn.execute(
                     f"SELECT id,status FROM stage_runs WHERE id IN ({placeholders})",
                     tuple(ids),
@@ -292,6 +292,8 @@ class PipelineExecutor:
                 ).rowcount
                 if updated == 0:
                     self._race_loss_counter += 1
+                    if self._race_loss_counter > 10000:
+                        self._race_loss_counter = 0
                     if self._race_loss_counter % 50 == 0:
                         self._logger.debug(
                             "Lost CAS claim %s times (latest stage %s, run %s)",
