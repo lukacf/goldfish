@@ -132,7 +132,7 @@ class Database:
                 """
             )
             # Bump schema version
-            if current_version == 0:
+            if current_version < 2:
                 if version_row:
                     conn.execute("UPDATE schema_version SET version = 2")
                 else:

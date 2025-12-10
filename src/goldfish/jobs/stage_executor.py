@@ -651,6 +651,11 @@ echo "Stage completed successfully"
 
     def _finalize_stage_run(self, stage_run_id: str, backend: str, status: str) -> None:
         """Handle terminal status: record outputs, fetch logs, update status."""
+        # Fetch stage_run first; if missing, nothing to do
+        stage_run = self.db.get_stage_run(stage_run_id)
+        if not stage_run:
+            return
+
         # CAS: only finalize if not already terminal
         with self.db._conn() as conn:
             updated = conn.execute(
@@ -659,10 +664,6 @@ echo "Stage completed successfully"
             ).rowcount
         if updated == 0:
             return  # already finalized
-
-        stage_run = self.db.get_stage_run(stage_run_id)
-        if not stage_run:
-            return
 
         workspace = stage_run["workspace_name"]
         stage_name_from_db = stage_run["stage_name"]
