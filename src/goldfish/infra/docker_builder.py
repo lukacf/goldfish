@@ -106,8 +106,11 @@ CMD ["/bin/bash"]
             dockerfile_path = build_context / "Dockerfile"
             dockerfile_path.write_text(dockerfile_content)
 
-            # Build image for linux/amd64 (GCE target platform)
-            build_cmd = ["docker", "build", "--platform", "linux/amd64", "-t", image_tag]
+            # Build image; force amd64 only when targeting GCE
+            build_cmd = ["docker", "build"]
+            if self.config.jobs.backend == "gce":
+                build_cmd += ["--platform", "linux/amd64"]
+            build_cmd += ["-t", image_tag]
 
             if not use_cache:
                 build_cmd.append("--no-cache")
@@ -174,6 +177,8 @@ CMD ["/bin/bash"]
             # Configure Docker authentication with gcloud (idempotent)
             # Extract registry domain from URL (e.g., "us-docker.pkg.dev")
             registry_domain = registry_url.split('/')[0]
+            if not shutil.which("gcloud"):
+                raise GoldfishError("gcloud not found; configure gcloud before pushing images.")
             auth_result = subprocess.run(
                 ["gcloud", "auth", "configure-docker", registry_domain, "--quiet"],
                 capture_output=True,
