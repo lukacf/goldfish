@@ -4,87 +4,33 @@ This is the main entry point that defines all MCP tools.
 Uses ServerContext for dependency management instead of global variables.
 """
 
-import json
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from fastmcp import FastMCP
 
-logger = logging.getLogger("goldfish.server")
-
 from goldfish.config import GoldfishConfig
-from goldfish.context import ServerContext, set_context, get_context, has_context
+from goldfish.context import ServerContext, get_context, has_context, set_context
+from goldfish.datasets.registry import DatasetRegistry
 from goldfish.db.database import Database
 from goldfish.errors import (
     GoldfishError,
-    JobNotFoundError,
-    SourceAlreadyExistsError,
-    SourceNotFoundError,
-    WorkspaceNotFoundError,
-    validate_reason,
 )
-from goldfish.lineage.manager import LineageManager
-from goldfish.validation import (
-    validate_workspace_name,
-    validate_source_name,
-    validate_script_path,
-    validate_slot_name,
-    validate_snapshot_id,
-    validate_output_name,
-    validate_job_id,
-    validate_artifact_uri,
-)
-from goldfish.models import (
-    AuditEntry,
-    AuditLogResponse,
-    CancelJobResponse,
-    CheckpointResponse,
-    CreateWorkspaceResponse,
-    DeleteSnapshotResponse,
-    DeleteSourceResponse,
-    DeleteWorkspaceResponse,
-    DiffResponse,
-    HibernateResponse,
-    JobInfo,
-    JobLogsResponse,
-    PipelineResponse,
-    ValidatePipelineResponse,
-    UpdatePipelineResponse,
-    ListJobsResponse,
-    ListSnapshotsResponse,
-    ListSourcesResponse,
-    LogThoughtResponse,
-    MountResponse,
-    PromoteArtifactResponse,
-    RegisterSourceResponse,
-    RollbackResponse,
-    RunJobResponse,
-    SnapshotInfo,
-    SourceInfo,
-    SourceLineage,
-    StatusResponse,
-    UpdateWorkspaceGoalResponse,
-    WorkspaceGoalResponse,
-    WorkspaceInfo,
-)
-from goldfish.state.state_md import StateManager
-from goldfish.utils import parse_datetime, parse_optional_datetime
-from goldfish.workspace.manager import WorkspaceManager
 from goldfish.jobs.launcher import JobLauncher
-from goldfish.jobs.tracker import JobTracker
-from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.jobs.pipeline_executor import PipelineExecutor
+from goldfish.jobs.stage_executor import StageExecutor
+from goldfish.jobs.tracker import JobTracker
 from goldfish.pipeline.manager import PipelineManager
-from goldfish.pipeline.parser import PipelineNotFoundError, PipelineValidationError
-from goldfish.datasets.registry import DatasetRegistry
+from goldfish.state.state_md import StateManager
+from goldfish.workspace.manager import WorkspaceManager
+
+logger = logging.getLogger("goldfish.server")
 
 # Initialize FastMCP server
-mcp = FastMCP("goldfish")
+mcp: FastMCP = FastMCP("goldfish")
 
 # Module-level variable to store project root (set when server starts)
-_project_root: Optional[Path] = None
+_project_root: Path | None = None
 
 
 # ============== CONTEXT ACCESSORS ==============
@@ -246,9 +192,7 @@ def _init_server(project_root: Path) -> None:
     workspace_manager = WorkspaceManager(config, project_root, db, state_manager)
 
     # Initialize job components
-    job_launcher = JobLauncher(
-        config, project_root, db, workspace_manager, state_manager
-    )
+    job_launcher = JobLauncher(config, project_root, db, workspace_manager, state_manager)
     job_tracker = JobTracker(db, project_root)
 
     # Initialize dataset registry
@@ -264,13 +208,9 @@ def _init_server(project_root: Path) -> None:
         workspace_manager=workspace_manager,
         pipeline_manager=pipeline_manager,
         project_root=project_root,
-        dataset_registry=dataset_registry
+        dataset_registry=dataset_registry,
     )
-    pipeline_executor = PipelineExecutor(
-        stage_executor=stage_executor,
-        pipeline_manager=pipeline_manager,
-        db=db
-    )
+    pipeline_executor = PipelineExecutor(stage_executor=stage_executor, pipeline_manager=pipeline_manager, db=db)
 
     # Create and set context
     ctx = ServerContext(
@@ -299,68 +239,63 @@ def _get_state_md() -> str:
 # ============== WORKSPACE TOOLS ==============
 
 
-
-
 # ============== MCP TOOLS ==============
 # Tools are organized in separate modules for maintainability
 
 # Import all tool modules (this registers them with MCP and makes them available)
-import goldfish.server_tools  # noqa: F401
-
-# Re-export all tools for backward compatibility with existing code
-from goldfish.server_tools.workspace_tools import (  # noqa: F401
-    mount,
-    hibernate,
-    create_workspace,
-    list_workspaces,
-    get_workspace,
-    delete_workspace,
-    checkpoint,
-    diff,
-    rollback,
-    list_snapshots,
-    get_snapshot,
-    delete_snapshot,
-    get_workspace_goal,
-    update_workspace_goal,
-    branch_workspace
-)
-from goldfish.server_tools.execution_tools import (  # noqa: F401
-    run_job,
-    job_status,
-    get_job_logs,
-    cancel_job,
-    list_jobs,
-    run_stage,
-    run_pipeline,
-    run_partial_pipeline
-)
-from goldfish.server_tools.data_tools import (  # noqa: F401
-    list_sources,
-    get_source,
-    register_source,
+# These imports MUST be after mcp is defined since they use @mcp.tool() decorator
+import goldfish.server_tools  # noqa: E402, F401
+from goldfish.server_tools.data_tools import (  # noqa: E402, F401
     delete_source,
+    get_dataset,
+    get_source,
     get_source_lineage,
+    list_datasets,
+    list_sources,
     promote_artifact,
     register_dataset,
-    list_datasets,
-    get_dataset
+    register_source,
 )
-from goldfish.server_tools.pipeline_tools import (  # noqa: F401
-    get_pipeline,
-    validate_pipeline,
-    update_pipeline
+from goldfish.server_tools.execution_tools import (  # noqa: E402, F401
+    cancel_job,
+    get_job_logs,
+    job_status,
+    list_jobs,
+    run_job,
+    run_partial_pipeline,
+    run_pipeline,
+    run_stage,
 )
-from goldfish.server_tools.lineage_tools import (  # noqa: F401
-    get_workspace_lineage,
+from goldfish.server_tools.lineage_tools import (  # noqa: E402, F401
+    get_run_provenance,
     get_version_diff,
-    get_run_provenance
+    get_workspace_lineage,
 )
-from goldfish.server_tools.utility_tools import (  # noqa: F401
-    initialize_project,
-    status,
+from goldfish.server_tools.pipeline_tools import get_pipeline, update_pipeline, validate_pipeline  # noqa: E402, F401
+from goldfish.server_tools.utility_tools import (  # noqa: E402, F401
     get_audit_log,
-    log_thought
+    initialize_project,
+    log_thought,
+    status,
+)
+
+# Re-export all tools for backward compatibility with existing code
+from goldfish.server_tools.workspace_tools import (  # noqa: E402, F401
+    branch_workspace,
+    checkpoint,
+    create_workspace,
+    delete_snapshot,
+    delete_workspace,
+    diff,
+    get_snapshot,
+    get_workspace,
+    get_workspace_goal,
+    hibernate,
+    list_snapshots,
+    list_workspaces,
+    mount,
+    rollback,
+    update_workspace_goal,
 )
 
 
@@ -372,7 +307,7 @@ def run_server(project_root: Path) -> None:
     try:
         with open("/tmp/goldfish_run_server.log", "a") as f:
             f.write(f"run_server called with project_root: {project_root}\n")
-    except:
+    except OSError:
         pass
 
     # Store project root so it's available to tools even before initialization
@@ -384,7 +319,7 @@ def run_server(project_root: Path) -> None:
         try:
             with open("/tmp/goldfish_run_server.log", "a") as f:
                 f.write(f"✓ Server initialized successfully for {project_root}\n")
-        except:
+        except OSError:
             pass
     except ProjectNotInitializedError as e:
         # Server starts without initialization - user must call initialize_project() first
@@ -392,7 +327,7 @@ def run_server(project_root: Path) -> None:
         try:
             with open("/tmp/goldfish_run_server.log", "a") as f:
                 f.write(f"✗ Server NOT initialized: {e}\n")
-        except:
+        except OSError:
             pass
         pass
     except Exception as e:
@@ -400,7 +335,7 @@ def run_server(project_root: Path) -> None:
         try:
             with open("/tmp/goldfish_run_server.log", "a") as f:
                 f.write(f"✗ Server initialization failed with unexpected error: {type(e).__name__}: {e}\n")
-        except:
+        except OSError:
             pass
         raise
 

@@ -9,8 +9,8 @@ Composable functions that build shell script fragments for:
 """
 
 import shlex
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import List, Sequence, Tuple, Mapping
 
 # Configuration constants
 GPU_DRIVER_MAX_ATTEMPTS = 160  # Maximum attempts to wait for GPU driver
@@ -148,7 +148,7 @@ def docker_run_section(
     *,
     image: str,
     env_keys: Sequence[str],
-    mounts: Sequence[Tuple[str, str]],
+    mounts: Sequence[tuple[str, str]],
     entrypoint: str,
     shm_size: str = DEFAULT_SHM_SIZE,
 ) -> str:
@@ -213,11 +213,11 @@ def build_startup_script(
     image: str,
     entrypoint: str,
     env_map: Mapping[str, str],
-    mounts: Sequence[Tuple[str, str]] = (),
+    mounts: Sequence[tuple[str, str]] = (),
     bucket_mount: str = "/mnt/gcs",
     gcsfuse: bool = True,
     shm_size: str = DEFAULT_SHM_SIZE,
-    disk_mounts: Sequence[Tuple[str, str, str]] = (),
+    disk_mounts: Sequence[tuple[str, str, str]] = (),
     pre_run_cmds: Sequence[str] = (),
     post_run_cmds: Sequence[str] = (),
 ) -> str:
@@ -242,11 +242,7 @@ def build_startup_script(
         Complete startup script as string
     """
     # Build GCS paths
-    bucket_path = "/".join(
-        part
-        for part in [bucket_prefix.strip("/"), run_path.strip("/")]
-        if part
-    )
+    bucket_path = "/".join(part for part in [bucket_prefix.strip("/"), run_path.strip("/")] if part)
     stage_uri = f"gs://{bucket}/{bucket_path}/logs/stage_times.log"
     log_file = f"{bucket_mount}/{bucket_path}/logs/train.log"
 
@@ -261,7 +257,7 @@ def build_startup_script(
     env_keys = list(env_map.keys())
 
     # Build script parts
-    parts: List[str] = [
+    parts: list[str] = [
         "#!/bin/bash",
         "set -euxo pipefail",
         "export DEBIAN_FRONTEND=noninteractive",
@@ -323,12 +319,8 @@ def build_startup_script(
         parts.append(cmd)
 
     # Upload exit code and logs
-    parts.append(
-        f'echo "$EXIT_CODE" > {bucket_mount}/{bucket_path}/logs/exit_code.txt || true'
-    )
-    parts.append(
-        f'gsutil cp "{log_file}" gs://{bucket}/{bucket_path}/logs/train.log || true'
-    )
+    parts.append(f'echo "$EXIT_CODE" > {bucket_mount}/{bucket_path}/logs/exit_code.txt || true')
+    parts.append(f'gsutil cp "{log_file}" gs://{bucket}/{bucket_path}/logs/train.log || true')
     parts.append(
         f"gsutil cp {bucket_mount}/{bucket_path}/logs/exit_code.txt gs://{bucket}/{bucket_path}/logs/exit_code.txt || true"
     )

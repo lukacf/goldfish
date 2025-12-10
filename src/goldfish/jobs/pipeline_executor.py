@@ -1,15 +1,13 @@
 """Pipeline execution engine for Goldfish."""
 
-from typing import Optional
-import json
-import time
-from uuid import uuid4
-from datetime import datetime, timezone
-from goldfish.utils import parse_optional_datetime
-from concurrent.futures import ThreadPoolExecutor
 import atexit
+import json
 import logging
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from uuid import uuid4
 
 from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
@@ -67,9 +65,9 @@ class PipelineExecutor:
     def run_pipeline(
         self,
         workspace: str,
-        pipeline_name: Optional[str] = None,
-        config_override: Optional[dict] = None,
-        reason: Optional[str] = None,
+        pipeline_name: str | None = None,
+        config_override: dict | None = None,
+        reason: str | None = None,
         async_mode: bool = True,
     ) -> dict:
         """
@@ -99,7 +97,7 @@ class PipelineExecutor:
 
         # async path with queue
         pipeline_run_id = f"prun-{uuid4().hex[:8]}"
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         with self.db._conn() as conn:
             conn.execute(
@@ -112,7 +110,7 @@ class PipelineExecutor:
 
             prev = None
             for stage in pipeline.stages:
-                deps = []
+                deps: list[str] = []
                 if prev:
                     deps.append(prev)
                 conn.execute(
@@ -124,7 +122,9 @@ class PipelineExecutor:
                 )
                 prev = stage.name
 
-        launched = self._process_pipeline_queue_once(pipeline_run_id, workspace, effective_pipeline_name, config_override, reason)
+        launched = self._process_pipeline_queue_once(
+            pipeline_run_id, workspace, effective_pipeline_name, config_override, reason
+        )
 
         self._pool.submit(
             self._worker_loop,
@@ -208,7 +208,7 @@ class PipelineExecutor:
             status = "completed" if (row["failed"] or 0) == 0 else "failed"
             conn.execute(
                 "UPDATE pipeline_runs SET status=?, completed_at=? WHERE id=?",
-                (status, datetime.now(timezone.utc).isoformat(), pipeline_run_id),
+                (status, datetime.now(UTC).isoformat(), pipeline_run_id),
             )
 
     def _list_pipeline_stage_runs(self, pipeline_run_id: str) -> list[StageRunInfo]:
@@ -237,15 +237,15 @@ class PipelineExecutor:
         self,
         pipeline_run_id: str,
         workspace: str,
-        pipeline_name: Optional[str],
-        config_override: Optional[dict],
-        reason: Optional[str],
+        pipeline_name: str | None,
+        config_override: dict | None,
+        reason: str | None,
     ) -> list[StageRunInfo]:
         effective_pipeline_name = pipeline_name
         launched: list[StageRunInfo] = []
 
         # First pass: update running items and claim new rows to launch
-        to_launch: list[tuple[str, str, Optional[dict]]] = []
+        to_launch: list[tuple[str, str, dict | None]] = []
         with self.db._conn() as conn:
             running = conn.execute(
                 "SELECT id, stage_run_id FROM pipeline_stage_queue WHERE pipeline_run_id=? AND status='running' AND stage_run_id IS NOT NULL",
@@ -288,7 +288,7 @@ class PipelineExecutor:
 
                 updated = conn.execute(
                     "UPDATE pipeline_stage_queue SET status='running', claimed_at=? WHERE id=? AND status='pending' AND (claimed_at IS NULL)",
-                    (datetime.now(timezone.utc).isoformat(), row["id"]),
+                    (datetime.now(UTC).isoformat(), row["id"]),
                 ).rowcount
                 if updated == 0:
                     self._race_loss_counter += 1
@@ -342,9 +342,9 @@ class PipelineExecutor:
         workspace: str,
         from_stage: str,
         to_stage: str,
-        pipeline_name: Optional[str] = None,
-        config_override: Optional[dict] = None,
-        reason: Optional[str] = None,
+        pipeline_name: str | None = None,
+        config_override: dict | None = None,
+        reason: str | None = None,
         async_mode: bool = True,
     ) -> dict:
         """Run a contiguous subset by constructing a temporary linear pipeline."""
@@ -354,8 +354,8 @@ class PipelineExecutor:
         try:
             start_idx = names.index(from_stage)
             end_idx = names.index(to_stage)
-        except ValueError:
-            raise ValueError("Stage not found in pipeline")
+        except ValueError as err:
+            raise ValueError("Stage not found in pipeline") from err
         if start_idx > end_idx:
             raise ValueError("from_stage must come before to_stage")
         sub_stages = pipeline.stages[start_idx : end_idx + 1]

@@ -1,7 +1,6 @@
 """Configuration loading for Goldfish."""
 
 from pathlib import Path
-from typing import Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -24,7 +23,7 @@ class JobsConfig(BaseModel):
     """Job execution configuration."""
 
     backend: str = "gce"
-    infra_path: Optional[str] = None  # Path to infra scripts (e.g., "../goldfish/infra")
+    infra_path: str | None = None  # Path to infra scripts (e.g., "../goldfish/infra")
     experiments_dir: str = "experiments"  # Where to export experiments
 
 
@@ -45,10 +44,10 @@ class GCEConfig(BaseModel):
 
     # Optional: Artifact Registry URL for Docker images
     # Example: "us-docker.pkg.dev/{project_id}/goldfish"
-    artifact_registry: Optional[str] = None
+    artifact_registry: str | None = None
 
     # Optional: global zone preferences (applies to all profiles)
-    zones: Optional[list[str]] = None
+    zones: list[str] | None = None
 
     # Optional: profile overrides and custom profiles
     # Example:
@@ -59,7 +58,7 @@ class GCEConfig(BaseModel):
     #     machine_type: "n2-standard-16"
     #     zones: ["us-east1-b"]
     #     ...
-    profile_overrides: Optional[dict[str, dict]] = None
+    profile_overrides: dict[str, dict] | None = None
 
     # Runtime preferences
     gpu_preference: list[str] = Field(default_factory=lambda: ["h100", "a100", "none"])
@@ -80,38 +79,31 @@ class GoldfishConfig(BaseModel):
     state_md: StateMdConfig = Field(default_factory=StateMdConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     jobs: JobsConfig = Field(default_factory=JobsConfig)
-    gcs: Optional[GCSConfig] = None
-    gce: Optional[GCEConfig] = None
+    gcs: GCSConfig | None = None
+    gce: GCEConfig | None = None
     invariants: list[str] = Field(default_factory=list)
 
     @classmethod
     def load(cls, project_root: Path) -> "GoldfishConfig":
         """Load configuration from goldfish.yaml in project root."""
-        from goldfish.errors import GoldfishError, ProjectNotInitializedError
         from pydantic import ValidationError
+
+        from goldfish.errors import GoldfishError, ProjectNotInitializedError
 
         config_path = project_root / "goldfish.yaml"
         if not config_path.exists():
-            raise ProjectNotInitializedError(
-                f"No goldfish.yaml found in {project_root}. Run 'goldfish init' first."
-            )
+            raise ProjectNotInitializedError(f"No goldfish.yaml found in {project_root}. Run 'goldfish init' first.")
 
         try:
             with open(config_path) as f:
                 data = yaml.safe_load(f)
         except (OSError, PermissionError) as e:
-            raise GoldfishError(
-                f"Cannot read configuration file: {type(e).__name__}"
-            ) from e
+            raise GoldfishError(f"Cannot read configuration file: {type(e).__name__}") from e
         except yaml.YAMLError as e:
-            raise GoldfishError(
-                f"Failed to parse configuration file: invalid YAML syntax"
-            ) from e
+            raise GoldfishError("Failed to parse configuration file: invalid YAML syntax") from e
 
         if data is None:
-            raise GoldfishError(
-                "Configuration file is empty"
-            )
+            raise GoldfishError("Configuration file is empty")
 
         try:
             return cls(**data)
@@ -122,12 +114,8 @@ class GoldfishConfig(BaseModel):
                 first_error = errors[0]
                 field = ".".join(str(loc) for loc in first_error.get("loc", []))
                 msg = first_error.get("msg", "validation error")
-                raise GoldfishError(
-                    f"Invalid configuration: {field} - {msg}"
-                ) from e
-            raise GoldfishError(
-                "Invalid configuration: validation failed"
-            ) from e
+                raise GoldfishError(f"Invalid configuration: {field} - {msg}") from e
+            raise GoldfishError("Invalid configuration: validation failed") from e
 
     def save(self, project_root: Path) -> None:
         """Save configuration to goldfish.yaml."""
@@ -143,9 +131,7 @@ class GoldfishConfig(BaseModel):
                     default_flow_style=False,
                 )
         except (OSError, PermissionError) as e:
-            raise GoldfishError(
-                f"Cannot write configuration file: {type(e).__name__}"
-            ) from e
+            raise GoldfishError(f"Cannot write configuration file: {type(e).__name__}") from e
 
     @property
     def db_path(self) -> str:

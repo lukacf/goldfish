@@ -1,7 +1,5 @@
 """Lineage tracking for Goldfish workspaces and runs."""
 
-from typing import Optional
-
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError
 from goldfish.workspace.manager import WorkspaceManager
@@ -88,9 +86,7 @@ class LineageManager:
             ],
         }
 
-    def get_version_diff(
-        self, workspace: str, from_version: str, to_version: str
-    ) -> dict:
+    def get_version_diff(self, workspace: str, from_version: str, to_version: str) -> dict:
         """Compare two versions.
 
         Returns:
@@ -106,18 +102,12 @@ class LineageManager:
         to_row = self.db.get_version(workspace, to_version)
 
         if not from_row:
-            raise GoldfishError(
-                f"Version '{from_version}' not found in workspace '{workspace}'"
-            )
+            raise GoldfishError(f"Version '{from_version}' not found in workspace '{workspace}'")
         if not to_row:
-            raise GoldfishError(
-                f"Version '{to_version}' not found in workspace '{workspace}'"
-            )
+            raise GoldfishError(f"Version '{to_version}' not found in workspace '{workspace}'")
 
         # Get git diff
-        git_diff = self.workspace_manager.git.diff_commits(
-            from_row["git_sha"], to_row["git_sha"]
-        )
+        git_diff = self.workspace_manager.git.diff_commits(from_row["git_sha"], to_row["git_sha"])
 
         return {
             "from_version": from_version,
@@ -148,6 +138,8 @@ class LineageManager:
 
         # Get version info
         version = self.db.get_version(run["workspace_name"], run["version"])
+        if not version:
+            raise GoldfishError(f"Version '{run['version']}' not found for workspace '{run['workspace_name']}'")
 
         # Get input signals (signals consumed by this run)
         inputs = self.db.list_signals(consumed_by=stage_run_id)
@@ -159,6 +151,7 @@ class LineageManager:
         config_override = run.get("config_override") or run.get("config_json") or {}
         if isinstance(config_override, str):
             import json
+
             config_override = json.loads(config_override) if config_override else {}
 
         return {
@@ -204,14 +197,10 @@ class LineageManager:
         # Verify version exists
         version = self.db.get_version(from_workspace, from_version)
         if not version:
-            raise GoldfishError(
-                f"Version '{from_version}' not found in workspace '{from_workspace}'"
-            )
+            raise GoldfishError(f"Version '{from_version}' not found in workspace '{from_workspace}'")
 
         # Create git branch
-        self.workspace_manager.branch_workspace(
-            from_workspace, from_version, new_workspace
-        )
+        self.workspace_manager.branch_workspace(from_workspace, from_version, new_workspace)
 
         # Record lineage
         self.db.create_workspace_lineage(

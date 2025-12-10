@@ -3,8 +3,6 @@
 Provides tools for tracing data lineage through the pipeline.
 """
 
-from typing import Optional
-
 from goldfish.db.database import Database
 from goldfish.errors import SourceNotFoundError
 
@@ -36,8 +34,8 @@ class LineageTracker:
         if not self.db.source_exists(source_name):
             raise SourceNotFoundError(f"Source not found: {source_name}")
 
-        ancestors = []
-        visited = set()
+        ancestors: list[str] = []
+        visited: set[str] = set()
         self._collect_ancestors(source_name, ancestors, visited, max_depth)
         return ancestors
 
@@ -77,8 +75,8 @@ class LineageTracker:
         if not self.db.source_exists(source_name):
             raise SourceNotFoundError(f"Source not found: {source_name}")
 
-        descendants = []
-        visited = set()
+        descendants: list[str] = []
+        visited: set[str] = set()
         self._collect_descendants(source_name, descendants, visited, max_depth)
         return descendants
 
@@ -108,9 +106,7 @@ class LineageTracker:
             for record in lineage:
                 if record.get("parent_source_id") == source_name:
                     descendants.append(child_name)
-                    self._collect_descendants(
-                        child_name, descendants, visited, remaining_depth - 1
-                    )
+                    self._collect_descendants(child_name, descendants, visited, remaining_depth - 1)
                     break
 
     def get_full_lineage_graph(self, source_name: str) -> dict:
@@ -146,11 +142,13 @@ class LineageTracker:
             for record in lineage:
                 parent = record.get("parent_source_id")
                 if parent and parent in nodes:
-                    edges.append({
-                        "from": parent,
-                        "to": node,
-                        "job_id": record.get("job_id"),
-                    })
+                    edges.append(
+                        {
+                            "from": parent,
+                            "to": node,
+                            "job_id": record.get("job_id"),
+                        }
+                    )
 
         return {
             "center": source_name,
@@ -158,7 +156,7 @@ class LineageTracker:
             "edges": edges,
         }
 
-    def get_producing_job(self, source_name: str) -> Optional[str]:
+    def get_producing_job(self, source_name: str) -> str | None:
         """Get the job that produced a source.
 
         Args:
@@ -167,10 +165,10 @@ class LineageTracker:
         Returns:
             Job ID if source was produced by a job, None otherwise
         """
-        if not self.db.source_exists(source_name):
+        source = self.db.get_source(source_name)
+        if source is None:
             raise SourceNotFoundError(f"Source not found: {source_name}")
 
-        source = self.db.get_source(source_name)
         created_by = source.get("created_by", "")
 
         if created_by.startswith("job:"):

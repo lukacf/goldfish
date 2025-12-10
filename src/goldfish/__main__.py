@@ -1,14 +1,11 @@
 """Entry point for: python -m goldfish"""
 
 import argparse
-import sys
 from pathlib import Path
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Goldfish - MCP server for ML experimentation"
-    )
+    parser = argparse.ArgumentParser(description="Goldfish - MCP server for ML experimentation")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # serve command (default)
@@ -69,33 +66,35 @@ def main():
 
         # DEBUG: Log what's happening
         import sys
+
         debug_msg = f"[DEBUG] serve command: args.command={args.command}, hasattr={hasattr(args, 'project')}, args.project={getattr(args, 'project', 'N/A')}"
         print(debug_msg, file=sys.stderr)
         try:
             with open("/tmp/goldfish_main_debug.log", "a") as f:
                 f.write(f"{debug_msg}\n")
-        except:
+        except OSError:
             pass
 
-        if hasattr(args, 'project') and args.project:
+        if hasattr(args, "project") and args.project:
             try:
                 with open("/tmp/goldfish_main_debug.log", "a") as f:
                     f.write(f"[DEBUG] Taking IF branch: args.project={args.project}\n")
-            except:
+            except OSError:
                 pass
             project_root = args.project
         else:
             try:
                 with open("/tmp/goldfish_main_debug.log", "a") as f:
-                    f.write(f"[DEBUG] Taking ELSE branch (autodiscovery)\n")
-            except:
+                    f.write("[DEBUG] Taking ELSE branch (autodiscovery)\n")
+            except OSError:
                 pass
             # Auto-discover: search for goldfish.yaml
-            import sys
             import os
+            import sys
+
             project_root = None
             # Check if GOLDFISH_START_DIR is set (for cases where uv changes CWD)
-            start_dir_str = os.environ.get('GOLDFISH_START_DIR')
+            start_dir_str = os.environ.get("GOLDFISH_START_DIR")
             if start_dir_str:
                 start_dir = Path(start_dir_str)
             else:
@@ -103,16 +102,17 @@ def main():
             try:
                 with open("/tmp/goldfish_main_debug.log", "a") as f:
                     f.write(f"[DEBUG] GOLDFISH_START_DIR={start_dir_str}, start_dir = {start_dir}\n")
-            except:
+            except OSError:
                 pass
 
             # Debug logging to file (in addition to stderr)
             debug_log = start_dir / "goldfish_autodiscovery.log"
+
             def log(msg):
                 try:
                     with open(debug_log, "a") as f:
                         f.write(f"{msg}\n")
-                except:
+                except OSError:
                     pass
                 print(msg, file=sys.stderr)
 

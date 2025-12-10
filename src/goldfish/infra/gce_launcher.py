@@ -12,11 +12,12 @@ Provides:
 import json
 import subprocess
 import time
+from datetime import UTC
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from goldfish.errors import GoldfishError
-from goldfish.infra.resource_launcher import ResourceLauncher, run_gcloud, cleanup_disk
+from goldfish.infra.resource_launcher import ResourceLauncher, cleanup_disk, run_gcloud
 from goldfish.infra.startup_builder import build_startup_script
 
 # Configuration constants for hyperdisk
@@ -33,11 +34,12 @@ class GCELauncher:
 
     def __init__(
         self,
-        project_id: Optional[str] = None,
+        project_id: str | None = None,
         zone: str = "us-central1-a",
-        bucket: Optional[str] = None,
-        resources: Optional[List[Dict[str, Any]]] = None,
-        zones: Optional[List[str]] = None,
+        bucket: str | None = None,
+        resources: list[dict[str, Any]] | None = None,
+        zones: list[str] | None = None,
+        gpu_preference: list[str] | None = None,
     ):
         """Initialize GCE launcher.
 
@@ -47,12 +49,14 @@ class GCELauncher:
             bucket: GCS bucket for logs/artifacts (required for full functionality)
             resources: Resource catalog (list of resource dicts)
             zones: List of all available zones (for multi-zone lookups)
+            gpu_preference: Ordered list of preferred GPU types for capacity search
         """
         self.project_id = project_id
         self.default_zone = zone
         self.bucket = bucket
         self.resources = resources or []
         self.zones = zones or [zone]  # Default to list containing just default_zone
+        self.gpu_preference = gpu_preference or ["h100", "a100", "none"]
 
     def launch_instance(
         self,
@@ -61,12 +65,12 @@ class GCELauncher:
         entrypoint_script: str,
         stage_config: dict,
         work_dir: Path,
-        inputs_dir: Optional[Path] = None,
-        outputs_dir: Optional[Path] = None,
+        inputs_dir: Path | None = None,
+        outputs_dir: Path | None = None,
         machine_type: str = "n1-standard-4",
-        gpu_type: Optional[str] = None,
+        gpu_type: str | None = None,
         gpu_count: int = 0,
-        zones: Optional[List[str]] = None,
+        zones: list[str] | None = None,
         use_capacity_search: bool = True,
     ) -> str:
         """Launch GCE instance for stage run.
@@ -145,8 +149,8 @@ class GCELauncher:
         self,
         instance_name: str,
         startup_script: str,
-        gpu_type: Optional[str],
-        zones: Optional[List[str]],
+        gpu_type: str | None,
+        zones: list[str] | None,
     ) -> str:
         """Launch using ResourceLauncher for capacity search.
 
@@ -165,28 +169,24 @@ class GCELauncher:
         # Filter resources by GPU type
         if gpu_type:
             filtered_resources = [
-                r
-                for r in self.resources
-                if (r.get("gpu", {}).get("type") or "none").lower()
-                == gpu_type.lower()
+                r for r in self.resources if (r.get("gpu", {}).get("type") or "none").lower() == gpu_type.lower()
             ]
         else:
             # No GPU requested - include resources with no GPU or gpu.type="none"
             filtered_resources = [
-                r for r in self.resources
-                if not r.get("gpu", {}).get("type")
-                or r.get("gpu", {}).get("type", "").lower() == "none"
+                r
+                for r in self.resources
+                if not r.get("gpu", {}).get("type") or r.get("gpu", {}).get("type", "").lower() == "none"
             ]
 
         if not filtered_resources:
-            raise GoldfishError(
-                f"No resources found for GPU type: {gpu_type or 'none'}"
-            )
+            raise GoldfishError(f"No resources found for GPU type: {gpu_type or 'none'}")
 
         # Create ResourceLauncher
+        # Use instance gpu_preference for ordering, but force_gpu restricts to specific type
         launcher = ResourceLauncher(
             resources=filtered_resources,
-            gpu_preference=[gpu_type] if gpu_type else ["none"],
+            gpu_preference=self.gpu_preference,
             force_gpu=gpu_type,
             zones_override=zones,
             project_id=self.project_id,
@@ -205,7 +205,7 @@ class GCELauncher:
         instance_name: str,
         startup_script: str,
         machine_type: str,
-        gpu_type: Optional[str],
+        gpu_type: str | None,
         gpu_count: int,
         zone: str,
     ) -> str:
@@ -271,7 +271,7 @@ class GCELauncher:
         zone: str,
         size_gb: int = 100,
         disk_type: str = "pd-ssd",
-        snapshot: Optional[str] = None,
+        snapshot: str | None = None,
     ) -> None:
         """Create a persistent disk.
 
@@ -322,9 +322,7 @@ class GCELauncher:
         """
         cleanup_disk(disk_name, zone)
 
-    def snapshot_disk(
-        self, disk_name: str, snapshot_name: str, zone: str
-    ) -> None:
+    def snapshot_disk(self, disk_name: str, snapshot_name: str, zone: str) -> None:
         """Create a snapshot of a disk.
 
         Args:
@@ -449,7 +447,7 @@ class GCELauncher:
         else:
             return "failed"
 
-    def _find_instance_zone(self, instance_name: str) -> Optional[str]:
+    def _find_instance_zone(self, instance_name: str) -> str | None:
         """Find which zone an instance is in.
 
         Tries default zone first, then searches all configured zones.
@@ -527,8 +525,8 @@ class GCELauncher:
     def get_instance_logs(
         self,
         instance_name: str,
-        tail_lines: Optional[int] = None,
-        since: Optional[str] = None,
+        tail_lines: int | None = None,
+        since: str | None = None,
     ) -> str:
         """Retrieve logs from GCE instance.
 
@@ -541,27 +539,27 @@ class GCELauncher:
             Instance logs as string
         """
         from collections import deque
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        def _parse_dt(val: str) -> Optional[datetime]:
+        def _parse_dt(val: str) -> datetime | None:
             if not val:
                 return None
             try:
                 iso = val.replace("Z", "+00:00")
                 dt = datetime.fromisoformat(iso)
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.replace(tzinfo=UTC)
                 return dt
             except Exception:
                 return None
 
-        def _line_ts(line: str) -> Optional[datetime]:
+        def _line_ts(line: str) -> datetime | None:
             first = (line.split() or [""])[0]
             return _parse_dt(first)
 
-        def _collect(stream, since_dt: Optional[datetime]):
+        def _collect(stream, since_dt: datetime | None) -> str:
             if tail_lines:
-                buf = deque(maxlen=tail_lines)
+                buf: deque[str] = deque(maxlen=tail_lines)
                 for ln in stream:
                     if since_dt:
                         ts = _line_ts(ln)
@@ -641,9 +639,7 @@ class GCELauncher:
         # Find which zone the instance is in
         zone = self._find_instance_zone(instance_name)
         if not zone:
-            raise GoldfishError(
-                f"Instance {instance_name} not found in any configured zone"
-            )
+            raise GoldfishError(f"Instance {instance_name} not found in any configured zone")
 
         cmd = [
             "gcloud",
@@ -687,9 +683,7 @@ class GCELauncher:
 
         run_gcloud(cmd, check=False)  # Don't fail if already deleted
 
-    def wait_for_termination(
-        self, instance_name: str, timeout_sec: int = 3600
-    ) -> str:
+    def wait_for_termination(self, instance_name: str, timeout_sec: int = 3600) -> str:
         """Wait for instance to terminate.
 
         Polls instance status until it reaches TERMINATED state or timeout.
@@ -721,8 +715,7 @@ class GCELauncher:
         # Timeout - get serial logs for debugging
         logs = self.get_instance_logs(instance_name)
         raise GoldfishError(
-            f"Instance {instance_name} did not terminate within {timeout_sec}s. "
-            f"Last logs:\n{logs[-1000:]}"
+            f"Instance {instance_name} did not terminate within {timeout_sec}s. Last logs:\n{logs[-1000:]}"
         )
 
     @staticmethod
