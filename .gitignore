@@ -50,3 +50,12 @@ htmlcov/
 # Ruff cache
 .ruff_cache/
 .env
+
+# Claude Code local files
+.claude/
+.mcp-the-force/
+
+# Coverage artifacts
+coverage.xml
+htmlcov/
+.coverage

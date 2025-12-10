@@ -1,7 +1,6 @@
 """Utility functions for Goldfish."""
 
 from datetime import datetime
-from typing import Optional
 
 
 def parse_datetime(value: str) -> datetime:
@@ -16,7 +15,7 @@ def parse_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
-def parse_optional_datetime(value: Optional[str]) -> Optional[datetime]:
+def parse_optional_datetime(value: str | None) -> datetime | None:
     """Parse an optional ISO format datetime string.
 
     Safely handles None values, avoiding the common pattern:

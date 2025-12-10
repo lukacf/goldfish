@@ -3,57 +3,35 @@
 Extracted from server.py for better organization.
 """
 
-from typing import Optional
-import logging
 import json
-from datetime import datetime, timezone
+import logging
+from datetime import datetime
 
-from goldfish.utils import parse_datetime, parse_optional_datetime
+from goldfish.errors import validate_reason
+from goldfish.models import (
+    AuditEntry,
+    AuditLogResponse,
+    LogThoughtResponse,
+    StatusResponse,
+)
+from goldfish.server import (
+    _get_config,
+    _get_db,
+    _get_state_manager,
+    _get_state_md,
+    _get_workspace_manager,
+    mcp,
+)
+from goldfish.utils import parse_datetime
+from goldfish.validation import (
+    validate_workspace_name,
+)
 
 logger = logging.getLogger("goldfish.server")
 
-# Import server context helpers
-from goldfish.server import (
-    mcp,
-    _get_config,
-    _get_db,
-    _get_workspace_manager,
-    _get_pipeline_manager,
-    _get_state_manager,
-    _get_job_launcher,
-    _get_job_tracker,
-    _get_dataset_registry,
-    _get_state_md,
-    _get_project_root,
-)
-
-# Import models
-from goldfish.models import *
-
-# Import validation functions
-from goldfish.validation import (
-    validate_workspace_name,
-    validate_slot_name,
-    
-    validate_snapshot_id,
-    validate_job_id,
-    validate_source_name,
-    validate_output_name,
-    validate_artifact_uri,
-    
-    validate_script_path,
-)
-
-# Import errors
-from goldfish.errors import GoldfishError, validate_reason
-
 
 @mcp.tool()
-def initialize_project(
-    project_name: str,
-    project_root: str,
-    from_existing: Optional[str] = None
-) -> dict:
+def initialize_project(project_name: str, project_root: str, from_existing: str | None = None) -> dict:
     """Initialize a new Goldfish project in the specified directory.
 
     Creates the necessary directory structure, git repository, and configuration.
@@ -68,7 +46,8 @@ def initialize_project(
         dict with success status and project details
     """
     from pathlib import Path
-    from goldfish.init import init_project, init_from_existing
+
+    from goldfish.init import init_from_existing, init_project
     from goldfish.server import _init_server
 
     try:
@@ -98,10 +77,7 @@ def initialize_project(
 
     except Exception as e:
         logger.error(f"Failed to initialize project: {e}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        return {"success": False, "error": str(e)}
 
 
 @mcp.tool()
@@ -133,10 +109,11 @@ def status() -> StatusResponse:
         state_md=state_md,
     )
 
+
 @mcp.tool()
 def get_audit_log(
     limit: int = 20,
-    workspace: Optional[str] = None,
+    workspace: str | None = None,
 ) -> AuditLogResponse:
     """Get recent audit trail entries.
 
@@ -163,12 +140,13 @@ def get_audit_log(
             slot=e.get("slot"),
             workspace=e.get("workspace"),
             reason=e["reason"],
-            details=json.loads(e["details"]) if e.get("details") else None,
+            details=json.loads(e["details"]) if e["details"] else None,
         )
         for e in entries
     ]
 
     return AuditLogResponse(entries=audit_entries, count=len(audit_entries))
+
 
 @mcp.tool()
 def log_thought(thought: str) -> LogThoughtResponse:

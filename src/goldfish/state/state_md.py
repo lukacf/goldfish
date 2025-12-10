@@ -6,12 +6,12 @@ This is Claude's primary context recovery mechanism after compaction.
 import logging
 import os
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 from goldfish.config import GoldfishConfig
-from goldfish.models import DirtyState, JobInfo, SlotInfo, SlotState, JobStatus
+from goldfish.models import DirtyState, JobStatus, SlotInfo, SlotState
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ class StateManager:
 
     def add_action(self, action: str) -> None:
         """Record an action with timestamp."""
-        timestamp = datetime.now(timezone.utc).strftime("%H:%M")
+        timestamp = datetime.now(UTC).strftime("%H:%M")
         self._recent_actions.append(f"[{timestamp}] {action}")
 
     def read(self) -> str:
@@ -74,7 +74,7 @@ class StateManager:
     def regenerate(
         self,
         slots: list[SlotInfo],
-        jobs: list[dict],
+        jobs: list[dict[str, Any]],
         source_count: int = 0,
     ) -> str:
         """Generate complete STATE.md content and write to file."""
@@ -183,9 +183,7 @@ class StateManager:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
         except (OSError, PermissionError) as e:
             # Log error but don't fail - STATE.md is not critical
-            logger.warning(
-                f"Failed to create directory for STATE.md at '{self.state_path.parent}': {e}"
-            )
+            logger.warning(f"Failed to create directory for STATE.md at '{self.state_path.parent}': {e}")
             return
 
         try:
@@ -200,20 +198,16 @@ class StateManager:
                     f.write(content)
                 # Atomic rename
                 Path(tmp_path).rename(self.state_path)
-            except Exception as e:
+            except Exception:
                 # Clean up temp file on error
                 try:
                     Path(tmp_path).unlink()
                 except Exception as cleanup_err:
-                    logger.warning(
-                        f"Failed to clean up temp file '{tmp_path}' after write error: {cleanup_err}"
-                    )
+                    logger.warning(f"Failed to clean up temp file '{tmp_path}' after write error: {cleanup_err}")
                 raise
         except (OSError, PermissionError) as e:
             # Log error but don't fail - STATE.md is best-effort
-            logger.warning(
-                f"Failed to write STATE.md to '{self.state_path}': {e}"
-            )
+            logger.warning(f"Failed to write STATE.md to '{self.state_path}': {e}")
 
     def _write(self) -> None:
         """Write current state (used for partial updates like set_goal).
@@ -223,17 +217,19 @@ class StateManager:
         """
         if not self.state_path.exists():
             # Create minimal STATE.md with just the goal
-            content = "\n".join([
-                f"# {self.config.project_name}",
-                "",
-                "## Active Goal",
-                self._active_goal,
-                "",
-                "## Workspaces",
-                "- No workspaces mounted",
-                "",
-                "## Recent Actions",
-            ])
+            content = "\n".join(
+                [
+                    f"# {self.config.project_name}",
+                    "",
+                    "## Active Goal",
+                    self._active_goal,
+                    "",
+                    "## Workspaces",
+                    "- No workspaces mounted",
+                    "",
+                    "## Recent Actions",
+                ]
+            )
             for action in reversed(list(self._recent_actions)):
                 content += f"\n- {action}"
             if not self._recent_actions:
@@ -300,7 +296,7 @@ class StateManager:
             [
                 "",
                 "## Recent Actions",
-                f"- [{datetime.now(timezone.utc).strftime('%H:%M')}] Project initialized",
+                f"- [{datetime.now(UTC).strftime('%H:%M')}] Project initialized",
                 "",
                 "## Background Jobs",
                 "- No active jobs",

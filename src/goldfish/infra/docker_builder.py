@@ -4,9 +4,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-import json
 from pathlib import Path
-from typing import Optional
 
 from goldfish.errors import GoldfishError
 
@@ -14,10 +12,9 @@ from goldfish.errors import GoldfishError
 class DockerBuilder:
     """Build Docker images for stage execution."""
 
-    def __init__(self, config: Optional[object] = None):
+    def __init__(self, config: object | None = None):
         # Store config for backend checks (may be GoldfishConfig or partial)
         self.config = config
-
 
     def generate_dockerfile(self, workspace_dir: Path) -> str:
         """Generate Dockerfile for workspace.
@@ -63,13 +60,7 @@ CMD ["/bin/bash"]
 
         return dockerfile
 
-    def build_image(
-        self,
-        workspace_dir: Path,
-        workspace_name: str,
-        version: str,
-        use_cache: bool = True
-    ) -> str:
+    def build_image(self, workspace_dir: Path, workspace_name: str, version: str, use_cache: bool = True) -> str:
         """Build Docker image for workspace.
 
         Uses a temporary directory as build context to avoid dirtying
@@ -125,32 +116,17 @@ CMD ["/bin/bash"]
             build_cmd.append(str(build_context))
 
             try:
-                result = subprocess.run(
-                    build_cmd,
-                    capture_output=True,
-                    text=True,
-                    check=False
-                )
+                result = subprocess.run(build_cmd, capture_output=True, text=True, check=False)
 
                 if result.returncode != 0:
-                    raise GoldfishError(
-                        f"Docker build failed: {result.stderr}"
-                    )
+                    raise GoldfishError(f"Docker build failed: {result.stderr}")
 
                 return image_tag
 
-            except FileNotFoundError:
-                raise GoldfishError(
-                    "Docker not found. Please install Docker to build images."
-                )
+            except FileNotFoundError as err:
+                raise GoldfishError("Docker not found. Please install Docker to build images.") from err
 
-    def push_image(
-        self,
-        local_tag: str,
-        registry_url: str,
-        workspace_name: str,
-        version: str
-    ) -> str:
+    def push_image(self, local_tag: str, registry_url: str, workspace_name: str, version: str) -> str:
         """Push Docker image to Artifact Registry.
 
         Args:
@@ -168,13 +144,12 @@ CMD ["/bin/bash"]
         # Validate registry URL format (must be host/path, no scheme)
         if not registry_url or "://" in registry_url or "/" not in registry_url:
             raise GoldfishError(
-                f"Invalid artifact_registry URL: {registry_url}. "
-                "Expected format: us-docker.pkg.dev/<project>/<repo>"
+                f"Invalid artifact_registry URL: {registry_url}. Expected format: us-docker.pkg.dev/<project>/<repo>"
             )
 
         # Generate sanitized image name
-        sanitized_workspace = re.sub(r'[^a-z0-9._-]', '_', workspace_name.lower())
-        sanitized_version = re.sub(r'[^a-z0-9._-]', '_', version.lower())
+        sanitized_workspace = re.sub(r"[^a-z0-9._-]", "_", workspace_name.lower())
+        sanitized_version = re.sub(r"[^a-z0-9._-]", "_", version.lower())
         image_name = f"goldfish-{sanitized_workspace}-{sanitized_version}"
 
         # Build full registry tag
@@ -182,7 +157,7 @@ CMD ["/bin/bash"]
 
         try:
             # Configure Docker authentication with gcloud (idempotent but always validated)
-            registry_domain = registry_url.split('/')[0]
+            registry_domain = registry_url.split("/")[0]
             if not shutil.which("gcloud"):
                 raise GoldfishError("gcloud not found; configure gcloud before pushing images.")
 
@@ -190,45 +165,29 @@ CMD ["/bin/bash"]
                 ["gcloud", "auth", "configure-docker", registry_domain, "--quiet"],
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
             )
             if auth_result.returncode != 0:
-                raise GoldfishError(
-                    f"Failed to configure Docker authentication: {auth_result.stderr}"
-                )
+                raise GoldfishError(f"Failed to configure Docker authentication: {auth_result.stderr}")
 
             # Tag for registry
             tag_result = subprocess.run(
-                ["docker", "tag", local_tag, registry_tag],
-                capture_output=True,
-                text=True,
-                check=False
+                ["docker", "tag", local_tag, registry_tag], capture_output=True, text=True, check=False
             )
 
             if tag_result.returncode != 0:
-                raise GoldfishError(
-                    f"Docker tag failed: {tag_result.stderr}"
-                )
+                raise GoldfishError(f"Docker tag failed: {tag_result.stderr}")
 
             # Push to registry
-            push_result = subprocess.run(
-                ["docker", "push", registry_tag],
-                capture_output=True,
-                text=True,
-                check=False
-            )
+            push_result = subprocess.run(["docker", "push", registry_tag], capture_output=True, text=True, check=False)
 
             if push_result.returncode != 0:
-                raise GoldfishError(
-                    f"Docker push failed: {push_result.stderr}"
-                )
+                raise GoldfishError(f"Docker push failed: {push_result.stderr}")
 
             return registry_tag
 
-        except FileNotFoundError:
-            raise GoldfishError(
-                "Docker not found. Please install Docker to push images."
-            )
+        except FileNotFoundError as err:
+            raise GoldfishError("Docker not found. Please install Docker to push images.") from err
 
     def _generate_image_tag(self, workspace_name: str, version: str) -> str:
         """Generate Docker image tag.
@@ -244,10 +203,10 @@ CMD ["/bin/bash"]
             Sanitized image tag
         """
         # Sanitize workspace name (Docker tags allow: [a-z0-9._-])
-        sanitized_workspace = re.sub(r'[^a-z0-9._-]', '_', workspace_name.lower())
+        sanitized_workspace = re.sub(r"[^a-z0-9._-]", "_", workspace_name.lower())
 
         # SECURITY: Sanitize version to prevent command injection
         # Docker tags allow: [a-z0-9._-]
-        sanitized_version = re.sub(r'[^a-z0-9._-]', '_', version.lower())
+        sanitized_version = re.sub(r"[^a-z0-9._-]", "_", version.lower())
 
         return f"goldfish-{sanitized_workspace}-{sanitized_version}"

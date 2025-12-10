@@ -1,15 +1,14 @@
 """Shared test fixtures for Goldfish tests."""
 
-import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 
 import pytest
 
-from goldfish.config import GoldfishConfig, StateMdConfig, AuditConfig, JobsConfig, GCSConfig
+from goldfish.config import AuditConfig, GCSConfig, GoldfishConfig, JobsConfig, StateMdConfig
 from goldfish.db.database import Database
 
 
@@ -28,22 +27,16 @@ def temp_git_repo(temp_dir: Path) -> Generator[Path, None, None]:
     repo_path.mkdir()
 
     subprocess.run(["git", "init"], cwd=repo_path, capture_output=True, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=repo_path, capture_output=True, check=True
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test User"],
-        cwd=repo_path, capture_output=True, check=True
-    )
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo_path, capture_output=True, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_path, capture_output=True, check=True)
 
     # Create initial commit
     (repo_path / "README.md").write_text("# Test")
     subprocess.run(["git", "add", "-A"], cwd=repo_path, capture_output=True, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Initial commit"],
-        cwd=repo_path, capture_output=True, check=True
-    )
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=repo_path, capture_output=True, check=True)
+
+    # Ensure branch is named 'main' (git default may vary by system/version)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=repo_path, capture_output=True, check=True)
 
     yield repo_path
 
@@ -101,6 +94,7 @@ def initialized_project(temp_dir: Path, temp_git_repo: Path) -> dict:
 
     # Write config file
     import yaml
+
     config_path = project_root / "goldfish.yaml"
     with open(config_path, "w") as f:
         yaml.dump(config.model_dump(exclude_none=True), f)

@@ -1,0 +1,50 @@
+repos:
+  # Ruff: Fast Python linter and formatter (replaces flake8, isort, black)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # MyPy: Static type checking
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.10.0
+    hooks:
+      - id: mypy
+        args: [--install-types, --non-interactive, --follow-imports=silent]
+        files: ^src/goldfish/
+
+  # Gitleaks: Prevent secrets from being committed
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.0
+    hooks:
+      - id: gitleaks
+
+  # Local hooks using Makefile as single source of truth
+  - repo: local
+    hooks:
+      # Fast tests on every commit
+      - id: pytest-fast
+        name: pytest (fast unit tests)
+        entry: make test
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # Full tests only on push (skip with --no-verify)
+      - id: pytest-unit-full
+        name: pytest (full unit tests)
+        entry: make test-unit
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
+
+      - id: pytest-integration
+        name: pytest (integration tests)
+        entry: make test-integration
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true

@@ -5,9 +5,8 @@ into the experiment directory format expected by the job infrastructure.
 """
 
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
@@ -29,15 +28,11 @@ def _safe_create_directory(path: Path) -> None:
     """
     # Check for symlinks first (symlinks can exist without target existing)
     if path.is_symlink():
-        raise GoldfishError(
-            f"Security error: path is a symlink, refusing to use: {path}"
-        )
+        raise GoldfishError(f"Security error: path is a symlink, refusing to use: {path}")
 
     # Check if already exists
     if path.exists():
-        raise GoldfishError(
-            f"Directory already exists: {path}"
-        )
+        raise GoldfishError(f"Directory already exists: {path}")
 
     # Create parent directories if needed
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -45,24 +40,18 @@ def _safe_create_directory(path: Path) -> None:
     # Create the directory atomically
     try:
         path.mkdir(exist_ok=False)
-    except FileExistsError:
+    except FileExistsError as err:
         # Race condition: something was created between our check and mkdir
-        raise GoldfishError(
-            f"Directory already exists (race condition detected): {path}"
-        )
+        raise GoldfishError(f"Directory already exists (race condition detected): {path}") from err
 
     # Verify what we created is actually a directory (not a symlink)
     if path.is_symlink():
         # This should be impossible, but check anyway
         path.rmdir()
-        raise GoldfishError(
-            f"Security error: created path became a symlink: {path}"
-        )
+        raise GoldfishError(f"Security error: created path became a symlink: {path}")
 
     if not path.is_dir():
-        raise GoldfishError(
-            f"Failed to create directory: {path}"
-        )
+        raise GoldfishError(f"Failed to create directory: {path}")
 
 
 class SnapshotExporter:
@@ -84,7 +73,7 @@ class SnapshotExporter:
         snapshot_id: str,
         script: str,
         reason: str,
-        config_overrides: Optional[dict] = None,
+        config_overrides: dict | None = None,
     ) -> Path:
         """Export workspace snapshot to experiment directory.
 
@@ -108,7 +97,7 @@ class SnapshotExporter:
             Path to the created experiment directory
         """
         # Generate experiment name
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         exp_name = f"goldfish-{workspace_name}-{timestamp}"
         exp_dir = self.experiments_dir / exp_name
 
@@ -167,7 +156,7 @@ class SnapshotExporter:
         self,
         workspace_path: Path,
         exp_dir: Path,
-        config_overrides: Optional[dict],
+        config_overrides: dict | None,
     ) -> None:
         """Write merged base_config.yaml to experiment directory."""
         # Start with workspace base_config if exists
@@ -179,9 +168,7 @@ class SnapshotExporter:
                 with open(workspace_config_path) as f:
                     base_config = yaml.safe_load(f) or {}
             except yaml.YAMLError as e:
-                raise GoldfishError(
-                    f"Failed to parse base_config.yaml: invalid YAML syntax"
-                ) from e
+                raise GoldfishError("Failed to parse base_config.yaml: invalid YAML syntax") from e
 
         # Apply overrides
         if config_overrides:
@@ -207,7 +194,7 @@ class SnapshotExporter:
                 "snapshot_id": snapshot_id,
                 "script": script,
                 "reason": reason,
-                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "exported_at": datetime.now(UTC).isoformat(),
             }
         }
 
