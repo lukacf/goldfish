@@ -40,14 +40,13 @@ class ServerContext:
     config: GoldfishConfig
     db: Database
     state_manager: StateManager
-    # These are imported here to avoid circular imports
-    workspace_manager: WorkspaceManager  # type: ignore
-    job_launcher: JobLauncher  # type: ignore
-    job_tracker: JobTracker  # type: ignore
-    pipeline_manager: PipelineManager  # type: ignore
-    dataset_registry: DatasetRegistry  # type: ignore
-    stage_executor: StageExecutor  # type: ignore
-    pipeline_executor: PipelineExecutor  # type: ignore
+    workspace_manager: WorkspaceManager
+    job_launcher: JobLauncher
+    job_tracker: JobTracker
+    pipeline_manager: PipelineManager
+    dataset_registry: DatasetRegistry
+    stage_executor: StageExecutor
+    pipeline_executor: PipelineExecutor
 
     def get_state_md(self) -> str:
         """Regenerate and return STATE.md content."""
