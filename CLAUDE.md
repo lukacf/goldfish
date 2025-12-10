@@ -508,3 +508,4 @@ docker inspect goldfish-{workspace}-v1  # Full container details
 2. **New signal types**: Update SignalDef + parser + IO library
 3. **New audit operations**: Add to AuditOperation enum
 4. **New MCP tools**: Add to appropriate tool module in `server_tools/`
+- When getting ruff, mypy or test errors, never cheat, always solve properly.
