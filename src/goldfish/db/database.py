@@ -2,10 +2,11 @@
 
 import json
 import sqlite3
+from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Generator, Optional
+from typing import Any, cast
 
 from goldfish.db.types import (
     AuditRow,
@@ -40,7 +41,7 @@ class Database:
             raise DatabaseError(
                 f"Cannot create database directory at '{db_path.parent}': {e}",
                 operation="init",
-            )
+            ) from e
         self._init_schema()
         self._migrate_schema()
 
@@ -52,7 +53,7 @@ class Database:
             raise DatabaseError(
                 f"Cannot read database schema file: {e}",
                 operation="init_schema",
-            )
+            ) from e
 
         try:
             with self._conn() as conn:
@@ -61,7 +62,7 @@ class Database:
             raise DatabaseError(
                 f"Cannot initialize database schema: {e}",
                 operation="init_schema",
-            )
+            ) from e
 
     def _migrate_schema(self) -> None:
         """Lightweight, idempotent migrations for existing databases."""
@@ -185,12 +186,12 @@ class Database:
         self,
         operation: str,
         reason: str,
-        slot: Optional[str] = None,
-        workspace: Optional[str] = None,
-        details: Optional[dict[str, Any]] = None,
+        slot: str | None = None,
+        workspace: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> int:
         """Log an operation to the audit trail. Returns row ID."""
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
         details_json = json.dumps(details) if details else None
 
         with self._conn() as conn:
@@ -201,15 +202,13 @@ class Database:
                 """,
                 (timestamp, operation, slot, workspace, reason, details_json),
             )
-            return cursor.lastrowid
+            return cursor.lastrowid or 0
 
     def get_recent_audit(self, limit: int = 20) -> list[AuditRow]:
         """Get recent audit entries."""
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,)
-            ).fetchall()
-            return [dict(row) for row in rows]
+            rows = conn.execute("SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            return [cast(AuditRow, dict(row)) for row in rows]
 
     # --- Source operations ---
 
@@ -219,13 +218,13 @@ class Database:
         name: str,
         gcs_location: str,
         created_by: str,
-        description: Optional[str] = None,
-        size_bytes: Optional[int] = None,
+        description: str | None = None,
+        size_bytes: int | None = None,
         status: str = "available",
-        metadata: Optional[dict] = None,
+        metadata: dict | None = None,
     ) -> None:
         """Create a new source entry."""
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
         metadata_json = json.dumps(metadata) if metadata else None
 
         with self._conn() as conn:
@@ -248,18 +247,16 @@ class Database:
                 ),
             )
 
-    def get_source(self, source_id: str) -> Optional[SourceRow]:
+    def get_source(self, source_id: str) -> SourceRow | None:
         """Get a source by ID."""
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM sources WHERE id = ?", (source_id,)
-            ).fetchone()
-            return dict(row) if row else None
+            row = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+            return cast(SourceRow, dict(row)) if row else None
 
     def count_sources(
         self,
-        status: Optional[str] = None,
-        created_by: Optional[str] = None,
+        status: str | None = None,
+        created_by: str | None = None,
     ) -> int:
         """Count sources matching filters.
 
@@ -283,12 +280,13 @@ class Database:
                 params.append(created_by)
 
             row = conn.execute(query, tuple(params)).fetchone()
-            return row[0] if row else 0
+            count: int = row[0] if row else 0
+            return count
 
     def list_sources(
         self,
-        status: Optional[str] = None,
-        created_by: Optional[str] = None,
+        status: str | None = None,
+        created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[SourceRow]:
@@ -327,17 +325,15 @@ class Database:
                 params.append(created_by)
 
             query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
+            params.extend([str(limit), str(offset)])
 
             rows = conn.execute(query, tuple(params)).fetchall()
-            return [dict(row) for row in rows]
+            return [cast(SourceRow, dict(row)) for row in rows]
 
     def source_exists(self, source_id: str) -> bool:
         """Check if a source exists."""
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM sources WHERE id = ?", (source_id,)
-            ).fetchone()
+            row = conn.execute("SELECT 1 FROM sources WHERE id = ?", (source_id,)).fetchone()
             return row is not None
 
     # --- Lineage operations ---
@@ -345,11 +341,11 @@ class Database:
     def add_lineage(
         self,
         source_id: str,
-        parent_source_id: Optional[str] = None,
-        job_id: Optional[str] = None,
+        parent_source_id: str | None = None,
+        job_id: str | None = None,
     ) -> None:
         """Add a lineage record for a source."""
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
 
         with self._conn() as conn:
             conn.execute(
@@ -363,10 +359,8 @@ class Database:
     def get_lineage(self, source_id: str) -> list[LineageRow]:
         """Get lineage records for a source."""
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM source_lineage WHERE source_id = ?", (source_id,)
-            ).fetchall()
-            return [dict(row) for row in rows]
+            rows = conn.execute("SELECT * FROM source_lineage WHERE source_id = ?", (source_id,)).fetchall()
+            return [cast(LineageRow, dict(row)) for row in rows]
 
     # --- Job operations ---
 
@@ -376,11 +370,11 @@ class Database:
         workspace: str,
         snapshot_id: str,
         script: str,
-        experiment_dir: Optional[str] = None,
-        metadata: Optional[dict] = None,
+        experiment_dir: str | None = None,
+        metadata: dict | None = None,
     ) -> None:
         """Create a new job entry."""
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
         metadata_json = json.dumps(metadata) if metadata else None
 
         with self._conn() as conn:
@@ -397,10 +391,10 @@ class Database:
         self,
         job_id: str,
         status: str,
-        completed_at: Optional[str] = None,
-        log_uri: Optional[str] = None,
-        artifact_uri: Optional[str] = None,
-        error: Optional[str] = None,
+        completed_at: str | None = None,
+        log_uri: str | None = None,
+        artifact_uri: str | None = None,
+        error: str | None = None,
     ) -> None:
         """Update job status."""
         with self._conn() as conn:
@@ -413,11 +407,11 @@ class Database:
                 (status, completed_at, log_uri, artifact_uri, error, job_id),
             )
 
-    def get_job(self, job_id: str) -> Optional[JobRow]:
+    def get_job(self, job_id: str) -> JobRow | None:
         """Get a job by ID."""
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-            return dict(row) if row else None
+            return cast(JobRow, dict(row)) if row else None
 
     def delete_job(self, job_id: str) -> tuple[bool, int]:
         """Delete a job and its inputs atomically.
@@ -432,7 +426,7 @@ class Database:
             JobNotFoundError: If job doesn't exist
             GoldfishError: If job is not in a terminal state (pending/running)
         """
-        from goldfish.errors import JobNotFoundError, GoldfishError
+        from goldfish.errors import GoldfishError, JobNotFoundError
 
         # Check job exists and get its status
         job = self.get_job(job_id)
@@ -442,16 +436,13 @@ class Database:
         # Only allow deleting completed, failed, or cancelled jobs
         if job["status"] in (JobStatus.PENDING, JobStatus.RUNNING):
             raise GoldfishError(
-                f"Cannot delete {job['status']} job. "
-                f"Only completed, failed, or cancelled jobs can be deleted."
+                f"Cannot delete {job['status']} job. Only completed, failed, or cancelled jobs can be deleted."
             )
 
         # Delete atomically with transaction
         with self.transaction() as conn:
             # Count and delete job_inputs
-            inputs_result = conn.execute(
-                "SELECT COUNT(*) FROM job_inputs WHERE job_id = ?", (job_id,)
-            ).fetchone()
+            inputs_result = conn.execute("SELECT COUNT(*) FROM job_inputs WHERE job_id = ?", (job_id,)).fetchone()
             inputs_count = inputs_result[0] if inputs_result else 0
 
             conn.execute("DELETE FROM job_inputs WHERE job_id = ?", (job_id,))
@@ -463,8 +454,8 @@ class Database:
 
     def list_jobs(
         self,
-        status: Optional[str] = None,
-        workspace: Optional[str] = None,
+        status: str | None = None,
+        workspace: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[JobRow]:
@@ -485,12 +476,12 @@ class Database:
 
         with self._conn() as conn:
             rows = conn.execute(query, params).fetchall()
-            return [dict(row) for row in rows]
+            return [cast(JobRow, dict(row)) for row in rows]
 
     def count_jobs(
         self,
-        status: Optional[str] = None,
-        workspace: Optional[str] = None,
+        status: str | None = None,
+        workspace: str | None = None,
     ) -> int:
         """Count jobs matching filters (for pagination)."""
         query = "SELECT COUNT(*) FROM jobs WHERE 1=1"
@@ -505,7 +496,8 @@ class Database:
 
         with self._conn() as conn:
             result = conn.execute(query, params).fetchone()
-            return result[0] if result else 0
+            count: int = result[0] if result else 0
+            return count
 
     def get_active_jobs(self) -> list[JobRow]:
         """Get all running/pending jobs."""
@@ -513,7 +505,7 @@ class Database:
             rows = conn.execute(
                 "SELECT * FROM jobs WHERE status IN ('pending', 'running') ORDER BY started_at DESC"
             ).fetchall()
-            return [dict(row) for row in rows]
+            return [cast(JobRow, dict(row)) for row in rows]
 
     # --- Job inputs ---
 
@@ -540,7 +532,7 @@ class Database:
                 """,
                 (job_id,),
             ).fetchall()
-            return [dict(row) for row in rows]
+            return [cast(JobInputWithSource, dict(row)) for row in rows]
 
     def create_job_with_inputs(
         self,
@@ -548,9 +540,9 @@ class Database:
         workspace: str,
         snapshot_id: str,
         script: str,
-        experiment_dir: Optional[str] = None,
-        inputs: Optional[dict[str, str]] = None,
-        metadata: Optional[dict] = None,
+        experiment_dir: str | None = None,
+        inputs: dict[str, str] | None = None,
+        metadata: dict | None = None,
     ) -> None:
         """Create a job and record its inputs atomically.
 
@@ -565,7 +557,7 @@ class Database:
             inputs: Map of input_name -> source_id
             metadata: Additional metadata to store
         """
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
         metadata_json = json.dumps(metadata) if metadata else None
 
         with self.transaction() as conn:
@@ -599,7 +591,7 @@ class Database:
             workspace: Workspace name
             goal: Goal description
         """
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
 
         with self._conn() as conn:
             conn.execute(
@@ -613,7 +605,7 @@ class Database:
                 (workspace, goal, timestamp, timestamp),
             )
 
-    def get_workspace_goal(self, workspace: str) -> Optional[str]:
+    def get_workspace_goal(self, workspace: str) -> str | None:
         """Get the goal for a workspace.
 
         Args:
@@ -672,9 +664,9 @@ class Database:
     def create_workspace_lineage(
         self,
         workspace_name: str,
-        parent_workspace: Optional[str] = None,
-        parent_version: Optional[str] = None,
-        description: Optional[str] = None,
+        parent_workspace: str | None = None,
+        parent_version: str | None = None,
+        description: str | None = None,
     ) -> None:
         """Record workspace creation in lineage.
 
@@ -684,7 +676,7 @@ class Database:
             parent_version: Version branched from
             description: Workspace description
         """
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
 
         with self._conn() as conn:
             conn.execute(
@@ -696,7 +688,7 @@ class Database:
                 (workspace_name, parent_workspace, parent_version, timestamp, description),
             )
 
-    def get_workspace_lineage(self, workspace_name: str) -> Optional[dict]:
+    def get_workspace_lineage(self, workspace_name: str) -> dict | None:
         """Get workspace lineage information.
 
         Args:
@@ -735,9 +727,7 @@ class Database:
             List of workspace lineage dicts
         """
         with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM workspace_lineage ORDER BY created_at DESC"
-            ).fetchall()
+            rows = conn.execute("SELECT * FROM workspace_lineage ORDER BY created_at DESC").fetchall()
             return [dict(row) for row in rows]
 
     def get_workspace_branches(self, parent_workspace: str) -> list[dict]:
@@ -765,8 +755,8 @@ class Database:
         git_tag: str,
         git_sha: str,
         created_by: str,
-        job_id: Optional[str] = None,
-        description: Optional[str] = None,
+        job_id: str | None = None,
+        description: str | None = None,
     ) -> None:
         """Create a new workspace version.
 
@@ -779,7 +769,7 @@ class Database:
             job_id: Job that triggered version (if created_by='run')
             description: Version description
         """
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
 
         with self._conn() as conn:
             conn.execute(
@@ -791,7 +781,7 @@ class Database:
                 (workspace_name, version, git_tag, git_sha, timestamp, created_by, job_id, description),
             )
 
-    def get_version(self, workspace_name: str, version: str) -> Optional[dict]:
+    def get_version(self, workspace_name: str, version: str) -> dict | None:
         """Get a specific workspace version.
 
         Args:
@@ -831,7 +821,7 @@ class Database:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def get_latest_version(self, workspace_name: str) -> Optional[dict]:
+    def get_latest_version(self, workspace_name: str) -> dict | None:
         """Get the most recent version for a workspace.
 
         Args:
@@ -872,16 +862,16 @@ class Database:
         workspace_name: str,
         version: str,
         stage_name: str,
-        pipeline_run_id: Optional[str] = None,
-        pipeline_name: Optional[str] = None,
-        job_id: Optional[str] = None,
-        profile: Optional[str] = None,
-        hints: Optional[dict] = None,
-        config: Optional[dict] = None,
-        config_override: Optional[dict] = None,
-        inputs: Optional[dict] = None,
-        backend_type: Optional[str] = None,
-        backend_handle: Optional[str] = None,
+        pipeline_run_id: str | None = None,
+        pipeline_name: str | None = None,
+        job_id: str | None = None,
+        profile: str | None = None,
+        hints: dict | None = None,
+        config: dict | None = None,
+        config_override: dict | None = None,
+        inputs: dict | None = None,
+        backend_type: str | None = None,
+        backend_handle: str | None = None,
     ) -> None:
         """Create a new stage run.
 
@@ -900,7 +890,7 @@ class Database:
             backend_type: local|gce
             backend_handle: container_id or instance_name for cancel/logs
         """
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(UTC).isoformat()
         effective_config = config_override if config_override is not None else config
         if effective_config is not None:
             config_json = json.dumps(effective_config)
@@ -939,12 +929,12 @@ class Database:
         self,
         stage_run_id: str,
         status: str,
-        completed_at: Optional[str] = None,
-        log_uri: Optional[str] = None,
-        artifact_uri: Optional[str] = None,
-        progress: Optional[str] = None,
-        outputs_json: Optional[dict] = None,
-        error: Optional[str] = None,
+        completed_at: str | None = None,
+        log_uri: str | None = None,
+        artifact_uri: str | None = None,
+        progress: str | None = None,
+        outputs_json: dict | None = None,
+        error: str | None = None,
     ) -> None:
         """Update stage run status.
 
@@ -985,7 +975,7 @@ class Database:
         with self._conn() as conn:
             conn.execute(query, params)
 
-    def get_stage_run(self, stage_run_id: str) -> Optional[dict]:
+    def get_stage_run(self, stage_run_id: str) -> dict | None:
         """Get a stage run by ID.
 
         Args:
@@ -1003,10 +993,10 @@ class Database:
 
     def list_stage_runs(
         self,
-        workspace_name: Optional[str] = None,
-        stage_name: Optional[str] = None,
-        status: Optional[str] = None,
-        pipeline_run_id: Optional[str] = None,
+        workspace_name: str | None = None,
+        stage_name: str | None = None,
+        status: str | None = None,
+        pipeline_run_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
@@ -1047,10 +1037,10 @@ class Database:
 
     def list_stage_runs_with_total(
         self,
-        workspace_name: Optional[str] = None,
-        stage_name: Optional[str] = None,
-        status: Optional[str] = None,
-        pipeline_run_id: Optional[str] = None,
+        workspace_name: str | None = None,
+        stage_name: str | None = None,
+        status: str | None = None,
+        pipeline_run_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
@@ -1080,10 +1070,10 @@ class Database:
 
     def count_stage_runs(
         self,
-        workspace_name: Optional[str] = None,
-        stage_name: Optional[str] = None,
-        status: Optional[str] = None,
-        pipeline_run_id: Optional[str] = None,
+        workspace_name: str | None = None,
+        stage_name: str | None = None,
+        status: str | None = None,
+        pipeline_run_id: str | None = None,
     ) -> int:
         """Count stage runs for pagination."""
         query = "SELECT COUNT(*) FROM stage_runs WHERE 1=1"
@@ -1104,14 +1094,15 @@ class Database:
 
         with self._conn() as conn:
             row = conn.execute(query, params).fetchone()
-            return row[0] if row else 0
+            count: int = row[0] if row else 0
+            return count
 
     def get_latest_stage_run(
         self,
         workspace_name: str,
         stage_name: str,
-        status: Optional[str] = None,
-    ) -> Optional[dict]:
+        status: str | None = None,
+    ) -> dict | None:
         """Get the most recent stage run for a workspace and stage.
 
         Args:
@@ -1146,7 +1137,7 @@ class Database:
         signal_name: str,
         signal_type: str,
         storage_location: str,
-        size_bytes: Optional[int] = None,
+        size_bytes: int | None = None,
         is_artifact: bool = False,
     ) -> None:
         """Add a signal produced by a stage run.
@@ -1186,7 +1177,7 @@ class Database:
                 (backend_type, backend_handle, stage_run_id),
             )
 
-    def get_signal(self, stage_run_id: str, signal_name: str) -> Optional[dict]:
+    def get_signal(self, stage_run_id: str, signal_name: str) -> dict | None:
         """Get a specific signal.
 
         Args:
@@ -1208,9 +1199,9 @@ class Database:
 
     def list_signals(
         self,
-        stage_run_id: Optional[str] = None,
-        consumed_by: Optional[str] = None,
-        is_artifact: Optional[bool] = None,
+        stage_run_id: str | None = None,
+        consumed_by: str | None = None,
+        is_artifact: bool | None = None,
     ) -> list[dict]:
         """List signals with optional filters.
 

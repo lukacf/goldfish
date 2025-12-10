@@ -4,23 +4,25 @@ Provides standard resource profiles for common ML workloads, abstracting away
 GCE machine types, zones, and disk configurations from Claude.
 """
 
-from typing import Any, Dict, List, Optional
 from copy import deepcopy
+from typing import Any
 
 
 class ProfileNotFoundError(Exception):
     """Raised when a profile name is not found."""
+
     pass
 
 
 class ProfileValidationError(Exception):
     """Raised when a profile has invalid structure."""
+
     pass
 
 
 # Built-in resource profiles optimized for ML workloads
 # Based on legacy infra/gcp.yaml
-BUILTIN_PROFILES: Dict[str, Dict[str, Any]] = {
+BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
     # CPU-only profiles
     "cpu-small": {
         "machine_type": "n2-standard-4",
@@ -69,7 +71,6 @@ BUILTIN_PROFILES: Dict[str, Dict[str, Any]] = {
             "mode": "rw",
         },
     },
-
     # H100 GPU profiles
     "h100-spot": {
         "machine_type": "a3-highgpu-1g",
@@ -121,7 +122,6 @@ BUILTIN_PROFILES: Dict[str, Dict[str, Any]] = {
             "mode": "rw",
         },
     },
-
     # A100 GPU profiles
     "a100-spot": {
         "machine_type": "a2-highgpu-1g",
@@ -176,7 +176,7 @@ BUILTIN_PROFILES: Dict[str, Dict[str, Any]] = {
 }
 
 
-def get_builtin_profile(name: str) -> Dict[str, Any]:
+def get_builtin_profile(name: str) -> dict[str, Any]:
     """Get a built-in profile by name.
 
     Args:
@@ -190,13 +190,11 @@ def get_builtin_profile(name: str) -> Dict[str, Any]:
     """
     if name not in BUILTIN_PROFILES:
         available = ", ".join(sorted(BUILTIN_PROFILES.keys()))
-        raise ProfileNotFoundError(
-            f"Profile '{name}' not found. Available profiles: {available}"
-        )
+        raise ProfileNotFoundError(f"Profile '{name}' not found. Available profiles: {available}")
     return deepcopy(BUILTIN_PROFILES[name])
 
 
-def validate_profile(profile: Dict[str, Any]) -> None:
+def validate_profile(profile: dict[str, Any]) -> None:
     """Validate profile structure.
 
     Args:
@@ -218,7 +216,7 @@ def validate_profile(profile: Dict[str, Any]) -> None:
         raise ProfileValidationError("Profile 'gpu' must be a dictionary")
 
 
-def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Deep merge two dictionaries, with override taking precedence.
 
     Args:
@@ -247,7 +245,7 @@ class ProfileResolver:
     Handles merging built-in profiles with user-defined overrides from goldfish.yaml.
     """
 
-    def __init__(self, profile_overrides: Optional[Dict[str, Dict[str, Any]]] = None):
+    def __init__(self, profile_overrides: dict[str, dict[str, Any]] | None = None):
         """Initialize profile resolver.
 
         Args:
@@ -255,7 +253,7 @@ class ProfileResolver:
         """
         self.profile_overrides = profile_overrides or {}
 
-    def resolve(self, name: str) -> Dict[str, Any]:
+    def resolve(self, name: str) -> dict[str, Any]:
         """Resolve a profile by name, applying any overrides.
 
         Args:
@@ -277,9 +275,7 @@ class ProfileResolver:
         # Get built-in profile as base
         if name not in BUILTIN_PROFILES:
             available = ", ".join(sorted(self.list_profiles()))
-            raise ProfileNotFoundError(
-                f"Profile '{name}' not found. Available profiles: {available}"
-            )
+            raise ProfileNotFoundError(f"Profile '{name}' not found. Available profiles: {available}")
 
         profile = get_builtin_profile(name)
 
@@ -290,7 +286,7 @@ class ProfileResolver:
         validate_profile(profile)
         return profile
 
-    def list_profiles(self) -> List[str]:
+    def list_profiles(self) -> list[str]:
         """List all available profile names (built-in + custom).
 
         Returns:

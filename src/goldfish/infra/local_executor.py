@@ -3,7 +3,6 @@
 import json
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 from goldfish.errors import GoldfishError
 
@@ -18,8 +17,8 @@ class LocalExecutor:
         entrypoint_script: str,
         stage_config: dict,
         work_dir: Path,
-        inputs_dir: Optional[Path] = None,
-        outputs_dir: Optional[Path] = None
+        inputs_dir: Path | None = None,
+        outputs_dir: Path | None = None,
     ) -> str:
         """Launch Docker container for stage run.
 
@@ -42,17 +41,24 @@ class LocalExecutor:
 
         # Build docker run command
         docker_cmd = [
-            "docker", "run",
-            "--name", stage_run_id,
+            "docker",
+            "run",
+            "--name",
+            stage_run_id,
             "--detach",  # Run in background
         ]
 
         # SECURITY: Add resource limits to prevent DoS
-        docker_cmd.extend([
-            "--memory", "4g",  # Limit memory to 4GB
-            "--cpus", "2.0",   # Limit to 2 CPUs
-            "--pids-limit", "100",  # Limit number of processes
-        ])
+        docker_cmd.extend(
+            [
+                "--memory",
+                "4g",  # Limit memory to 4GB
+                "--cpus",
+                "2.0",  # Limit to 2 CPUs
+                "--pids-limit",
+                "100",  # Limit number of processes
+            ]
+        )
 
         # SECURITY: Run as non-root user (UID 1000)
         docker_cmd.extend(["--user", "1000:1000"])
@@ -77,27 +83,17 @@ class LocalExecutor:
         docker_cmd.extend(["-v", f"{entrypoint_path}:/entrypoint.sh:ro"])
 
         # Image and command
-        docker_cmd.extend([
-            image_tag,
-            "/bin/bash", "/entrypoint.sh"
-        ])
+        docker_cmd.extend([image_tag, "/bin/bash", "/entrypoint.sh"])
 
         # Launch container
         try:
-            result = subprocess.Popen(
-                docker_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
+            subprocess.Popen(docker_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
             # Container launches in detached mode, return immediately
             return stage_run_id
 
-        except FileNotFoundError:
-            raise GoldfishError(
-                "Docker not found. Please install Docker to run containers."
-            )
+        except FileNotFoundError as err:
+            raise GoldfishError("Docker not found. Please install Docker to run containers.") from err
 
     def get_container_status(self, container_id: str) -> str:
         """Get status of running container.
@@ -109,18 +105,14 @@ class LocalExecutor:
             Status: "running", "completed", "failed", or "not_found"
         """
         try:
-            result = subprocess.run(
-                ["docker", "inspect", container_id],
-                capture_output=True,
-                text=True,
-                check=False
-            )
+            result = subprocess.run(["docker", "inspect", container_id], capture_output=True, text=True, check=False)
 
             if result.returncode != 0:
                 return "not_found"
 
             # Parse docker inspect output
             import json
+
             inspect_data = json.loads(result.stdout)
 
             if not inspect_data:
@@ -135,12 +127,12 @@ class LocalExecutor:
                 exit_code = state.get("ExitCode", 1)
                 return "completed" if exit_code == 0 else "failed"
             else:
-                return status
+                return str(status)
 
         except Exception as e:
-            raise GoldfishError(f"Failed to get container status: {e}")
+            raise GoldfishError(f"Failed to get container status: {e}") from e
 
-    def get_container_logs(self, container_id: str, tail_lines: int = 200, since: Optional[str] = None) -> str:
+    def get_container_logs(self, container_id: str, tail_lines: int = 200, since: str | None = None) -> str:
         """Retrieve logs from container (supports tail and since).
 
         Args:
@@ -152,17 +144,12 @@ class LocalExecutor:
         if since:
             cmd.extend(["--since", since])
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=False
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
             return result.stdout
 
         except Exception as e:
-            raise GoldfishError(f"Failed to get container logs: {e}")
+            raise GoldfishError(f"Failed to get container logs: {e}") from e
 
     def stop_container(self, container_id: str) -> None:
         """Stop running container.
@@ -171,14 +158,10 @@ class LocalExecutor:
             container_id: Container identifier
         """
         try:
-            subprocess.run(
-                ["docker", "stop", container_id],
-                capture_output=True,
-                check=False
-            )
+            subprocess.run(["docker", "stop", container_id], capture_output=True, check=False)
 
         except Exception as e:
-            raise GoldfishError(f"Failed to stop container: {e}")
+            raise GoldfishError(f"Failed to stop container: {e}") from e
 
     def remove_container(self, container_id: str) -> None:
         """Remove stopped container.
@@ -187,11 +170,7 @@ class LocalExecutor:
             container_id: Container identifier
         """
         try:
-            subprocess.run(
-                ["docker", "rm", container_id],
-                capture_output=True,
-                check=False
-            )
+            subprocess.run(["docker", "rm", container_id], capture_output=True, check=False)
 
         except Exception as e:
-            raise GoldfishError(f"Failed to remove container: {e}")
+            raise GoldfishError(f"Failed to remove container: {e}") from e

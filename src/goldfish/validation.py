@@ -13,7 +13,7 @@ add validation here first.
 """
 
 import re
-from typing import Optional
+from pathlib import Path
 
 from goldfish.errors import GoldfishError
 
@@ -161,7 +161,7 @@ _DANGEROUS_CHARS = set(";|&$`\"'\\<>*?[]{}~!\n\t\r")
 _PATH_TRAVERSAL_PATTERNS = ["..", "//"]
 
 
-def _contains_dangerous_chars(value: str) -> Optional[str]:
+def _contains_dangerous_chars(value: str) -> str | None:
     """Check if string contains shell metacharacters.
 
     Returns the first dangerous character found, or None if clean.
@@ -204,9 +204,7 @@ def validate_workspace_name(name: str) -> None:
     # Check for dangerous characters first (better error message)
     dangerous = _contains_dangerous_chars(name)
     if dangerous:
-        raise InvalidWorkspaceNameError(
-            name, f"contains invalid character: '{dangerous}'"
-        )
+        raise InvalidWorkspaceNameError(name, f"contains invalid character: '{dangerous}'")
 
     # Check for whitespace
     if " " in name:
@@ -218,20 +216,14 @@ def validate_workspace_name(name: str) -> None:
 
     # Check for leading/trailing special chars
     if name.startswith(("-", "_", ".")):
-        raise InvalidWorkspaceNameError(
-            name, "name must start with a letter or number"
-        )
+        raise InvalidWorkspaceNameError(name, "name must start with a letter or number")
 
     if name.endswith(("-", "_")):
-        raise InvalidWorkspaceNameError(
-            name, "name must end with a letter or number"
-        )
+        raise InvalidWorkspaceNameError(name, "name must end with a letter or number")
 
     # Final regex check
     if not _NAME_PATTERN.match(name):
-        raise InvalidWorkspaceNameError(
-            name, "name must contain only letters, numbers, hyphens, and underscores"
-        )
+        raise InvalidWorkspaceNameError(name, "name must contain only letters, numbers, hyphens, and underscores")
 
 
 def validate_source_name(name: str) -> None:
@@ -248,7 +240,7 @@ def validate_source_name(name: str) -> None:
     try:
         validate_workspace_name(name)
     except InvalidWorkspaceNameError as e:
-        raise InvalidSourceNameError(name, e.message.split(": ", 1)[-1])
+        raise InvalidSourceNameError(name, e.message.split(": ", 1)[-1]) from e
 
 
 def validate_script_path(path: str) -> None:
@@ -272,9 +264,7 @@ def validate_script_path(path: str) -> None:
     # Check for dangerous characters
     dangerous = _contains_dangerous_chars(path)
     if dangerous:
-        raise InvalidScriptPathError(
-            path, f"contains invalid character: '{dangerous}'"
-        )
+        raise InvalidScriptPathError(path, f"contains invalid character: '{dangerous}'")
 
     # Check for whitespace
     if " " in path:
@@ -290,15 +280,11 @@ def validate_script_path(path: str) -> None:
 
     # Check extension
     if not (path.endswith(".py") or path.endswith(".sh")):
-        raise InvalidScriptPathError(
-            path, "must end with .py or .sh"
-        )
+        raise InvalidScriptPathError(path, "must end with .py or .sh")
 
     # Final pattern check
     if not _SCRIPT_PATH_PATTERN.match(path):
-        raise InvalidScriptPathError(
-            path, "contains invalid characters"
-        )
+        raise InvalidScriptPathError(path, "contains invalid characters")
 
 
 def validate_slot_name(slot: str, valid_slots: list[str]) -> None:
@@ -317,8 +303,7 @@ def validate_slot_name(slot: str, valid_slots: list[str]) -> None:
     # Check for dangerous characters (defense in depth)
     dangerous = _contains_dangerous_chars(slot)
     if dangerous:
-        raise InvalidSlotNameError(slot, f"contains invalid character: '{dangerous}'"
-        )
+        raise InvalidSlotNameError(slot, f"contains invalid character: '{dangerous}'")
 
     # Check for path traversal
     if _contains_path_traversal(slot) or "/" in slot:
@@ -326,9 +311,7 @@ def validate_slot_name(slot: str, valid_slots: list[str]) -> None:
 
     # Whitelist check
     if slot not in valid_slots:
-        raise InvalidSlotNameError(
-            slot, f"must be one of: {', '.join(valid_slots)}"
-        )
+        raise InvalidSlotNameError(slot, f"must be one of: {', '.join(valid_slots)}")
 
 
 def validate_ref_name(ref: str) -> None:
@@ -369,21 +352,16 @@ def validate_snapshot_id(snapshot_id: str) -> None:
     # Check for dangerous characters first (better error message)
     dangerous = _contains_dangerous_chars(snapshot_id)
     if dangerous:
-        raise InvalidSnapshotIdError(
-            snapshot_id, f"contains invalid character: '{dangerous}'"
-        )
+        raise InvalidSnapshotIdError(snapshot_id, f"contains invalid character: '{dangerous}'")
 
     # Check for path traversal
     if _contains_path_traversal(snapshot_id) or "/" in snapshot_id:
-        raise InvalidSnapshotIdError(
-            snapshot_id, "cannot contain path components"
-        )
+        raise InvalidSnapshotIdError(snapshot_id, "cannot contain path components")
 
     # Must match exact format
     if not _SNAPSHOT_ID_PATTERN.match(snapshot_id):
         raise InvalidSnapshotIdError(
-            snapshot_id,
-            "must match format snap-{hex}-{YYYYMMDD}-{HHMMSS} (e.g., snap-a1b2c3d-20251205-143000)"
+            snapshot_id, "must match format snap-{hex}-{YYYYMMDD}-{HHMMSS} (e.g., snap-a1b2c3d-20251205-143000)"
         )
 
 
@@ -410,9 +388,7 @@ def validate_output_name(name: str) -> None:
     # Check for dangerous characters
     dangerous = _contains_dangerous_chars(name)
     if dangerous:
-        raise InvalidOutputNameError(
-            name, f"contains invalid character: '{dangerous}'"
-        )
+        raise InvalidOutputNameError(name, f"contains invalid character: '{dangerous}'")
 
     # Check for path components (slashes, backslashes, traversal)
     if "/" in name or "\\" in name:
@@ -423,9 +399,7 @@ def validate_output_name(name: str) -> None:
 
     # Must match pattern
     if not _OUTPUT_NAME_PATTERN.match(name):
-        raise InvalidOutputNameError(
-            name, "must contain only letters, numbers, hyphens, and underscores"
-        )
+        raise InvalidOutputNameError(name, "must contain only letters, numbers, hyphens, and underscores")
 
 
 def validate_from_ref(ref: str) -> None:
@@ -472,7 +446,7 @@ def validate_from_ref(ref: str) -> None:
     except InvalidWorkspaceNameError as e:
         # Re-raise with proper error type
         reason = e.message.split(": ", 1)[-1] if ": " in e.message else str(e)
-        raise InvalidRefNameError(ref, reason)
+        raise InvalidRefNameError(ref, reason) from e
 
 
 def validate_job_id(job_id: str) -> None:
@@ -493,22 +467,15 @@ def validate_job_id(job_id: str) -> None:
     # Check for dangerous characters first (better error message)
     dangerous = _contains_dangerous_chars(job_id)
     if dangerous:
-        raise InvalidJobIdError(
-            job_id, f"contains invalid character: '{dangerous}'"
-        )
+        raise InvalidJobIdError(job_id, f"contains invalid character: '{dangerous}'")
 
     # Check for path traversal
     if _contains_path_traversal(job_id) or "/" in job_id:
-        raise InvalidJobIdError(
-            job_id, "cannot contain path components"
-        )
+        raise InvalidJobIdError(job_id, "cannot contain path components")
 
     # Must match exact format
     if not _JOB_ID_PATTERN.match(job_id):
-        raise InvalidJobIdError(
-            job_id,
-            "must match format job-{8 hex chars} (e.g., job-a1b2c3d4)"
-        )
+        raise InvalidJobIdError(job_id, "must match format job-{8 hex chars} (e.g., job-a1b2c3d4)")
 
 
 def validate_log_path(log_uri: str, project_root: "Path") -> "Path":
@@ -553,34 +520,28 @@ def validate_log_path(log_uri: str, project_root: "Path") -> "Path":
 
     # SECURITY: Check for symlinks before resolving
     if log_path.exists() and log_path.is_symlink():
-        raise InvalidLogPathError(
-            log_uri, "log path cannot be a symlink (security risk)"
-        )
+        raise InvalidLogPathError(log_uri, "log path cannot be a symlink (security risk)")
 
     # Resolve path
     try:
         log_path = log_path.resolve(strict=False)  # strict=False allows non-existent paths
     except (OSError, RuntimeError) as e:
-        raise InvalidLogPathError(log_uri, f"invalid path: {e}")
+        raise InvalidLogPathError(log_uri, f"invalid path: {e}") from e
 
     project_resolved = project_root.resolve()
 
     # Check that resolved path is within project_root
     try:
         log_path.relative_to(project_resolved)
-    except ValueError:
-        raise InvalidLogPathError(
-            log_uri, f"path must be within project directory (got: {log_path})"
-        )
+    except ValueError as e:
+        raise InvalidLogPathError(log_uri, f"path must be within project directory (got: {log_path})") from e
 
     # Verify no intermediate symlinks in the path hierarchy
     for parent in log_path.parents:
         if parent == project_resolved or parent == project_resolved.parent:
             break
         if parent.exists() and parent.is_symlink():
-            raise InvalidLogPathError(
-                log_uri, f"path contains symlink: {parent}"
-            )
+            raise InvalidLogPathError(log_uri, f"path contains symlink: {parent}")
 
     return log_path
 
@@ -604,12 +565,8 @@ def validate_artifact_uri(artifact_uri: str) -> None:
 
     # Must be GCS URI
     if not artifact_uri.startswith("gs://"):
-        raise InvalidArtifactUriError(
-            artifact_uri, "artifact URI must start with gs://"
-        )
+        raise InvalidArtifactUriError(artifact_uri, "artifact URI must start with gs://")
 
     # Check for path traversal (just ".." - gs:// contains // which is fine)
     if ".." in artifact_uri:
-        raise InvalidArtifactUriError(
-            artifact_uri, "cannot contain path traversal"
-        )
+        raise InvalidArtifactUriError(artifact_uri, "cannot contain path traversal")

@@ -3,7 +3,6 @@
 These provide type safety for dict objects returned from database queries.
 """
 
-from typing import Optional
 from typing_extensions import TypedDict
 
 
@@ -13,10 +12,10 @@ class AuditRow(TypedDict):
     id: int
     timestamp: str
     operation: str
-    slot: Optional[str]
-    workspace: Optional[str]
+    slot: str | None
+    workspace: str | None
     reason: str
-    details: Optional[str]  # JSON string
+    details: str | None  # JSON string
 
 
 class SourceRow(TypedDict):
@@ -24,13 +23,13 @@ class SourceRow(TypedDict):
 
     id: str
     name: str
-    description: Optional[str]
+    description: str | None
     created_at: str
     created_by: str
     gcs_location: str
-    size_bytes: Optional[int]
+    size_bytes: int | None
     status: str
-    metadata: Optional[str]  # JSON string
+    metadata: str | None  # JSON string
 
 
 class LineageRow(TypedDict):
@@ -38,8 +37,8 @@ class LineageRow(TypedDict):
 
     id: int
     source_id: str
-    parent_source_id: Optional[str]
-    job_id: Optional[str]
+    parent_source_id: str | None
+    job_id: str | None
     created_at: str
 
 
@@ -50,14 +49,14 @@ class JobRow(TypedDict):
     workspace: str
     snapshot_id: str
     script: str
-    experiment_dir: Optional[str]
+    experiment_dir: str | None
     status: str
     started_at: str
-    completed_at: Optional[str]
-    log_uri: Optional[str]
-    artifact_uri: Optional[str]
-    error: Optional[str]
-    metadata: Optional[str]  # JSON string
+    completed_at: str | None
+    log_uri: str | None
+    artifact_uri: str | None
+    error: str | None
+    metadata: str | None  # JSON string
 
 
 class JobInputRow(TypedDict):

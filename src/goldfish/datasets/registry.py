@@ -1,9 +1,8 @@
 """Dataset registry for project-level data sources."""
 
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from goldfish.config import GoldfishConfig
 from goldfish.db.database import Database
@@ -30,8 +29,8 @@ class DatasetRegistry:
         source: str,
         description: str,
         format: str,
-        metadata: Optional[dict] = None,
-        size_bytes: Optional[int] = None,
+        metadata: dict | None = None,
+        size_bytes: int | None = None,
     ) -> SourceInfo:
         """Register a project-level dataset.
 
@@ -71,10 +70,7 @@ class DatasetRegistry:
             # Use GCS path directly
             gcs_location = source
         else:
-            raise GoldfishError(
-                f"Invalid source format: {source}. "
-                f"Must start with 'local:' or 'gs://'"
-            )
+            raise GoldfishError(f"Invalid source format: {source}. Must start with 'local:' or 'gs://'")
 
         # Register in database
         self.db.create_source(
@@ -105,8 +101,7 @@ class DatasetRegistry:
         """
         if not self.config.gcs:
             raise GoldfishError(
-                "GCS not configured. Cannot upload local datasets. "
-                "Add GCS configuration to goldfish.yaml"
+                "GCS not configured. Cannot upload local datasets. Add GCS configuration to goldfish.yaml"
             )
 
         bucket = self.config.gcs.bucket
@@ -130,19 +125,16 @@ class DatasetRegistry:
 
             if result.returncode != 0:
                 error_msg = result.stderr.decode() if result.stderr else "Unknown error"
-                raise GoldfishError(
-                    f"Failed to upload dataset to GCS: {error_msg}"
-                )
+                raise GoldfishError(f"Failed to upload dataset to GCS: {error_msg}")
 
             return gcs_path
 
-        except FileNotFoundError:
+        except FileNotFoundError as err:
             raise GoldfishError(
-                "gsutil command not found. Install Google Cloud SDK: "
-                "https://cloud.google.com/sdk/docs/install"
-            )
+                "gsutil command not found. Install Google Cloud SDK: https://cloud.google.com/sdk/docs/install"
+            ) from err
 
-    def list_datasets(self, status: Optional[str] = None) -> list[SourceInfo]:
+    def list_datasets(self, status: str | None = None) -> list[SourceInfo]:
         """List all registered datasets.
 
         Args:
