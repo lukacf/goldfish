@@ -140,18 +140,20 @@ class LocalExecutor:
         except Exception as e:
             raise GoldfishError(f"Failed to get container status: {e}")
 
-    def get_container_logs(self, container_id: str) -> str:
-        """Retrieve logs from container.
+    def get_container_logs(self, container_id: str, tail_lines: int = 200, since: Optional[str] = None) -> str:
+        """Retrieve logs from container (supports tail and since).
 
         Args:
             container_id: Container identifier
-
-        Returns:
-            Container logs as string
+            tail_lines: number of lines from the end
+            since: ISO8601 timestamp or Docker-acceptable since string
         """
+        cmd = ["docker", "logs", container_id, "--tail", str(tail_lines)]
+        if since:
+            cmd.extend(["--since", since])
         try:
             result = subprocess.run(
-                ["docker", "logs", container_id],
+                cmd,
                 capture_output=True,
                 text=True,
                 check=False

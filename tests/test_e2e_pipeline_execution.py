@@ -29,9 +29,11 @@ from goldfish.jobs.stage_executor import StageExecutor
 @pytest.fixture
 def pipeline_project():
     """Create a full project setup for pipeline execution testing."""
-    # Create temp directory
+    # Create outer temp directory containing both project and dev repo as siblings
     tmp = tempfile.mkdtemp(prefix="goldfish_pipeline_e2e_")
-    project_root = Path(tmp)
+    tmp_root = Path(tmp)
+    project_root = tmp_root / "project"
+    project_root.mkdir()
 
     try:
         # Create project structure
@@ -40,9 +42,9 @@ def pipeline_project():
         (project_root / "experiments").mkdir()
         (project_root / "data").mkdir()
 
-        # Initialize dev repo
-        dev_repo = project_root / ".goldfish" / "dev"
-        dev_repo.mkdir(parents=True)
+        # Initialize dev repo as sibling to project
+        dev_repo = tmp_root / "project-dev"
+        dev_repo.mkdir()
         subprocess.run(["git", "init"], cwd=dev_repo, capture_output=True, check=True)
         subprocess.run(
             ["git", "config", "user.email", "test@example.com"],
@@ -65,10 +67,10 @@ def pipeline_project():
             cwd=dev_repo, capture_output=True, check=True
         )
 
-        # Create config
+        # Create config - dev_repo_path is relative to project_root.parent
         config = GoldfishConfig(
             project_name="pipeline-e2e-test",
-            dev_repo_path=".goldfish/dev",
+            dev_repo_path="project-dev",  # Sibling of project (relative to parent)
             workspaces_dir="workspaces",
             slots=["w1", "w2", "w3"],
             state_md=StateMdConfig(path="STATE.md", max_recent_actions=15),

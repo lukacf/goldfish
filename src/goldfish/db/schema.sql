@@ -129,19 +129,29 @@ CREATE INDEX IF NOT EXISTS idx_workspace_versions_workspace ON workspace_version
 CREATE INDEX IF NOT EXISTS idx_workspace_versions_created ON workspace_versions(created_at);
 
 
--- Stage runs (individual stage executions within jobs)
+-- Stage runs (individual stage executions within pipelines)
 CREATE TABLE IF NOT EXISTS stage_runs (
     id TEXT PRIMARY KEY,              -- e.g., "stage-abc123"
-    job_id TEXT,                      -- Parent job (optional, for grouping)
+    job_id TEXT,                      -- Legacy job grouping (run_job); keep for compatibility
+    pipeline_run_id TEXT,             -- Grouping ID for pipeline invocations
     workspace_name TEXT NOT NULL,
+    pipeline_name TEXT,               -- Named pipeline file (e.g., train, inference)
     version TEXT NOT NULL,
     stage_name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     started_at TEXT NOT NULL,
     completed_at TEXT,
     log_uri TEXT,
+    artifact_uri TEXT,
+    progress TEXT,                    -- Optional progress string
+    profile TEXT,                     -- Resolved profile name
+    hints_json TEXT,                  -- JSON hints (spot_ok, priority, etc.)
+    outputs_json TEXT,                -- JSON map name -> details
+    config_json TEXT,                 -- Effective config used
+    inputs_json TEXT,                 -- Resolved inputs (URI + ref)
+    backend_type TEXT,                -- local | gce
+    backend_handle TEXT,              -- container_id or instance_name for cancel/log lookup
     error TEXT,
-    config_override TEXT,             -- JSON of config overrides
     FOREIGN KEY (workspace_name, version) REFERENCES workspace_versions(workspace_name, version)
 );
 
@@ -149,6 +159,37 @@ CREATE INDEX IF NOT EXISTS idx_stage_runs_workspace ON stage_runs(workspace_name
 CREATE INDEX IF NOT EXISTS idx_stage_runs_status ON stage_runs(status);
 CREATE INDEX IF NOT EXISTS idx_stage_runs_started ON stage_runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_stage_runs_job ON stage_runs(job_id);
+CREATE INDEX IF NOT EXISTS idx_stage_runs_pipeline_run ON stage_runs(pipeline_run_id);
+CREATE INDEX IF NOT EXISTS idx_stage_runs_ws_stage_status ON stage_runs(workspace_name, stage_name, status);
+
+-- Pipeline runs (group stages for one pipeline invocation)
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id TEXT PRIMARY KEY,              -- e.g., "prun-abc123"
+    workspace_name TEXT NOT NULL,
+    pipeline_name TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_workspace ON pipeline_runs(workspace_name);
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status);
+
+-- Pipeline stage queue (restart-safe async pipeline execution)
+CREATE TABLE IF NOT EXISTS pipeline_stage_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pipeline_run_id TEXT NOT NULL,
+    stage_name TEXT NOT NULL,
+    deps TEXT,                        -- JSON list of dependent stage names
+    status TEXT NOT NULL DEFAULT 'pending', -- pending, running, completed, failed
+    stage_run_id TEXT,                -- filled when launched
+    claimed_at TEXT,                  -- worker locking
+    FOREIGN KEY (pipeline_run_id) REFERENCES pipeline_runs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_stage_queue_run ON pipeline_stage_queue(pipeline_run_id);
+CREATE INDEX IF NOT EXISTS idx_pipeline_stage_queue_status ON pipeline_stage_queue(status);
 
 
 -- Signal lineage (tracks data flow between stages)

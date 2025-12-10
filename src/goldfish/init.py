@@ -3,6 +3,7 @@
 Creates the project structure and dev repository.
 """
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -14,6 +15,8 @@ INIT_GIT_TIMEOUT = 60
 
 from goldfish.config import (
     AuditConfig,
+    GCSConfig,
+    GCEConfig,
     GoldfishConfig,
     JobsConfig,
     StateMdConfig,
@@ -65,6 +68,26 @@ def init_project(
     goldfish_dir = project_path / ".goldfish"
     goldfish_dir.mkdir(exist_ok=True)
 
+    # Read GCS/GCE config from environment variables (optional)
+    gcs_config = None
+    gce_config = None
+
+    gcs_bucket = os.getenv("GOLDFISH_GCS_BUCKET")
+    if gcs_bucket:
+        gcs_config = GCSConfig(bucket=gcs_bucket)
+
+    gce_project = os.getenv("GOLDFISH_GCE_PROJECT")
+    if gce_project:
+        # Prefer explicit registry env, otherwise default to the project-scoped "goldfish" repo
+        artifact_registry = os.getenv(
+            "GOLDFISH_ARTIFACT_REGISTRY",
+            f"us-docker.pkg.dev/{gce_project}/goldfish",
+        )
+        gce_config = GCEConfig(
+            project_id=gce_project,
+            artifact_registry=artifact_registry,
+        )
+
     # Create config
     config = GoldfishConfig(
         project_name=project_name,
@@ -83,6 +106,8 @@ def init_project(
             backend="gce",
             experiments_dir="experiments",
         ),
+        gcs=gcs_config,
+        gce=gce_config,
         invariants=[],
     )
 
@@ -203,6 +228,25 @@ def _write_config(config: GoldfishConfig, config_path: Path) -> None:
             "experiments_dir": config.jobs.experiments_dir,
         },
     }
+
+    if config.gcs:
+        config_dict["gcs"] = {
+            "bucket": config.gcs.bucket,
+            "sources_prefix": config.gcs.sources_prefix,
+            "artifacts_prefix": config.gcs.artifacts_prefix,
+            "snapshots_prefix": config.gcs.snapshots_prefix,
+            "datasets_prefix": config.gcs.datasets_prefix,
+        }
+
+    if config.gce:
+        gce_dict = {"project_id": config.gce.project_id}
+        if config.gce.artifact_registry:
+            gce_dict["artifact_registry"] = config.gce.artifact_registry
+        if config.gce.zones:
+            gce_dict["zones"] = config.gce.zones
+        if config.gce.profile_overrides:
+            gce_dict["profile_overrides"] = config.gce.profile_overrides
+        config_dict["gce"] = gce_dict
 
     if config.invariants:
         config_dict["invariants"] = config.invariants

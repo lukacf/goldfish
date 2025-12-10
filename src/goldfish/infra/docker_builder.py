@@ -1,7 +1,10 @@
 """Docker image building for Goldfish stage execution."""
 
 import re
+import shutil
 import subprocess
+import tempfile
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -10,6 +13,11 @@ from goldfish.errors import GoldfishError
 
 class DockerBuilder:
     """Build Docker images for stage execution."""
+
+    def __init__(self, config: Optional[object] = None):
+        # Store config for backend checks (may be GoldfishConfig or partial)
+        self.config = config
+
 
     def generate_dockerfile(self, workspace_dir: Path) -> str:
         """Generate Dockerfile for workspace.
@@ -20,16 +28,21 @@ class DockerBuilder:
         Returns:
             Dockerfile content as string
         """
-        # Check for optional loaders directory
+        # Check for optional files/directories
+        has_requirements = (workspace_dir / "requirements.txt").exists()
         has_loaders = (workspace_dir / "loaders").exists()
 
-        dockerfile = f"""FROM python:3.11-slim
+        dockerfile = "FROM python:3.11-slim\n\n"
 
-# Install dependencies
+        # Install dependencies (optional)
+        if has_requirements:
+            dockerfile += """# Install dependencies
 COPY requirements.txt /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Install Goldfish IO library
+"""
+
+        dockerfile += """# Install Goldfish IO library
 # TODO: Package goldfish.io separately and install from wheel
 # For now, assume it's available in the image or mounted
 
@@ -59,6 +72,9 @@ CMD ["/bin/bash"]
     ) -> str:
         """Build Docker image for workspace.
 
+        Uses a temporary directory as build context to avoid dirtying
+        the workspace with a Dockerfile.
+
         Args:
             workspace_dir: Path to workspace directory
             workspace_name: Workspace name
@@ -74,37 +90,144 @@ CMD ["/bin/bash"]
         # Generate image tag
         image_tag = self._generate_image_tag(workspace_name, version)
 
-        # Generate Dockerfile
-        dockerfile_content = self.generate_dockerfile(workspace_dir)
-        dockerfile_path = workspace_dir / "Dockerfile"
-        dockerfile_path.write_text(dockerfile_content)
+        # Create temporary build context to avoid dirtying workspace
+        with tempfile.TemporaryDirectory(prefix="goldfish-docker-") as tmp_dir:
+            build_context = Path(tmp_dir)
 
-        # Build image
-        build_cmd = ["docker", "build", "-t", image_tag]
+            # Copy required workspace files to build context
+            if (workspace_dir / "requirements.txt").exists():
+                shutil.copy2(workspace_dir / "requirements.txt", build_context / "requirements.txt")
 
-        if not use_cache:
-            build_cmd.append("--no-cache")
+            if (workspace_dir / "modules").exists():
+                shutil.copytree(workspace_dir / "modules", build_context / "modules")
 
-        build_cmd.append(str(workspace_dir))
+            if (workspace_dir / "configs").exists():
+                shutil.copytree(workspace_dir / "configs", build_context / "configs")
+
+            if (workspace_dir / "loaders").exists():
+                shutil.copytree(workspace_dir / "loaders", build_context / "loaders")
+
+            # Generate Dockerfile in build context (not workspace)
+            dockerfile_content = self.generate_dockerfile(workspace_dir)
+            dockerfile_path = build_context / "Dockerfile"
+            dockerfile_path.write_text(dockerfile_content)
+
+            # Build image; force amd64 only when targeting GCE
+            build_cmd = ["docker", "build"]
+            backend = getattr(getattr(self.config, "jobs", None), "backend", None) if self.config else None
+            if backend == "gce":
+                build_cmd += ["--platform", "linux/amd64"]
+            build_cmd += ["-t", image_tag]
+
+            if not use_cache:
+                build_cmd.append("--no-cache")
+
+            build_cmd.append(str(build_context))
+
+            try:
+                result = subprocess.run(
+                    build_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+
+                if result.returncode != 0:
+                    raise GoldfishError(
+                        f"Docker build failed: {result.stderr}"
+                    )
+
+                return image_tag
+
+            except FileNotFoundError:
+                raise GoldfishError(
+                    "Docker not found. Please install Docker to build images."
+                )
+
+    def push_image(
+        self,
+        local_tag: str,
+        registry_url: str,
+        workspace_name: str,
+        version: str
+    ) -> str:
+        """Push Docker image to Artifact Registry.
+
+        Args:
+            local_tag: Local image tag (e.g., "goldfish-test_ws-v1")
+            registry_url: Registry URL (e.g., "us-docker.pkg.dev/project/goldfish")
+            workspace_name: Workspace name
+            version: Version identifier
+
+        Returns:
+            Full registry image tag
+
+        Raises:
+            GoldfishError: If push fails
+        """
+        # Validate registry URL format (must be host/path, no scheme)
+        if not registry_url or "://" in registry_url or "/" not in registry_url:
+            raise GoldfishError(
+                f"Invalid artifact_registry URL: {registry_url}. "
+                "Expected format: us-docker.pkg.dev/<project>/<repo>"
+            )
+
+        # Generate sanitized image name
+        sanitized_workspace = re.sub(r'[^a-z0-9._-]', '_', workspace_name.lower())
+        sanitized_version = re.sub(r'[^a-z0-9._-]', '_', version.lower())
+        image_name = f"goldfish-{sanitized_workspace}-{sanitized_version}"
+
+        # Build full registry tag
+        registry_tag = f"{registry_url}/{image_name}"
 
         try:
-            result = subprocess.run(
-                build_cmd,
+            # Configure Docker authentication with gcloud (idempotent but always validated)
+            registry_domain = registry_url.split('/')[0]
+            if not shutil.which("gcloud"):
+                raise GoldfishError("gcloud not found; configure gcloud before pushing images.")
+
+            auth_result = subprocess.run(
+                ["gcloud", "auth", "configure-docker", registry_domain, "--quiet"],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+            if auth_result.returncode != 0:
+                raise GoldfishError(
+                    f"Failed to configure Docker authentication: {auth_result.stderr}"
+                )
+
+            # Tag for registry
+            tag_result = subprocess.run(
+                ["docker", "tag", local_tag, registry_tag],
                 capture_output=True,
                 text=True,
                 check=False
             )
 
-            if result.returncode != 0:
+            if tag_result.returncode != 0:
                 raise GoldfishError(
-                    f"Docker build failed: {result.stderr}"
+                    f"Docker tag failed: {tag_result.stderr}"
                 )
 
-            return image_tag
+            # Push to registry
+            push_result = subprocess.run(
+                ["docker", "push", registry_tag],
+                capture_output=True,
+                text=True,
+                check=False
+            )
+
+            if push_result.returncode != 0:
+                raise GoldfishError(
+                    f"Docker push failed: {push_result.stderr}"
+                )
+
+            return registry_tag
 
         except FileNotFoundError:
             raise GoldfishError(
-                "Docker not found. Please install Docker to build images."
+                "Docker not found. Please install Docker to push images."
             )
 
     def _generate_image_tag(self, workspace_name: str, version: str) -> str:

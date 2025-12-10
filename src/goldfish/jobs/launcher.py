@@ -359,10 +359,12 @@ class JobLauncher:
                 self._launch_via_infra(job_id, exp_dir, script, create_run_script)
                 return
 
-        # No infra configured or found - just log
-        # In development mode, we might want to run locally
-        # For now, we'll update status to indicate it's "launched"
-        # but not actually executing
+        # No infra configured or found - fail explicitly
+        # This prevents jobs from being stuck in RUNNING forever
+        raise GoldfishError(
+            "No execution backend available. "
+            "Configure jobs.infra_path in goldfish.yaml or use run_stage() for stage execution."
+        )
 
     def _launch_via_infra(
         self, job_id: str, exp_dir: Path, script: str, create_run_script: Path

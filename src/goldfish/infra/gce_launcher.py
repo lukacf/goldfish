@@ -37,6 +37,7 @@ class GCELauncher:
         zone: str = "us-central1-a",
         bucket: Optional[str] = None,
         resources: Optional[List[Dict[str, Any]]] = None,
+        zones: Optional[List[str]] = None,
     ):
         """Initialize GCE launcher.
 
@@ -45,11 +46,13 @@ class GCELauncher:
             zone: Default GCE zone (can be overridden per launch)
             bucket: GCS bucket for logs/artifacts (required for full functionality)
             resources: Resource catalog (list of resource dicts)
+            zones: List of all available zones (for multi-zone lookups)
         """
         self.project_id = project_id
         self.default_zone = zone
         self.bucket = bucket
         self.resources = resources or []
+        self.zones = zones or [zone]  # Default to list containing just default_zone
 
     def launch_instance(
         self,
@@ -168,8 +171,11 @@ class GCELauncher:
                 == gpu_type.lower()
             ]
         else:
+            # No GPU requested - include resources with no GPU or gpu.type="none"
             filtered_resources = [
-                r for r in self.resources if not r.get("gpu", {}).get("type")
+                r for r in self.resources
+                if not r.get("gpu", {}).get("type")
+                or r.get("gpu", {}).get("type", "").lower() == "none"
             ]
 
         if not filtered_resources:
@@ -237,8 +243,8 @@ class GCELauncher:
                 f"--machine-type={machine_type}",
                 "--boot-disk-size=100GB",
                 "--boot-disk-type=pd-ssd",
-                "--image-family=cos-stable",
-                "--image-project=cos-cloud",
+                "--image-family=debian-12",
+                "--image-project=debian-cloud",
                 f"--metadata-from-file=startup-script={startup_path}",
                 "--scopes=https://www.googleapis.com/auth/cloud-platform",
                 "--quiet",
@@ -381,6 +387,9 @@ class GCELauncher:
     def get_instance_status(self, instance_name: str) -> str:
         """Get status of GCE instance.
 
+        Uses zone-agnostic lookup with instances list to handle capacity-aware
+        launches where instance may be in any zone.
+
         Args:
             instance_name: Instance identifier
 
@@ -389,13 +398,14 @@ class GCELauncher:
         """
         instance_name = self._sanitize_name(instance_name)
 
+        # FIX #19: Use zone-agnostic instance lookup
+        # This works regardless of which zone the instance was launched in
         cmd = [
             "gcloud",
             "compute",
             "instances",
-            "describe",
-            instance_name,
-            f"--zone={self.default_zone}",
+            "list",
+            f"--filter=name={instance_name}",
             "--format=value(status)",
         ]
         if self.project_id:
@@ -403,11 +413,28 @@ class GCELauncher:
 
         result = run_gcloud(cmd, check=False)
 
-        if result.returncode != 0:
+        if result.returncode == 0:
+            status = result.stdout.strip()
+            if status:  # Instance found
+                return self._map_gce_status(status, instance_name)
             return "not_found"
 
-        status = result.stdout.strip()
+        # Distinguish real errors from not-found
+        stderr = (result.stderr or "").lower()
+        if "not found" in stderr or "could not fetch resource" in stderr or not stderr:
+            return "not_found"
+        raise GoldfishError(f"Failed to query instance status: {result.stderr}")
 
+    def _map_gce_status(self, status: str, instance_name: str) -> str:
+        """Map GCE instance status to Goldfish status.
+
+        Args:
+            status: GCE status string
+            instance_name: Instance identifier
+
+        Returns:
+            Goldfish status: "running", "completed", "failed"
+        """
         # Map GCE status to Goldfish status
         if status in ("PROVISIONING", "STAGING", "RUNNING"):
             return "running"
@@ -421,6 +448,54 @@ class GCELauncher:
             return "running"
         else:
             return "failed"
+
+    def _find_instance_zone(self, instance_name: str) -> Optional[str]:
+        """Find which zone an instance is in.
+
+        Tries default zone first, then searches all configured zones.
+
+        Args:
+            instance_name: Instance identifier
+
+        Returns:
+            Zone name if found, None otherwise
+        """
+        instance_name = self._sanitize_name(instance_name)
+
+        # Try default zone first (fast path)
+        cmd = [
+            "gcloud",
+            "compute",
+            "instances",
+            "describe",
+            instance_name,
+            f"--zone={self.default_zone}",
+            "--format=value(name)",
+        ]
+        if self.project_id:
+            cmd.append(f"--project={self.project_id}")
+
+        result = run_gcloud(cmd, check=False)
+        if result.returncode == 0:
+            return self.default_zone
+
+        # Zone-agnostic lookup to avoid N calls
+        cmd_list = [
+            "gcloud",
+            "compute",
+            "instances",
+            "list",
+            f"--filter=name={instance_name}",
+            "--format=value(zone)",
+        ]
+        if self.project_id:
+            cmd_list.append(f"--project={self.project_id}")
+
+        result = run_gcloud(cmd_list, check=False)
+        if result.returncode == 0:
+            zone = result.stdout.strip()
+            return zone or None
+        return None
 
     def _get_exit_code(self, instance_name: str) -> int:
         """Get exit code from GCS.
@@ -449,7 +524,12 @@ class GCELauncher:
         except Exception:
             return 0
 
-    def get_instance_logs(self, instance_name: str) -> str:
+    def get_instance_logs(
+        self,
+        instance_name: str,
+        tail_lines: Optional[int] = None,
+        since: Optional[str] = None,
+    ) -> str:
         """Retrieve logs from GCE instance.
 
         Tries to fetch from GCS first, falls back to serial console.
@@ -460,26 +540,75 @@ class GCELauncher:
         Returns:
             Instance logs as string
         """
+        from collections import deque
+        from datetime import datetime, timezone
+
+        def _parse_dt(val: str) -> Optional[datetime]:
+            if not val:
+                return None
+            try:
+                iso = val.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(iso)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except Exception:
+                return None
+
+        def _line_ts(line: str) -> Optional[datetime]:
+            first = (line.split() or [""])[0]
+            return _parse_dt(first)
+
+        def _collect(stream, since_dt: Optional[datetime]):
+            if tail_lines:
+                buf = deque(maxlen=tail_lines)
+                for ln in stream:
+                    if since_dt:
+                        ts = _line_ts(ln)
+                        if ts and ts < since_dt:
+                            continue
+                    buf.append(ln)
+                return "".join(buf)
+            # No tail requested: keep all, optionally filter by since
+            out = []
+            for ln in stream:
+                if since_dt:
+                    ts = _line_ts(ln)
+                    if ts and ts < since_dt:
+                        continue
+                out.append(ln)
+            return "".join(out)
+
         instance_name = self._sanitize_name(instance_name)
+        since_dt = _parse_dt(since) if since else None
 
         # Try GCS first
         if self.bucket:
             try:
-                result = subprocess.run(
+                proc = subprocess.Popen(
                     [
                         "gsutil",
                         "cat",
                         f"{self.bucket}/runs/{instance_name}/logs/train.log",
                     ],
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
                     text=True,
-                    check=True,
                 )
-                return result.stdout
+                if not proc.stdout:
+                    raise RuntimeError("No stdout from gsutil cat")
+                with proc.stdout:
+                    output = _collect(proc.stdout, since_dt)
+                proc.wait()
+                if proc.returncode == 0:
+                    return output
             except Exception:
                 pass
 
-        # Fall back to serial console
+        # Fall back to serial console - find correct zone first
+        zone = self._find_instance_zone(instance_name)
+        if not zone:
+            return f"Instance {instance_name} not found in any configured zone"
+
         try:
             cmd = [
                 "gcloud",
@@ -487,14 +616,14 @@ class GCELauncher:
                 "instances",
                 "get-serial-port-output",
                 instance_name,
-                f"--zone={self.default_zone}",
+                f"--zone={zone}",
                 "--port=1",
             ]
             if self.project_id:
                 cmd.append(f"--project={self.project_id}")
 
             result = run_gcloud(cmd, check=False)
-            return result.stdout
+            return _collect(result.stdout.splitlines(keepends=True), since_dt)
         except Exception as e:
             return f"Failed to retrieve logs: {e}"
 
@@ -503,8 +632,18 @@ class GCELauncher:
 
         Args:
             instance_name: Instance identifier
+
+        Raises:
+            GoldfishError: If instance not found in any zone
         """
         instance_name = self._sanitize_name(instance_name)
+
+        # Find which zone the instance is in
+        zone = self._find_instance_zone(instance_name)
+        if not zone:
+            raise GoldfishError(
+                f"Instance {instance_name} not found in any configured zone"
+            )
 
         cmd = [
             "gcloud",
@@ -512,7 +651,7 @@ class GCELauncher:
             "instances",
             "stop",
             instance_name,
-            f"--zone={self.default_zone}",
+            f"--zone={zone}",
             "--quiet",
         ]
         if self.project_id:
@@ -528,13 +667,19 @@ class GCELauncher:
         """
         instance_name = self._sanitize_name(instance_name)
 
+        # Find which zone the instance is in
+        zone = self._find_instance_zone(instance_name)
+        if not zone:
+            # Instance not found - already deleted or never existed
+            return
+
         cmd = [
             "gcloud",
             "compute",
             "instances",
             "delete",
             instance_name,
-            f"--zone={self.default_zone}",
+            f"--zone={zone}",
             "--quiet",
         ]
         if self.project_id:

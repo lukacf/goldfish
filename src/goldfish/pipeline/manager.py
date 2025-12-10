@@ -34,42 +34,26 @@ class PipelineManager:
         self.dataset_registry = dataset_registry
         self.parser = PipelineParser()
 
-    def get_pipeline(self, workspace: str) -> PipelineDef:
-        """Load pipeline definition from workspace.
-
-        Args:
-            workspace: Workspace name
-
-        Returns:
-            PipelineDef object
-
-        Raises:
-            PipelineNotFoundError: If no pipeline.yaml in workspace
-            PipelineValidationError: If pipeline.yaml is invalid
-        """
+    def _pipeline_path(self, workspace: str, pipeline: Optional[str] = None) -> Path:
         workspace_path = self.workspace_manager.get_workspace_path(workspace)
-        pipeline_path = workspace_path / "pipeline.yaml"
+        if pipeline:
+            return workspace_path / "pipelines" / f"{pipeline}.yaml"
+        return workspace_path / "pipeline.yaml"
+
+    def get_pipeline(self, workspace: str, pipeline: Optional[str] = None) -> PipelineDef:
+        """Load pipeline definition from workspace (supports named pipelines)."""
+        pipeline_path = self._pipeline_path(workspace, pipeline)
 
         if not pipeline_path.exists():
             raise PipelineNotFoundError(
-                f"No pipeline.yaml found in workspace '{workspace}' at {workspace_path}"
+                f"No pipeline file found in workspace '{workspace}' at {pipeline_path}"
             )
 
         return self.parser.parse(pipeline_path)
 
-    def validate_pipeline(self, workspace: str) -> list[str]:
-        """Validate pipeline definition.
-
-        Args:
-            workspace: Workspace name
-
-        Returns:
-            List of validation error messages (empty if valid)
-
-        Raises:
-            PipelineNotFoundError: If no pipeline.yaml in workspace
-        """
-        pipeline = self.get_pipeline(workspace)
+    def validate_pipeline(self, workspace: str, pipeline: Optional[str] = None) -> list[str]:
+        """Validate pipeline definition (default pipeline.yaml or pipelines/<name>.yaml)."""
+        pipeline_def = self.get_pipeline(workspace, pipeline)
         workspace_path = self.workspace_manager.get_workspace_path(workspace)
 
         # Create dataset existence checker if registry available
@@ -77,9 +61,9 @@ class PipelineManager:
         if self.dataset_registry:
             dataset_exists_fn = lambda name: self.dataset_registry.dataset_exists(name)
 
-        return self.parser.validate(pipeline, workspace_path, dataset_exists_fn)
+        return self.parser.validate(pipeline_def, workspace_path, dataset_exists_fn)
 
-    def update_pipeline(self, workspace: str, pipeline_yaml: str) -> PipelineDef:
+    def update_pipeline(self, workspace: str, pipeline_yaml: str, pipeline: Optional[str] = None) -> PipelineDef:
         """Update pipeline.yaml in workspace.
 
         Validates before writing.
@@ -96,7 +80,7 @@ class PipelineManager:
             GoldfishError: If workspace not found or write fails
         """
         workspace_path = self.workspace_manager.get_workspace_path(workspace)
-        pipeline_path = workspace_path / "pipeline.yaml"
+        pipeline_path = self._pipeline_path(workspace, pipeline)
 
         # Write to temp file and validate
         temp_path = pipeline_path.with_suffix(".yaml.tmp")
@@ -105,23 +89,24 @@ class PipelineManager:
             temp_path.write_text(pipeline_yaml)
 
             # Parse to validate YAML syntax
-            pipeline = self.parser.parse(temp_path)
+            pipeline_obj = self.parser.parse(temp_path)
 
             # Validate structure
             dataset_exists_fn = None
             if self.dataset_registry:
                 dataset_exists_fn = lambda name: self.dataset_registry.dataset_exists(name)
 
-            errors = self.parser.validate(pipeline, workspace_path, dataset_exists_fn)
+            errors = self.parser.validate(pipeline_obj, workspace_path, dataset_exists_fn)
             if errors:
                 raise PipelineValidationError(
                     f"Pipeline validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
                 )
 
             # Valid - move to actual location
+            temp_path.parent.mkdir(parents=True, exist_ok=True)
             temp_path.rename(pipeline_path)
 
-            return pipeline
+            return pipeline_obj
 
         except Exception:
             # Clean up temp file on error
@@ -129,18 +114,10 @@ class PipelineManager:
                 temp_path.unlink()
             raise
 
-    def pipeline_exists(self, workspace: str) -> bool:
-        """Check if workspace has a pipeline.yaml.
-
-        Args:
-            workspace: Workspace name
-
-        Returns:
-            True if pipeline.yaml exists, False otherwise
-        """
+    def pipeline_exists(self, workspace: str, pipeline: Optional[str] = None) -> bool:
+        """Check if workspace has a pipeline file (default or named)."""
         try:
-            workspace_path = self.workspace_manager.get_workspace_path(workspace)
-            pipeline_path = workspace_path / "pipeline.yaml"
+            pipeline_path = self._pipeline_path(workspace, pipeline)
             return pipeline_path.exists()
         except Exception:
             return False
