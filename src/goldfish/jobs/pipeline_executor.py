@@ -23,7 +23,7 @@ class PipelineExecutor:
 
     _pool_size = int(os.getenv("GOLDFISH_PIPELINE_WORKERS", "8"))
     _pool = ThreadPoolExecutor(max_workers=_pool_size, thread_name_prefix="pipeline-worker")
-    atexit.register(_pool.shutdown, wait=False)
+    atexit.register(_pool.shutdown, wait=True, cancel_futures=True)
     _logger = logging.getLogger(__name__)
 
     def __init__(
@@ -232,13 +232,21 @@ class PipelineExecutor:
                 "SELECT id, stage_run_id FROM pipeline_stage_queue WHERE pipeline_run_id=? AND status='running' AND stage_run_id IS NOT NULL",
                 (pipeline_run_id,),
             ).fetchall()
-            for row in running:
-                sr = self.db.get_stage_run(row["stage_run_id"])
-                if sr and sr.get("status") in ("completed", "failed", "canceled"):
-                    conn.execute(
-                        "UPDATE pipeline_stage_queue SET status=? WHERE id=?",
-                        (sr.get("status"), row["id"]),
-                    )
+            if running:
+                ids = [r["stage_run_id"] for r in running]
+                placeholders = ",".join(["?"] * len(ids))
+                stage_rows = conn.execute(
+                    f"SELECT id,status FROM stage_runs WHERE id IN ({placeholders})",
+                    ids,
+                ).fetchall()
+                status_map = {r["id"]: r["status"] for r in stage_rows}
+                for row in running:
+                    sr_status = status_map.get(row["stage_run_id"])
+                    if sr_status in ("completed", "failed", "canceled"):
+                        conn.execute(
+                            "UPDATE pipeline_stage_queue SET status=? WHERE id=?",
+                            (sr_status, row["id"]),
+                        )
 
             rows = conn.execute(
                 """
