@@ -22,11 +22,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install uv
-          uv pip install --system "ruff>=0.8.4" mypy
+          pip install pre-commit
 
       - name: Run linting and static analysis
-        run: make lint
+        run: |
+          pre-commit run ruff --all-files
+          pre-commit run ruff-format --all-files
+          pre-commit run mypy --all-files
 
   unit-tests:
     runs-on: ubuntu-latest
