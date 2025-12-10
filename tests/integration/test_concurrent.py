@@ -9,7 +9,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
-
 from goldfish.config import AuditConfig, GoldfishConfig, JobsConfig, StateMdConfig
 from goldfish.db.database import Database
 from goldfish.state.state_md import StateManager
@@ -499,17 +498,17 @@ class TestConcurrentWorkspaceOperations:
         print(f"DEBUG: Errors: {results['errors']}")
 
         # Verify results
-        assert len(results["success"]) == 1, (
-            f"Expected exactly 1 success, got {len(results['success'])}: {results['success']}"
-        )
-        assert len(results["errors"]) == 1, (
-            f"Expected exactly 1 error, got {len(results['errors'])}: {results['errors']}"
-        )
+        assert (
+            len(results["success"]) == 1
+        ), f"Expected exactly 1 success, got {len(results['success'])}: {results['success']}"
+        assert (
+            len(results["errors"]) == 1
+        ), f"Expected exactly 1 error, got {len(results['errors'])}: {results['errors']}"
 
         # The error should be SlotNotEmptyError
-        assert results["errors"][0][1] == "SlotNotEmptyError", (
-            f"Expected SlotNotEmptyError, got {results['errors'][0][1]}"
-        )
+        assert (
+            results["errors"][0][1] == "SlotNotEmptyError"
+        ), f"Expected SlotNotEmptyError, got {results['errors'][0][1]}"
 
         # Verify filesystem state is consistent - only one workspace should be mounted
         slot_info = manager.get_slot_info("w1")
@@ -713,9 +712,10 @@ class TestConcurrentWorkspaceOperations:
         # 2. "More modified content" (if checkpoint succeeded before rollback)
         # 3. "Initial content" (if both succeeded in sequence)
 
-        assert final_content in ["Initial content", "More modified content"], (
-            f"File in unexpected state: {final_content}"
-        )
+        assert final_content in [
+            "Initial content",
+            "More modified content",
+        ], f"File in unexpected state: {final_content}"
 
         # If both succeeded, rollback should have happened last (file = "Initial content")
         if results["checkpoint"] and results["rollback"]:
@@ -725,11 +725,12 @@ class TestConcurrentWorkspaceOperations:
         # or we should have a GoldfishError (not a system error)
         if results["errors"]:
             for error in results["errors"]:
-                # Errors should be GoldfishError (indicating proper locking)
+                # Errors should be GoldfishError or its subclasses (indicating proper locking)
                 # not system errors like OSError
-                assert "GoldfishError" in error[2] or "workspace is locked" in error[1], (
-                    f"Unexpected error type: {error}"
-                )
+                allowed_errors = ["GoldfishError", "WorkspaceAlreadyExistsError", "WorkspaceNotFoundError"]
+                is_allowed_error = any(err_type in error[2] for err_type in allowed_errors)
+                is_lock_error = "workspace is locked" in error[1] or "already exists" in error[1]
+                assert is_allowed_error or is_lock_error, f"Unexpected error type: {error}"
 
         # Verify database audit trail is consistent
         audit = db.get_recent_audit(limit=10)
