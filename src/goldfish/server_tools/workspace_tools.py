@@ -3,52 +3,45 @@
 Extracted from server.py for better organization.
 """
 
-from typing import Optional
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
-logger = logging.getLogger("goldfish.server")
-
-# Import server context helpers
-from goldfish.server import (
-    mcp,
-    _get_config,
-    _get_db,
-    _get_workspace_manager,
-    _get_pipeline_manager,
-    _get_state_manager,
-    _get_job_launcher,
-    _get_job_tracker,
-    _get_dataset_registry,
-    _get_state_md,
-)
-
-# Import models
-from goldfish.models import *
-
-# Import validation functions
-from goldfish.validation import (
-    validate_workspace_name,
-    validate_slot_name,
-    
-    validate_snapshot_id,
-    validate_job_id,
-    validate_source_name,
-    validate_output_name,
-    validate_artifact_uri,
-    
-    validate_script_path,
-)
-
-# Import errors
 from goldfish.errors import (
     GoldfishError,
-    validate_reason,
     WorkspaceNotFoundError,
+    validate_reason,
+)
+from goldfish.lineage.manager import LineageManager
+from goldfish.models import (
+    CheckpointResponse,
+    CreateWorkspaceResponse,
+    DeleteSnapshotResponse,
+    DeleteWorkspaceResponse,
+    DiffResponse,
+    HibernateResponse,
+    ListSnapshotsResponse,
+    MountResponse,
+    RollbackResponse,
+    SnapshotInfo,
+    UpdateWorkspaceGoalResponse,
+    WorkspaceGoalResponse,
+    WorkspaceInfo,
+)
+from goldfish.server import (
+    _get_config,
+    _get_db,
+    _get_state_manager,
+    _get_state_md,
+    _get_workspace_manager,
+    mcp,
+)
+from goldfish.validation import (
+    validate_slot_name,
+    validate_snapshot_id,
+    validate_workspace_name,
 )
 
-# Import LineageManager
-from goldfish.lineage.manager import LineageManager
+logger = logging.getLogger("goldfish.server")
 
 
 @mcp.tool()
@@ -80,6 +73,7 @@ def mount(workspace: str, slot: str, reason: str) -> MountResponse:
         logger.error("mount() failed", extra={"workspace": workspace, "slot": slot, "error": str(e)})
         raise
 
+
 @mcp.tool()
 def hibernate(slot: str, reason: str) -> HibernateResponse:
     """Save current work and free a slot.
@@ -106,6 +100,7 @@ def hibernate(slot: str, reason: str) -> HibernateResponse:
     except Exception as e:
         logger.error("hibernate() failed", extra={"slot": slot, "error": str(e)})
         raise
+
 
 @mcp.tool()
 def create_workspace(name: str, goal: str, reason: str) -> CreateWorkspaceResponse:
@@ -138,6 +133,7 @@ def create_workspace(name: str, goal: str, reason: str) -> CreateWorkspaceRespon
         logger.error("create_workspace() failed", extra={"workspace": name, "error": str(e)})
         raise
 
+
 @mcp.tool()
 def list_workspaces() -> list[WorkspaceInfo]:
     """List all workspaces (active and hibernated).
@@ -147,6 +143,7 @@ def list_workspaces() -> list[WorkspaceInfo]:
     workspace_manager = _get_workspace_manager()
 
     return workspace_manager.list_workspaces()
+
 
 @mcp.tool()
 def get_workspace(name: str) -> WorkspaceInfo:
@@ -159,6 +156,7 @@ def get_workspace(name: str) -> WorkspaceInfo:
     validate_workspace_name(name)
 
     return workspace_manager.get_workspace(name)
+
 
 @mcp.tool()
 def delete_workspace(workspace: str, reason: str) -> DeleteWorkspaceResponse:
@@ -188,8 +186,7 @@ def delete_workspace(workspace: str, reason: str) -> DeleteWorkspaceResponse:
     for slot_info in workspace_manager.get_all_slots():
         if slot_info.workspace == workspace:
             raise GoldfishError(
-                f"Cannot delete workspace '{workspace}': it is mounted in slot {slot_info.slot}. "
-                f"Hibernate it first."
+                f"Cannot delete workspace '{workspace}': it is mounted in slot {slot_info.slot}. Hibernate it first."
             )
 
     try:
@@ -218,10 +215,13 @@ def delete_workspace(workspace: str, reason: str) -> DeleteWorkspaceResponse:
         # Update state
         state_manager.add_action(f"Deleted workspace '{workspace}' ({snapshot_count} snapshots)")
 
-        logger.info("delete_workspace() succeeded", extra={
-            "workspace": workspace,
-            "snapshots_deleted": snapshot_count,
-        })
+        logger.info(
+            "delete_workspace() succeeded",
+            extra={
+                "workspace": workspace,
+                "snapshots_deleted": snapshot_count,
+            },
+        )
 
         return DeleteWorkspaceResponse(
             success=True,
@@ -231,6 +231,7 @@ def delete_workspace(workspace: str, reason: str) -> DeleteWorkspaceResponse:
     except Exception as e:
         logger.error("delete_workspace() failed", extra={"workspace": workspace, "error": str(e)})
         raise
+
 
 @mcp.tool()
 def checkpoint(slot: str, message: str) -> CheckpointResponse:
@@ -258,6 +259,7 @@ def checkpoint(slot: str, message: str) -> CheckpointResponse:
         logger.error("checkpoint() failed", extra={"slot": slot, "error": str(e)})
         raise
 
+
 @mcp.tool()
 def diff(slot: str) -> DiffResponse:
     """Show changes in a slot since last checkpoint.
@@ -274,6 +276,7 @@ def diff(slot: str) -> DiffResponse:
     validate_slot_name(slot, config.slots)
 
     return workspace_manager.diff(slot)
+
 
 @mcp.tool()
 def rollback(slot: str, snapshot_id: str, reason: str) -> RollbackResponse:
@@ -296,10 +299,9 @@ def rollback(slot: str, snapshot_id: str, reason: str) -> RollbackResponse:
 
     return workspace_manager.rollback(slot, snapshot_id, reason)
 
+
 @mcp.tool()
-def list_snapshots(
-    workspace: str, limit: int = 50, offset: int = 0
-) -> ListSnapshotsResponse:
+def list_snapshots(workspace: str, limit: int = 50, offset: int = 0) -> ListSnapshotsResponse:
     """List snapshots for a workspace with pagination.
 
     Use this before rollback to see available checkpoints.
@@ -324,9 +326,7 @@ def list_snapshots(
         raise GoldfishError("offset must be >= 0")
 
     # Get all snapshots once and apply pagination in memory
-    all_snapshots_data = workspace_manager.list_snapshots(
-        workspace, limit=10000, offset=0
-    )
+    all_snapshots_data = workspace_manager.list_snapshots(workspace, limit=10000, offset=0)
 
     # Filter out snapshots without dates and convert to SnapshotInfo objects
     all_valid_snapshots = [
@@ -356,6 +356,7 @@ def list_snapshots(
         has_more=has_more,
     )
 
+
 @mcp.tool()
 def get_snapshot(workspace: str, snapshot_id: str) -> SnapshotInfo:
     """Get detailed information about a specific snapshot.
@@ -372,7 +373,6 @@ def get_snapshot(workspace: str, snapshot_id: str) -> SnapshotInfo:
     Raises:
         GoldfishError: If workspace doesn't exist or snapshot not found in workspace
     """
-    from datetime import datetime
 
     workspace_manager = _get_workspace_manager()
 
@@ -384,7 +384,7 @@ def get_snapshot(workspace: str, snapshot_id: str) -> SnapshotInfo:
     try:
         snapshot_ids = workspace_manager.git.list_snapshots(workspace)
     except GoldfishError as e:
-        raise GoldfishError(f"Workspace '{workspace}' not found or inaccessible: {e}")
+        raise GoldfishError(f"Workspace '{workspace}' not found or inaccessible: {e}") from e
 
     # Check if snapshot belongs to this workspace
     if snapshot_id not in snapshot_ids:
@@ -399,10 +399,8 @@ def get_snapshot(workspace: str, snapshot_id: str) -> SnapshotInfo:
     if info.get("commit_date"):
         try:
             created_at = datetime.fromisoformat(info["commit_date"])
-        except ValueError:
-            raise GoldfishError(
-                f"Invalid date format for snapshot '{snapshot_id}': {info.get('commit_date')}"
-            )
+        except ValueError as e:
+            raise GoldfishError(f"Invalid date format for snapshot '{snapshot_id}': {info.get('commit_date')}") from e
 
     if created_at is None:
         raise GoldfishError(f"Snapshot '{snapshot_id}' has no valid creation date")
@@ -415,6 +413,7 @@ def get_snapshot(workspace: str, snapshot_id: str) -> SnapshotInfo:
 
 
 # ============== JOB TOOLS ==============
+
 
 @mcp.tool()
 def delete_snapshot(workspace: str, snapshot_id: str, reason: str) -> DeleteSnapshotResponse:
@@ -468,6 +467,7 @@ def delete_snapshot(workspace: str, snapshot_id: str, reason: str) -> DeleteSnap
 
 # ============== PIPELINE TOOLS ==============
 
+
 @mcp.tool()
 def get_workspace_goal(workspace: str) -> WorkspaceGoalResponse:
     """Get the goal for a workspace.
@@ -485,6 +485,7 @@ def get_workspace_goal(workspace: str) -> WorkspaceGoalResponse:
         workspace=workspace,
         goal=goal,
     )
+
 
 @mcp.tool()
 def update_workspace_goal(workspace: str, goal: str, reason: str) -> UpdateWorkspaceGoalResponse:
@@ -526,13 +527,9 @@ def update_workspace_goal(workspace: str, goal: str, reason: str) -> UpdateWorks
         state_md=state_md,
     )
 
+
 @mcp.tool()
-def branch_workspace(
-    from_workspace: str,
-    from_version: str,
-    new_workspace: str,
-    reason: str
-) -> dict:
+def branch_workspace(from_workspace: str, from_version: str, new_workspace: str, reason: str) -> dict:
     """Create new workspace branched from specific version.
 
     Allows experimenting from a known-good version.
@@ -560,8 +557,4 @@ def branch_workspace(
     lineage_mgr = LineageManager(db=db, workspace_manager=workspace_manager)
     lineage_mgr.branch_workspace(from_workspace, from_version, new_workspace, reason)
 
-    return {
-        "workspace": new_workspace,
-        "parent": from_workspace,
-        "parent_version": from_version
-    }
+    return {"workspace": new_workspace, "parent": from_workspace, "parent_version": from_version}

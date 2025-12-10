@@ -9,15 +9,14 @@ This module coordinates:
 
 import subprocess
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 from goldfish.config import GoldfishConfig
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError, SlotEmptyError
 from goldfish.jobs.exporter import SnapshotExporter
-from goldfish.models import RunJobResponse, SlotState, JobStatus
+from goldfish.models import JobStatus, RunJobResponse, SlotState
 from goldfish.workspace.manager import WorkspaceManager
 
 
@@ -64,7 +63,7 @@ class JobLauncher:
             SlotEmptyError: If slot is empty
         """
         slot_info = self.workspace_manager.get_slot_info(slot)
-        if slot_info.state == SlotState.EMPTY:
+        if slot_info.state == SlotState.EMPTY or slot_info.workspace is None:
             raise SlotEmptyError(f"Slot {slot} is empty - mount a workspace first")
 
         workspace_name = slot_info.workspace
@@ -81,9 +80,7 @@ class JobLauncher:
         Returns:
             Snapshot ID of the created checkpoint
         """
-        checkpoint_response = self.workspace_manager.checkpoint(
-            slot, f"Pre-job checkpoint: {reason}"
-        )
+        checkpoint_response = self.workspace_manager.checkpoint(slot, f"Pre-job checkpoint: {reason}")
         return checkpoint_response.snapshot_id
 
     def _export_snapshot(
@@ -93,7 +90,7 @@ class JobLauncher:
         snapshot_id: str,
         script: str,
         reason: str,
-        config_overrides: Optional[dict],
+        config_overrides: dict | None,
     ) -> Path:
         """Export snapshot to experiment directory.
 
@@ -122,7 +119,7 @@ class JobLauncher:
             )
         except GoldfishError:
             raise
-        except (OSError, IOError) as e:
+        except OSError as e:
             raise GoldfishError(f"Failed to export snapshot: {e}") from e
         except Exception as e:
             raise GoldfishError(f"Unexpected error during export: {e}") from e
@@ -135,8 +132,8 @@ class JobLauncher:
         script: str,
         exp_dir: Path,
         reason: str,
-        config_overrides: Optional[dict],
-        source_inputs: Optional[dict[str, str]],
+        config_overrides: dict | None,
+        source_inputs: dict[str, str] | None,
     ) -> None:
         """Create job record in database with inputs atomically.
 
@@ -192,7 +189,7 @@ class JobLauncher:
             self.db.update_job_status(
                 job_id,
                 JobStatus.FAILED,
-                completed_at=datetime.now(timezone.utc).isoformat(),
+                completed_at=datetime.now(UTC).isoformat(),
                 error=str(e),
             )
             raise
@@ -201,16 +198,16 @@ class JobLauncher:
             self.db.update_job_status(
                 job_id,
                 JobStatus.FAILED,
-                completed_at=datetime.now(timezone.utc).isoformat(),
+                completed_at=datetime.now(UTC).isoformat(),
                 error=str(e),
             )
             raise GoldfishError(f"Job launch subprocess failed: {e}") from e
-        except (OSError, IOError) as e:
+        except OSError as e:
             self._cleanup_exp_dir(exp_dir)
             self.db.update_job_status(
                 job_id,
                 JobStatus.FAILED,
-                completed_at=datetime.now(timezone.utc).isoformat(),
+                completed_at=datetime.now(UTC).isoformat(),
                 error=str(e),
             )
             raise GoldfishError(f"Job launch failed (file system error): {e}") from e
@@ -219,7 +216,7 @@ class JobLauncher:
             self.db.update_job_status(
                 job_id,
                 JobStatus.FAILED,
-                completed_at=datetime.now(timezone.utc).isoformat(),
+                completed_at=datetime.now(UTC).isoformat(),
                 error=str(e),
             )
             raise GoldfishError(f"Unexpected error launching job: {e}") from e
@@ -266,8 +263,8 @@ class JobLauncher:
         slot: str,
         script: str,
         reason: str,
-        config_overrides: Optional[dict] = None,
-        source_inputs: Optional[dict[str, str]] = None,
+        config_overrides: dict | None = None,
+        source_inputs: dict[str, str] | None = None,
     ) -> RunJobResponse:
         """Launch a job on the current workspace snapshot.
 
@@ -295,24 +292,19 @@ class JobLauncher:
         snapshot_id = self._create_checkpoint(slot, reason)
 
         # 3. Export to experiment directory
-        exp_dir = self._export_snapshot(
-            slot_path, workspace_name, snapshot_id, script, reason, config_overrides
-        )
+        exp_dir = self._export_snapshot(slot_path, workspace_name, snapshot_id, script, reason, config_overrides)
 
         # 4. Generate job ID and record in database
         job_id = f"job-{uuid.uuid4().hex[:8]}"
         self._create_job_record(
-            job_id, workspace_name, snapshot_id, script, exp_dir,
-            reason, config_overrides, source_inputs
+            job_id, workspace_name, snapshot_id, script, exp_dir, reason, config_overrides, source_inputs
         )
 
         # 5. Launch the job
         self._launch_and_update_status(job_id, exp_dir, script)
 
         # 6. Log audit
-        self._log_job_launch(
-            slot, workspace_name, reason, job_id, snapshot_id, script, exp_dir
-        )
+        self._log_job_launch(slot, workspace_name, reason, job_id, snapshot_id, script, exp_dir)
 
         # 7. Return response
         artifact_uri = self._get_artifact_uri(job_id)
@@ -324,7 +316,7 @@ class JobLauncher:
             artifact_uri=artifact_uri,
         )
 
-    def _cleanup_exp_dir(self, exp_dir: Optional[Path]) -> None:
+    def _cleanup_exp_dir(self, exp_dir: Path | None) -> None:
         """Best-effort cleanup of experiment directory.
 
         Args:
@@ -332,6 +324,7 @@ class JobLauncher:
         """
         if exp_dir and exp_dir.exists():
             import shutil
+
             try:
                 shutil.rmtree(exp_dir)
             except OSError:
@@ -366,9 +359,7 @@ class JobLauncher:
             "Configure jobs.infra_path in goldfish.yaml or use run_stage() for stage execution."
         )
 
-    def _launch_via_infra(
-        self, job_id: str, exp_dir: Path, script: str, create_run_script: Path
-    ) -> None:
+    def _launch_via_infra(self, job_id: str, exp_dir: Path, script: str, create_run_script: Path) -> None:
         """Launch job via infrastructure layer.
 
         Calls the create_run.py script to handle:
@@ -390,9 +381,12 @@ class JobLauncher:
         cmd = [
             sys.executable,
             str(create_run_script),
-            "--experiment", str(exp_dir),
-            "--script", script,
-            "--job-id", job_id,
+            "--experiment",
+            str(exp_dir),
+            "--script",
+            script,
+            "--job-id",
+            job_id,
         ]
 
         try:
@@ -406,17 +400,14 @@ class JobLauncher:
 
             if result.returncode != 0:
                 error_msg = result.stderr or result.stdout or "Unknown error"
-                raise GoldfishError(
-                    f"Job launch failed (exit code {result.returncode}): {error_msg}"
-                )
+                raise GoldfishError(f"Job launch failed (exit code {result.returncode}): {error_msg}")
 
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as err:
             raise GoldfishError(
-                f"Job launch timed out after 300 seconds. "
-                f"The infrastructure may be slow or unresponsive."
-            )
+                "Job launch timed out after 300 seconds. The infrastructure may be slow or unresponsive."
+            ) from err
 
-    def _get_artifact_uri(self, job_id: str) -> Optional[str]:
+    def _get_artifact_uri(self, job_id: str) -> str | None:
         """Get the artifact URI for a job.
 
         Constructs the GCS location where job outputs will be stored.

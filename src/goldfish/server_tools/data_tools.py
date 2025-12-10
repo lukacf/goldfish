@@ -3,59 +3,49 @@
 Extracted from server.py for better organization.
 """
 
-from typing import Optional
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from goldfish.utils import parse_datetime, parse_optional_datetime
-
-logger = logging.getLogger("goldfish.server")
-
-# Import server context helpers
-from goldfish.server import (
-    mcp,
-    _get_config,
-    _get_db,
-    _get_workspace_manager,
-    _get_pipeline_manager,
-    _get_state_manager,
-    _get_job_launcher,
-    _get_job_tracker,
-    _get_dataset_registry,
-    _get_state_md,
-)
-
-# Import models
-from goldfish.models import *
-
-# Import validation functions
-from goldfish.validation import (
-    validate_workspace_name,
-    validate_slot_name,
-    
-    validate_snapshot_id,
-    validate_job_id,
-    validate_source_name,
-    validate_output_name,
-    validate_artifact_uri,
-    
-    validate_script_path,
-)
-
-# Import errors
 from goldfish.errors import (
     GoldfishError,
-    validate_reason,
-    SourceNotFoundError,
-    SourceAlreadyExistsError,
     JobNotFoundError,
+    SourceAlreadyExistsError,
+    SourceNotFoundError,
+    validate_reason,
 )
+from goldfish.models import (
+    DeleteSourceResponse,
+    ListSourcesResponse,
+    PromoteArtifactResponse,
+    RegisterDatasetResponse,
+    RegisterSourceResponse,
+    SourceInfo,
+    SourceLineage,
+    SourceStatus,
+)
+from goldfish.server import (
+    _get_config,
+    _get_dataset_registry,
+    _get_db,
+    _get_state_manager,
+    _get_state_md,
+    mcp,
+)
+from goldfish.utils import parse_datetime
+from goldfish.validation import (
+    validate_artifact_uri,
+    validate_job_id,
+    validate_output_name,
+    validate_source_name,
+)
+
+logger = logging.getLogger("goldfish.server")
 
 
 @mcp.tool()
 def list_sources(
-    status: Optional[str] = None,
-    created_by: Optional[str] = None,
+    status: str | None = None,
+    created_by: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> ListSourcesResponse:
@@ -97,7 +87,7 @@ def list_sources(
             created_by=s["created_by"],
             gcs_location=s["gcs_location"],
             size_bytes=s.get("size_bytes"),
-            status=s["status"],
+            status=SourceStatus(s["status"]),
         )
         for s in sources
     ]
@@ -121,6 +111,7 @@ def list_sources(
         filters_applied=filters_applied,
     )
 
+
 @mcp.tool()
 def get_source(name: str) -> SourceInfo:
     """Get detailed information about a specific data source.
@@ -142,13 +133,12 @@ def get_source(name: str) -> SourceInfo:
         created_by=source["created_by"],
         gcs_location=source["gcs_location"],
         size_bytes=source.get("size_bytes"),
-        status=source["status"],
+        status=SourceStatus(source["status"]),
     )
 
+
 @mcp.tool()
-def register_source(
-    name: str, gcs_path: str, description: str, reason: str
-) -> RegisterSourceResponse:
+def register_source(name: str, gcs_path: str, description: str, reason: str) -> RegisterSourceResponse:
     """Register an external data source.
 
     Args:
@@ -204,6 +194,7 @@ def register_source(
         logger.error("register_source() failed", extra={"source": name, "error": str(e)})
         raise
 
+
 @mcp.tool()
 def delete_source(source_name: str, reason: str) -> DeleteSourceResponse:
     """Delete a data source from the registry.
@@ -251,6 +242,7 @@ def delete_source(source_name: str, reason: str) -> DeleteSourceResponse:
         logger.error("delete_source() failed", extra={"source_name": source_name, "error": str(e)})
         raise
 
+
 @mcp.tool()
 def get_source_lineage(source_name: str) -> SourceLineage:
     """Get lineage information for a data source.
@@ -277,8 +269,9 @@ def get_source_lineage(source_name: str) -> SourceLineage:
     job_id = None
 
     for record in lineage_records:
-        if record.get("parent_source_id"):
-            parent_sources.append(record["parent_source_id"])
+        parent_id = record.get("parent_source_id")
+        if parent_id:
+            parent_sources.append(parent_id)
         if record.get("job_id") and job_id is None:
             job_id = record["job_id"]
 
@@ -291,10 +284,9 @@ def get_source_lineage(source_name: str) -> SourceLineage:
 
 # ============== DELETE TOOLS ==============
 
+
 @mcp.tool()
-def promote_artifact(
-    job_id: str, output_name: str, source_name: str, reason: str
-) -> PromoteArtifactResponse:
+def promote_artifact(job_id: str, output_name: str, source_name: str, reason: str) -> PromoteArtifactResponse:
     """Promote a job output to a reusable data source.
 
     This creates a registry entry pointing to the artifact location
@@ -307,11 +299,14 @@ def promote_artifact(
         source_name: Name for the new source (e.g., "preprocessed_v1")
         reason: Why you're promoting this artifact (min 15 chars)
     """
-    logger.info("promote_artifact() called", extra={
-        "job_id": job_id,
-        "output_name": output_name,
-        "source_name": source_name,
-    })
+    logger.info(
+        "promote_artifact() called",
+        extra={
+            "job_id": job_id,
+            "output_name": output_name,
+            "source_name": source_name,
+        },
+    )
 
     config = _get_config()
     db = _get_db()
@@ -359,7 +354,7 @@ def promote_artifact(
                     source_name,
                     source_name,
                     f"Promoted from job {job_id} output '{output_name}'",
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                     f"job:{job_id}",
                     gcs_location,
                     None,  # size_bytes
@@ -370,7 +365,7 @@ def promote_artifact(
 
             # Record lineage from job inputs
             job_inputs = db.get_job_inputs(job_id)
-            timestamp = datetime.now(timezone.utc).isoformat()
+            timestamp = datetime.now(UTC).isoformat()
             for inp in job_inputs:
                 conn.execute(
                     """
@@ -393,10 +388,13 @@ def promote_artifact(
 
         state_manager.add_action(f"Promoted '{output_name}' from job {job_id} → source '{source_name}'")
 
-        logger.info("promote_artifact() succeeded", extra={
-            "job_id": job_id,
-            "source_name": source_name,
-        })
+        logger.info(
+            "promote_artifact() succeeded",
+            extra={
+                "job_id": job_id,
+                "source_name": source_name,
+            },
+        )
 
         source = SourceInfo(
             name=source_name,
@@ -414,16 +412,18 @@ def promote_artifact(
 
         state_md = _get_state_md()
 
-        return PromoteArtifactResponse(
-            success=True, source=source, lineage=lineage, state_md=state_md
-        )
+        return PromoteArtifactResponse(success=True, source=source, lineage=lineage, state_md=state_md)
     except Exception as e:
-        logger.error("promote_artifact() failed", extra={
-            "job_id": job_id,
-            "source_name": source_name,
-            "error": str(e),
-        })
+        logger.error(
+            "promote_artifact() failed",
+            extra={
+                "job_id": job_id,
+                "source_name": source_name,
+                "error": str(e),
+            },
+        )
         raise
+
 
 @mcp.tool()
 def register_dataset(
@@ -431,7 +431,7 @@ def register_dataset(
     source: str,
     description: str,
     format: str,
-    metadata: Optional[dict] = None,
+    metadata: dict | None = None,
 ) -> RegisterDatasetResponse:
     """Register a project-level dataset.
 
@@ -479,8 +479,9 @@ def register_dataset(
     except SourceAlreadyExistsError as e:
         raise GoldfishError(str(e)) from e
 
+
 @mcp.tool()
-def list_datasets(status: Optional[str] = None) -> dict:
+def list_datasets(status: str | None = None) -> dict:
     """List all registered datasets.
 
     Args:
@@ -507,6 +508,7 @@ def list_datasets(status: Optional[str] = None) -> dict:
         ],
         "count": len(datasets),
     }
+
 
 @mcp.tool()
 def get_dataset(name: str) -> dict:
