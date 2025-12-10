@@ -5,6 +5,8 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+import os
+import time
 from uuid import uuid4
 
 import yaml
@@ -651,11 +653,6 @@ echo "Stage completed successfully"
 
     def _finalize_stage_run(self, stage_run_id: str, backend: str, status: str) -> None:
         """Handle terminal status: record outputs, fetch logs, update status."""
-        # Fetch stage_run first; if missing, nothing to do
-        stage_run = self.db.get_stage_run(stage_run_id)
-        if not stage_run:
-            return
-
         # CAS: only finalize if not already terminal
         with self.db._conn() as conn:
             updated = conn.execute(
@@ -664,6 +661,11 @@ echo "Stage completed successfully"
             ).rowcount
         if updated == 0:
             return  # already finalized
+
+        # Re-fetch after CAS for fresh data
+        stage_run = self.db.get_stage_run(stage_run_id)
+        if not stage_run:
+            return
 
         workspace = stage_run["workspace_name"]
         stage_name_from_db = stage_run["stage_name"]
@@ -720,8 +722,16 @@ echo "Stage completed successfully"
 
         backend = self.config.jobs.backend
 
-        elapsed = 0
-        while elapsed < timeout:
+        start = time.time()
+        last_log = 0
+        not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
+
+        while True:
+            elapsed = time.time() - start
+            if elapsed >= timeout:
+                raise GoldfishError(
+                    f"Stage run {stage_run_id} timed out after {timeout} seconds"
+                )
             if backend == "local":
                 status = self.local_executor.get_container_status(stage_run_id)
 
@@ -730,9 +740,8 @@ echo "Stage completed successfully"
                     self.db.update_stage_run_status(
                         stage_run_id=stage_run_id, status="running"
                     )
-                    interval = self._poll_interval(elapsed)
+                    interval = self._poll_interval(int(elapsed))
                     time.sleep(interval)
-                    elapsed += interval
                     continue
 
                 elif status in ("completed", "failed"):
@@ -754,9 +763,8 @@ echo "Stage completed successfully"
                     self.db.update_stage_run_status(
                         stage_run_id=stage_run_id, status="running"
                     )
-                    interval = self._poll_interval(elapsed)
+                    interval = self._poll_interval(int(elapsed))
                     time.sleep(interval)
-                    elapsed += interval
                     continue
 
                 elif status in ("completed", "failed"):
@@ -764,23 +772,20 @@ echo "Stage completed successfully"
                     return status
 
                 elif status == "not_found":
-                    # GCE API has eventual consistency - instance may take time to appear
-                    # Capacity search across multiple zones can take 10+ minutes
-                    # Treat "not_found" as transient but only up to NOT_FOUND_TIMEOUT
-                    if elapsed % 60 == 0 and elapsed > 0:
-                        # Log every minute for visibility
+                    now = time.time()
+                    if now - last_log >= 60:
                         import logging
                         logger = logging.getLogger(__name__)
                         logger.info(
                             f"Instance {stage_run_id} not yet visible in GCE API "
-                            f"(elapsed: {elapsed}s, may be launching or searching capacity)"
+                            f"(elapsed: {int(elapsed)}s, may be launching or searching capacity)"
                         )
-                    if elapsed >= 300:  # 5 minutes not_found -> fail fast
+                        last_log = now
+                    if elapsed >= not_found_timeout:
                         raise GoldfishError(
-                            f"GCE instance {stage_run_id} not found after 5 minutes; abandoning run"
+                            f"GCE instance {stage_run_id} not found after {not_found_timeout} seconds; abandoning run"
                         )
                     time.sleep(poll_interval)
-                    elapsed += poll_interval
                     continue
 
                 else:
@@ -790,10 +795,7 @@ echo "Stage completed successfully"
             else:
                 raise GoldfishError(f"Backend {backend} not supported for monitoring")
 
-        # Timeout exceeded
-        raise GoldfishError(
-            f"Stage run {stage_run_id} timed out after {timeout} seconds"
-        )
+        # Should not reach here
 
     def refresh_status_once(self, stage_run_id: str) -> Optional[str]:
         """Single backend check to advance status/logs/outputs without blocking."""
