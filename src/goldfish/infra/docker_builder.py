@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Optional
 
 from goldfish.errors import GoldfishError
-from typing import Optional
 
 
 class DockerBuilder:
