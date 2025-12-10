@@ -6,28 +6,28 @@ Creates the project structure and dev repository.
 import os
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 import yaml
 
-# Timeout for git operations during init (60 seconds)
-INIT_GIT_TIMEOUT = 60
-
 from goldfish.config import (
     AuditConfig,
-    GCSConfig,
     GCEConfig,
+    GCSConfig,
     GoldfishConfig,
     JobsConfig,
     StateMdConfig,
 )
 from goldfish.state.state_md import StateManager
 
+# Timeout for git operations during init (60 seconds)
+INIT_GIT_TIMEOUT = 60
+
 
 def init_project(
     project_name: str,
     project_path: Path,
-    dev_repo_path: Optional[Path] = None,
+    dev_repo_path: Path | None = None,
 ) -> GoldfishConfig:
     """Initialize a new Goldfish project.
 
@@ -101,7 +101,6 @@ def init_project(
         audit=AuditConfig(
             min_reason_length=15,
         ),
-        db_path=".goldfish/goldfish.db",
         jobs=JobsConfig(
             backend="gce",
             experiments_dir="experiments",
@@ -222,7 +221,6 @@ def _write_config(config: GoldfishConfig, config_path: Path) -> None:
         "audit": {
             "min_reason_length": config.audit.min_reason_length,
         },
-        "db_path": config.db_path,
         "jobs": {
             "backend": config.jobs.backend,
             "experiments_dir": config.jobs.experiments_dir,
@@ -239,7 +237,7 @@ def _write_config(config: GoldfishConfig, config_path: Path) -> None:
         }
 
     if config.gce:
-        gce_dict = {"project_id": config.gce.project_id}
+        gce_dict: dict[str, Any] = {"project_id": config.gce.project_id}
         if config.gce.artifact_registry:
             gce_dict["artifact_registry"] = config.gce.artifact_registry
         if config.gce.zones:

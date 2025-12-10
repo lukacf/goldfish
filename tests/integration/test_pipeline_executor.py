@@ -1,0 +1,498 @@
+"""Tests for PipelineExecutor - TDD Phase 4."""
+
+import json
+from datetime import UTC, datetime
+from unittest.mock import MagicMock
+
+import pytest
+
+from goldfish.jobs.pipeline_executor import PipelineExecutor
+from goldfish.models import PipelineDef, StageDef, StageRunInfo
+
+
+class DummyStageExecutor:
+    """Lightweight stage executor used to exercise queue semantics in tests."""
+
+    def __init__(self, db, version: str = "v1"):
+        self.db = db
+        self.calls: list[str] = []
+        self.call_kwargs: list[dict] = []
+        self.version = version
+        self._seeded_workspaces: set[str] = set()
+
+    def _ensure_workspace_version(self, workspace: str):
+        if workspace in self._seeded_workspaces:
+            return
+        now = datetime.now(UTC).isoformat()
+        with self.db._conn() as conn:
+            conn.execute("PRAGMA busy_timeout = 5000")
+            conn.execute(
+                "INSERT OR IGNORE INTO workspace_lineage (workspace_name, parent_workspace, parent_version, created_at) VALUES (?, NULL, NULL, ?)",
+                (workspace, now),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO workspace_versions (workspace_name, version, git_tag, git_sha, created_at, created_by, description) VALUES (?, ?, ?, ?, ?, 'test', 'seed for tests')",
+                (workspace, self.version, f"{workspace}-{self.version}", "deadbeef", now),
+            )
+        self._seeded_workspaces.add(workspace)
+
+    def run_stage(
+        self,
+        workspace: str,
+        stage_name: str,
+        pipeline_name: str | None = None,
+        pipeline_run_id: str | None = None,
+        config_override=None,
+        reason: str | None = None,
+        wait: bool = False,
+    ) -> StageRunInfo:
+        self._ensure_workspace_version(workspace)
+        stage_run_id = f"stage-{len(self.calls) + 1}"
+        self.calls.append(stage_name)
+        self.db.create_stage_run(
+            stage_run_id=stage_run_id,
+            workspace_name=workspace,
+            version=self.version,
+            stage_name=stage_name,
+            pipeline_run_id=pipeline_run_id,
+            pipeline_name=pipeline_name,
+            config=config_override or {},
+            inputs={},
+            profile=None,
+            hints=None,
+            backend_type="local",
+            backend_handle=stage_run_id,
+        )
+        # mark running immediately
+        self.db.update_stage_run_status(stage_run_id, status="running")
+        self.call_kwargs.append(
+            {
+                "workspace": workspace,
+                "stage_name": stage_name,
+                "pipeline_name": pipeline_name,
+                "wait": wait,
+            }
+        )
+        return StageRunInfo(
+            stage_run_id=stage_run_id,
+            workspace=workspace,
+            version=self.version,
+            stage=stage_name,
+            pipeline=pipeline_name,
+            pipeline_run_id=pipeline_run_id,
+            status="running",
+        )
+
+    def refresh_status_once(self, stage_run_id: str):  # pragma: no cover - not used in tests
+        return "running"
+
+
+class TestRunFullPipeline:
+    """Test running complete pipeline (all stages)."""
+
+    def test_run_pipeline_executes_all_stages(self, test_db):
+        """Should execute all stages in sequence."""
+        # Setup
+        pipeline_def = PipelineDef(
+            name="test_pipeline",
+            stages=[
+                StageDef(name="preprocess", inputs={}, outputs={}),
+                StageDef(name="tokenize", inputs={}, outputs={}),
+                StageDef(name="train", inputs={}, outputs={}),
+            ],
+        )
+
+        # Mock stage executor
+        stage_executor = MagicMock()
+        stage_executor.run_stage.side_effect = [
+            StageRunInfo(
+                stage_run_id="stage-1", workspace="test_ws", version="v1", stage="preprocess", status="running"
+            ),
+            StageRunInfo(stage_run_id="stage-2", workspace="test_ws", version="v1", stage="tokenize", status="running"),
+            StageRunInfo(stage_run_id="stage-3", workspace="test_ws", version="v1", stage="train", status="running"),
+        ]
+
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+
+        executor = PipelineExecutor(stage_executor=stage_executor, pipeline_manager=pipeline_manager, db=test_db)
+
+        # Execute
+        result = executor.run_pipeline(
+            workspace="test_ws",
+            reason="Test full pipeline",
+            async_mode=False,
+        )
+
+        stage_runs = result["stage_runs"]
+        assert len(stage_runs) == 3
+        assert [r["stage"] for r in stage_runs] == ["preprocess", "tokenize", "train"]
+        assert stage_executor.run_stage.call_count == 3
+
+    def test_run_pipeline_applies_config_overrides(self, test_db):
+        """Should apply stage-specific config overrides."""
+        # Setup
+        pipeline_def = PipelineDef(
+            name="test_pipeline",
+            stages=[StageDef(name="preprocess", inputs={}, outputs={}), StageDef(name="train", inputs={}, outputs={})],
+        )
+
+        stage_executor = MagicMock()
+        stage_executor.run_stage.return_value = StageRunInfo(
+            stage_run_id="stage-1", workspace="test_ws", version="v1", stage="preprocess", status="running"
+        )
+
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+
+        executor = PipelineExecutor(stage_executor=stage_executor, pipeline_manager=pipeline_manager, db=test_db)
+
+        # Execute with config overrides
+        config_override = {"preprocess": {"BATCH_SIZE": "128"}, "train": {"EPOCHS": "20"}}
+
+        executor.run_pipeline(
+            workspace="test_ws",
+            config_override=config_override,
+            reason="Test overrides",
+            async_mode=False,
+        )
+
+        # Verify config passed to each stage
+        assert stage_executor.run_stage.call_count == 2
+        # First call (preprocess)
+        assert stage_executor.run_stage.call_args_list[0][1]["config_override"] == {"BATCH_SIZE": "128"}
+        # Second call (train)
+        assert stage_executor.run_stage.call_args_list[1][1]["config_override"] == {"EPOCHS": "20"}
+
+
+class TestRunPartialPipeline:
+    """Test running subset of pipeline stages."""
+
+    def test_run_partial_pipeline_from_to(self, test_db):
+        """Should run stages from_stage through to_stage."""
+        # Setup
+        pipeline_def = PipelineDef(
+            name="test_pipeline",
+            stages=[
+                StageDef(name="preprocess", inputs={}, outputs={}),
+                StageDef(name="tokenize", inputs={}, outputs={}),
+                StageDef(name="train", inputs={}, outputs={}),
+                StageDef(name="evaluate", inputs={}, outputs={}),
+            ],
+        )
+
+        stage_executor = MagicMock()
+        stage_executor.run_stage.side_effect = [
+            StageRunInfo(stage_run_id="stage-1", workspace="test_ws", version="v1", stage="tokenize", status="running"),
+            StageRunInfo(stage_run_id="stage-2", workspace="test_ws", version="v1", stage="train", status="running"),
+        ]
+
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+
+        executor = PipelineExecutor(stage_executor=stage_executor, pipeline_manager=pipeline_manager, db=test_db)
+
+        # Execute
+        result = executor.run_partial_pipeline(
+            workspace="test_ws",
+            from_stage="tokenize",
+            to_stage="train",
+            reason="Test partial run",
+            async_mode=False,
+        )
+
+        # Verify
+        stage_runs = result["stage_runs"]
+        assert len(stage_runs) == 2
+        assert [r["stage"] for r in stage_runs] == ["tokenize", "train"]
+
+    def test_run_partial_pipeline_raises_on_invalid_stage_order(self, test_db):
+        """Should raise error if from_stage comes after to_stage."""
+        # Setup
+        pipeline_def = PipelineDef(
+            name="test_pipeline",
+            stages=[
+                StageDef(name="preprocess", inputs={}, outputs={}),
+                StageDef(name="tokenize", inputs={}, outputs={}),
+                StageDef(name="train", inputs={}, outputs={}),
+            ],
+        )
+
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+
+        executor = PipelineExecutor(stage_executor=MagicMock(), pipeline_manager=pipeline_manager, db=test_db)
+
+        # Execute - should raise
+        with pytest.raises(ValueError, match="from_stage must come before to_stage"):
+            executor.run_partial_pipeline(workspace="test_ws", from_stage="train", to_stage="preprocess", reason="Test")
+
+    def test_run_partial_pipeline_raises_on_unknown_stage(self, test_db):
+        """Should raise error if stage not found in pipeline."""
+        # Setup
+        pipeline_def = PipelineDef(
+            name="test_pipeline",
+            stages=[StageDef(name="preprocess", inputs={}, outputs={}), StageDef(name="train", inputs={}, outputs={})],
+        )
+
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+
+        executor = PipelineExecutor(stage_executor=MagicMock(), pipeline_manager=pipeline_manager, db=test_db)
+
+        # Execute - should raise
+        with pytest.raises(ValueError, match="Stage not found"):
+            executor.run_partial_pipeline(
+                workspace="test_ws", from_stage="nonexistent", to_stage="train", reason="Test"
+            )
+
+
+class TestAsyncQueueSemantics:
+    def _make_executor(self, test_db, pipeline_def, monkeypatch):
+        stage_executor = DummyStageExecutor(test_db)
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+
+        fake_pool = MagicMock()
+        monkeypatch.setattr(PipelineExecutor, "_pool", fake_pool)
+
+        executor = PipelineExecutor(
+            stage_executor=stage_executor,
+            pipeline_manager=pipeline_manager,
+            db=test_db,
+        )
+        return executor, stage_executor, pipeline_manager, fake_pool
+
+    def test_run_pipeline_async_returns_immediately(self, test_db, monkeypatch):
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[
+                StageDef(name="prep", inputs={}, outputs={}),
+                StageDef(name="train", inputs={}, outputs={}),
+            ],
+        )
+
+        executor, stage_executor, pipeline_manager, fake_pool = self._make_executor(test_db, pipeline_def, monkeypatch)
+
+        result = executor.run_pipeline(
+            workspace="ws",
+            pipeline_name="train",
+            async_mode=True,
+            reason="Testing async",
+        )
+
+        assert "pipeline_run_id" in result
+        assert len(result["stage_runs"]) == 1  # only first stage launched immediately
+        fake_pool.submit.assert_called_once()
+        assert stage_executor.calls == ["prep"]
+
+    def test_pipeline_queue_respects_dependencies(self, test_db, monkeypatch):
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[
+                StageDef(name="prep", inputs={}, outputs={}),
+                StageDef(name="train", inputs={}, outputs={}),
+            ],
+        )
+
+        executor, stage_executor, _, fake_pool = self._make_executor(test_db, pipeline_def, monkeypatch)
+
+        result = executor.run_pipeline(
+            workspace="ws",
+            pipeline_name="train",
+            async_mode=True,
+            reason="queue deps",
+        )
+        prun = result["pipeline_run_id"]
+
+        # Mark first stage complete in DB to satisfy dependency
+        first_stage_id = result["stage_runs"][0]["stage_run_id"]
+        test_db.update_stage_run_status(first_stage_id, status="completed")
+
+        launched = executor._process_pipeline_queue_once(
+            prun,
+            workspace="ws",
+            pipeline_name="train",
+            config_override=None,
+            reason="queue deps",
+        )
+
+        assert [sr.stage for sr in launched] == ["train"]
+        assert stage_executor.calls == ["prep", "train"]
+        # submit should have been invoked once by run_pipeline
+        fake_pool.submit.assert_called_once()
+
+    def test_worker_loop_cas_prevents_double_launch(self, test_db, monkeypatch):
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[
+                StageDef(name="prep", inputs={}, outputs={}),
+            ],
+        )
+
+        executor, stage_executor, _, _ = self._make_executor(test_db, pipeline_def, monkeypatch)
+
+        result = executor.run_pipeline(
+            workspace="ws",
+            pipeline_name="train",
+            async_mode=True,
+            reason="cas",
+        )
+        prun = result["pipeline_run_id"]
+
+        # Second pass should not relaunch the same stage when status is still running
+        before_calls = len(stage_executor.calls)
+        executor._process_pipeline_queue_once(
+            prun,
+            workspace="ws",
+            pipeline_name="train",
+            config_override=None,
+            reason="cas",
+        )
+        assert len(stage_executor.calls) == before_calls
+
+    def test_worker_recovery_on_restart(self, test_db, monkeypatch):
+        # Seed DB with a pending pipeline run so __init__ schedules recovery
+        pipeline_run_id = "prun-test"
+        with test_db._conn() as conn:
+            conn.execute(
+                "INSERT INTO pipeline_runs (id, workspace_name, pipeline_name, status, started_at) VALUES (?, ?, ?, 'pending', datetime('now'))",
+                (pipeline_run_id, "ws", "train"),
+            )
+            conn.execute(
+                "INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, deps, status) VALUES (?, ?, ?, 'pending')",
+                (pipeline_run_id, "prep", json.dumps([])),
+            )
+
+        fake_pool = MagicMock()
+        monkeypatch.setattr(PipelineExecutor, "_pool", fake_pool)
+
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = PipelineDef(
+            name="train", stages=[StageDef(name="prep", inputs={}, outputs={})]
+        )
+
+        executor = PipelineExecutor(
+            stage_executor=DummyStageExecutor(test_db),
+            pipeline_manager=pipeline_manager,
+            db=test_db,
+        )
+
+        fake_pool.submit.assert_called_once()
+
+    def test_worker_handles_stage_failures(self, test_db, monkeypatch):
+        pipeline_run_id = "prun-fail"
+        with test_db._conn() as conn:
+            conn.execute(
+                "INSERT INTO pipeline_runs (id, workspace_name, pipeline_name, status, started_at) VALUES (?, ?, ?, 'pending', datetime('now'))",
+                (pipeline_run_id, "ws", "train"),
+            )
+            conn.execute(
+                "INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, deps, status) VALUES (?, ?, ?, 'failed')",
+                (pipeline_run_id, "prep", json.dumps([])),
+            )
+
+        executor, _, _, _ = self._make_executor(
+            test_db,
+            PipelineDef(name="train", stages=[StageDef(name="prep", inputs={}, outputs={})]),
+            monkeypatch,
+        )
+
+        executor._worker_loop(
+            pipeline_run_id,
+            workspace="ws",
+            pipeline_name="train",
+            config_override=None,
+            reason="fail",
+        )
+
+        with test_db._conn() as conn:
+            row = conn.execute(
+                "SELECT status FROM pipeline_runs WHERE id=?",
+                (pipeline_run_id,),
+            ).fetchone()
+        assert row["status"] == "failed"
+
+    def test_run_stage_wait_false_returns_immediately(self, test_db, monkeypatch):
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+        executor, stage_executor, _, _ = self._make_executor(test_db, pipeline_def, monkeypatch)
+
+        result = executor.run_pipeline(
+            workspace="ws",
+            pipeline_name="train",
+            async_mode=True,
+            reason="wait flag",
+        )
+
+        sr = result["stage_runs"][0]
+        assert sr["status"] == "running"
+        # stage_executor.run_stage is invoked once with default wait=False (not supplied)
+        assert len(executor.stage_executor.call_kwargs) == 1
+        assert executor.stage_executor.call_kwargs[0]["wait"] is False
+
+
+class TestNamedPipelines:
+    def test_get_pipeline_with_name(self, test_db):
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+        stage_executor = DummyStageExecutor(test_db)
+
+        executor = PipelineExecutor(
+            stage_executor=stage_executor,
+            pipeline_manager=pipeline_manager,
+            db=test_db,
+        )
+
+        executor.run_pipeline(workspace="ws", pipeline_name="train", async_mode=False)
+        pipeline_manager.get_pipeline.assert_called_with("ws", "train")
+
+    def test_get_pipeline_default_fallback(self, test_db):
+        pipeline_def = PipelineDef(
+            name="default",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+        stage_executor = DummyStageExecutor(test_db)
+
+        executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
+        executor.run_pipeline(workspace="ws", pipeline_name=None, async_mode=False)
+
+        pipeline_manager.get_pipeline.assert_called_with("ws", None)
+
+    def test_run_stage_with_pipeline_param(self, test_db):
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+        stage_executor = DummyStageExecutor(test_db)
+
+        executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
+        executor.run_pipeline(workspace="ws", pipeline_name="train", async_mode=False)
+
+        assert stage_executor.calls == ["prep"]
+        row = test_db.list_stage_runs()[0]
+        assert row["pipeline_name"] == "train"
+
+    def test_run_pipeline_with_named_pipeline(self, test_db):
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={}), StageDef(name="train", inputs={}, outputs={})],
+        )
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+        stage_executor = DummyStageExecutor(test_db)
+
+        executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
+        result = executor.run_pipeline(workspace="ws", pipeline_name="train", async_mode=False)
+
+        assert all(r["pipeline"] == "train" for r in result["stage_runs"])

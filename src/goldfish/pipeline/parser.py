@@ -1,13 +1,14 @@
 """Pipeline parser and validator."""
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 import yaml
 from pydantic import ValidationError
 
 from goldfish.errors import GoldfishError
-from goldfish.models import PipelineDef, StageDef, SignalDef
+from goldfish.models import PipelineDef, SignalDef, StageDef
 
 
 class PipelineValidationError(GoldfishError):
@@ -55,6 +56,7 @@ class PipelineParser:
             if "stages" in data:
                 stages = []
                 for stage_data in data["stages"]:
+
                     def _normalize_input_item(item):
                         if isinstance(item, str):
                             item = {"name": item, "type": "dataset"}
@@ -76,9 +78,7 @@ class PipelineParser:
                         if isinstance(inputs_raw, list):
                             # Convert list to dict: [{name: "x", ...}] -> {"x": SignalDef(...)}
                             stage_data["inputs"] = {
-                                _normalize_input_item(item)["name"]: SignalDef(
-                                    **_normalize_input_item(item)
-                                )
+                                _normalize_input_item(item)["name"]: SignalDef(**_normalize_input_item(item))
                                 for item in inputs_raw
                             }
                         elif isinstance(inputs_raw, dict):
@@ -105,9 +105,7 @@ class PipelineParser:
                         if isinstance(outputs_raw, list):
                             # Convert list to dict: [{name: "y", ...}] -> {"y": SignalDef(...)}
                             stage_data["outputs"] = {
-                                _normalize_output_item(item)["name"]: SignalDef(
-                                    **_normalize_output_item(item)
-                                )
+                                _normalize_output_item(item)["name"]: SignalDef(**_normalize_output_item(item))
                                 for item in outputs_raw
                             }
                         elif isinstance(outputs_raw, dict):
@@ -140,7 +138,7 @@ class PipelineParser:
         self,
         pipeline: PipelineDef,
         workspace_path: Path,
-        dataset_exists_fn: Optional[callable] = None,
+        dataset_exists_fn: Callable[[str], bool] | None = None,
     ) -> list[str]:
         """Validate pipeline definition.
 
@@ -209,19 +207,16 @@ class PipelineParser:
                     # Check dataset exists
                     if not input_def.dataset:
                         errors.append(
-                            f"Stage '{stage.name}' input '{input_name}': "
-                            f"dataset type requires 'dataset' field"
+                            f"Stage '{stage.name}' input '{input_name}': dataset type requires 'dataset' field"
                         )
                     elif dataset_exists_fn and not dataset_exists_fn(input_def.dataset):
                         errors.append(
-                            f"Stage '{stage.name}' input '{input_name}': "
-                            f"dataset '{input_def.dataset}' not found"
+                            f"Stage '{stage.name}' input '{input_name}': dataset '{input_def.dataset}' not found"
                         )
                 else:
                     # Input must be either dataset or from_stage
                     errors.append(
-                        f"Stage '{stage.name}' input '{input_name}': "
-                        f"must specify either 'dataset' or 'from_stage'"
+                        f"Stage '{stage.name}' input '{input_name}': must specify either 'dataset' or 'from_stage'"
                     )
 
             # Register outputs as available for next stages
@@ -234,9 +229,7 @@ class PipelineParser:
         for stage in pipeline.stages:
             for input_def in stage.inputs.values():
                 if input_def.from_stage == stage.name:
-                    errors.append(
-                        f"Stage '{stage.name}' has circular dependency (references itself)"
-                    )
+                    errors.append(f"Stage '{stage.name}' has circular dependency (references itself)")
 
         return errors
 
@@ -250,35 +243,29 @@ class PipelineParser:
             YAML string
         """
         # Convert to dict for YAML serialization
-        data = {
-            "name": pipeline.name,
-            "description": pipeline.description,
-            "stages": [],
-        }
+        stages_list: list[dict[str, Any]] = []
 
         for stage in pipeline.stages:
-            stage_data = {"name": stage.name}
+            stage_data: dict[str, Any] = {"name": stage.name}
 
             if stage.inputs:
                 stage_data["inputs"] = {
-                    name: {
-                        k: v
-                        for k, v in sig.model_dump().items()
-                        if v is not None and k != "name"
-                    }
+                    name: {k: v for k, v in sig.model_dump().items() if v is not None and k != "name"}
                     for name, sig in stage.inputs.items()
                 }
 
             if stage.outputs:
                 stage_data["outputs"] = {
-                    name: {
-                        k: v
-                        for k, v in sig.model_dump().items()
-                        if v is not None and k != "name"
-                    }
+                    name: {k: v for k, v in sig.model_dump().items() if v is not None and k != "name"}
                     for name, sig in stage.outputs.items()
                 }
 
-            data["stages"].append(stage_data)
+            stages_list.append(stage_data)
+
+        data: dict[str, Any] = {
+            "name": pipeline.name,
+            "description": pipeline.description,
+            "stages": stages_list,
+        }
 
         return yaml.safe_dump(data, default_flow_style=False, sort_keys=False)

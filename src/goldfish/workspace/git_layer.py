@@ -6,24 +6,23 @@ All errors are translated to GoldfishError before leaving this module.
 
 import logging
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
+
+from goldfish.errors import (
+    GoldfishError,
+    SlotNotEmptyError,
+    SyncError,
+    WorkspaceAlreadyExistsError,
+    WorkspaceNotFoundError,
+    translate_git_error,
+)
 
 # Default timeout for git operations (60 seconds)
 # Long enough for remote operations, short enough to catch hangs
 GIT_TIMEOUT = 60
 
 logger = logging.getLogger(__name__)
-
-from goldfish.errors import (
-    GoldfishError,
-    WorkspaceAlreadyExistsError,
-    WorkspaceNotFoundError,
-    SlotNotEmptyError,
-    SyncError,
-    translate_git_error,
-)
 
 
 class GitLayer:
@@ -47,13 +46,9 @@ class GitLayer:
 
         # Verify dev repo exists
         if not (self.dev_repo / ".git").exists():
-            raise GoldfishError(
-                f"Project not initialized. Expected repository at {dev_repo_path}"
-            )
+            raise GoldfishError(f"Project not initialized. Expected repository at {dev_repo_path}")
 
-    def _run_git(
-        self, *args: str, cwd: Optional[Path] = None, check: bool = True
-    ) -> tuple[str, str]:
+    def _run_git(self, *args: str, cwd: Path | None = None, check: bool = True) -> tuple[str, str]:
         """Run git command, translating errors.
 
         Args:
@@ -76,11 +71,10 @@ class GitLayer:
                 text=True,
                 timeout=GIT_TIMEOUT,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as err:
             raise GoldfishError(
-                f"Operation timed out after {GIT_TIMEOUT} seconds. "
-                f"The repository may be slow or unresponsive."
-            )
+                f"Operation timed out after {GIT_TIMEOUT} seconds. The repository may be slow or unresponsive."
+            ) from err
 
         if check and result.returncode != 0:
             error_msg = translate_git_error(result.stderr)
@@ -122,9 +116,7 @@ class GitLayer:
 
     def list_branches(self) -> list[str]:
         """List all workspace branches (experiment/*)."""
-        stdout, _ = self._run_git(
-            "branch", "--list", "experiment/*", "--format=%(refname:short)"
-        )
+        stdout, _ = self._run_git("branch", "--list", "experiment/*", "--format=%(refname:short)")
         branches = []
         for line in stdout.split("\n"):
             line = line.strip()
@@ -140,9 +132,7 @@ class GitLayer:
 
         # Get creation time (first commit on branch after diverging from main)
         try:
-            stdout, _ = self._run_git(
-                "log", branch, "--not", "main", "--format=%aI", "--reverse", "-1"
-            )
+            stdout, _ = self._run_git("log", branch, "--not", "main", "--format=%aI", "--reverse", "-1")
             created_at = stdout.strip() if stdout.strip() else None
         except GoldfishError as e:
             logger.warning(f"Failed to get git metadata for workspace '{workspace_name}': {e}")
@@ -151,9 +141,7 @@ class GitLayer:
         # Fall back to first commit if above fails
         if not created_at:
             try:
-                stdout, _ = self._run_git(
-                    "log", branch, "--format=%aI", "--reverse", "-1"
-                )
+                stdout, _ = self._run_git("log", branch, "--format=%aI", "--reverse", "-1")
                 created_at = stdout.strip() if stdout.strip() else None
             except GoldfishError:
                 created_at = None
@@ -195,9 +183,8 @@ class GitLayer:
             try:
                 if any(slot_path.iterdir()):
                     from goldfish.errors import GoldfishError
-                    raise GoldfishError(
-                        f"Cannot add worktree: {slot_path} is not empty"
-                    )
+
+                    raise GoldfishError(f"Cannot add worktree: {slot_path} is not empty")
             except (PermissionError, OSError):
                 # If we can't check, let git fail naturally
                 pass
@@ -236,7 +223,7 @@ class GitLayer:
 
         return worktrees
 
-    def get_worktree_for_slot(self, slot_path: Path) -> Optional[dict]:
+    def get_worktree_for_slot(self, slot_path: Path) -> dict | None:
         """Get worktree info for a specific slot path."""
         worktrees = self.list_worktrees()
         slot_str = str(slot_path.resolve())
@@ -282,11 +269,10 @@ class GitLayer:
                 timeout=GIT_TIMEOUT,
             )
             return result.returncode != 0
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as err:
             raise GoldfishError(
-                f"Operation timed out after {GIT_TIMEOUT} seconds. "
-                f"The repository may be slow or unresponsive."
-            )
+                f"Operation timed out after {GIT_TIMEOUT} seconds. The repository may be slow or unresponsive."
+            ) from err
 
     def get_changed_files(self, slot_path: Path) -> list[str]:
         """Get list of changed files (staged and unstaged)."""
@@ -314,7 +300,7 @@ class GitLayer:
         """Get diff statistics summary."""
         stdout, _ = self._run_git("diff", "--stat", "HEAD", cwd=slot_path)
         # Return just the summary line (last line)
-        lines = [l for l in stdout.strip().split("\n") if l.strip()]
+        lines = [line for line in stdout.strip().split("\n") if line.strip()]
         if lines:
             return lines[-1].strip()
         return "No changes"
@@ -358,7 +344,7 @@ class GitLayer:
 
         # Create snapshot tag
         sha = self.get_head_sha(slot_path)
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         snapshot_id = f"snap-{sha}-{timestamp}"
 
         self._run_git("tag", snapshot_id, cwd=slot_path)
@@ -378,12 +364,10 @@ class GitLayer:
         # Create tag in the dev repo (not in worktree)
         self._run_git("tag", tag_name, commit_sha, cwd=self.dev_repo)
 
-    def get_latest_snapshot(self, slot_path: Path) -> Optional[str]:
+    def get_latest_snapshot(self, slot_path: Path) -> str | None:
         """Get the most recent snapshot tag."""
         try:
-            stdout, _ = self._run_git(
-                "describe", "--tags", "--abbrev=0", "--match=snap-*", cwd=slot_path
-            )
+            stdout, _ = self._run_git("describe", "--tags", "--abbrev=0", "--match=snap-*", cwd=slot_path)
             return stdout.strip() if stdout.strip() else None
         except GoldfishError:
             return None
@@ -413,14 +397,10 @@ class GitLayer:
             commit_sha = stdout.strip()
 
             # Get commit date (ISO format)
-            date_out, _ = self._run_git(
-                "log", "-1", "--format=%cI", commit_sha
-            )
+            date_out, _ = self._run_git("log", "-1", "--format=%cI", commit_sha)
 
             # Get commit message (first line)
-            msg_out, _ = self._run_git(
-                "log", "-1", "--format=%s", commit_sha
-            )
+            msg_out, _ = self._run_git("log", "-1", "--format=%s", commit_sha)
 
             return {
                 "commit_date": date_out.strip(),
@@ -458,7 +438,7 @@ class GitLayer:
             self._run_git("remote", "get-url", "origin", check=False)
             self._run_git("push", "origin", branch, "--tags")
         except GoldfishError as e:
-            raise SyncError(f"Failed to sync workspace: {e.message}")
+            raise SyncError(f"Failed to sync workspace: {e.message}") from e
 
     def fetch(self) -> None:
         """Fetch from remote."""
@@ -488,9 +468,7 @@ class GitLayer:
             - files: Dict of file changes {file_path: change_type}
         """
         # Get commits between the two SHAs
-        stdout, _ = self._run_git(
-            "log", "--oneline", "--format=%H|%s", f"{from_sha}..{to_sha}"
-        )
+        stdout, _ = self._run_git("log", "--oneline", "--format=%H|%s", f"{from_sha}..{to_sha}")
         commits = []
         for line in stdout.strip().split("\n"):
             if line and "|" in line:
@@ -498,9 +476,7 @@ class GitLayer:
                 commits.append({"sha": sha, "message": message})
 
         # Get file changes
-        stdout, _ = self._run_git(
-            "diff", "--name-status", from_sha, to_sha
-        )
+        stdout, _ = self._run_git("diff", "--name-status", from_sha, to_sha)
         files = {}
         for line in stdout.strip().split("\n"):
             if line:

@@ -337,28 +337,49 @@ To add a new signal type:
 
 **Philosophy**: Test real components, minimize mocks
 
-### Test Categories
+### Directory Structure
 
-1. **Unit tests** (`test_*.py`):
-   - Test individual components
-   - Use fixtures for database and config
-   - Mock external services (GCS, Docker)
+```
+tests/
+├── unit/           # Fast, isolated tests (~164 tests, <1s each)
+├── integration/    # Component tests with real resources (~408 tests)
+├── e2e/            # Full system tests
+│   ├── deluxe/     # GCE cloud tests (opt-in, ~30 min)
+│   └── *.py        # Local e2e tests
+└── conftest.py     # Shared fixtures
+```
 
-2. **Integration tests** (`test_e2e_*.py`):
-   - Test complete workflows
-   - Use real Database, WorkspaceManager, PipelineManager
-   - Create temp directories for isolation
+### Test Categories and Criteria
 
-3. **Security tests** (`test_security*.py`):
-   - Path traversal attempts
-   - Command injection attempts
-   - Resource exhaustion scenarios
-   - Concurrent access patterns
+1. **Unit tests** (`tests/unit/`):
+   - Test pure logic in isolation
+   - All external dependencies mocked (DB, git, Docker, GCS)
+   - Fast: each test completes in <100ms
+   - No filesystem side effects (use temp dirs if needed)
+   - Examples: validation, config parsing, utility functions, profiles
 
-4. **Concurrency tests** (`test_concurrent.py`):
-   - Multi-threaded operations
-   - Slot locking behavior
-   - Database transaction isolation
+2. **Integration tests** (`tests/integration/`):
+   - Test component interactions with real resources
+   - Use real SQLite databases (in temp dirs)
+   - Use real git repos (in temp dirs)
+   - Mock only external services (GCS, Docker daemon)
+   - May take 1-5 seconds per test
+   - Examples: database CRUD, git operations, workspace management
+
+3. **E2E tests** (`tests/e2e/`):
+   - Full system tests with real Docker containers
+   - May take 10-60 seconds per test
+   - Examples: complete pipeline execution, signal flow
+
+4. **Deluxe GCE tests** (`tests/e2e/deluxe/`):
+   - Real cloud infrastructure tests
+   - Marked with `@pytest.mark.deluxe_gce`
+   - Require GCP credentials and ~30 min to run
+   - Run manually or via `make test-deluxe`
+
+### Test Markers
+
+- `@pytest.mark.deluxe_gce` - Cloud tests requiring GCP access (opt-in)
 
 ### Writing Tests
 
@@ -508,3 +529,4 @@ docker inspect goldfish-{workspace}-v1  # Full container details
 2. **New signal types**: Update SignalDef + parser + IO library
 3. **New audit operations**: Add to AuditOperation enum
 4. **New MCP tools**: Add to appropriate tool module in `server_tools/`
+- When getting ruff, mypy or test errors, never cheat, always solve properly.

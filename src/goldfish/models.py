@@ -1,8 +1,7 @@
 """Pydantic models for Goldfish responses."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -39,18 +38,18 @@ class SlotInfo(BaseModel):
 
     slot: str  # e.g., "w1"
     state: SlotState
-    workspace: Optional[str] = None  # Workspace name if mounted
-    dirty: Optional[DirtyState] = None
-    last_checkpoint: Optional[str] = None
-    context: Optional[str] = None  # One-line description
+    workspace: str | None = None  # Workspace name if mounted
+    dirty: DirtyState | None = None
+    last_checkpoint: str | None = None
+    context: str | None = None  # One-line description
 
     # Lineage information (Phase 7)
-    current_version: Optional[str] = None  # Current version (e.g., "v3")
-    version_count: Optional[int] = None  # Total number of versions
-    parent_workspace: Optional[str] = None  # Parent workspace if branched
-    parent_version: Optional[str] = None  # Version branched from
-    version_history: Optional[list[dict]] = None  # Recent versions
-    branches: Optional[list[dict]] = None  # Child workspaces
+    current_version: str | None = None  # Current version (e.g., "v3")
+    version_count: int | None = None  # Total number of versions
+    parent_workspace: str | None = None  # Parent workspace if branched
+    parent_version: str | None = None  # Version branched from
+    version_history: list[dict] | None = None  # Recent versions
+    branches: list[dict] | None = None  # Child workspaces
 
 
 class WorkspaceInfo(BaseModel):
@@ -62,7 +61,7 @@ class WorkspaceInfo(BaseModel):
     snapshot_count: int
     last_activity: datetime
     is_mounted: bool
-    mounted_slot: Optional[str] = None
+    mounted_slot: str | None = None
 
 
 # --- Response Models ---
@@ -86,8 +85,8 @@ class MountResponse(BaseModel):
     workspace: str
     state_md: str
     dirty: DirtyState
-    last_checkpoint: Optional[str] = None
-    warning: Optional[str] = None  # For soft limit warnings
+    last_checkpoint: str | None = None
+    warning: str | None = None  # For soft limit warnings
 
 
 class HibernateResponse(BaseModel):
@@ -98,7 +97,7 @@ class HibernateResponse(BaseModel):
     workspace: str
     state_md: str
     auto_checkpointed: bool
-    checkpoint_id: Optional[str] = None
+    checkpoint_id: str | None = None
     pushed_to_remote: bool
 
 
@@ -133,25 +132,24 @@ class JobInfo(BaseModel):
     snapshot_id: str
     script: str
     started_at: datetime
-    completed_at: Optional[datetime] = None
-    log_uri: Optional[str] = None
-    artifact_uri: Optional[str] = None
-    error: Optional[str] = None
+    completed_at: datetime | None = None
+    log_uri: str | None = None
+    artifact_uri: str | None = None
+    error: str | None = None
     input_sources: list[str] = Field(default_factory=list)
 
     @property
-    def elapsed_seconds(self) -> Optional[float]:
+    def elapsed_seconds(self) -> float | None:
         """Elapsed time in seconds (uses completed_at if done, else current time)."""
-        from datetime import timezone
 
         if self.completed_at:
             return (self.completed_at - self.started_at).total_seconds()
         elif self.status in (JobStatus.RUNNING, JobStatus.PENDING):
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             # Ensure started_at has timezone info
             start = self.started_at
             if start.tzinfo is None:
-                start = start.replace(tzinfo=timezone.utc)
+                start = start.replace(tzinfo=UTC)
             return (now - start).total_seconds()
         return None
 
@@ -168,10 +166,10 @@ class RunJobResponse(BaseModel):
     job_id: str
     snapshot_id: str
     experiment_dir: str
-    artifact_uri: Optional[str] = None
-    log_uri: Optional[str] = None
+    artifact_uri: str | None = None
+    log_uri: str | None = None
     initial_status: str = "pending"
-    state_md: Optional[str] = None
+    state_md: str | None = None
 
 
 # --- Source Models ---
@@ -181,11 +179,11 @@ class SourceInfo(BaseModel):
     """Information about a data source."""
 
     name: str
-    description: Optional[str] = None
+    description: str | None = None
     created_at: datetime
     created_by: str  # "job:{job_id}" or "external"
     gcs_location: str
-    size_bytes: Optional[int] = None
+    size_bytes: int | None = None
     status: SourceStatus = SourceStatus.AVAILABLE
 
 
@@ -194,7 +192,7 @@ class SourceLineage(BaseModel):
 
     source_name: str
     parent_sources: list[str] = Field(default_factory=list)
-    job_id: Optional[str] = None
+    job_id: str | None = None
 
 
 class RegisterSourceResponse(BaseModel):
@@ -280,9 +278,9 @@ class JobLogsResponse(BaseModel):
 
     job_id: str
     status: str  # Current job status
-    logs: Optional[str] = None  # Log content if available
-    log_uri: Optional[str] = None  # URI where logs are stored
-    error: Optional[str] = None  # Error message if logs unavailable
+    logs: str | None = None  # Log content if available
+    log_uri: str | None = None  # URI where logs are stored
+    error: str | None = None  # Error message if logs unavailable
 
 
 class SnapshotInfo(BaseModel):
@@ -308,7 +306,7 @@ class WorkspaceGoalResponse(BaseModel):
     """Response from get_workspace_goal() tool."""
 
     workspace: str
-    goal: Optional[str] = None  # None if not set
+    goal: str | None = None  # None if not set
 
 
 class UpdateWorkspaceGoalResponse(BaseModel):
@@ -360,10 +358,10 @@ class AuditEntry(BaseModel):
     id: int
     timestamp: datetime
     operation: str
-    slot: Optional[str] = None
-    workspace: Optional[str] = None
+    slot: str | None = None
+    workspace: str | None = None
     reason: str
-    details: Optional[dict] = None
+    details: dict | None = None
 
 
 class AuditLogResponse(BaseModel):
@@ -381,11 +379,11 @@ class SignalDef(BaseModel):
 
     name: str
     type: str  # dataset, npy, csv, directory, file
-    from_stage: Optional[str] = None  # For inputs: which stage produces this
-    dataset: Optional[str] = None  # For dataset type: dataset name
-    storage: Optional[str] = None  # gcs, hyperdisk, local (hint)
-    format: Optional[str] = None  # Override format detection
-    artifact: Optional[bool] = False  # Mark output as artifact for auto-registration
+    from_stage: str | None = None  # For inputs: which stage produces this
+    dataset: str | None = None  # For dataset type: dataset name
+    storage: str | None = None  # gcs, hyperdisk, local (hint)
+    format: str | None = None  # Override format detection
+    artifact: bool | None = False  # Mark output as artifact for auto-registration
 
 
 class StageDef(BaseModel):
@@ -434,23 +432,23 @@ class StageRunInfo(BaseModel):
     """Information about a stage run."""
 
     stage_run_id: str
-    pipeline_run_id: Optional[str] = None
+    pipeline_run_id: str | None = None
     workspace: str
-    pipeline: Optional[str] = None
+    pipeline: str | None = None
     version: str
     stage: str
-    profile: Optional[str] = None
-    hints: Optional[dict] = None
+    profile: str | None = None
+    hints: dict | None = None
     status: str  # pending, running, completed, failed
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    progress: Optional[str] = None
-    log_uri: Optional[str] = None
-    artifact_uri: Optional[str] = None
-    outputs: Optional[list] = None
-    config: Optional[dict] = None
-    inputs: Optional[dict] = None
-    error: Optional[str] = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    progress: str | None = None
+    log_uri: str | None = None
+    artifact_uri: str | None = None
+    outputs: list | None = None
+    config: dict | None = None
+    inputs: dict | None = None
+    error: str | None = None
 
 
 class RunStageResponse(BaseModel):
@@ -478,9 +476,9 @@ class ListRunsResponse(BaseModel):
 
 class StageLogsResponse(BaseModel):
     stage_run_id: str
-    status: Optional[str] = None
-    logs: Optional[str] = None
-    log_uri: Optional[str] = None
+    status: str | None = None
+    logs: str | None = None
+    log_uri: str | None = None
 
 
 class GetOutputsResponse(BaseModel):
@@ -497,5 +495,5 @@ class GetRunResponse(BaseModel):
 
 class CancelRunResponse(BaseModel):
     success: bool
-    previous_status: Optional[str] = None
-    error: Optional[str] = None
+    previous_status: str | None = None
+    error: str | None = None

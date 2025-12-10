@@ -8,10 +8,11 @@ import json
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any
 
 from goldfish.errors import GoldfishError
 
@@ -28,12 +29,14 @@ CAPACITY_PATTERNS = (
 
 class CapacityError(Exception):
     """Raised when GCE reports a capacity or quota issue."""
+
     pass
 
 
 @dataclass
 class LaunchSelection:
     """Selected resource configuration for a launch."""
+
     resource: str
     zone: str
     preemptible: bool
@@ -42,19 +45,18 @@ class LaunchSelection:
 @dataclass
 class LaunchResult:
     """Result of a successful instance launch."""
+
     instance_name: str
-    disk_name: Optional[str]
+    disk_name: str | None
     selection: LaunchSelection
-    timings: Dict[str, float]
-    attempt_log: List[Dict[str, Any]]
-    run_id: Optional[str] = None  # Run identifier for tracking
-    log_uri: Optional[str] = None  # GCS URI for logs
-    artifact_uri: Optional[str] = None  # GCS URI for artifacts
+    timings: dict[str, float]
+    attempt_log: list[dict[str, Any]]
+    run_id: str | None = None  # Run identifier for tracking
+    log_uri: str | None = None  # GCS URI for logs
+    artifact_uri: str | None = None  # GCS URI for artifacts
 
 
-def run_gcloud(
-    cmd: List[str], *, allow_capacity: bool = False, check: bool = True
-) -> subprocess.CompletedProcess:
+def run_gcloud(cmd: list[str], *, allow_capacity: bool = False, check: bool = True) -> subprocess.CompletedProcess:
     """Run gcloud command with capacity error detection.
 
     Args:
@@ -88,10 +90,10 @@ def run_gcloud(
 
 
 def order_resources(
-    resources: List[Dict[str, Any]],
+    resources: list[dict[str, Any]],
     gpu_preference: Iterable[str],
-    force_gpu: Optional[str],
-) -> List[Dict[str, Any]]:
+    force_gpu: str | None,
+) -> list[dict[str, Any]]:
     """Order resources by GPU preference.
 
     Args:
@@ -103,7 +105,7 @@ def order_resources(
         Ordered list of resources
     """
     # Group by GPU type
-    by_type: Dict[str, List[Dict[str, Any]]] = {}
+    by_type: dict[str, list[dict[str, Any]]] = {}
     for res in resources:
         gpu_info = res.get("gpu") or {}
         gpu_type = (gpu_info.get("type") or "none").lower()
@@ -113,14 +115,12 @@ def order_resources(
     if force_gpu:
         forced_type = force_gpu.lower()
         if forced_type not in by_type:
-            raise GoldfishError(
-                f"force_gpu={force_gpu} not present in resource catalog"
-            )
+            raise GoldfishError(f"force_gpu={force_gpu} not present in resource catalog")
         return by_type[forced_type]
 
     # Order by preference
-    ordered_types: List[str] = []
-    for pref in (gpu_preference or []):
+    ordered_types: list[str] = []
+    for pref in gpu_preference or []:
         pref = pref.lower()
         if pref in by_type and pref not in ordered_types:
             ordered_types.append(pref)
@@ -131,16 +131,14 @@ def order_resources(
             ordered_types.append(gpu_type)
 
     # Flatten
-    ordered: List[Dict[str, Any]] = []
+    ordered: list[dict[str, Any]] = []
     for gpu_type in ordered_types:
         ordered.extend(by_type.get(gpu_type, []))
 
     return ordered
 
 
-def mode_order(
-    resource: Dict[str, Any], preference: str, force_mode: Optional[str]
-) -> List[str]:
+def mode_order(resource: dict[str, Any], preference: str, force_mode: str | None) -> list[str]:
     """Determine preemptible mode ordering for a resource.
 
     Args:
@@ -157,11 +155,9 @@ def mode_order(
     if force_mode == "on_demand":
         return ["on_demand"] if resource.get("on_demand_allowed") else []
 
-    preferred = (
-        ["spot", "on_demand"] if preference == "spot_first" else ["on_demand", "spot"]
-    )
+    preferred = ["spot", "on_demand"] if preference == "spot_first" else ["on_demand", "spot"]
 
-    modes: List[str] = []
+    modes: list[str] = []
     for mode in preferred:
         if mode == "spot" and resource.get("preemptible_allowed"):
             modes.append("spot")
@@ -213,18 +209,18 @@ class ResourceLauncher:
 
     def __init__(
         self,
-        resources: List[Dict[str, Any]],
+        resources: list[dict[str, Any]],
         *,
-        gpu_preference: Optional[List[str]] = None,
-        force_gpu: Optional[str] = None,
+        gpu_preference: list[str] | None = None,
+        force_gpu: str | None = None,
         preemptible_preference: str = "spot_first",
-        force_preemptible: Optional[str] = None,
-        zones_override: Optional[List[str]] = None,
+        force_preemptible: str | None = None,
+        zones_override: list[str] | None = None,
         search_timeout_sec: int = 600,
         initial_backoff_sec: float = 5,
         backoff_multiplier: float = 1.5,
         max_attempts: int = 100,
-        project_id: Optional[str] = None,
+        project_id: str | None = None,
     ) -> None:
         if not resources:
             raise GoldfishError("resources list is empty")
@@ -241,18 +237,16 @@ class ResourceLauncher:
         self.max_attempts = max_attempts
         self.project_id = project_id
 
-        self.ordered_resources = order_resources(
-            resources, self.gpu_preference, self.force_gpu
-        )
+        self.ordered_resources = order_resources(resources, self.gpu_preference, self.force_gpu)
 
     def launch(
         self,
         *,
         instance_name: str,
         startup_script: str,
-        disk_name: Optional[str] = None,
-        snapshot: Optional[str] = None,
-        extra_disks: Optional[List[Dict[str, Any]]] = None,
+        disk_name: str | None = None,
+        snapshot: str | None = None,
+        extra_disks: list[dict[str, Any]] | None = None,
         data_disk_mode: str = "ro",
     ) -> LaunchResult:
         """Launch instance with capacity search.
@@ -276,27 +270,23 @@ class ResourceLauncher:
             f.write(startup_script)
             startup_path = Path(f.name)
 
-        attempt_log: List[Dict[str, Any]] = []
+        attempt_log: list[dict[str, Any]] = []
         deadline = time.time() + self.search_timeout
         backoff = self.initial_backoff
         attempts = 0
-        selection: Optional[LaunchSelection] = None
-        timings: Optional[Dict[str, float]] = None
+        selection: LaunchSelection | None = None
+        timings: dict[str, float] | None = None
 
         try:
             for resource in self.ordered_resources:
                 candidate_zones = [
-                    z
-                    for z in resource.get("zones", [])
-                    if not self.zone_filter or z in self.zone_filter
+                    z for z in resource.get("zones", []) if not self.zone_filter or z in self.zone_filter
                 ]
 
                 if not candidate_zones:
                     continue
 
-                mode_seq = mode_order(
-                    resource, self.preemptible_preference, self.force_preemptible
-                )
+                mode_seq = mode_order(resource, self.preemptible_preference, self.force_preemptible)
 
                 if not mode_seq:
                     continue
@@ -305,19 +295,12 @@ class ResourceLauncher:
                     preemptible = mode == "spot"
 
                     for zone in candidate_zones:
-                        if (
-                            selection is not None
-                            or attempts >= self.max_attempts
-                            or time.time() > deadline
-                        ):
+                        if selection is not None or attempts >= self.max_attempts or time.time() > deadline:
                             break
 
                         attempts += 1
                         attempt_entry = {
-                            "timestamp": datetime.utcnow().isoformat(
-                                timespec="seconds"
-                            )
-                            + "Z",
+                            "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
                             "resource": resource["name"],
                             "zone": zone,
                             "preemptible": preemptible,
@@ -342,9 +325,7 @@ class ResourceLauncher:
                                 {
                                     "status": "success",
                                     "disk_create_sec": timing.get("disk_create_sec"),
-                                    "instance_create_sec": timing.get(
-                                        "instance_create_sec"
-                                    ),
+                                    "instance_create_sec": timing.get("instance_create_sec"),
                                 }
                             )
                             attempt_log.append(attempt_entry)
@@ -359,25 +340,15 @@ class ResourceLauncher:
                             if sleep_time > 0:
                                 time.sleep(sleep_time)
 
-                            backoff = min(
-                                backoff * self.backoff_multiplier, self.search_timeout
-                            )
+                            backoff = min(backoff * self.backoff_multiplier, self.search_timeout)
                             continue
 
-                    if (
-                        selection is not None
-                        or attempts >= self.max_attempts
-                        or time.time() > deadline
-                    ):
+                    if selection is not None or attempts >= self.max_attempts or time.time() > deadline:
                         break
 
             if selection is None or timings is None:
-                snippet = (
-                    json.dumps(attempt_log[-3:], indent=2) if attempt_log else "none"
-                )
-                raise GoldfishError(
-                    f"Failed to acquire capacity within budget; last attempts:\n{snippet}"
-                )
+                snippet = json.dumps(attempt_log[-3:], indent=2) if attempt_log else "none"
+                raise GoldfishError(f"Failed to acquire capacity within budget; last attempts:\n{snippet}")
 
         finally:
             startup_path.unlink(missing_ok=True)
@@ -393,16 +364,16 @@ class ResourceLauncher:
     def _attempt_launch(
         self,
         *,
-        resource: Dict[str, Any],
+        resource: dict[str, Any],
         zone: str,
         preemptible: bool,
-        disk_name: Optional[str],
+        disk_name: str | None,
         instance_name: str,
         startup_path: Path,
-        snapshot: Optional[str],
-        extra_disks: List[Dict[str, Any]],
+        snapshot: str | None,
+        extra_disks: list[dict[str, Any]],
         data_disk_mode: str,
-    ) -> tuple[LaunchSelection, Dict[str, float]]:
+    ) -> tuple[LaunchSelection, dict[str, float]]:
         """Attempt to launch instance in specific zone/resource.
 
         Args:
@@ -422,7 +393,7 @@ class ResourceLauncher:
         Raises:
             CapacityError: If capacity not available
         """
-        timings: Dict[str, float] = {}
+        timings: dict[str, float] = {}
         scratch_attached = False
 
         # Create data disk from snapshot if requested
@@ -480,11 +451,9 @@ class ResourceLauncher:
                 cmd.append(f"--image-project={image_project}")
 
         # Attach data disk
-        metadata_entries: List[str] = []
+        metadata_entries: list[str] = []
         if scratch_attached and disk_name:
-            cmd.append(
-                f"--disk=name={disk_name},device-name={disk_name},mode={data_disk_mode}"
-            )
+            cmd.append(f"--disk=name={disk_name},device-name={disk_name},mode={data_disk_mode}")
 
         # Extra disks
         for disk in extra_disks:
@@ -538,8 +507,6 @@ class ResourceLauncher:
         timings["instance_create_sec"] = round(time.time() - start, 2)
 
         return (
-            LaunchSelection(
-                resource=resource["name"], zone=zone, preemptible=preemptible
-            ),
+            LaunchSelection(resource=resource["name"], zone=zone, preemptible=preemptible),
             timings,
         )

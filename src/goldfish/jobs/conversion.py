@@ -3,19 +3,22 @@
 Shared utility for converting database job dictionaries to JobInfo model objects.
 """
 
-from goldfish.db.database import Database
-from goldfish.models import JobInfo, StageRunInfo
-from goldfish.utils import parse_datetime, parse_optional_datetime
 import json
 from functools import lru_cache
+from typing import Any
+
+from goldfish.db.database import Database
+from goldfish.db.types import JobRow
+from goldfish.models import JobInfo, JobStatus, StageRunInfo
+from goldfish.utils import parse_datetime, parse_optional_datetime
 
 
 @lru_cache(maxsize=1024)
-def _cached_json(val: str):
+def _cached_json(val: str) -> Any:
     return json.loads(val)
 
 
-def job_dict_to_info(job: dict, db: Database) -> JobInfo:
+def job_dict_to_info(job: JobRow, db: Database) -> JobInfo:
     """Convert database job dict to JobInfo model.
 
     Args:
@@ -30,7 +33,7 @@ def job_dict_to_info(job: dict, db: Database) -> JobInfo:
 
     return JobInfo(
         job_id=job["id"],
-        status=job["status"],
+        status=JobStatus(job["status"]),
         workspace=job["workspace"],
         snapshot_id=job["snapshot_id"],
         script=job["script"],
@@ -60,8 +63,11 @@ def stage_run_dict_to_info(row: dict) -> StageRunInfo:
     config_raw = row.get("config_json")
     inputs_raw = row.get("inputs_json")
 
+    stage_run_id = row.get("id") or row.get("stage_run_id")
+    if stage_run_id is None:
+        raise ValueError("stage_run_id is required in stage run row")
     return StageRunInfo(
-        stage_run_id=row.get("id") or row.get("stage_run_id"),
+        stage_run_id=stage_run_id,
         pipeline_run_id=row.get("pipeline_run_id"),
         workspace=row["workspace_name"],
         pipeline=row.get("pipeline_name"),

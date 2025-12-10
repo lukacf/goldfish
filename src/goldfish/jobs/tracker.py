@@ -7,11 +7,11 @@ This module handles:
 """
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 from goldfish.db.database import Database
+from goldfish.db.types import JobRow
 from goldfish.errors import GoldfishError, JobNotFoundError
 from goldfish.models import CancelJobResponse, JobInfo, JobStatus
 from goldfish.validation import validate_log_path
@@ -78,8 +78,8 @@ class JobTracker:
 
     def list_jobs(
         self,
-        workspace: Optional[str] = None,
-        status: Optional[str] = None,
+        workspace: str | None = None,
+        status: str | None = None,
         limit: int = 50,
     ) -> list[JobInfo]:
         """List jobs with optional filters.
@@ -99,9 +99,9 @@ class JobTracker:
         self,
         job_id: str,
         status: str,
-        log_uri: Optional[str] = None,
-        artifact_uri: Optional[str] = None,
-        error: Optional[str] = None,
+        log_uri: str | None = None,
+        artifact_uri: str | None = None,
+        error: str | None = None,
     ) -> JobInfo:
         """Update job status.
 
@@ -125,7 +125,7 @@ class JobTracker:
         # Set completed_at for terminal states
         completed_at = None
         if status in (JobStatus.COMPLETED, JobStatus.FAILED):
-            completed_at = datetime.now(timezone.utc).isoformat()
+            completed_at = datetime.now(UTC).isoformat()
 
         self.db.update_job_status(
             job_id=job_id,
@@ -138,7 +138,7 @@ class JobTracker:
 
         return self.get_job(job_id)
 
-    def get_job_logs(self, job_id: str) -> Optional[str]:
+    def get_job_logs(self, job_id: str) -> str | None:
         """Get job logs if available.
 
         Args:
@@ -178,9 +178,7 @@ class JobTracker:
             # Security: Check if path is a symlink BEFORE reading
             # This prevents TOCTOU attacks where file is replaced with symlink
             if unresolved_path.is_symlink():
-                raise GoldfishError(
-                    f"Security error: log path is a symlink, refusing to read: {log_uri}"
-                )
+                raise GoldfishError(f"Security error: log path is a symlink, refusing to read: {log_uri}")
 
             if unresolved_path.exists():
                 # Security: Check file size before reading to prevent memory exhaustion
@@ -189,20 +187,20 @@ class JobTracker:
                     max_size = 100 * 1024 * 1024  # 100MB
                     if file_size > max_size:
                         raise GoldfishError(
-                            f"Log file too large ({file_size / (1024*1024):.1f}MB). "
-                            f"Maximum size is {max_size / (1024*1024):.0f}MB. "
+                            f"Log file too large ({file_size / (1024 * 1024):.1f}MB). "
+                            f"Maximum size is {max_size / (1024 * 1024):.0f}MB. "
                             f"Download the log file directly from the experiment directory."
                         )
-                except (OSError, IOError) as e:
+                except OSError as e:
                     raise GoldfishError(f"Failed to check log file size: {e}") from e
 
                 # Security: Use O_NOFOLLOW as defense-in-depth
                 # Even though we checked is_symlink() above, use O_NOFOLLOW
                 # in case of race condition
                 try:
-                    with open(unresolved_path, 'r', opener=_safe_opener) as f:
+                    with open(unresolved_path, opener=_safe_opener) as f:
                         return f.read()
-                except (OSError, IOError) as e:
+                except OSError as e:
                     raise GoldfishError(f"Failed to read log file: {e}") from e
 
         # For GCS URIs, would need gsutil or cloud client
@@ -241,7 +239,7 @@ class JobTracker:
                     self.db.update_job_status(
                         job_id=job_id,
                         status=JobStatus.COMPLETED,
-                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        completed_at=datetime.now(UTC).isoformat(),
                     )
                     return self.get_job(job_id)
 
@@ -252,7 +250,7 @@ class JobTracker:
                     self.db.update_job_status(
                         job_id=job_id,
                         status=JobStatus.FAILED,
-                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        completed_at=datetime.now(UTC).isoformat(),
                         error=error_msg,
                     )
                     return self.get_job(job_id)
@@ -260,9 +258,10 @@ class JobTracker:
         # No status change detected
         return self._job_dict_to_info(job)
 
-    def _job_dict_to_info(self, job: dict) -> JobInfo:
+    def _job_dict_to_info(self, job: JobRow) -> JobInfo:
         """Convert database job dict to JobInfo model."""
         from goldfish.jobs.conversion import job_dict_to_info
+
         return job_dict_to_info(job, self.db)
 
     def cancel_job(self, job_id: str, reason: str) -> CancelJobResponse:
@@ -287,15 +286,13 @@ class JobTracker:
 
         # Check if job is in a cancellable state
         if previous_status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
-            raise GoldfishError(
-                f"Job {job_id} is already {previous_status} and cannot be cancelled"
-            )
+            raise GoldfishError(f"Job {job_id} is already {previous_status} and cannot be cancelled")
 
         # Update job status to cancelled
         self.db.update_job_status(
             job_id=job_id,
             status=JobStatus.CANCELLED,
-            completed_at=datetime.now(timezone.utc).isoformat(),
+            completed_at=datetime.now(UTC).isoformat(),
             error=f"Cancelled: {reason}",
         )
 

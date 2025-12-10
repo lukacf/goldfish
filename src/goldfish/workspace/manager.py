@@ -6,9 +6,8 @@ Coordinates git_layer, audit, and state_md updates.
 import fcntl
 import os
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 from goldfish.config import GoldfishConfig
 from goldfish.db.database import Database
@@ -66,9 +65,7 @@ class WorkspaceManager:
     def _validate_slot(self, slot: str) -> None:
         """Validate slot name."""
         if slot not in self.config.slots:
-            raise InvalidSlotError(
-                f"Invalid slot: {slot}. Valid slots: {self.config.slots}"
-            )
+            raise InvalidSlotError(f"Invalid slot: {slot}. Valid slots: {self.config.slots}")
 
     @contextmanager
     def _acquire_slot_lock(self, slot: str):
@@ -95,15 +92,12 @@ class WorkspaceManager:
 
         try:
             # Open/create lock file with O_NOFOLLOW to prevent symlink attacks
-            fd = os.open(
-                lock_file_path,
-                os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW,
-                0o644
-            )
+            fd = os.open(lock_file_path, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o644)
             lock_file = os.fdopen(fd, "w")
 
             # Try to acquire exclusive lock (non-blocking with timeout)
             import time
+
             timeout = 10  # seconds
             start_time = time.time()
 
@@ -111,12 +105,10 @@ class WorkspaceManager:
                 try:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break  # Lock acquired
-                except (IOError, OSError):
+                except OSError as e:
                     # Lock not available - check timeout
                     if time.time() - start_time > timeout:
-                        raise GoldfishError(
-                            f"workspace is locked - another operation may be in progress"
-                        )
+                        raise GoldfishError("workspace is locked - another operation may be in progress") from e
                     time.sleep(0.01)  # Wait 10ms before retry
 
             # Lock acquired - yield control
@@ -128,7 +120,7 @@ class WorkspaceManager:
                 try:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
                     lock_file.close()
-                except (IOError, OSError):
+                except OSError:
                     pass  # Best effort cleanup
 
     def _get_slot_state(self, slot: str) -> SlotInfo:
@@ -206,18 +198,19 @@ class WorkspaceManager:
 
         # Workspace not mounted
         raise GoldfishError(
-            f"Workspace '{workspace}' is not currently mounted. "
-            f"Mount it to a slot first using mount()."
+            f"Workspace '{workspace}' is not currently mounted. Mount it to a slot first using mount()."
         )
 
     def _regenerate_state_md(self) -> str:
         """Regenerate STATE.md and return content."""
         if self.state_manager:
-            return self.state_manager.regenerate(
+            jobs = self.db.get_active_jobs()
+            result: str = self.state_manager.regenerate(
                 slots=self.get_all_slots(),
-                jobs=self.db.get_active_jobs(),
+                jobs=[dict(j) for j in jobs],  # Convert JobRow to dict
                 source_count=len(self.db.list_sources()),
             )
+            return result
         return "# Project\n\nSTATE.md not yet initialized"
 
     def mount(self, workspace: str, slot: str, reason: str) -> MountResponse:
@@ -233,10 +226,7 @@ class WorkspaceManager:
         warning = None
         active = self.count_active_slots()
         if active >= self.SOFT_LIMIT:
-            warning = (
-                f"You have {active} active workspaces. "
-                f"Consider hibernating one to maintain focus."
-            )
+            warning = f"You have {active} active workspaces. Consider hibernating one to maintain focus."
 
         # Use file-based locking to prevent concurrent mounts to the same slot
         # This prevents TOCTOU race conditions and git lock conflicts
@@ -246,8 +236,7 @@ class WorkspaceManager:
             slot_info = self._get_slot_state(slot)
             if slot_info.state == SlotState.MOUNTED:
                 raise SlotNotEmptyError(
-                    f"Slot {slot} already has workspace '{slot_info.workspace}'. "
-                    f"Hibernate it first."
+                    f"Slot {slot} already has workspace '{slot_info.workspace}'. Hibernate it first."
                 )
 
             # Perform mount - now protected by lock
@@ -258,9 +247,8 @@ class WorkspaceManager:
                 slot_info = self._get_slot_state(slot)
                 if slot_info.state == SlotState.MOUNTED:
                     raise SlotNotEmptyError(
-                        f"Slot {slot} already has workspace '{slot_info.workspace}'. "
-                        f"Hibernate it first."
-                    )
+                        f"Slot {slot} already has workspace '{slot_info.workspace}'. Hibernate it first."
+                    ) from e
                 # Otherwise, re-raise original error
                 raise
 
@@ -298,7 +286,7 @@ class WorkspaceManager:
         validate_reason(reason, self.config.audit.min_reason_length)
 
         slot_info = self._get_slot_state(slot)
-        if slot_info.state == SlotState.EMPTY:
+        if slot_info.state == SlotState.EMPTY or slot_info.workspace is None:
             raise SlotEmptyError(f"Slot {slot} is already empty")
 
         workspace = slot_info.workspace
@@ -308,9 +296,7 @@ class WorkspaceManager:
         auto_checkpointed = False
         checkpoint_id = None
         if slot_info.dirty == DirtyState.DIRTY:
-            checkpoint_id = self.git.create_snapshot(
-                slot_path, f"Auto-checkpoint before hibernate: {reason}"
-            )
+            checkpoint_id = self.git.create_snapshot(slot_path, f"Auto-checkpoint before hibernate: {reason}")
             auto_checkpointed = True
 
         # Push to remote (best effort - log failures but don't block hibernate)
@@ -365,9 +351,7 @@ class WorkspaceManager:
             pushed_to_remote=pushed,
         )
 
-    def create_workspace(
-        self, name: str, goal: str, reason: str, from_ref: str = "main"
-    ) -> CreateWorkspaceResponse:
+    def create_workspace(self, name: str, goal: str, reason: str, from_ref: str = "main") -> CreateWorkspaceResponse:
         """Create a new workspace from main (or another ref)."""
         validate_reason(reason, self.config.audit.min_reason_length)
 
@@ -425,9 +409,7 @@ class WorkspaceManager:
         # Get version info from database
         version = self.db.get_version(from_workspace, from_version)
         if not version:
-            raise GoldfishError(
-                f"Version '{from_version}' not found in workspace '{from_workspace}'"
-            )
+            raise GoldfishError(f"Version '{from_version}' not found in workspace '{from_workspace}'")
 
         # Check new workspace doesn't already exist
         if self.git.branch_exists(new_workspace):
@@ -468,16 +450,8 @@ class WorkspaceManager:
             info = self.git.get_branch_info(name)
 
             # Parse timestamps
-            created_at = (
-                datetime.fromisoformat(info["created_at"])
-                if info["created_at"]
-                else datetime.now(timezone.utc)
-            )
-            last_activity = (
-                datetime.fromisoformat(info["last_activity"])
-                if info["last_activity"]
-                else created_at
-            )
+            created_at = datetime.fromisoformat(info["created_at"]) if info["created_at"] else datetime.now(UTC)
+            last_activity = datetime.fromisoformat(info["last_activity"]) if info["last_activity"] else created_at
 
             # Get goal from database
             goal = self.db.get_workspace_goal(name) or ""
@@ -545,7 +519,7 @@ class WorkspaceManager:
         self._validate_slot(slot)
         return self._get_slot_state(slot)
 
-    def get_workspace_for_slot(self, workspace_or_slot: str) -> Optional[str]:
+    def get_workspace_for_slot(self, workspace_or_slot: str) -> str | None:
         """Resolve workspace name from slot or workspace name.
 
         Args:
@@ -645,9 +619,7 @@ class WorkspaceManager:
 
         # Update STATE.md
         if self.state_manager:
-            self.state_manager.add_action(
-                f"Rolled back {slot} to {snapshot_id} ({files_reverted} files)"
-            )
+            self.state_manager.add_action(f"Rolled back {slot} to {snapshot_id} ({files_reverted} files)")
 
         state_md = self._regenerate_state_md()
 
@@ -685,16 +657,8 @@ class WorkspaceManager:
                 mounted_map[slot_info.workspace] = slot_info.slot
 
         # Parse timestamps
-        created_at = (
-            datetime.fromisoformat(info["created_at"])
-            if info["created_at"]
-            else datetime.now(timezone.utc)
-        )
-        last_activity = (
-            datetime.fromisoformat(info["last_activity"])
-            if info["last_activity"]
-            else created_at
-        )
+        created_at = datetime.fromisoformat(info["created_at"]) if info["created_at"] else datetime.now(UTC)
+        last_activity = datetime.fromisoformat(info["last_activity"]) if info["last_activity"] else created_at
 
         # Get goal from database
         goal = self.db.get_workspace_goal(name) or ""
@@ -709,9 +673,7 @@ class WorkspaceManager:
             mounted_slot=mounted_map.get(name),
         )
 
-    def list_snapshots(
-        self, workspace: str, limit: int = 50, offset: int = 0
-    ) -> list[dict]:
+    def list_snapshots(self, workspace: str, limit: int = 50, offset: int = 0) -> list[dict]:
         """List snapshots for a workspace with pagination.
 
         Args:
@@ -747,17 +709,16 @@ class WorkspaceManager:
                 except ValueError:
                     pass
 
-            snapshots.append({
-                "snapshot_id": snap_id,
-                "created_at": created_at,
-                "message": info.get("message", ""),
-            })
+            snapshots.append(
+                {
+                    "snapshot_id": snap_id,
+                    "created_at": created_at,
+                    "message": info.get("message", ""),
+                }
+            )
 
         # Sort by created_at descending (newest first)
-        snapshots.sort(
-            key=lambda x: x["created_at"] or datetime.min,
-            reverse=True
-        )
+        snapshots.sort(key=lambda x: x["created_at"] or datetime.min, reverse=True)
 
         # Apply pagination
         return snapshots[offset : offset + limit]
