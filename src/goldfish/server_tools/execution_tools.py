@@ -285,11 +285,12 @@ def list_runs(
         offset=offset,
     )
     total = rows[0]["total_count"] if rows else 0
-    return ListRunsResponse(
+    result: dict[str, Any] = ListRunsResponse(
         runs=[_stage_run_row_to_info(r) for r in rows],
         total_count=total,
         has_more=offset + len(rows) < total,
     ).model_dump(mode="json")
+    return result
 
 
 @mcp.tool()
@@ -396,7 +397,8 @@ def get_outputs(stage_run_id: str) -> dict:
     if not row:
         raise GoldfishError(f"Stage run not found: {stage_run_id}")
     outputs = json.loads(row["outputs_json"]) if row.get("outputs_json") else []
-    return GetOutputsResponse(stage_run_id=stage_run_id, outputs=outputs).model_dump(mode="json")
+    result: dict[str, Any] = GetOutputsResponse(stage_run_id=stage_run_id, outputs=outputs).model_dump(mode="json")
+    return result
 
 
 @mcp.tool()
@@ -406,12 +408,13 @@ def get_run(stage_run_id: str) -> dict:
     row = db.get_stage_run(stage_run_id)
     if not row:
         raise GoldfishError(f"Stage run not found: {stage_run_id}")
-    return GetRunResponse(
+    result: dict[str, Any] = GetRunResponse(
         stage_run=_stage_run_row_to_info(row),
         inputs=json.loads(row["inputs_json"]) if row.get("inputs_json") else {},
         outputs=json.loads(row["outputs_json"]) if row.get("outputs_json") else [],
         config=json.loads(row["config_json"]) if row.get("config_json") else {},
     ).model_dump(mode="json")
+    return result
 
 
 @mcp.tool()
@@ -441,11 +444,12 @@ def cancel_run(stage_run_id: str, reason: str) -> dict:
         ).rowcount
 
     if updated == 0:
-        return CancelRunResponse(
+        fail_result: dict[str, Any] = CancelRunResponse(
             success=False,
             error="Stage is not running (already completed/failed/canceled)",
             previous_status=row.get("status"),
         ).model_dump(mode="json")
+        return fail_result
 
     # Best-effort backend stop; ignore failures
     try:
@@ -456,7 +460,10 @@ def cancel_run(stage_run_id: str, reason: str) -> dict:
     except Exception:
         pass
 
-    return CancelRunResponse(success=True, previous_status=row.get("status")).model_dump(mode="json")
+    success_result: dict[str, Any] = CancelRunResponse(success=True, previous_status=row.get("status")).model_dump(
+        mode="json"
+    )
+    return success_result
 
 
 @mcp.tool()
