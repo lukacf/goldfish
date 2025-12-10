@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install uv
-          uv pip install --system ruff mypy
+          uv pip install --system "ruff>=0.8.4" mypy
 
       - name: Run linting and static analysis
         run: make lint
