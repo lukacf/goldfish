@@ -3,13 +3,11 @@
 All errors shown to Claude should be git-agnostic.
 """
 
-from typing import Optional
-
 
 class GoldfishError(Exception):
     """Base error for all Goldfish operations."""
 
-    def __init__(self, message: str, details: Optional[dict] = None):
+    def __init__(self, message: str, details: dict | None = None):
         self.message = message
         self.details = details or {}
         super().__init__(message)
@@ -17,31 +15,37 @@ class GoldfishError(Exception):
 
 class WorkspaceNotFoundError(GoldfishError):
     """Workspace does not exist."""
+
     pass
 
 
 class WorkspaceAlreadyExistsError(GoldfishError):
     """Workspace with this name already exists."""
+
     pass
 
 
 class SlotNotEmptyError(GoldfishError):
     """Slot already has a mounted workspace."""
+
     pass
 
 
 class SlotEmptyError(GoldfishError):
     """Operation requires a mounted workspace but slot is empty."""
+
     pass
 
 
 class InvalidSlotError(GoldfishError):
     """Invalid slot name."""
+
     pass
 
 
 class SyncError(GoldfishError):
     """Failed to sync workspace to remote."""
+
     pass
 
 
@@ -55,16 +59,19 @@ class ReasonTooShortError(GoldfishError):
 
 class SourceNotFoundError(GoldfishError):
     """Data source does not exist."""
+
     pass
 
 
 class SourceAlreadyExistsError(GoldfishError):
     """Data source with this name already exists."""
+
     pass
 
 
 class JobNotFoundError(GoldfishError):
     """Job does not exist."""
+
     pass
 
 
@@ -86,13 +93,14 @@ class InvalidSourceNameError(GoldfishError):
 
 class ProjectNotInitializedError(GoldfishError):
     """Project has not been initialized with Goldfish."""
+
     pass
 
 
 class DatabaseError(GoldfishError):
     """Database operation failed."""
 
-    def __init__(self, message: str, path: str = None, operation: str = None):
+    def __init__(self, message: str, path: str | None = None, operation: str | None = None):
         details = {}
         if path:
             details["path"] = path
@@ -144,6 +152,7 @@ def translate_git_error(error_message: str) -> str:
     for old, new in GIT_TERM_REPLACEMENTS.items():
         # Case-insensitive replacement
         import re
+
         result = re.sub(re.escape(old), new, result, flags=re.IGNORECASE)
 
     return result

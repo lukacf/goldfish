@@ -8,9 +8,9 @@ The registry tracks:
 """
 
 from datetime import datetime
-from typing import Optional
 
 from goldfish.db.database import Database
+from goldfish.db.types import SourceRow
 from goldfish.errors import (
     GoldfishError,
     SourceAlreadyExistsError,
@@ -30,7 +30,7 @@ class SourceRegistry:
         """
         self.db = db
 
-    def list_sources(self, status: Optional[str] = None) -> list[SourceInfo]:
+    def list_sources(self, status: str | None = None) -> list[SourceInfo]:
         """List all sources, optionally filtered by status.
 
         Args:
@@ -75,8 +75,8 @@ class SourceRegistry:
         name: str,
         gcs_location: str,
         description: str,
-        size_bytes: Optional[int] = None,
-        metadata: Optional[dict] = None,
+        size_bytes: int | None = None,
+        metadata: dict | None = None,
     ) -> SourceInfo:
         """Register a new external data source.
 
@@ -114,7 +114,7 @@ class SourceRegistry:
         output_name: str,
         source_name: str,
         artifact_uri: str,
-        description: Optional[str] = None,
+        description: str | None = None,
     ) -> tuple[SourceInfo, SourceLineage]:
         """Promote a job artifact to a reusable source.
 
@@ -194,8 +194,9 @@ class SourceRegistry:
         job_id = None
 
         for record in lineage_records:
-            if record.get("parent_source_id"):
-                parent_sources.append(record["parent_source_id"])
+            parent_id = record.get("parent_source_id")
+            if parent_id:
+                parent_sources.append(parent_id)
             if record.get("job_id") and job_id is None:
                 job_id = record["job_id"]
 
@@ -222,7 +223,7 @@ class SourceRegistry:
         # For now, we don't support status updates
         raise GoldfishError("Source status updates not yet implemented")
 
-    def _dict_to_source_info(self, source: dict) -> SourceInfo:
+    def _dict_to_source_info(self, source: SourceRow) -> SourceInfo:
         """Convert database source dict to SourceInfo model."""
         return SourceInfo(
             name=source["name"],

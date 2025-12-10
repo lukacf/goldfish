@@ -3,57 +3,35 @@
 Extracted from server.py for better organization.
 """
 
-from typing import Optional
 import logging
-from datetime import datetime, timezone
 
-logger = logging.getLogger("goldfish.server")
-
-# Import server context helpers
-from goldfish.server import (
-    mcp,
-    _get_config,
-    _get_db,
-    _get_workspace_manager,
-    _get_pipeline_manager,
-    _get_state_manager,
-    _get_job_launcher,
-    _get_job_tracker,
-    _get_dataset_registry,
-    _get_state_md,
-)
-
-# Import models
-from goldfish.models import *
-
-# Import validation functions
-from goldfish.validation import (
-    validate_workspace_name,
-    validate_slot_name,
-    
-    validate_snapshot_id,
-    validate_job_id,
-    validate_source_name,
-    validate_output_name,
-    validate_artifact_uri,
-    
-    validate_script_path,
-)
-
-# Import errors
 from goldfish.errors import (
     GoldfishError,
-    validate_reason,
     WorkspaceNotFoundError,
+)
+from goldfish.models import (
+    PipelineResponse,
+    UpdatePipelineResponse,
+    ValidatePipelineResponse,
 )
 from goldfish.pipeline.parser import (
     PipelineNotFoundError,
     PipelineValidationError,
 )
+from goldfish.server import (
+    _get_pipeline_manager,
+    _get_workspace_manager,
+    mcp,
+)
+from goldfish.validation import (
+    validate_workspace_name,
+)
+
+logger = logging.getLogger("goldfish.server")
 
 
 @mcp.tool()
-def get_pipeline(workspace: str, pipeline: Optional[str] = None) -> PipelineResponse:
+def get_pipeline(workspace: str, pipeline: str | None = None) -> PipelineResponse:
     """Get pipeline definition for a workspace.
 
     Returns the pipeline.yaml content as a structured object.
@@ -81,8 +59,9 @@ def get_pipeline(workspace: str, pipeline: Optional[str] = None) -> PipelineResp
     except PipelineValidationError as e:
         raise GoldfishError(f"Pipeline is invalid: {e}") from e
 
+
 @mcp.tool()
-def validate_pipeline(workspace: str, pipeline: Optional[str] = None) -> ValidatePipelineResponse:
+def validate_pipeline(workspace: str, pipeline: str | None = None) -> ValidatePipelineResponse:
     """Validate pipeline definition for a workspace.
 
     Checks:
@@ -116,8 +95,9 @@ def validate_pipeline(workspace: str, pipeline: Optional[str] = None) -> Validat
     except PipelineNotFoundError as e:
         raise GoldfishError(str(e)) from e
 
+
 @mcp.tool()
-def update_pipeline(workspace: str, pipeline_yaml: str, pipeline: Optional[str] = None) -> UpdatePipelineResponse:
+def update_pipeline(workspace: str, pipeline_yaml: str, pipeline: str | None = None) -> UpdatePipelineResponse:
     """Update pipeline.yaml in workspace.
 
     Validates the pipeline before writing. Will reject invalid pipelines.

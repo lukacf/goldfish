@@ -5,16 +5,16 @@ a simple API for modules to load inputs and save outputs
 without worrying about storage backends (GCS/hyperdisk/local).
 """
 
-import os
-import json
-from pathlib import Path
-from typing import Any, Optional
 import importlib.util
+import json
+import os
+from pathlib import Path
+from typing import Any
 
 try:
     import numpy as np
 except ImportError:
-    np = None
+    np = None  # type: ignore[assignment]
 
 try:
     import pandas as pd
@@ -22,12 +22,13 @@ except ImportError:
     pd = None
 
 
-def _get_stage_config() -> dict:
+def _get_stage_config() -> dict[str, Any]:
     """Load stage configuration from environment."""
     config_json = os.environ.get("GOLDFISH_STAGE_CONFIG")
     if not config_json:
         raise RuntimeError("GOLDFISH_STAGE_CONFIG not set")
-    return json.loads(config_json)
+    result: dict[str, Any] = json.loads(config_json)
+    return result
 
 
 def _get_inputs_dir() -> Path:
@@ -40,7 +41,7 @@ def _get_outputs_dir() -> Path:
     return Path(os.environ.get("GOLDFISH_OUTPUTS_DIR", "/mnt/outputs"))
 
 
-def load_input(name: str, format: Optional[str] = None) -> Any:
+def load_input(name: str, format: str | None = None) -> Any:
     """Load input signal or dataset.
 
     Args:
@@ -180,10 +181,7 @@ def save_output(name: str, data: Any, artifact: bool = False):
         data.to_csv(output_path, index=False)
 
     else:
-        raise ValueError(
-            f"Cannot auto-save format '{fmt}'. "
-            f"Use get_output_path() for manual saving."
-        )
+        raise ValueError(f"Cannot auto-save format '{fmt}'. Use get_output_path() for manual saving.")
 
     if artifact:
         _mark_as_artifact(name)
@@ -218,16 +216,13 @@ def _run_custom_loader(name: str, loader_config: dict) -> Any:
 
     # CRITICAL: Check for symlinks BEFORE resolving
     if script_path.is_symlink():
-        raise ValueError(
-            f"Custom loader script cannot be a symlink (security risk). "
-            f"Got: {script}"
-        )
+        raise ValueError(f"Custom loader script cannot be a symlink (security risk). Got: {script}")
 
     # Resolve path (but we already checked it's not a symlink)
     try:
         script_path = script_path.resolve(strict=True)
     except (OSError, RuntimeError) as e:
-        raise ValueError(f"Invalid custom loader script path: {e}")
+        raise ValueError(f"Invalid custom loader script path: {e}") from e
 
     # Check if we're running in Docker (production) or tests
     app_path = Path("/app")
@@ -236,25 +231,19 @@ def _run_custom_loader(name: str, loader_config: dict) -> Any:
         app_resolved = app_path.resolve()
         try:
             script_path.relative_to(app_resolved)
-        except ValueError:
+        except ValueError as e:
             raise ValueError(
-                f"Custom loader script must be within /app directory. "
-                f"Got: {script}, resolved to: {script_path}"
-            )
+                f"Custom loader script must be within /app directory. Got: {script}, resolved to: {script_path}"
+            ) from e
 
         # Additional check: script must be in loaders/ directory
         if "loaders" not in script_path.parts:
-            raise ValueError(
-                f"Custom loader script must be in loaders/ directory. "
-                f"Got: {script}"
-            )
+            raise ValueError(f"Custom loader script must be in loaders/ directory. Got: {script}")
 
         # Verify no intermediate symlinks in the resolved path
         for parent in script_path.parents:
             if parent.is_symlink() and parent != app_resolved:
-                raise ValueError(
-                    f"Custom loader path contains symlink: {parent}"
-                )
+                raise ValueError(f"Custom loader path contains symlink: {parent}")
     else:
         # Running in tests - just check script exists and filename is valid
         if not script_path.exists():
@@ -262,16 +251,12 @@ def _run_custom_loader(name: str, loader_config: dict) -> Any:
 
         # Basic security: no path traversal components
         if ".." in script_path.parts:
-            raise ValueError(
-                f"Custom loader script path contains path traversal. "
-                f"Got: {script}"
-            )
+            raise ValueError(f"Custom loader script path contains path traversal. Got: {script}")
 
     # Validate function name (prevent calling private/dangerous functions)
     if not function.isidentifier() or function.startswith("_"):
         raise ValueError(
-            f"Invalid function name: {function}. "
-            "Must be a valid identifier and not start with underscore."
+            f"Invalid function name: {function}. Must be a valid identifier and not start with underscore."
         )
 
     # Import custom loader

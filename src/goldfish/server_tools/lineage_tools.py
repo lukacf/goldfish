@@ -3,48 +3,19 @@
 Extracted from server.py for better organization.
 """
 
-from typing import Optional
 import logging
-from datetime import datetime, timezone
 
-logger = logging.getLogger("goldfish.server")
-
-# Import server context helpers
+from goldfish.lineage.manager import LineageManager
 from goldfish.server import (
-    mcp,
-    _get_config,
     _get_db,
     _get_workspace_manager,
-    _get_pipeline_manager,
-    _get_state_manager,
-    _get_job_launcher,
-    _get_job_tracker,
-    _get_dataset_registry,
-    _get_state_md,
+    mcp,
 )
-
-# Import models
-from goldfish.models import *
-
-# Import validation functions
 from goldfish.validation import (
     validate_workspace_name,
-    validate_slot_name,
-    
-    validate_snapshot_id,
-    validate_job_id,
-    validate_source_name,
-    validate_output_name,
-    validate_artifact_uri,
-    
-    validate_script_path,
 )
 
-# Import errors
-from goldfish.errors import GoldfishError, validate_reason
-
-# Import LineageManager
-from goldfish.lineage.manager import LineageManager
+logger = logging.getLogger("goldfish.server")
 
 
 @mcp.tool()
@@ -74,6 +45,7 @@ def get_workspace_lineage(workspace: str) -> dict:
     lineage_mgr = LineageManager(db=db, workspace_manager=workspace_manager)
     return lineage_mgr.get_workspace_lineage(workspace)
 
+
 @mcp.tool()
 def get_version_diff(workspace: str, from_version: str, to_version: str) -> dict:
     """Compare two versions of workspace.
@@ -99,6 +71,7 @@ def get_version_diff(workspace: str, from_version: str, to_version: str) -> dict
 
     lineage_mgr = LineageManager(db=db, workspace_manager=workspace_manager)
     return lineage_mgr.get_version_diff(workspace, from_version, to_version)
+
 
 @mcp.tool()
 def get_run_provenance(stage_run_id: str) -> dict:
