@@ -1,0 +1,33 @@
+name: io-validation-pipeline
+description: Test pipeline for validating goldfish.io in GCE containers
+
+stages:
+  - name: generate_test_data
+    inputs: {}
+    outputs:
+      test_array:
+        type: npy
+      test_csv:
+        type: csv
+      test_directory:
+        type: directory
+
+  - name: validate_io
+    inputs:
+      array_input:
+        from_stage: generate_test_data
+        signal: test_array
+        type: npy
+      csv_input:
+        from_stage: generate_test_data
+        signal: test_csv
+        type: csv
+      dir_input:
+        from_stage: generate_test_data
+        signal: test_directory
+        type: directory
+    outputs:
+      validation_results:
+        type: csv
+      transformed_array:
+        type: npy

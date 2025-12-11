@@ -1,0 +1,10 @@
+# Validate I/O stage configuration
+# Uses GCE with cpu-small profile to test container execution
+
+compute:
+  profile: "cpu-small"
+
+description: Validate goldfish.io module works correctly in GCE container
+
+env:
+  PYTHONUNBUFFERED: "1"

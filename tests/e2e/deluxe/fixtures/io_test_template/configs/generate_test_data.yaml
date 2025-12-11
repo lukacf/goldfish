@@ -1,0 +1,7 @@
+# Generate test data stage configuration
+# Runs locally (no compute profile = local backend)
+
+description: Generate test data for I/O validation
+
+env:
+  PYTHONUNBUFFERED: "1"
