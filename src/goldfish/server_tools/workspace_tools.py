@@ -4,6 +4,7 @@ Extracted from server.py for better organization.
 """
 
 import logging
+import warnings
 from datetime import datetime
 
 from goldfish.errors import (
@@ -302,9 +303,9 @@ def rollback(slot: str, snapshot_id: str, reason: str) -> RollbackResponse:
 
 @mcp.tool()
 def list_snapshots(workspace: str, limit: int = 50, offset: int = 0) -> ListSnapshotsResponse:
-    """List snapshots for a workspace with pagination.
+    """[DEPRECATED] List snapshots for a workspace with pagination.
 
-    Use this before rollback to see available checkpoints.
+    Use get_workspace() instead, which includes version/snapshot history.
 
     Args:
         workspace: Workspace name to list snapshots for
@@ -314,6 +315,11 @@ def list_snapshots(workspace: str, limit: int = 50, offset: int = 0) -> ListSnap
     Returns:
         ListSnapshotsResponse with snapshots and pagination metadata
     """
+    warnings.warn(
+        "list_snapshots is deprecated, use get_workspace() instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     workspace_manager = _get_workspace_manager()
 
     # Validate workspace name
@@ -359,9 +365,9 @@ def list_snapshots(workspace: str, limit: int = 50, offset: int = 0) -> ListSnap
 
 @mcp.tool()
 def get_snapshot(workspace: str, snapshot_id: str) -> SnapshotInfo:
-    """Get detailed information about a specific snapshot.
+    """[DEPRECATED] Get detailed information about a specific snapshot.
 
-    Use this to verify a snapshot exists and get its metadata before operations like rollback.
+    Use get_workspace_lineage() instead for version/snapshot history.
 
     Args:
         workspace: Workspace name the snapshot belongs to
@@ -373,7 +379,11 @@ def get_snapshot(workspace: str, snapshot_id: str) -> SnapshotInfo:
     Raises:
         GoldfishError: If workspace doesn't exist or snapshot not found in workspace
     """
-
+    warnings.warn(
+        "get_snapshot is deprecated, use get_workspace_lineage() instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     workspace_manager = _get_workspace_manager()
 
     # Validate parameters
@@ -417,7 +427,9 @@ def get_snapshot(workspace: str, snapshot_id: str) -> SnapshotInfo:
 
 @mcp.tool()
 def delete_snapshot(workspace: str, snapshot_id: str, reason: str) -> DeleteSnapshotResponse:
-    """Delete a specific snapshot from a workspace.
+    """[DEPRECATED] Delete a specific snapshot from a workspace.
+
+    This tool is deprecated. Snapshots are now managed as workspace versions.
 
     WARNING: This is irreversible. You cannot rollback to a deleted snapshot.
 
@@ -426,6 +438,11 @@ def delete_snapshot(workspace: str, snapshot_id: str, reason: str) -> DeleteSnap
         snapshot_id: ID of the snapshot to delete
         reason: Why you're deleting this snapshot (min 15 chars)
     """
+    warnings.warn(
+        "delete_snapshot is deprecated, snapshots are now managed as workspace versions",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     config = _get_config()
     db = _get_db()
     workspace_manager = _get_workspace_manager()
@@ -470,11 +487,18 @@ def delete_snapshot(workspace: str, snapshot_id: str, reason: str) -> DeleteSnap
 
 @mcp.tool()
 def get_workspace_goal(workspace: str) -> WorkspaceGoalResponse:
-    """Get the goal for a workspace.
+    """[DEPRECATED] Get the goal for a workspace.
+
+    Use get_workspace() instead, which includes the goal in the response.
 
     Args:
         workspace: Workspace name to query
     """
+    warnings.warn(
+        "get_workspace_goal is deprecated, use get_workspace() instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     db = _get_db()
 
     validate_workspace_name(workspace)
@@ -489,13 +513,21 @@ def get_workspace_goal(workspace: str) -> WorkspaceGoalResponse:
 
 @mcp.tool()
 def update_workspace_goal(workspace: str, goal: str, reason: str) -> UpdateWorkspaceGoalResponse:
-    """Update the goal for a workspace.
+    """[DEPRECATED] Update the goal for a workspace.
+
+    The goal is now set at workspace creation time. If you need to update it,
+    consider creating a new workspace with the new goal.
 
     Args:
         workspace: Workspace name to update
         goal: New goal description
         reason: Why you're updating the goal (min 15 chars)
     """
+    warnings.warn(
+        "update_workspace_goal is deprecated, set goal at workspace creation time",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     config = _get_config()
     db = _get_db()
     state_manager = _get_state_manager()
@@ -530,9 +562,10 @@ def update_workspace_goal(workspace: str, goal: str, reason: str) -> UpdateWorks
 
 @mcp.tool()
 def branch_workspace(from_workspace: str, from_version: str, new_workspace: str, reason: str) -> dict:
-    """Create new workspace branched from specific version.
+    """[DEPRECATED] Create new workspace branched from specific version.
 
-    Allows experimenting from a known-good version.
+    Use create_workspace() instead. Branching is now handled by workspace lineage
+    which tracks parent relationships automatically.
 
     Args:
         from_workspace: Source workspace
@@ -546,6 +579,11 @@ def branch_workspace(from_workspace: str, from_version: str, new_workspace: str,
         - parent: Parent workspace
         - parent_version: Version branched from
     """
+    warnings.warn(
+        "branch_workspace is deprecated, use create_workspace() instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     config = _get_config()
     db = _get_db()
     workspace_manager = _get_workspace_manager()

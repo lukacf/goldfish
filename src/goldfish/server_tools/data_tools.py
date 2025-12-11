@@ -53,12 +53,18 @@ def list_sources(
 
     Args:
         status: Filter by status (available, processing, error)
-        created_by: Filter by creator (external, internal, etc.)
+        created_by: Filter by creator. Use "external" for datasets (registered
+                   via register_dataset), or "job:xxx" for promoted artifacts.
         limit: Maximum number of sources to return (1-200, default 50)
         offset: Number of sources to skip for pagination (default 0)
 
     Returns:
         ListSourcesResponse with sources and pagination metadata
+
+    Examples:
+        list_sources()                           # All sources
+        list_sources(created_by="external")      # Only datasets
+        list_sources(status="available")         # Only available sources
     """
     db = _get_db()
 
@@ -480,68 +486,5 @@ def register_dataset(
         raise GoldfishError(str(e)) from e
 
 
-@mcp.tool()
-def list_datasets(status: str | None = None) -> dict:
-    """List all registered datasets.
-
-    Args:
-        status: Optional status filter (available, pending, failed)
-
-    Returns:
-        List of datasets with their info
-    """
-    dataset_registry = _get_dataset_registry()
-
-    datasets = dataset_registry.list_datasets(status=status)
-
-    return {
-        "datasets": [
-            {
-                "name": d.name,
-                "gcs_location": d.gcs_location,
-                "description": d.description,
-                "created_at": d.created_at.isoformat(),
-                "size_bytes": d.size_bytes,
-                "status": d.status.value,
-            }
-            for d in datasets
-        ],
-        "count": len(datasets),
-    }
-
-
-@mcp.tool()
-def get_dataset(name: str) -> dict:
-    """Get dataset details.
-
-    Args:
-        name: Dataset name
-
-    Returns:
-        Dataset info
-
-    Raises:
-        SourceNotFoundError: If dataset not found
-    """
-    from goldfish.validation import validate_source_name
-
-    dataset_registry = _get_dataset_registry()
-    validate_source_name(name)
-
-    try:
-        dataset = dataset_registry.get_dataset(name)
-
-        return {
-            "name": dataset.name,
-            "gcs_location": dataset.gcs_location,
-            "description": dataset.description,
-            "created_at": dataset.created_at.isoformat(),
-            "created_by": dataset.created_by,
-            "size_bytes": dataset.size_bytes,
-            "status": dataset.status.value,
-        }
-    except SourceNotFoundError as e:
-        raise GoldfishError(str(e)) from e
-
-
-# ============== CONTEXT TOOLS ==============
+# Note: list_datasets() and get_dataset() removed.
+# Use list_sources(created_by="external") and get_source() instead.

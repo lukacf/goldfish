@@ -74,17 +74,17 @@ Workspaces can be **mounted** (active, files accessible), **hibernated** (stored
 
 ### Versions = Immutable Snapshots
 
-A **version** is an immutable snapshot of your experiment at a point in time. Goldfish auto-creates versions on every stage run, ensuring full reproducibility.
+A **version** is an immutable snapshot of your experiment at a point in time. Goldfish auto-creates versions on every run, ensuring full reproducibility.
 
 ```
-run_stage("w1", "train")
+run("w1", stages=["train"])
      ↓
 Creates version: axial_attention-v3
 Captures: code, config, pipeline definition
 Tracks: output locations and lineage
 ```
 
-You can always return to any version: `rollback("axial_attention", "v2")`
+You can always return to any version: `rollback("w1", "v2")`
 
 ### Pipelines = Workflow Definitions
 

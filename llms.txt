@@ -1,11 +1,11 @@
 # Goldfish
 
-> Goldfish is an MCP (Model Context Protocol) server that enables Claude Code to conduct ML experiments autonomously. It manages workspaces (git branches), executes pipeline stages (Docker containers), and tracks full experiment provenance. The core abstraction maps ML concepts to git: workspaces=branches, versions=tags, pipelines=YAML, stages=Python modules, signals=typed data flow.
+> Goldfish is an ML experimentation platform for AI agents that manages workspaces (isolated experiments), executes pipeline stages (Docker containers), and tracks full experiment provenance. The core abstractions: workspaces=branches, versions=tags, pipelines=YAML, stages=Python modules, signals=typed data flow.
 
 Key concepts for LLMs working on this codebase:
 - All infrastructure (Docker, GCS, GCE) is hidden from the MCP client
 - STATE.md provides context recovery after conversation summarization
-- 52 MCP tools organized into: workspace, execution, data, pipeline, lineage, utility
+- 39 MCP tools organized into: workspace, execution, data, pipeline, lineage, utility
 - Security: input validation, path traversal protection, Docker sandboxing, git error translation
 
 ## Primary Documentation
@@ -33,11 +33,12 @@ Key concepts for LLMs working on this codebase:
 
 ## MCP Tools
 
-- [src/goldfish/server_tools/workspace_tools.py](src/goldfish/server_tools/workspace_tools.py): 18 workspace management tools
-- [src/goldfish/server_tools/execution_tools.py](src/goldfish/server_tools/execution_tools.py): 14 execution tools (run_stage, run_pipeline)
-- [src/goldfish/server_tools/data_tools.py](src/goldfish/server_tools/data_tools.py): 9 dataset and source tools
+- [src/goldfish/server_tools/workspace_tools.py](src/goldfish/server_tools/workspace_tools.py): 15 workspace management tools
+- [src/goldfish/server_tools/execution_tools.py](src/goldfish/server_tools/execution_tools.py): 6 execution tools (run, get_run, logs, cancel, list_runs, get_outputs)
+- [src/goldfish/server_tools/data_tools.py](src/goldfish/server_tools/data_tools.py): 7 data tools
 - [src/goldfish/server_tools/pipeline_tools.py](src/goldfish/server_tools/pipeline_tools.py): 4 pipeline tools
 - [src/goldfish/server_tools/lineage_tools.py](src/goldfish/server_tools/lineage_tools.py): 3 provenance tracking tools
+- [src/goldfish/server_tools/utility_tools.py](src/goldfish/server_tools/utility_tools.py): 4 utility tools
 
 ## Infrastructure
 

@@ -214,60 +214,90 @@ goldfish/
 
 ### Key Design Decisions
 
-1. **Git as Truth**: Workspaces are git branches, versions are git tags. This gives us free versioning, branching, and merging semantics.
+1. **Copy-Based Isolation**: User works with plain file copies (no `.git` in workspace). All versioning happens in the separate goldfish dev repo. This keeps the user's project pristine.
 
-2. **Hidden Infrastructure**: Claude never sees Docker commands, GCS paths, or GCE APIs. Everything is abstracted behind MCP tools.
+2. **100% Provenance**: Every `run()` syncs changes back to git and commits BEFORE execution. The version SHA always matches what actually ran.
 
-3. **Context Recovery**: STATE.md is regenerated after every operation, enabling Claude to recover context after conversation summarization.
+3. **Hidden Infrastructure**: Claude never sees Docker commands, GCS paths, or GCE APIs. Everything is abstracted behind MCP tools.
 
-4. **Typed Boundaries**: All MCP tool inputs/outputs use Pydantic models. Database rows use TypedDict for type safety.
+4. **Per-Workspace STATE.md**: Each workspace has its own experiment narrative, enabling context recovery after conversation summarization.
 
-5. **Defense in Depth**: Four security layers protect against injection and traversal attacks.
+5. **Typed Boundaries**: All MCP tool inputs/outputs use Pydantic models. Database rows use TypedDict for type safety.
+
+6. **Defense in Depth**: Four security layers protect against injection and traversal attacks.
 
 ---
 
 ## Core Abstractions
 
-### 1. Workspaces = Git Branches
+### 1. Workspaces = Copy-Based Isolation
 
-A workspace is an isolated experiment environment implemented as a git branch.
+A workspace is an isolated experiment environment. Internally, each workspace is a git branch in the goldfish dev repo, but the user works with **plain file copies**.
+
+```
+ARCHITECTURE:
+goldfish-dev/                    ← Goldfish dev repo (all versioning here)
+├── .git/
+│   └── experiment/baseline_lstm ← Workspace branch
+└── .goldfish/goldfish.db        ← Database
+
+user-project/                    ← User's project (stays pristine)
+└── workspaces/w1/               ← Copied files (NO .git)
+    ├── pipeline.yaml
+    ├── modules/
+    └── .goldfish-mount          ← Only Goldfish metadata
+```
+
+**Workflow**:
+```
+MOUNT:  gf-dev/branch ──copy──▶ user/w1 (plain files, NO .git)
+WORK:   Claude edits user/w1
+RUN:    user/w1 ──sync──▶ gf-dev/branch ──commit──▶ execute with SHA
+```
 
 ```python
 # workspace/manager.py
 class WorkspaceManager:
     def create_workspace(self, name: str, goal: str) -> WorkspaceInfo:
-        """Create experiment/{name} branch from main"""
+        """Create experiment/{name} branch in dev repo"""
 
     def mount(self, workspace: str, slot: str) -> SlotInfo:
-        """Attach git worktree to slot directory"""
+        """Copy branch content to slot directory (plain files)"""
 
     def hibernate(self, slot: str) -> None:
-        """Commit changes, push to remote, detach worktree"""
+        """Sync changes back to branch, commit, remove slot"""
 
     def checkpoint(self, slot: str, message: str) -> VersionInfo:
-        """Create tagged version of current state"""
+        """Sync + create tagged version"""
 ```
 
-**Git mapping**:
-- Workspace "baseline_lstm" → branch `experiment/baseline_lstm`
-- Mounted to slot w1 → git worktree at `workspaces/w1/`
-- Version v3 → git tag `baseline_lstm-v3`
+**Git mapping** (internal, hidden from user):
+- Workspace "baseline_lstm" → branch `experiment/baseline_lstm` in dev repo
+- Mounted to slot w1 → plain directory at `user-project/workspaces/w1/`
+- Version v3 → git tag `baseline_lstm-v3` in dev repo
 
-### 2. Versions = Git Tags
+### 2. Versions = Git Tags (with 100% Provenance)
 
-Every `run_stage()` call creates an immutable version.
+Every `run()` call syncs changes back to the dev repo and creates an immutable version.
 
 ```python
-# jobs/stage_executor.py:274
-def _auto_version(self, workspace: str) -> str:
-    """Create version before stage execution"""
-    git = self.workspace_manager.git_layer
-    sha = git.get_head_sha(workspace)
-    version = f"v{next_version_number}"
-    git.create_tag(f"{workspace}-{version}", sha)
-    self.db.create_version(workspace, version, sha, "run")
-    return version
+# jobs/stage_executor.py
+def run_stage(self, workspace: str, stage: str, ...):
+    # 1. Sync slot changes back to dev repo branch
+    sha = self.git.sync_slot_to_branch(slot_path, workspace, commit_msg)
+
+    # 2. Push for remote execution (GCE)
+    if self.config.execution.push_before_run:
+        self.git.push_branch(workspace)
+
+    # 3. Create version tag
+    version = self._auto_version(workspace)  # Points to committed SHA
+
+    # 4. Execute with guaranteed provenance
+    self._launch_container(sha, ...)
 ```
+
+**Provenance guarantee**: Code is always committed before execution. The version SHA matches exactly what ran.
 
 ### 3. Pipelines = YAML Workflows
 
@@ -369,7 +399,7 @@ Claude just writes `profile: "h100-spot"` in configs; Goldfish handles the rest.
 ### Stage Execution Sequence
 
 ```
-run_stage("w1", "train")
+run("w1", stages=["train"])
          │
          ▼
 ┌─────────────────────────────────────────────────────────────────┐
@@ -381,8 +411,10 @@ run_stage("w1", "train")
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ 2. AUTO-VERSION                                                  │
-│    - Get current HEAD SHA                                        │
+│ 2. SYNC + AUTO-VERSION (Provenance Guard)                       │
+│    - Sync slot files back to dev repo branch                    │
+│    - Commit changes in dev repo                                 │
+│    - Push to remote (for GCE execution)                         │
 │    - Create git tag: baseline_lstm-v4                           │
 │    - Record in workspace_versions table                         │
 └────────────────────────────┬────────────────────────────────────┘
@@ -766,16 +798,21 @@ Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`
 # Project identification
 project_name: string              # Required: Project identifier
 
-# File paths
-dev_repo_path: .goldfish/dev      # Git repository location
-workspaces_dir: workspaces        # Workspace mount directory
+# Repository layout (copy-based architecture)
+dev_repo_path: ../myproject-dev   # Goldfish dev repo (sibling directory)
+workspaces_dir: workspaces        # Slot directory in USER project
 slots: [w1, w2, w3]               # Available slot names
+
+# Execution policy
+execution:
+  push_before_run: true           # Push commits for GCE execution
 
 # State management
 state_md:
-  path: STATE.md                  # Context recovery file location
-  max_recent_actions: 15          # Number of actions to display
-  show_lineage: true              # Show lineage in STATE.md
+  global_path: STATE.md           # Global overview in dev repo
+  per_workspace_enabled: true     # Enable per-workspace STATE.md
+  per_workspace_path: STATE.md    # Filename in each workspace
+  max_recent_actions: 50          # Actions to keep in narrative
 
 # Audit configuration
 audit:

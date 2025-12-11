@@ -32,11 +32,13 @@ def init_project(
     """Initialize a new Goldfish project.
 
     Creates:
-    - {project}-dev/ git repo (sibling directory)
-    - {project}/goldfish.yaml config file
-    - {project}/STATE.md initial state
-    - {project}/workspaces/ directory
-    - {project}/.goldfish/ directory for database
+    - {project}-dev/ git repo (sibling directory) with:
+      - .goldfish/ directory for database
+      - workspaces/ directory for mounted workspaces
+      - STATE.md global overview
+    - {project}/goldfish.yaml config file (only Goldfish file in user project)
+
+    The user project stays PRISTINE - no Goldfish artifacts except config.
 
     Args:
         project_name: Name of the project (e.g., "mlm")
@@ -60,12 +62,12 @@ def init_project(
     # Create dev repository
     _create_dev_repo(dev_repo_path, project_name)
 
-    # Create workspaces directory
-    workspaces_dir = project_path / "workspaces"
+    # Create workspaces directory IN DEV REPO (not user project)
+    workspaces_dir = dev_repo_path / "workspaces"
     workspaces_dir.mkdir(exist_ok=True)
 
-    # Create .goldfish directory for database
-    goldfish_dir = project_path / ".goldfish"
+    # Create .goldfish directory for database IN DEV REPO
+    goldfish_dir = dev_repo_path / ".goldfish"
     goldfish_dir.mkdir(exist_ok=True)
 
     # Read GCS/GCE config from environment variables (optional)
@@ -110,12 +112,12 @@ def init_project(
         invariants=[],
     )
 
-    # Write config file
+    # Write config file (only Goldfish file in user project)
     config_path = project_path / "goldfish.yaml"
     _write_config(config, config_path)
 
-    # Create initial STATE.md
-    state_path = project_path / config.state_md.path
+    # Create initial STATE.md IN DEV REPO
+    state_path = dev_repo_path / config.state_md.path
     StateManager.create_initial(state_path, config)
 
     return config
@@ -178,6 +180,10 @@ env/
 # Project specific
 *.log
 .DS_Store
+
+# Goldfish runtime directories (not versioned)
+.goldfish/
+workspaces/
 """
     )
 

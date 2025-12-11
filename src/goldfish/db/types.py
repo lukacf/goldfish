@@ -84,3 +84,20 @@ class WorkspaceGoalRow(TypedDict):
     goal: str
     created_at: str
     updated_at: str
+
+
+class StageVersionRow(TypedDict):
+    """Row from the stage_versions table.
+
+    Tracks unique (code + config) combinations per stage,
+    enabling "preprocessing-v5", "tokenization-v11" independent
+    of workspace versions.
+    """
+
+    id: int
+    workspace_name: str
+    stage_name: str
+    version_num: int
+    git_sha: str
+    config_hash: str
+    created_at: str

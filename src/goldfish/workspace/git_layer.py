@@ -4,8 +4,12 @@ Claude should never see git commands or error messages from this layer.
 All errors are translated to GoldfishError before leaving this module.
 """
 
+import fnmatch
+import json
 import logging
+import shutil
 import subprocess
+import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -94,9 +98,26 @@ class GitLayer:
 
     # --- Branch operations (workspaces) ---
 
+    # --- Branch naming convention ---
+    # Workspace branches are stored under goldfish/* namespace for scalability.
+    # This allows git to efficiently handle 1000+ workspaces without branch
+    # enumeration performance issues.
+
+    def _workspace_branch(self, workspace: str) -> str:
+        """Get branch name for workspace (under refs/heads for git compatibility)."""
+        return f"goldfish/{workspace}"
+
+    def _is_workspace_branch(self, branch_name: str) -> bool:
+        """Check if branch is a goldfish workspace branch."""
+        return branch_name.startswith("goldfish/")
+
+    def _workspace_from_branch(self, branch_name: str) -> str:
+        """Extract workspace name from branch."""
+        return branch_name.removeprefix("goldfish/")
+
     def branch_exists(self, workspace_name: str) -> bool:
         """Check if a workspace (branch) exists."""
-        branch = f"experiment/{workspace_name}"
+        branch = self._workspace_branch(workspace_name)
         try:
             self._run_git("show-ref", "--verify", f"refs/heads/{branch}")
             return True
@@ -105,30 +126,30 @@ class GitLayer:
 
     def create_branch(self, workspace_name: str, from_ref: str = "main") -> None:
         """Create a new workspace branch from a reference."""
-        branch = f"experiment/{workspace_name}"
+        branch = self._workspace_branch(workspace_name)
         self._run_git("branch", branch, from_ref)
 
     def delete_branch(self, workspace_name: str, force: bool = False) -> None:
         """Delete a workspace branch."""
-        branch = f"experiment/{workspace_name}"
+        branch = self._workspace_branch(workspace_name)
         flag = "-D" if force else "-d"
         self._run_git("branch", flag, branch)
 
     def list_branches(self) -> list[str]:
-        """List all workspace branches (experiment/*)."""
-        stdout, _ = self._run_git("branch", "--list", "experiment/*", "--format=%(refname:short)")
+        """List all workspace branches (goldfish/*)."""
+        stdout, _ = self._run_git("branch", "--list", "goldfish/*", "--format=%(refname:short)")
         branches = []
         for line in stdout.split("\n"):
             line = line.strip()
             if line:
-                # Strip "experiment/" prefix
-                name = line.replace("experiment/", "")
+                # Strip "goldfish/" prefix
+                name = self._workspace_from_branch(line)
                 branches.append(name)
         return branches
 
     def get_branch_info(self, workspace_name: str) -> dict:
         """Get metadata about a workspace branch."""
-        branch = f"experiment/{workspace_name}"
+        branch = self._workspace_branch(workspace_name)
 
         # Get creation time (first commit on branch after diverging from main)
         try:
@@ -189,7 +210,7 @@ class GitLayer:
                 # If we can't check, let git fail naturally
                 pass
 
-        branch = f"experiment/{workspace_name}"
+        branch = self._workspace_branch(workspace_name)
         # Git worktree add is atomic - either succeeds completely or fails
         self._run_git("worktree", "add", str(slot_path), branch)
 
@@ -374,7 +395,7 @@ class GitLayer:
 
     def list_snapshots(self, workspace_name: str) -> list[str]:
         """List all snapshot IDs for a workspace."""
-        branch = f"experiment/{workspace_name}"
+        branch = self._workspace_branch(workspace_name)
         try:
             stdout, _ = self._run_git("tag", "--list", "snap-*", "--merged", branch)
             return [t.strip() for t in stdout.split("\n") if t.strip()]
@@ -432,7 +453,7 @@ class GitLayer:
 
     def push_branch(self, workspace_name: str) -> None:
         """Push workspace to remote (if configured)."""
-        branch = f"experiment/{workspace_name}"
+        branch = self._workspace_branch(workspace_name)
         try:
             # Check if remote exists
             self._run_git("remote", "get-url", "origin", check=False)
@@ -489,3 +510,281 @@ class GitLayer:
             "commits": commits,
             "files": files,
         }
+
+    # --- Copy-based mounting operations (Phase 2) ---
+
+    def get_head_sha_from_branch(self, branch: str) -> str:
+        """Get HEAD SHA from a branch (without needing a worktree).
+
+        Args:
+            branch: Full branch name (e.g., "goldfish/workspace_name")
+
+        Returns:
+            The commit SHA at the head of the branch
+        """
+        stdout, _ = self._run_git("rev-parse", branch)
+        return stdout.strip()
+
+    def copy_mount_workspace(self, workspace_name: str, slot_path: Path) -> dict:
+        """Copy workspace branch content to slot directory.
+
+        The slot is a plain directory with NO git - just files.
+        This uses git archive to extract files cleanly.
+
+        Args:
+            workspace_name: Name of the workspace to mount
+            slot_path: Path to the slot directory
+
+        Returns:
+            Metadata dict with workspace_name, branch, mounted_sha, mounted_at
+
+        Raises:
+            WorkspaceNotFoundError: If workspace doesn't exist
+            GoldfishError: If slot exists and is not empty/not a Goldfish workspace
+        """
+        branch = self._workspace_branch(workspace_name)
+        if not self.branch_exists(workspace_name):
+            raise WorkspaceNotFoundError(f"Workspace '{workspace_name}' not found")
+
+        # CRITICAL: Safety check - refuse to mount to non-empty non-Goldfish directory
+        if slot_path.exists():
+            if any(slot_path.iterdir()):  # Non-empty
+                metadata_file = slot_path / ".goldfish-mount"
+                if not metadata_file.exists():
+                    raise GoldfishError(
+                        f"Target directory '{slot_path}' is not empty and is not a Goldfish workspace.\n"
+                        f"Refusing to mount to avoid data loss."
+                    )
+                # If it's a Goldfish workspace, we'll overwrite it (re-mount)
+                shutil.rmtree(slot_path)
+
+        # Get the tree content from the branch via git archive
+        slot_path.mkdir(parents=True, exist_ok=True)
+        tar_path = slot_path.parent / f".{slot_path.name}.tar"
+
+        try:
+            # Export branch content to tar
+            self._run_git("archive", branch, "--format=tar", f"--output={tar_path}")
+
+            # Extract to slot
+            with tarfile.open(tar_path) as tar:
+                tar.extractall(slot_path)
+        finally:
+            # Clean up tar file
+            if tar_path.exists():
+                tar_path.unlink()
+
+        # Create metadata file (the ONLY goldfish file in slot)
+        head_sha = self.get_head_sha_from_branch(branch)
+        metadata = {
+            "workspace_name": workspace_name,
+            "branch": branch,
+            "mounted_sha": head_sha,
+            "mounted_at": datetime.now(UTC).isoformat(),
+        }
+        (slot_path / ".goldfish-mount").write_text(json.dumps(metadata, indent=2))
+
+        return metadata
+
+    def _sync_directory(
+        self,
+        src: Path,
+        dst: Path,
+        exclude: list[str] | None = None,
+    ) -> None:
+        """Sync src to dst with delete semantics (like rsync --delete).
+
+        CRITICAL: This deletes files in dst that don't exist in src.
+        Also respects .gitignore patterns from dst.
+
+        Args:
+            src: Source directory (user workspace)
+            dst: Destination directory (git worktree)
+            exclude: List of patterns to exclude from sync
+        """
+        if exclude is None:
+            exclude = []
+
+        # Load .gitignore patterns from destination (if exists)
+        gitignore_patterns = set(exclude)
+        gitignore_file = dst / ".gitignore"
+        if gitignore_file.exists():
+            for line in gitignore_file.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    gitignore_patterns.add(line)
+
+        def should_exclude(path: Path) -> bool:
+            """Check if path matches any exclusion pattern."""
+            name = path.name
+            for pattern in gitignore_patterns:
+                if fnmatch.fnmatch(name, pattern):
+                    return True
+            return False
+
+        # 1. Delete files in dst that don't exist in src
+        if dst.exists():
+            for dst_item in list(dst.rglob("*")):
+                if dst_item.is_file():
+                    rel_path = dst_item.relative_to(dst)
+                    src_item = src / rel_path
+                    # Don't delete .git directory or excluded files
+                    if ".git" in dst_item.parts:
+                        continue
+                    if not src_item.exists() and not should_exclude(dst_item):
+                        dst_item.unlink()
+
+            # Clean up empty directories (except .git)
+            for dst_item in sorted(dst.rglob("*"), reverse=True):
+                if dst_item.is_dir() and ".git" not in dst_item.parts:
+                    try:
+                        if not any(dst_item.iterdir()):
+                            dst_item.rmdir()
+                    except OSError:
+                        pass  # Directory not empty or other error
+
+        # 2. Copy/update files from src to dst
+        for src_item in src.rglob("*"):
+            if src_item.is_file():
+                rel_path = src_item.relative_to(src)
+                # Skip excluded files
+                if should_exclude(src_item):
+                    continue
+                # Skip .goldfish-mount metadata file
+                if src_item.name == ".goldfish-mount":
+                    continue
+                dst_item = dst / rel_path
+                dst_item.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_item, dst_item)
+
+    def sync_slot_to_branch(
+        self,
+        slot_path: Path,
+        workspace_name: str,
+        commit_msg: str,
+    ) -> str:
+        """Sync slot changes back to branch and commit.
+
+        This is called before run() or on unmount.
+
+        Args:
+            slot_path: Path to the user workspace slot
+            workspace_name: Name of the workspace
+            commit_msg: Commit message for the changes
+
+        Returns:
+            The new commit SHA (or existing SHA if no changes)
+
+        Raises:
+            GoldfishError: If workspace diverged on remote
+        """
+        branch = self._workspace_branch(workspace_name)
+        metadata_file = slot_path / ".goldfish-mount"
+
+        if not metadata_file.exists():
+            raise GoldfishError(f"Slot '{slot_path}' is not a mounted Goldfish workspace")
+
+        metadata = json.loads(metadata_file.read_text())
+
+        # 1. Check branch hasn't moved (reject divergence)
+        current_branch_sha = self.get_head_sha_from_branch(branch)
+        if current_branch_sha != metadata["mounted_sha"]:
+            raise GoldfishError(
+                f"Workspace '{workspace_name}' diverged on remote.\n"
+                f"Branch moved from {metadata['mounted_sha'][:8]} to {current_branch_sha[:8]}.\n"
+                f"Options: rollback() or branch_workspace()"
+            )
+
+        # 2. Sync files from slot to branch using a temporary worktree
+        temp_worktree = self.dev_repo / ".goldfish" / "tmp-sync" / workspace_name
+        temp_worktree.parent.mkdir(parents=True, exist_ok=True)
+
+        # Clean up any existing temp worktree
+        if temp_worktree.exists():
+            try:
+                self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
+            except GoldfishError:
+                pass
+            if temp_worktree.exists():
+                shutil.rmtree(temp_worktree)
+
+        try:
+            self._run_git("worktree", "add", str(temp_worktree), branch)
+
+            # Sync with delete: mirror slot to worktree (respecting .gitignore)
+            self._sync_directory(
+                src=slot_path,
+                dst=temp_worktree,
+                exclude=[".goldfish-mount", ".git", "__pycache__", "*.pyc", ".pytest_cache"],
+            )
+
+            # Commit in the worktree (this advances the branch)
+            self._run_git("add", "-A", cwd=temp_worktree)
+
+            # Check if there are actual changes
+            status, _ = self._run_git("status", "--porcelain", cwd=temp_worktree)
+            if not status.strip():
+                return current_branch_sha  # No changes
+
+            self._run_git("commit", "-m", commit_msg, cwd=temp_worktree)
+            # Use full SHA (not short) to match get_head_sha_from_branch
+            new_sha = self.get_head_sha(temp_worktree, short=False)
+
+            # Update metadata with new SHA
+            metadata["mounted_sha"] = new_sha
+            metadata_file.write_text(json.dumps(metadata, indent=2))
+
+            return new_sha
+
+        finally:
+            # Clean up temp worktree
+            if temp_worktree.exists():
+                try:
+                    self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
+                except GoldfishError:
+                    pass
+                if temp_worktree.exists():
+                    shutil.rmtree(temp_worktree, ignore_errors=True)
+
+    def copy_unmount_workspace(self, slot_path: Path, workspace_name: str, commit_msg: str) -> str:
+        """Sync changes and remove slot directory.
+
+        Args:
+            slot_path: Path to the user workspace slot
+            workspace_name: Name of the workspace
+            commit_msg: Commit message for any pending changes
+
+        Returns:
+            The final commit SHA
+        """
+        # Sync any pending changes
+        sha = self.sync_slot_to_branch(slot_path, workspace_name, commit_msg)
+
+        # Remove the slot
+        shutil.rmtree(slot_path)
+
+        return sha
+
+    def create_snapshot_copy_based(self, slot_path: Path, workspace_name: str, message: str) -> str:
+        """Create a snapshot for copy-based mounting.
+
+        Syncs slot changes to branch, commits, and creates a snapshot tag.
+
+        Args:
+            slot_path: Path to the user workspace slot
+            workspace_name: Name of the workspace
+            message: Snapshot message
+
+        Returns:
+            The snapshot ID (snap-{sha}-{timestamp})
+        """
+        # Sync changes to branch and commit
+        sha = self.sync_slot_to_branch(slot_path, workspace_name, message)
+
+        # Create snapshot tag in the dev repo
+        timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        snapshot_id = f"snap-{sha[:8]}-{timestamp}"
+
+        self._run_git("tag", snapshot_id, sha, cwd=self.dev_repo)
+
+        return snapshot_id

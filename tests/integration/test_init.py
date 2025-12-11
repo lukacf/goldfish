@@ -31,12 +31,14 @@ class TestInitProject:
             dev_repo_path=dev_repo_path,
         )
 
-        # Check project directory structure
+        # Check project directory structure (only goldfish.yaml in user project)
         assert project_path.exists()
-        assert (project_path / "workspaces").exists()
-        assert (project_path / ".goldfish").exists()
         assert (project_path / "goldfish.yaml").exists()
-        assert (project_path / "STATE.md").exists()
+
+        # Check dev repo structure (runtime artifacts live here)
+        assert (dev_repo_path / "workspaces").exists()
+        assert (dev_repo_path / ".goldfish").exists()
+        assert (dev_repo_path / "STATE.md").exists()
 
         # Check config was created correctly
         assert config.project_name == "test-project"
@@ -105,7 +107,7 @@ class TestInitProject:
         assert "jobs" in config_dict
 
     def test_init_project_state_md_created(self, temp_dir):
-        """Test that STATE.md is created with initial content."""
+        """Test that STATE.md is created with initial content in dev repo."""
         from goldfish.init import init_project
 
         project_path = temp_dir / "test-project"
@@ -117,7 +119,8 @@ class TestInitProject:
             dev_repo_path=dev_repo_path,
         )
 
-        state_path = project_path / "STATE.md"
+        # STATE.md is created in dev repo (not user project)
+        state_path = dev_repo_path / "STATE.md"
         assert state_path.exists()
 
         content = state_path.read_text()

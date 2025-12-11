@@ -73,7 +73,7 @@ class TestGitLayerBranchOperations:
         # Get current branch to use as base
         current = run_git(["branch", "--show-current"], dev_repo)
 
-        # Create a workspace branch (GitLayer adds experiment/ prefix)
+        # Create a workspace branch (GitLayer adds goldfish/ prefix)
         git.create_branch("test-workspace", from_ref=current)
 
         # Now it should exist
@@ -92,7 +92,7 @@ class TestGitLayerBranchOperations:
         # Get current branch name
         current = run_git(["branch", "--show-current"], dev_repo)
 
-        # Create new branch (don't include experiment/ - GitLayer adds it)
+        # Create new branch (don't include goldfish/ - GitLayer adds it)
         git.create_branch("new-feature", from_ref=current)
 
         # Verify branch exists
@@ -100,7 +100,7 @@ class TestGitLayerBranchOperations:
 
         # Verify the actual branch name in git
         branches = run_git(["branch", "--list"], dev_repo)
-        assert "experiment/new-feature" in branches
+        assert "goldfish/new-feature" in branches
 
     def test_create_branch_from_specific_ref(self, git_setup):
         """create_branch should create from specified ref."""
@@ -116,7 +116,7 @@ class TestGitLayerBranchOperations:
         # Get the first commit SHA
         first_sha = run_git(["rev-list", "--max-parents=0", "HEAD"], dev_repo)
 
-        # Create branch from first commit (don't include experiment/)
+        # Create branch from first commit (don't include goldfish/)
         git.create_branch("from-first", from_ref=first_sha[:7])
 
         # Branch should exist
@@ -130,7 +130,7 @@ class TestGitLayerWorktreeOperations:
         """add_worktree should create a new worktree."""
         dev_repo, project_root, git = git_setup
 
-        # Create branch first (don't include experiment/)
+        # Create branch first (don't include goldfish/)
         current = run_git(["branch", "--show-current"], dev_repo)
         git.create_branch("test-ws", from_ref=current)
 
@@ -470,7 +470,7 @@ class TestGitLayerPushBranch:
 
             # Verify branch exists on remote
             remote_branches = run_git(["branch", "-r"], dev_repo)
-            assert "origin/experiment/push-test" in remote_branches
+            assert "origin/goldfish/push-test" in remote_branches
         finally:
             git.remove_worktree(worktree_path)
 
