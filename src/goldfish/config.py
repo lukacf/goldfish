@@ -135,8 +135,22 @@ class GoldfishConfig(BaseModel):
 
     @property
     def db_path(self) -> str:
-        """Path to the SQLite database (relative to project root)."""
+        """Path to the SQLite database (relative to dev repo)."""
         return ".goldfish/goldfish.db"
+
+    def get_dev_repo_path(self, project_root: Path) -> Path:
+        """Resolve the dev repo path to an absolute path.
+
+        Args:
+            project_root: The user's project root directory.
+
+        Returns:
+            Absolute path to the dev repository.
+        """
+        # dev_repo_path is stored relative to project_root's parent
+        # e.g., if project is /home/user/mlm, dev_repo_path might be "mlm-dev"
+        # which resolves to /home/user/mlm-dev
+        return (project_root.parent / self.dev_repo_path).resolve()
 
 
 def generate_default_config(project_name: str, dev_repo_path: str = "../{project}-dev") -> GoldfishConfig:

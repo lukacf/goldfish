@@ -1,9 +1,13 @@
 """Goldfish MCP tools - Pipeline Tools
 
 Extracted from server.py for better organization.
+
+NOTE: These tools are DEPRECATED. Use get_workspace() instead, which now
+includes pipeline information in the response.
 """
 
 import logging
+import warnings
 
 from goldfish.errors import (
     GoldfishError,
@@ -32,7 +36,9 @@ logger = logging.getLogger("goldfish.server")
 
 @mcp.tool()
 def get_pipeline(workspace: str, pipeline: str | None = None) -> PipelineResponse:
-    """Get pipeline definition for a workspace.
+    """[DEPRECATED] Get pipeline definition for a workspace.
+
+    Use get_workspace() instead, which includes pipeline info.
 
     Returns the pipeline.yaml content as a structured object.
 
@@ -42,6 +48,11 @@ def get_pipeline(workspace: str, pipeline: str | None = None) -> PipelineRespons
     Returns:
         Pipeline definition with stages, inputs, outputs
     """
+    warnings.warn(
+        "get_pipeline is deprecated, use get_workspace() instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     pipeline_manager = _get_pipeline_manager()
     workspace_manager = _get_workspace_manager()
 
@@ -62,7 +73,9 @@ def get_pipeline(workspace: str, pipeline: str | None = None) -> PipelineRespons
 
 @mcp.tool()
 def validate_pipeline(workspace: str, pipeline: str | None = None) -> ValidatePipelineResponse:
-    """Validate pipeline definition for a workspace.
+    """[DEPRECATED] Validate pipeline definition for a workspace.
+
+    Use get_workspace() instead, which validates and includes pipeline info.
 
     Checks:
     - Stage files exist (modules/{stage}.py, configs/{stage}.yaml)
@@ -76,6 +89,11 @@ def validate_pipeline(workspace: str, pipeline: str | None = None) -> ValidatePi
     Returns:
         Validation result with list of errors (empty if valid)
     """
+    warnings.warn(
+        "validate_pipeline is deprecated, use get_workspace() instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     pipeline_manager = _get_pipeline_manager()
     workspace_manager = _get_workspace_manager()
 
@@ -98,7 +116,9 @@ def validate_pipeline(workspace: str, pipeline: str | None = None) -> ValidatePi
 
 @mcp.tool()
 def update_pipeline(workspace: str, pipeline_yaml: str, pipeline: str | None = None) -> UpdatePipelineResponse:
-    """Update pipeline.yaml in workspace.
+    """[DEPRECATED] Update pipeline.yaml in workspace.
+
+    Edit pipeline.yaml directly in the workspace instead.
 
     Validates the pipeline before writing. Will reject invalid pipelines.
 
@@ -109,6 +129,11 @@ def update_pipeline(workspace: str, pipeline_yaml: str, pipeline: str | None = N
     Returns:
         Updated pipeline definition
     """
+    warnings.warn(
+        "update_pipeline is deprecated, edit pipeline.yaml directly",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     pipeline_manager = _get_pipeline_manager()
     workspace_manager = _get_workspace_manager()
 
@@ -131,7 +156,15 @@ def update_pipeline(workspace: str, pipeline_yaml: str, pipeline: str | None = N
 
 @mcp.tool()
 def list_pipelines(workspace: str) -> dict:
-    """List available pipeline files in a workspace (default + pipelines/*.yaml)."""
+    """[DEPRECATED] List available pipeline files in a workspace.
+
+    Use get_workspace() instead, which includes pipeline info.
+    """
+    warnings.warn(
+        "list_pipelines is deprecated, use get_workspace() instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     workspace_manager = _get_workspace_manager()
 
     validate_workspace_name(workspace)
