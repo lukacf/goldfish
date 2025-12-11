@@ -8,6 +8,9 @@ from pathlib import Path
 
 from goldfish.errors import GoldfishError
 
+# Path to goldfish.io module (relative to this file)
+GOLDFISH_IO_PATH = Path(__file__).parent.parent / "io" / "__init__.py"
+
 
 class DockerBuilder:
     """Build Docker images for stage execution."""
@@ -40,8 +43,8 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 """
 
         dockerfile += """# Install Goldfish IO library
-# TODO: Package goldfish.io separately and install from wheel
-# For now, assume it's available in the image or mounted
+COPY goldfish_io/ /app/goldfish_io/
+ENV PYTHONPATH="/app:${PYTHONPATH}"
 
 # Copy workspace code
 COPY modules/ /app/modules/
@@ -97,6 +100,18 @@ CMD ["/bin/bash"]
 
             if (workspace_dir / "loaders").exists():
                 shutil.copytree(workspace_dir / "loaders", build_context / "loaders")
+
+            # Copy goldfish.io module into build context
+            # This creates a goldfish/io package structure so `from goldfish.io import ...` works
+            goldfish_io_dest = build_context / "goldfish_io" / "goldfish" / "io"
+            goldfish_io_dest.mkdir(parents=True, exist_ok=True)
+            if GOLDFISH_IO_PATH.exists():
+                shutil.copy2(GOLDFISH_IO_PATH, goldfish_io_dest / "__init__.py")
+                # Create parent __init__.py for package structure
+                (build_context / "goldfish_io" / "goldfish" / "__init__.py").write_text(
+                    '"""Goldfish ML package (container runtime)."""\n'
+                )
+                (build_context / "goldfish_io" / "__init__.py").write_text("")
 
             # Generate Dockerfile in build context (not workspace)
             dockerfile_content = self.generate_dockerfile(workspace_dir)
