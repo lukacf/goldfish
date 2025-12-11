@@ -260,7 +260,7 @@ class ProfileResolver:
             name: Profile name (e.g., "h100-spot")
 
         Returns:
-            Resolved profile dictionary
+            Resolved profile dictionary with 'name' field included
 
         Raises:
             ProfileNotFoundError: If profile doesn't exist in built-ins or overrides
@@ -270,6 +270,7 @@ class ProfileResolver:
             # Custom profile - use as-is
             profile = deepcopy(self.profile_overrides[name])
             validate_profile(profile)
+            profile["name"] = name  # Ensure name is included for ResourceLauncher
             return profile
 
         # Get built-in profile as base
@@ -284,6 +285,7 @@ class ProfileResolver:
             profile = deep_merge(profile, self.profile_overrides[name])
 
         validate_profile(profile)
+        profile["name"] = name  # Ensure name is included for ResourceLauncher
         return profile
 
     def list_profiles(self) -> list[str]:

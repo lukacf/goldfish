@@ -1,6 +1,7 @@
 """Stage execution engine for Goldfish."""
 
 import json
+import logging
 import os
 import time
 from datetime import UTC, datetime
@@ -23,6 +24,8 @@ from goldfish.pipeline.manager import PipelineManager
 from goldfish.utils import parse_optional_datetime
 from goldfish.utils.config_hash import compute_config_hash
 from goldfish.workspace.manager import WorkspaceManager
+
+logger = logging.getLogger(__name__)
 
 STAGE_LOG_TAIL_FOR_FINALIZE = int(os.getenv("GOLDFISH_FINALIZE_LOG_TAIL", "1000"))
 
@@ -534,22 +537,27 @@ class StageExecutor:
             workspace_dir=workspace_dir, workspace_name=workspace, version=version, use_cache=True
         )
 
-        # If using GCE backend and artifact_registry is configured, push to registry
+        # If using GCE backend, push to Artifact Registry
         backend = self.config.jobs.backend
         if backend == "gce":
             if not self.config.gce:
                 raise GoldfishError("GCE backend requires gce configuration in goldfish.yaml")
 
-            if not self.config.gce.artifact_registry:
-                raise GoldfishError(
-                    "GCE backend requires artifact_registry URL in gce configuration. "
-                    "Example: artifact_registry: us-docker.pkg.dev/{project_id}/goldfish"
-                )
+            # Get or create artifact registry URL
+            registry_url = self.config.gce.artifact_registry
+            if not registry_url:
+                # Auto-generate registry URL from project_id
+                project_id = self.config.gce.effective_project_id
+                registry_url = f"us-docker.pkg.dev/{project_id}/goldfish"
+                logger.info(f"Using auto-generated artifact registry: {registry_url}")
+
+                # Ensure the repository exists (create if needed)
+                self._ensure_artifact_registry(project_id, "goldfish")
 
             # Push image to Artifact Registry
             registry_image_tag = self.docker_builder.push_image(
                 local_tag=local_image_tag,
-                registry_url=self.config.gce.artifact_registry,
+                registry_url=registry_url,
                 workspace_name=workspace,
                 version=version,
             )
@@ -557,6 +565,64 @@ class StageExecutor:
             return registry_image_tag
 
         return local_image_tag
+
+    def _ensure_artifact_registry(self, project_id: str, repo_name: str) -> None:
+        """Ensure Artifact Registry repository exists, creating if needed.
+
+        Args:
+            project_id: GCP project ID
+            repo_name: Repository name (e.g., "goldfish")
+        """
+        import subprocess
+
+        # Check if repository exists
+        check_result = subprocess.run(
+            [
+                "gcloud",
+                "artifacts",
+                "repositories",
+                "describe",
+                repo_name,
+                f"--project={project_id}",
+                "--location=us",
+                "--format=value(name)",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if check_result.returncode == 0:
+            logger.debug(f"Artifact Registry repository {repo_name} already exists")
+            return
+
+        # Create repository
+        logger.info(f"Creating Artifact Registry repository: {repo_name} in project {project_id}")
+        create_result = subprocess.run(
+            [
+                "gcloud",
+                "artifacts",
+                "repositories",
+                "create",
+                repo_name,
+                f"--project={project_id}",
+                "--location=us",
+                "--repository-format=docker",
+                "--description=Goldfish ML experiment images",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if create_result.returncode != 0:
+            # Check if it was a race condition (already exists)
+            if "already exists" in create_result.stderr.lower():
+                logger.debug(f"Artifact Registry repository {repo_name} created by concurrent process")
+                return
+            raise GoldfishError(f"Failed to create Artifact Registry repository: {create_result.stderr}")
+
+        logger.info(f"Created Artifact Registry repository: us-docker.pkg.dev/{project_id}/{repo_name}")
 
     def _load_stage_config(self, workspace: str, stage_name: str) -> dict:
         """Load stage config from configs/{stage}.yaml.

@@ -277,6 +277,7 @@ from goldfish.server_tools.utility_tools import (  # noqa: E402, F401
     get_audit_log,
     initialize_project,
     log_thought,
+    reload_config,
     status,
 )
 
