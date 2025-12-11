@@ -108,7 +108,47 @@ class GCELauncher:
         env_map = {
             "GOLDFISH_STAGE_CONFIG": json.dumps(stage_config),
             "GOLDFISH_RUN_ID": stage_run_id,
+            "GOLDFISH_INPUTS_DIR": "/mnt/inputs",
+            "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
         }
+
+        # Build input staging commands
+        # Transform gs://bucket/path to /mnt/gcs/path (symlinks on host)
+        pre_run_cmds = [
+            f"cat > /mnt/entrypoint.sh << 'ENTRYPOINT_EOF'\n{entrypoint_script}\nENTRYPOINT_EOF",
+            "chmod +x /mnt/entrypoint.sh",
+            "mkdir -p /mnt/inputs /mnt/outputs",
+        ]
+
+        # Stage inputs from GCS to /mnt/inputs/
+        inputs = stage_config.get("inputs", {})
+        for input_name, input_config in inputs.items():
+            # Handle both old format (string URI) and new format (dict with location)
+            if isinstance(input_config, str):
+                gcs_uri = input_config
+            elif isinstance(input_config, dict):
+                gcs_uri = input_config.get("location", "")
+            else:
+                continue
+
+            if gcs_uri and gcs_uri.startswith("gs://"):
+                # Extract bucket and path from gs://bucket/path
+                uri_parts = gcs_uri.replace("gs://", "").split("/", 1)
+                if len(uri_parts) == 2:
+                    input_bucket, input_path = uri_parts
+                    # If input is from same bucket, use gcsfuse; otherwise gsutil
+                    if input_bucket == bucket_name:
+                        # Symlink from gcsfuse mount
+                        pre_run_cmds.append(f'ln -sf "/mnt/gcs/{input_path.rstrip("/")}" "/mnt/inputs/{input_name}"')
+                    else:
+                        # Different bucket - use gsutil to copy
+                        pre_run_cmds.append(f'gsutil -m cp -r "{gcs_uri.rstrip("/")}" "/mnt/inputs/{input_name}"')
+
+        # Build output staging commands (run after Docker)
+        outputs_gcs_path = f"gs://{bucket_name}/{run_path}/outputs"
+        post_run_cmds = [
+            f'gsutil -m cp -r /mnt/outputs/* "{outputs_gcs_path}/" || true',
+        ]
 
         # Build startup script with proper orchestration
         startup_script = build_startup_script(
@@ -118,12 +158,15 @@ class GCELauncher:
             image=image_tag,
             entrypoint="/bin/bash",
             env_map=env_map,
-            mounts=[("/mnt/entrypoint.sh", "/entrypoint.sh")],
-            gcsfuse=True,
-            pre_run_cmds=[
-                f"cat > /mnt/entrypoint.sh << 'ENTRYPOINT_EOF'\n{entrypoint_script}\nENTRYPOINT_EOF",
-                "chmod +x /mnt/entrypoint.sh",
+            mounts=[
+                ("/mnt/entrypoint.sh", "/entrypoint.sh"),
+                ("/mnt/gcs", "/mnt/gcs"),  # Mount gcsfuse for input access
+                ("/mnt/inputs", "/mnt/inputs"),  # Input staging directory
+                ("/mnt/outputs", "/mnt/outputs"),  # Output staging directory
             ],
+            gcsfuse=True,
+            pre_run_cmds=pre_run_cmds,
+            post_run_cmds=post_run_cmds,
         )
 
         if use_capacity_search and self.resources:

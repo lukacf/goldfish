@@ -181,7 +181,26 @@ class StageExecutor:
                 progress="launch",
             )
             # 7. Launch container
-            self._launch_container(stage_run_id, workspace, stage_name, image_tag, inputs)
+            # Build input config with format info for goldfish.io
+            input_configs = {}
+            for input_name, input_def in stage.inputs.items():
+                input_configs[input_name] = {
+                    "location": inputs.get(input_name, ""),
+                    "format": input_def.format or input_def.type,  # Use format override or fall back to type
+                    "type": input_def.type,
+                }
+
+            # Build output config with format info
+            output_configs = {}
+            for output_name, output_def in stage.outputs.items():
+                output_configs[output_name] = {
+                    "format": output_def.format or output_def.type,
+                    "type": output_def.type,
+                }
+
+            self._launch_container(
+                stage_run_id, workspace, stage_name, image_tag, inputs, input_configs, output_configs
+            )
         except Exception as e:
             # Mark failed immediately with error and re-raise
             self.db.update_stage_run_status(
@@ -687,9 +706,18 @@ class StageExecutor:
         stage_name: str,
         image_tag: str,
         inputs: dict,
+        input_configs: dict | None = None,
+        output_configs: dict | None = None,
     ):
         """Launch Docker container (local) or GCE instance."""
         backend = self.config.jobs.backend
+
+        # Build stage config for goldfish.io
+        stage_config = {
+            "stage": stage_name,
+            "inputs": input_configs or inputs,  # Use input_configs if provided
+            "outputs": output_configs or {},
+        }
 
         if backend == "local":
             # Create work directory for this run
@@ -712,13 +740,6 @@ python -m modules.{stage_name}
 
 echo "Stage completed successfully"
 """
-
-            # Generate stage config
-            stage_config = {
-                "stage": stage_name,
-                "inputs": inputs,
-                "outputs": {},  # Will be populated by module
-            }
 
             # Launch container using LocalExecutor
             self.local_executor.launch_container(
@@ -769,7 +790,7 @@ python -m modules.{stage_name}
 
 echo "Stage completed successfully"
 """,
-                stage_config={"stage": stage_name, "inputs": inputs, "outputs": {}},
+                stage_config=stage_config,
                 work_dir=self.dev_repo / ".goldfish" / "runs" / stage_run_id,
                 machine_type=machine_type,
                 gpu_type=gpu_type,
