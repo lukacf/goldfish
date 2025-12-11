@@ -23,13 +23,16 @@ make install-hooks     # REQUIRED: installs pre-commit hooks
 ## What is Goldfish?
 
 An MCP server enabling Claude Code to conduct ML experiments by managing:
-- **Workspaces** = git branches (isolated experiment environments)
-- **Versions** = git tags (immutable snapshots, auto-created on every run)
+- **Workspaces** = isolated experiment environments (copy-based, NO git in user workspace)
+- **Versions** = immutable snapshots (auto-created on every run, 100% provenance)
 - **Pipelines** = YAML workflows (stage definitions + signal wiring)
 - **Stages** = Python modules (run in Docker containers)
 - **Signals** = typed data flow (dataset, npy, csv, directory, file)
 
-**Core invariant**: All infrastructure (Docker, GCS, GCE) is hidden from the MCP client. Claude sees only ML concepts.
+**Core invariants**:
+- All infrastructure (Docker, GCS, GCE) is hidden from the MCP client
+- User workspace is plain files (no `.git`) - all versioning in dev repo
+- Every `run()` syncs and commits BEFORE execution (100% provenance)
 
 ---
 
@@ -41,7 +44,7 @@ MCP Client (Claude) ─── JSON-RPC ───▶ server.py
                     ┌─────────────────────┼─────────────────────┐
                     ▼                     ▼                     ▼
              server_tools/*         context.py            db/database.py
-             (52 MCP tools)      (ServerContext DI)         (SQLite)
+             (39 MCP tools)      (ServerContext DI)         (SQLite)
                     │                     │
         ┌───────────┼───────────┐         │
         ▼           ▼           ▼         ▼
@@ -55,9 +58,10 @@ MCP Client (Claude) ─── JSON-RPC ───▶ server.py
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `jobs/stage_executor.py` | 900 | **Core**: Stage execution engine |
+| `jobs/stage_executor.py` | 900 | **Core**: Stage execution + sync + provenance |
 | `db/database.py` | 1200 | All database operations |
-| `workspace/manager.py` | 400 | Workspace CRUD + git worktrees |
+| `workspace/manager.py` | 400 | Workspace CRUD + copy-based mounting |
+| `workspace/git_layer.py` | 500 | Git ops + sync_slot_to_branch |
 | `infra/gce_launcher.py` | 600 | GCE instance lifecycle |
 | `server.py` | 350 | MCP server initialization |
 
@@ -65,20 +69,21 @@ MCP Client (Claude) ─── JSON-RPC ───▶ server.py
 
 ## The Six Abstractions
 
-### 1. Workspaces = Git Branches
+### 1. Workspaces = Copy-Based Isolation
 
 ```
-workspace "baseline_lstm" ─▶ branch "experiment/baseline_lstm"
-mounted to slot w1        ─▶ git worktree at "workspaces/w1/"
+MOUNT:  dev-repo/branch ──copy──▶ user/workspaces/w1/ (plain files, NO .git)
+WORK:   Claude edits user/workspaces/w1/
+RUN:    user/w1/ ──sync──▶ dev-repo/branch ──commit──▶ execute
 ```
 
 **Key operations**: `create_workspace()`, `mount()`, `hibernate()`, `checkpoint()`
 
-### 2. Versions = Git Tags
+### 2. Versions = Git Tags (100% Provenance)
 
-Every `run_stage()` auto-creates a version:
+Every `run()` syncs changes back to dev repo, commits, THEN creates version:
 ```
-baseline_lstm-v1  ─▶  git tag pointing to commit SHA
+user edits ──sync──▶ commit in dev-repo ──tag──▶ baseline_lstm-v1
 ```
 
 Stored in `workspace_versions` table with `created_by: run|checkpoint|manual`
@@ -225,19 +230,24 @@ All git errors translated to Goldfish concepts before reaching Claude.
 ## Stage Execution Flow
 
 ```
-run_stage("w1", "train")
+run("w1", stages=["train"])
          │
          ├─▶ 1. Validate workspace mounted
-         ├─▶ 2. Auto-version (create git tag, record in DB)
-         ├─▶ 3. Load pipeline, validate stage exists
-         ├─▶ 4. Resolve inputs (datasets or upstream signals)
-         ├─▶ 5. Build Docker image
-         ├─▶ 6. Launch container (local or GCE)
-         ├─▶ 7. Monitor status, stream logs
-         └─▶ 8. Finalize: register outputs in signal_lineage
+         ├─▶ 2. SYNC: Copy user/w1 → dev-repo/branch (with delete semantics)
+         ├─▶ 3. COMMIT: Auto-commit changes in dev-repo
+         ├─▶ 4. PUSH: Push to remote (for GCE execution)
+         ├─▶ 5. Auto-version (create git tag from committed SHA)
+         ├─▶ 6. Load pipeline, validate stage exists
+         ├─▶ 7. Resolve inputs (datasets or upstream signals)
+         ├─▶ 8. Build Docker image
+         ├─▶ 9. Launch container (local or GCE)
+         ├─▶ 10. Monitor status, stream logs
+         └─▶ 11. Finalize: register outputs in signal_lineage
 ```
 
-Key method: `StageExecutor.run_stage()` in `jobs/stage_executor.py:85-209`
+Key methods:
+- `GitLayer.sync_slot_to_branch()` - sync + commit (provenance guard)
+- `StageExecutor.run_stage()` in `jobs/stage_executor.py`
 
 ---
 
@@ -332,11 +342,14 @@ def test_feature(test_db, temp_git_repo):
 ## Debugging
 
 ```bash
-# Database state
-sqlite3 .goldfish/goldfish.db "SELECT * FROM stage_runs ORDER BY started_at DESC LIMIT 5"
+# Database state (in dev repo)
+sqlite3 ../myproject-dev/.goldfish/goldfish.db "SELECT * FROM stage_runs ORDER BY started_at DESC LIMIT 5"
 
-# Git state
-cd .goldfish/dev && git log --all --oneline --graph
+# Git state (dev repo has all branches/tags)
+cd ../myproject-dev && git log --all --oneline --graph
+
+# Check workspace mount metadata
+cat workspaces/w1/.goldfish-mount
 
 # Docker
 docker ps                           # Running containers
@@ -356,14 +369,14 @@ import logging; logging.basicConfig(level=logging.DEBUG)
 | **Context** | `context.py` (ServerContext DI) |
 | **Models** | `models.py` (Pydantic), `db/types.py` (TypedDict) |
 | **Validation** | `validation.py`, `errors.py` |
-| **Workspace** | `workspace/manager.py`, `workspace/git_layer.py` |
+| **Workspace** | `workspace/manager.py`, `workspace/git_layer.py` (copy-based + sync) |
 | **Execution** | `jobs/stage_executor.py`, `jobs/pipeline_executor.py` |
 | **Pipeline** | `pipeline/parser.py`, `pipeline/manager.py` |
 | **Infra** | `infra/docker_builder.py`, `infra/local_executor.py`, `infra/gce_launcher.py` |
 | **Data** | `datasets/registry.py`, `sources/registry.py` |
-| **State** | `state/state_md.py` (STATE.md generation) |
+| **State** | `state/state_md.py` (per-workspace + global STATE.md) |
 | **IO** | `io/__init__.py` (container load_input/save_output) |
-| **Tools** | `server_tools/*.py` (52 MCP tools) |
+| **Tools** | `server_tools/*.py` (39 MCP tools) |
 
 ---
 

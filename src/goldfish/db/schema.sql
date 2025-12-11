@@ -129,6 +129,27 @@ CREATE INDEX IF NOT EXISTS idx_workspace_versions_workspace ON workspace_version
 CREATE INDEX IF NOT EXISTS idx_workspace_versions_created ON workspace_versions(created_at);
 
 
+-- Stage versions (tracks unique code + config combinations per stage)
+-- Enables "preprocessing-v5", "tokenization-v11" independent of workspace versions
+CREATE TABLE IF NOT EXISTS stage_versions (
+    id INTEGER PRIMARY KEY,
+    workspace_name TEXT NOT NULL,
+    stage_name TEXT NOT NULL,
+    version_num INTEGER NOT NULL,
+    git_sha TEXT NOT NULL,
+    config_hash TEXT NOT NULL,            -- Full SHA256 (64 chars)
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(workspace_name, stage_name, version_num),
+    UNIQUE(workspace_name, stage_name, git_sha, config_hash),
+    FOREIGN KEY (workspace_name) REFERENCES workspace_lineage(workspace_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stage_versions_lookup
+    ON stage_versions(workspace_name, stage_name, git_sha, config_hash);
+CREATE INDEX IF NOT EXISTS idx_stage_versions_workspace_stage
+    ON stage_versions(workspace_name, stage_name);
+
+
 -- Stage runs (individual stage executions within pipelines)
 CREATE TABLE IF NOT EXISTS stage_runs (
     id TEXT PRIMARY KEY,              -- e.g., "stage-abc123"
@@ -138,6 +159,7 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     pipeline_name TEXT,               -- Named pipeline file (e.g., train, inference)
     version TEXT NOT NULL,
     stage_name TEXT NOT NULL,
+    stage_version_id INTEGER,         -- Links to stage_versions for lineage
     status TEXT NOT NULL DEFAULT 'pending',
     started_at TEXT NOT NULL,
     completed_at TEXT,
@@ -152,7 +174,8 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     backend_type TEXT,                -- local | gce
     backend_handle TEXT,              -- container_id or instance_name for cancel/log lookup
     error TEXT,
-    FOREIGN KEY (workspace_name, version) REFERENCES workspace_versions(workspace_name, version)
+    FOREIGN KEY (workspace_name, version) REFERENCES workspace_versions(workspace_name, version),
+    FOREIGN KEY (stage_version_id) REFERENCES stage_versions(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_stage_runs_workspace ON stage_runs(workspace_name);
@@ -201,11 +224,33 @@ CREATE TABLE IF NOT EXISTS signal_lineage (
     size_bytes INTEGER,
     consumed_by TEXT,                 -- Stage run ID that consumed this (NULL if not consumed yet)
     is_artifact BOOLEAN DEFAULT 0,    -- 1 if marked as permanent artifact
+    source_stage_run_id TEXT,         -- Upstream stage run that produced this input
+    source_stage_version_id INTEGER,  -- Upstream stage version for lineage tracking
     PRIMARY KEY (stage_run_id, signal_name),
     FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id),
-    FOREIGN KEY (consumed_by) REFERENCES stage_runs(id)
+    FOREIGN KEY (consumed_by) REFERENCES stage_runs(id),
+    FOREIGN KEY (source_stage_run_id) REFERENCES stage_runs(id),
+    FOREIGN KEY (source_stage_version_id) REFERENCES stage_versions(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_signal_lineage_stage ON signal_lineage(stage_run_id);
 CREATE INDEX IF NOT EXISTS idx_signal_lineage_consumed ON signal_lineage(consumed_by);
 CREATE INDEX IF NOT EXISTS idx_signal_lineage_artifact ON signal_lineage(is_artifact);
+
+
+-- Workspace mounts (tracks active copy-based workspace mounts)
+CREATE TABLE IF NOT EXISTS workspace_mounts (
+    slot TEXT PRIMARY KEY,
+    workspace_name TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    mounted_sha TEXT NOT NULL,
+    mounted_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',  -- 'mounting' | 'active' | 'unmounting' | 'failed'
+    FOREIGN KEY (workspace_name) REFERENCES workspace_lineage(workspace_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mounts_workspace ON workspace_mounts(workspace_name);
+CREATE INDEX IF NOT EXISTS idx_mounts_status ON workspace_mounts(status);
+-- Prevent concurrent mounts of the same workspace (only one active mount per workspace)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mounts_active_workspace ON workspace_mounts(workspace_name)
+    WHERE status = 'active';

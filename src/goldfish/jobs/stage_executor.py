@@ -21,6 +21,7 @@ from goldfish.infra.profiles import ProfileResolver
 from goldfish.models import PipelineDef, StageDef, StageRunInfo
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.utils import parse_optional_datetime
+from goldfish.utils.config_hash import compute_config_hash
 from goldfish.workspace.manager import WorkspaceManager
 
 STAGE_LOG_TAIL_FOR_FINALIZE = int(os.getenv("GOLDFISH_FINALIZE_LOG_TAIL", "1000"))
@@ -44,6 +45,9 @@ class StageExecutor:
         self.pipeline_manager = pipeline_manager
         self.project_root = project_root
         self.dataset_registry = dataset_registry
+
+        # Dev repo contains all Goldfish runtime artifacts (.goldfish/, runs/, etc.)
+        self.dev_repo = config.get_dev_repo_path(project_root)
 
         # Initialize execution infrastructure
         self.docker_builder = DockerBuilder(config)
@@ -111,8 +115,8 @@ class StageExecutor:
             6. Launch container
             7. Monitor and track
         """
-        # 1. Auto-version workspace
-        version = self._auto_version(workspace, stage_name, reason)
+        # 1. Auto-version workspace (returns version and git SHA)
+        version, git_sha = self._auto_version(workspace, stage_name, reason)
 
         # 2. Load pipeline and stage
         pipeline = self.pipeline_manager.get_pipeline(workspace, pipeline_name)
@@ -124,19 +128,30 @@ class StageExecutor:
             # shallow merge override
             stage_config.update(config_override)
 
-        # 3. Resolve inputs
-        inputs = self._resolve_inputs(workspace, stage, inputs_override)
+        # 2c. Compute config hash and get/create stage version
+        config_hash = compute_config_hash(stage_config)
+        stage_version_id, stage_version_num, _ = self.db.get_or_create_stage_version(
+            workspace=workspace,
+            stage=stage_name,
+            git_sha=git_sha,
+            config_hash=config_hash,
+        )
+
+        # 3. Resolve inputs (with source metadata for lineage tracking)
+        inputs, input_sources = self._resolve_inputs(workspace, stage, inputs_override)
 
         # 4. Generate stage run ID
         stage_run_id = f"stage-{uuid4().hex[:8]}"
 
-        # 5. Create stage run record
+        # 5. Create stage run record (with stage version ID and input lineage)
         self._create_stage_run_record(
             stage_run_id=stage_run_id,
             workspace=workspace,
             version=version,
             stage_name=stage_name,
+            stage_version_id=stage_version_id,
             inputs=inputs,
+            input_sources=input_sources,
             config_override=config_override,
             reason=reason,
             pipeline_run_id=pipeline_run_id,
@@ -181,9 +196,11 @@ class StageExecutor:
             pipeline=pipeline_name,
             version=version,
             stage=stage_name,
+            stage_version=stage_version_id,
+            stage_version_num=stage_version_num,
             status="running",
             started_at=datetime.now(UTC),
-            log_uri=str(self.project_root / ".goldfish" / "runs" / stage_run_id / "logs" / "output.log"),
+            log_uri=str(self.dev_repo / ".goldfish" / "runs" / stage_run_id / "logs" / "output.log"),
             progress="launch",
             profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
             hints=stage_config.get("hints"),
@@ -213,17 +230,22 @@ class StageExecutor:
         workspace: str,
         stage: StageDef,
         inputs_override: dict | None = None,
-    ) -> dict[str, str]:
+    ) -> tuple[dict[str, str], dict[str, dict]]:
         """Resolve input sources (dataset, signal, or override).
 
-        Returns dict: {input_name: source_location}
+        Returns:
+            (inputs, sources) tuple where:
+            - inputs: {input_name: source_location}
+            - sources: {input_name: {source_stage_run_id, source_stage_version_id, source_type}}
         """
-        inputs = {}
+        inputs: dict[str, str] = {}
+        sources: dict[str, dict] = {}
 
         for input_name, input_def in stage.inputs.items():
             # Check for override
             if inputs_override and input_name in inputs_override:
                 inputs[input_name] = inputs_override[input_name]
+                sources[input_name] = {"source_type": "override"}
                 continue
 
             # Resolve precedence: from_stage first, then dataset
@@ -233,14 +255,16 @@ class StageExecutor:
                 stage_runs = self.db.list_stage_runs(workspace_name=workspace, stage_name=input_def.from_stage)
 
                 # Find completed run with the signal
-                source_run_id = None
+                source_run = None
                 for run in stage_runs:
                     if run["status"] == "completed":
-                        source_run_id = run["id"]
+                        source_run = run
                         break
 
-                if not source_run_id:
+                if not source_run:
                     raise GoldfishError(f"No successful run found for stage '{input_def.from_stage}'")
+
+                source_run_id = source_run["id"]
 
                 # Get signal from that run
                 signals = self.db.list_signals(stage_run_id=source_run_id)
@@ -256,6 +280,11 @@ class StageExecutor:
                     raise GoldfishError(f"Signal '{signal_name}' not found in stage run {source_run_id}")
 
                 inputs[input_name] = signal["storage_location"]
+                sources[input_name] = {
+                    "source_type": "stage",
+                    "source_stage_run_id": source_run_id,
+                    "source_stage_version_id": source_run.get("stage_version_id"),
+                }
 
             elif input_def.type == "dataset":
                 # External dataset
@@ -265,46 +294,42 @@ class StageExecutor:
                     raise GoldfishError(f"Input '{input_name}' is type 'dataset' but no dataset specified")
                 dataset = self.dataset_registry.get_dataset(input_def.dataset)
                 inputs[input_name] = dataset.gcs_location
+                sources[input_name] = {
+                    "source_type": "dataset",
+                    "dataset_name": input_def.dataset,
+                }
 
             else:
                 raise GoldfishError(f"Cannot resolve input: {input_name}")
 
-        return inputs
+        return inputs, sources
 
-    def _auto_version(self, workspace: str, stage_name: str, reason: str | None) -> str:
+    def _auto_version(self, workspace: str, stage_name: str, reason: str | None) -> tuple[str, str]:
         """Create automatic version for workspace.
 
-        Returns version string (e.g., "v1", "v2")
+        With copy-based mounting, this syncs slot changes to branch before versioning,
+        ensuring 100% provenance - every run executes against committed code.
+
+        Returns:
+            (version, git_sha) tuple - e.g., ("v1", "abc123def456")
         """
-        # Ensure workspace lineage exists
-        if not self.db.workspace_exists(workspace):
-            self.db.create_workspace_lineage(workspace_name=workspace, description=f"Auto-created for {stage_name}")
+        # Find which slot has this workspace mounted
+        slot = None
+        for slot_info in self.workspace_manager.get_all_slots():
+            if slot_info.workspace == workspace:
+                slot = slot_info.slot
+                break
 
-        # Get workspace path (must be mounted)
-        workspace_path = self.workspace_manager.get_workspace_path(workspace)
+        if slot is None:
+            raise GoldfishError(
+                f"Workspace '{workspace}' is not mounted to any slot. " f"Mount it to a slot first using mount()."
+            )
 
-        # Get current git SHA from the workspace
-        git_sha = self.workspace_manager.git.get_head_sha(workspace_path, short=False)
+        # Use sync_and_version to sync changes and create version tag
+        # This is the provenance guard: all edits are committed before execution
+        version, git_sha = self.workspace_manager.sync_and_version(slot, stage_name, reason)
 
-        # Get next version number
-        next_version = self.db.get_next_version_number(workspace)
-
-        # Create git tag
-        git_tag = f"{workspace}-{next_version}"
-        self.workspace_manager.git.create_tag(workspace, git_tag, git_sha)
-
-        # Create version record
-        description = reason or f"Auto-version for {stage_name} run"
-        self.db.create_version(
-            workspace_name=workspace,
-            version=next_version,
-            git_tag=git_tag,
-            git_sha=git_sha,
-            created_by="run",
-            description=description,
-        )
-
-        return next_version
+        return version, git_sha
 
     def _find_stage(self, pipeline: PipelineDef, stage_name: str) -> StageDef:
         """Find stage definition in pipeline."""
@@ -319,7 +344,9 @@ class StageExecutor:
         workspace: str,
         version: str,
         stage_name: str,
+        stage_version_id: int,
         inputs: dict,
+        input_sources: dict[str, dict],
         config_override: dict | None,
         reason: str | None,
         pipeline_run_id: str | None,
@@ -328,7 +355,7 @@ class StageExecutor:
         hints: dict | None,
         config: dict | None,
     ):
-        """Create stage run record in database."""
+        """Create stage run record in database with input lineage tracking."""
         self.db.create_stage_run(
             stage_run_id=stage_run_id,
             workspace_name=workspace,
@@ -344,14 +371,23 @@ class StageExecutor:
             backend_handle=stage_run_id,  # provisional handle for cancel/logs
         )
 
-        # Record input signals in lineage
+        # Link stage run to its stage version
+        self.db.update_stage_run_version(stage_run_id, stage_version_id)
+
+        # Record input signals in lineage with source tracking
         for input_name, storage_location in inputs.items():
-            # Add signal to lineage table
-            self.db.add_signal(
+            source_meta = input_sources.get(input_name, {})
+            source_stage_run_id = source_meta.get("source_stage_run_id")
+            source_stage_version_id = source_meta.get("source_stage_version_id")
+
+            # Use add_signal_with_source to properly track upstream lineage
+            self.db.add_signal_with_source(
                 stage_run_id=stage_run_id,
                 signal_name=input_name,
                 signal_type="input",
                 storage_location=storage_location,
+                source_stage_run_id=source_stage_run_id,
+                source_stage_version_id=source_stage_version_id,
             )
 
     def _record_output_signals(
@@ -377,7 +413,7 @@ class StageExecutor:
             return
 
         # Get the outputs directory for this run (local backend)
-        run_dir = self.project_root / ".goldfish" / "runs" / stage_run_id
+        run_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id
         outputs_dir = run_dir / "outputs"
 
         outputs_payload: list[dict[str, Any]] = []
@@ -479,7 +515,7 @@ class StageExecutor:
 
     def _persist_logs(self, stage_run_id: str, logs: str) -> str:
         """Write logs to local run directory and return path."""
-        run_dir = self.project_root / ".goldfish" / "runs" / stage_run_id / "logs"
+        run_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "logs"
         run_dir.mkdir(parents=True, exist_ok=True)
         log_path = run_dir / "output.log"
         log_path.write_text(logs or "")
@@ -591,7 +627,7 @@ class StageExecutor:
 
         if backend == "local":
             # Create work directory for this run
-            run_dir = self.project_root / ".goldfish" / "runs" / stage_run_id
+            run_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id
             run_dir.mkdir(parents=True, exist_ok=True)
 
             # Create inputs and outputs directories
@@ -668,7 +704,7 @@ python -m modules.{stage_name}
 echo "Stage completed successfully"
 """,
                 stage_config={"stage": stage_name, "inputs": inputs, "outputs": {}},
-                work_dir=self.project_root / ".goldfish" / "runs" / stage_run_id,
+                work_dir=self.dev_repo / ".goldfish" / "runs" / stage_run_id,
                 machine_type=machine_type,
                 gpu_type=gpu_type,
                 gpu_count=gpu_count,

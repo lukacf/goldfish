@@ -183,10 +183,15 @@ def _init_server(project_root: Path) -> None:
     _set_project_root(project_root)
 
     config = GoldfishConfig.load(project_root)
-    db = Database(project_root / config.db_path)
 
-    # Initialize state manager
-    state_manager = StateManager(project_root / config.state_md.path, config)
+    # Dev repo contains all Goldfish runtime artifacts (.goldfish/, workspaces/, STATE.md)
+    dev_repo_path = config.get_dev_repo_path(project_root)
+
+    # Database is in dev repo
+    db = Database(dev_repo_path / config.db_path)
+
+    # Initialize state manager (STATE.md is in dev repo)
+    state_manager = StateManager(dev_repo_path / config.state_md.path, config)
 
     # Initialize workspace manager with state manager
     workspace_manager = WorkspaceManager(config, project_root, db, state_manager)
@@ -247,24 +252,20 @@ def _get_state_md() -> str:
 import goldfish.server_tools  # noqa: E402, F401
 from goldfish.server_tools.data_tools import (  # noqa: E402, F401
     delete_source,
-    get_dataset,
     get_source,
     get_source_lineage,
-    list_datasets,
     list_sources,
     promote_artifact,
     register_dataset,
     register_source,
 )
 from goldfish.server_tools.execution_tools import (  # noqa: E402, F401
-    cancel_job,
-    get_job_logs,
-    job_status,
-    list_jobs,
-    run_job,
-    run_partial_pipeline,
-    run_pipeline,
-    run_stage,
+    cancel,
+    get_outputs,
+    get_run,
+    list_runs,
+    logs,
+    run,
 )
 from goldfish.server_tools.lineage_tools import (  # noqa: E402, F401
     get_run_provenance,
