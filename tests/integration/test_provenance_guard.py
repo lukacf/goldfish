@@ -58,6 +58,9 @@ def provenance_setup(temp_dir):
         check=True,
     )
 
+    # Ensure branch is named 'main' (git default may vary by system/version)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=dev_repo, capture_output=True, check=True)
+
     # Create workspaces directory in user project
     workspaces_dir = user_project / "workspaces"
     workspaces_dir.mkdir()
