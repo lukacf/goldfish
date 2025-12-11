@@ -62,8 +62,8 @@ def init_project(
     # Create dev repository
     _create_dev_repo(dev_repo_path, project_name)
 
-    # Create workspaces directory IN DEV REPO (not user project)
-    workspaces_dir = dev_repo_path / "workspaces"
+    # Create workspaces directory IN PROJECT ROOT (where user edits files)
+    workspaces_dir = project_path / "workspaces"
     workspaces_dir.mkdir(exist_ok=True)
 
     # Create .goldfish directory for database IN DEV REPO
