@@ -209,6 +209,12 @@ def ml_project_template():
     return Path(__file__).parent / "fixtures" / "ml_project_template"
 
 
+@pytest.fixture
+def io_test_template():
+    """Return path to I/O validation test template."""
+    return Path(__file__).parent / "fixtures" / "io_test_template"
+
+
 def is_dry_run():
     """Check if running in dry-run mode."""
     return os.getenv("GOLDFISH_DELUXE_DRY_RUN") == "1"
