@@ -126,7 +126,7 @@ class TestRunProvenance:
             workspace_name="test_ws",
             version="v1",
             stage_name="preprocess",
-            config_override={},
+            config={},
         )
 
         # Add input signal (from previous stage)
@@ -144,7 +144,7 @@ class TestRunProvenance:
             workspace_name="test_ws",
             version="v1",
             stage_name="tokenize",
-            config_override={"VOCAB_SIZE": "20000"},
+            config={"VOCAB_SIZE": "20000"},
         )
 
         # Mark signal as consumed by our stage
