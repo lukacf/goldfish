@@ -40,16 +40,19 @@ class GCSConfig(BaseModel):
 class GCEConfig(BaseModel):
     """GCE (Google Compute Engine) configuration."""
 
-    project_id: str
+    # Project ID - accepts both "project_id" and "project" for convenience
+    project_id: str | None = Field(default=None)
+    project: str | None = Field(default=None)  # Alias for project_id
 
     # Optional: Artifact Registry URL for Docker images
     # Example: "us-docker.pkg.dev/{project_id}/goldfish"
-    artifact_registry: str | None = None
+    artifact_registry: str | None = Field(default=None, alias="image_uri")
 
     # Optional: global zone preferences (applies to all profiles)
     zones: list[str] | None = None
+    region: str | None = None  # Alternative to zones
 
-    # Optional: profile overrides and custom profiles
+    # Optional: profile overrides and custom profiles - accepts both names
     # Example:
     # profile_overrides:
     #   h100-spot:
@@ -59,6 +62,10 @@ class GCEConfig(BaseModel):
     #     zones: ["us-east1-b"]
     #     ...
     profile_overrides: dict[str, dict] | None = None
+    profiles: dict[str, dict] | None = None  # Alias for profile_overrides
+
+    # Service account (optional)
+    service_account: str | None = None
 
     # Runtime preferences
     gpu_preference: list[str] = Field(default_factory=lambda: ["h100", "a100", "none"])
@@ -67,6 +74,20 @@ class GCEConfig(BaseModel):
     initial_backoff_sec: int = 10
     backoff_multiplier: float = 1.5
     max_attempts: int = 150
+
+    @property
+    def effective_project_id(self) -> str:
+        """Get the project ID from either field."""
+        if self.project_id:
+            return self.project_id
+        if self.project:
+            return self.project
+        raise ValueError("GCE config requires project_id or project")
+
+    @property
+    def effective_profile_overrides(self) -> dict[str, dict] | None:
+        """Get profile overrides from either field."""
+        return self.profile_overrides or self.profiles
 
 
 class GoldfishConfig(BaseModel):
@@ -104,6 +125,17 @@ class GoldfishConfig(BaseModel):
 
         if data is None:
             raise GoldfishError("Configuration file is empty")
+
+        # Handle common misconfigurations: gce nested inside jobs
+        if "gce" not in data and "jobs" in data and isinstance(data["jobs"], dict):
+            if "gce" in data["jobs"]:
+                data["gce"] = data["jobs"].pop("gce")
+
+        # Handle convenience: gcs_bucket inside gce section -> create gcs config
+        if "gcs" not in data and "gce" in data and isinstance(data["gce"], dict):
+            gcs_bucket = data["gce"].pop("gcs_bucket", None)
+            if gcs_bucket:
+                data["gcs"] = {"bucket": gcs_bucket}
 
         try:
             return cls(**data)
