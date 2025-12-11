@@ -1024,7 +1024,6 @@ class Database:
         profile: str | None = None,
         hints: dict | None = None,
         config: dict | None = None,
-        config_override: dict | None = None,
         inputs: dict | None = None,
         backend_type: str | None = None,
         backend_handle: str | None = None,
@@ -1041,17 +1040,13 @@ class Database:
             job_id: Parent job ID (legacy run_job)
             profile: Resolved profile name
             hints: Hint dict
-            config: Effective config used
+            config: Full merged config (base + overrides, computed by caller)
             inputs: Resolved input URIs/refs
             backend_type: local|gce
             backend_handle: container_id or instance_name for cancel/logs
         """
         timestamp = datetime.now(UTC).isoformat()
-        effective_config = config_override if config_override is not None else config
-        if effective_config is not None:
-            config_json = json.dumps(effective_config)
-        else:
-            config_json = None
+        config_json = json.dumps(config) if config is not None else None
         hints_json = json.dumps(hints) if hints else None
         inputs_json = json.dumps(inputs) if inputs else None
 
