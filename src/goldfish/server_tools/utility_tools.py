@@ -66,13 +66,16 @@ def initialize_project(project_name: str, project_root: str, from_existing: str 
         # Initialize the server context now that project is set up
         _init_server(project_path)
 
+        # Dev repo path (relative to project parent)
+        dev_repo_path = config.get_dev_repo_path(project_path)
+
         return {
             "success": True,
             "message": message,
             "project_path": str(project_path),
-            "dev_repo": str(project_path / config.dev_repo_path),
+            "dev_repo": str(dev_repo_path),
             "config_file": str(project_path / "goldfish.yaml"),
-            "state_file": str(project_path / config.state_md.path),
+            "state_file": str(dev_repo_path / config.state_md.path),
         }
 
     except Exception as e:

@@ -14,6 +14,7 @@ from goldfish.db.types import (
     JobRow,
     LineageRow,
     SourceRow,
+    StageVersionRow,
 )
 from goldfish.models import JobStatus
 
@@ -79,6 +80,11 @@ class Database:
                 ("backend_type", "TEXT"),
                 ("backend_handle", "TEXT"),
                 ("artifact_uri", "TEXT"),
+                ("stage_version_id", "INTEGER"),  # Links to stage_versions
+            ],
+            "signal_lineage": [
+                ("source_stage_run_id", "TEXT"),  # Upstream stage run
+                ("source_stage_version_id", "INTEGER"),  # Upstream stage version
             ],
         }
 
@@ -130,6 +136,24 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_pipeline_stage_queue_status ON pipeline_stage_queue(status);
 
                 CREATE INDEX IF NOT EXISTS idx_stage_runs_ws_stage_status ON stage_runs(workspace_name, stage_name, status);
+
+                -- Stage versions table (tracks unique code + config per stage)
+                CREATE TABLE IF NOT EXISTS stage_versions (
+                    id INTEGER PRIMARY KEY,
+                    workspace_name TEXT NOT NULL,
+                    stage_name TEXT NOT NULL,
+                    version_num INTEGER NOT NULL,
+                    git_sha TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE(workspace_name, stage_name, version_num),
+                    UNIQUE(workspace_name, stage_name, git_sha, config_hash),
+                    FOREIGN KEY (workspace_name) REFERENCES workspace_lineage(workspace_name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_stage_versions_lookup
+                    ON stage_versions(workspace_name, stage_name, git_sha, config_hash);
+                CREATE INDEX IF NOT EXISTS idx_stage_versions_workspace_stage
+                    ON stage_versions(workspace_name, stage_name);
                 """
             )
             # Bump schema version
@@ -637,6 +661,138 @@ class Database:
             )
             return cursor.rowcount > 0
 
+    # --- Workspace mount operations (copy-based mounting) ---
+
+    def record_mount(
+        self,
+        slot: str,
+        workspace_name: str,
+        branch: str,
+        mounted_sha: str,
+        status: str = "active",
+    ) -> None:
+        """Record a workspace mount operation.
+
+        Args:
+            slot: Slot name (e.g., "w1")
+            workspace_name: Workspace name
+            branch: Git branch name
+            mounted_sha: SHA at time of mount
+            status: Mount status (default "active")
+        """
+        timestamp = datetime.now(UTC).isoformat()
+
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO workspace_mounts
+                (slot, workspace_name, branch, mounted_sha, mounted_at, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (slot, workspace_name, branch, mounted_sha, timestamp, status),
+            )
+
+    def get_mount(self, slot: str) -> dict | None:
+        """Get mount information for a slot.
+
+        Args:
+            slot: Slot name
+
+        Returns:
+            Mount dict or None if not found
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM workspace_mounts WHERE slot = ?",
+                (slot,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_mount_by_workspace(self, workspace_name: str) -> dict | None:
+        """Get mount information for a workspace.
+
+        Args:
+            workspace_name: Workspace name
+
+        Returns:
+            Mount dict or None if not mounted
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM workspace_mounts WHERE workspace_name = ? AND status = 'active'",
+                (workspace_name,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_mount_status(self, slot: str, status: str) -> bool:
+        """Update mount status.
+
+        Args:
+            slot: Slot name
+            status: New status
+
+        Returns:
+            True if updated, False if not found
+        """
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE workspace_mounts SET status = ? WHERE slot = ?",
+                (status, slot),
+            )
+            return cursor.rowcount > 0
+
+    def update_mount_sha(self, slot: str, mounted_sha: str) -> bool:
+        """Update mounted SHA after sync.
+
+        Args:
+            slot: Slot name
+            mounted_sha: New SHA
+
+        Returns:
+            True if updated, False if not found
+        """
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE workspace_mounts SET mounted_sha = ? WHERE slot = ?",
+                (mounted_sha, slot),
+            )
+            return cursor.rowcount > 0
+
+    def delete_mount(self, slot: str) -> bool:
+        """Delete a mount record.
+
+        Args:
+            slot: Slot name
+
+        Returns:
+            True if deleted, False if not found
+        """
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM workspace_mounts WHERE slot = ?",
+                (slot,),
+            )
+            return cursor.rowcount > 0
+
+    def get_mounts(self, status: str | None = None) -> list[dict]:
+        """Get all mount records.
+
+        Args:
+            status: Optional status filter
+
+        Returns:
+            List of mount dicts
+        """
+        with self._conn() as conn:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM workspace_mounts WHERE status = ?",
+                    (status,),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM workspace_mounts").fetchall()
+            return [dict(row) for row in rows]
+
     def delete_source(self, source_id: str) -> bool:
         """Delete a source and its lineage records.
 
@@ -868,7 +1024,6 @@ class Database:
         profile: str | None = None,
         hints: dict | None = None,
         config: dict | None = None,
-        config_override: dict | None = None,
         inputs: dict | None = None,
         backend_type: str | None = None,
         backend_handle: str | None = None,
@@ -885,17 +1040,13 @@ class Database:
             job_id: Parent job ID (legacy run_job)
             profile: Resolved profile name
             hints: Hint dict
-            config: Effective config used
+            config: Full merged config (base + overrides, computed by caller)
             inputs: Resolved input URIs/refs
             backend_type: local|gce
             backend_handle: container_id or instance_name for cancel/logs
         """
         timestamp = datetime.now(UTC).isoformat()
-        effective_config = config_override if config_override is not None else config
-        if effective_config is not None:
-            config_json = json.dumps(effective_config)
-        else:
-            config_json = None
+        config_json = json.dumps(config) if config is not None else None
         hints_json = json.dumps(hints) if hints else None
         inputs_json = json.dumps(inputs) if inputs else None
 
@@ -1160,6 +1311,49 @@ class Database:
                 (stage_run_id, signal_name, signal_type, storage_location, size_bytes, is_artifact),
             )
 
+    def add_signal_with_source(
+        self,
+        stage_run_id: str,
+        signal_name: str,
+        signal_type: str,
+        storage_location: str,
+        source_stage_run_id: str | None = None,
+        source_stage_version_id: int | None = None,
+        size_bytes: int | None = None,
+        is_artifact: bool = False,
+    ) -> None:
+        """Add a signal with upstream source tracking.
+
+        Args:
+            stage_run_id: Stage run ID that has this signal as input
+            signal_name: Signal name (e.g., "features", "tokens")
+            signal_type: Signal type (input, npy, csv, etc.)
+            storage_location: Where the signal is stored
+            source_stage_run_id: Upstream stage run that produced this input
+            source_stage_version_id: Upstream stage version for lineage tracking
+            size_bytes: Size in bytes
+            is_artifact: Whether this is a permanent artifact
+        """
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO signal_lineage
+                (stage_run_id, signal_name, signal_type, storage_location,
+                 source_stage_run_id, source_stage_version_id, size_bytes, is_artifact)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stage_run_id,
+                    signal_name,
+                    signal_type,
+                    storage_location,
+                    source_stage_run_id,
+                    source_stage_version_id,
+                    size_bytes,
+                    is_artifact,
+                ),
+            )
+
     def set_stage_run_backend(
         self,
         stage_run_id: str,
@@ -1252,3 +1446,344 @@ class Database:
                 """,
                 (consumed_by, stage_run_id, signal_name),
             )
+
+    # ==================== Stage Version Methods ====================
+
+    def get_or_create_stage_version(
+        self,
+        workspace: str,
+        stage: str,
+        git_sha: str,
+        config_hash: str,
+    ) -> tuple[int, int, bool]:
+        """Get existing or create new stage version.
+
+        A stage version is a unique combination of (workspace, stage, git_sha, config_hash).
+        Version numbers auto-increment per stage within a workspace.
+
+        Uses transaction with retry to handle concurrent creation.
+
+        Args:
+            workspace: Workspace name
+            stage: Stage name
+            git_sha: Git commit SHA
+            config_hash: SHA256 hash of stage config
+
+        Returns:
+            Tuple of (stage_version_id, version_num, is_new)
+        """
+        with self._conn() as conn:
+            # Try to find existing
+            row = conn.execute(
+                """
+                SELECT id, version_num FROM stage_versions
+                WHERE workspace_name = ? AND stage_name = ?
+                AND git_sha = ? AND config_hash = ?
+                """,
+                (workspace, stage, git_sha, config_hash),
+            ).fetchone()
+
+            if row:
+                return (row["id"], row["version_num"], False)
+
+            # Create new - get next version number
+            max_row = conn.execute(
+                """
+                SELECT COALESCE(MAX(version_num), 0) as max_v FROM stage_versions
+                WHERE workspace_name = ? AND stage_name = ?
+                """,
+                (workspace, stage),
+            ).fetchone()
+            next_version = max_row["max_v"] + 1
+
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO stage_versions
+                    (workspace_name, stage_name, version_num, git_sha, config_hash)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (workspace, stage, next_version, git_sha, config_hash),
+                )
+                row_id = cursor.lastrowid
+                assert row_id is not None  # Always set after INSERT
+                return (row_id, next_version, True)
+            except sqlite3.IntegrityError:
+                # Race condition - another process created it, fetch again
+                row = conn.execute(
+                    """
+                    SELECT id, version_num FROM stage_versions
+                    WHERE workspace_name = ? AND stage_name = ?
+                    AND git_sha = ? AND config_hash = ?
+                    """,
+                    (workspace, stage, git_sha, config_hash),
+                ).fetchone()
+                return (row["id"], row["version_num"], False)
+
+    def get_stage_version(
+        self,
+        workspace: str,
+        stage: str,
+        version_num: int,
+    ) -> StageVersionRow | None:
+        """Get a specific stage version by number.
+
+        Args:
+            workspace: Workspace name
+            stage: Stage name
+            version_num: Version number (1, 2, 3, ...)
+
+        Returns:
+            StageVersionRow or None if not found
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM stage_versions
+                WHERE workspace_name = ? AND stage_name = ? AND version_num = ?
+                """,
+                (workspace, stage, version_num),
+            ).fetchone()
+            return cast(StageVersionRow, dict(row)) if row else None
+
+    def list_stage_versions(
+        self,
+        workspace: str,
+        stage: str | None = None,
+    ) -> list[StageVersionRow]:
+        """List all stage versions for a workspace.
+
+        Args:
+            workspace: Workspace name
+            stage: Optional stage name filter
+
+        Returns:
+            List of StageVersionRow
+        """
+        with self._conn() as conn:
+            if stage:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM stage_versions
+                    WHERE workspace_name = ? AND stage_name = ?
+                    ORDER BY stage_name, version_num
+                    """,
+                    (workspace, stage),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM stage_versions
+                    WHERE workspace_name = ?
+                    ORDER BY stage_name, version_num
+                    """,
+                    (workspace,),
+                ).fetchall()
+            return [cast(StageVersionRow, dict(row)) for row in rows]
+
+    def get_stage_version_for_run(self, stage_run_id: str) -> StageVersionRow | None:
+        """Get the stage version associated with a stage run.
+
+        Args:
+            stage_run_id: Stage run ID
+
+        Returns:
+            StageVersionRow or None if not linked
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT sv.* FROM stage_versions sv
+                JOIN stage_runs sr ON sr.stage_version_id = sv.id
+                WHERE sr.id = ?
+                """,
+                (stage_run_id,),
+            ).fetchone()
+            return cast(StageVersionRow, dict(row)) if row else None
+
+    def update_stage_run_version(
+        self,
+        stage_run_id: str,
+        stage_version_id: int,
+    ) -> None:
+        """Link a stage run to its stage version.
+
+        Args:
+            stage_run_id: Stage run ID
+            stage_version_id: Stage version ID
+        """
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE stage_runs
+                SET stage_version_id = ?
+                WHERE id = ?
+                """,
+                (stage_version_id, stage_run_id),
+            )
+
+    # --- Lineage Query Methods ---
+
+    def get_latest_completed_stage_run(
+        self,
+        workspace: str,
+        stage_name: str,
+    ) -> dict | None:
+        """Get the most recent completed run of a stage in a workspace.
+
+        Args:
+            workspace: Workspace name
+            stage_name: Stage name
+
+        Returns:
+            Stage run dict or None if no completed runs exist
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM stage_runs
+                WHERE workspace_name = ? AND stage_name = ? AND status = 'completed'
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (workspace, stage_name),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_downstream_runs(self, stage_version_id: int) -> list[dict]:
+        """Find all stage runs that used this stage version as input.
+
+        Args:
+            stage_version_id: Stage version ID
+
+        Returns:
+            List of stage run dicts that consumed this version
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT sr.* FROM stage_runs sr
+                JOIN signal_lineage sl ON sl.stage_run_id = sr.id
+                WHERE sl.source_stage_version_id = ?
+                ORDER BY sr.started_at DESC
+                """,
+                (stage_version_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_lineage_tree(
+        self,
+        stage_run_id: str,
+        max_depth: int = 10,
+    ) -> dict | None:
+        """Build upstream lineage tree recursively.
+
+        Shows what version of each stage produced the inputs,
+        recursively back to source datasets.
+
+        Args:
+            stage_run_id: Stage run ID to trace lineage for
+            max_depth: Maximum recursion depth (default 10)
+
+        Returns:
+            Nested lineage tree dict, or None if run not found
+        """
+        return self._build_lineage_node(stage_run_id, max_depth, current_depth=0)
+
+    def _build_lineage_node(
+        self,
+        stage_run_id: str,
+        max_depth: int,
+        current_depth: int,
+    ) -> dict | None:
+        """Recursively build a lineage tree node."""
+        with self._conn() as conn:
+            # Get the stage run
+            run_row = conn.execute(
+                "SELECT * FROM stage_runs WHERE id = ?",
+                (stage_run_id,),
+            ).fetchone()
+
+            if not run_row:
+                return None
+
+            run = dict(run_row)
+
+            # Get stage version info if available
+            stage_version_num = None
+            git_sha = None
+            config_hash = None
+
+            if run.get("stage_version_id"):
+                sv_row = conn.execute(
+                    "SELECT * FROM stage_versions WHERE id = ?",
+                    (run["stage_version_id"],),
+                ).fetchone()
+                if sv_row:
+                    sv = dict(sv_row)
+                    stage_version_num = sv["version_num"]
+                    git_sha = sv["git_sha"]
+                    config_hash = sv["config_hash"]
+
+            # Build node
+            node: dict = {
+                "run_id": stage_run_id,
+                "stage": run["stage_name"],
+                "stage_version_num": stage_version_num,
+                "git_sha": git_sha,
+                "config_hash": config_hash,
+                "inputs": {},
+            }
+
+            # Get input signals with source tracking
+            signal_rows = conn.execute(
+                """
+                SELECT * FROM signal_lineage
+                WHERE stage_run_id = ? AND source_stage_run_id IS NOT NULL
+                """,
+                (stage_run_id,),
+            ).fetchall()
+
+            for signal_row in signal_rows:
+                signal = dict(signal_row)
+                signal_name = signal["signal_name"]
+                source_run_id = signal["source_stage_run_id"]
+                source_version_id = signal["source_stage_version_id"]
+
+                # Get source stage info
+                source_stage = None
+                source_version_num = None
+
+                if source_run_id:
+                    source_run_row = conn.execute(
+                        "SELECT stage_name FROM stage_runs WHERE id = ?",
+                        (source_run_id,),
+                    ).fetchone()
+                    if source_run_row:
+                        source_stage = source_run_row["stage_name"]
+
+                if source_version_id:
+                    source_sv_row = conn.execute(
+                        "SELECT version_num FROM stage_versions WHERE id = ?",
+                        (source_version_id,),
+                    ).fetchone()
+                    if source_sv_row:
+                        source_version_num = source_sv_row["version_num"]
+
+                input_info: dict = {
+                    "source_type": "stage",
+                    "source_stage": source_stage,
+                    "source_stage_run_id": source_run_id,
+                    "source_stage_version_num": source_version_num,
+                    "storage_location": signal["storage_location"],
+                }
+
+                # Recursively build upstream if within depth limit
+                if current_depth < max_depth - 1 and source_run_id:
+                    upstream = self._build_lineage_node(source_run_id, max_depth, current_depth + 1)
+                    if upstream:
+                        input_info["upstream"] = upstream
+
+                node["inputs"][signal_name] = input_info
+
+            return node

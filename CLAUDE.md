@@ -1,532 +1,406 @@
-# CLAUDE.md
+# Goldfish Development Guide
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+> **For AI assistants working on this codebase.** Everything you need to develop Goldfish effectively—compact, scannable, and action-oriented.
 
-## Overview
-
-Goldfish is an MCP server for pipeline-based ML experimentation. It enables Claude Code to conduct ML research by managing workspaces (git branches), executing pipeline stages (Docker containers), and tracking full experiment provenance.
-
-**Core Value**: Maintains state and provenance across long conversations through auto-generated STATE.md and comprehensive audit logging.
-
-## Development Commands
-
-### Testing
+## Quick Reference
 
 ```bash
-# Run all tests (559 tests)
-pytest
+# Development cycle
+make lint              # Ruff + mypy via pre-commit - run before commits
+make test              # Fast unit tests (<1s) - run frequently
+make test-integration  # Integration tests (~2min) - before pushing
+make ci                # Full CI suite (lint + all tests)
 
-# Run specific test file
-pytest tests/test_workspace_manager.py
-
-# Run single test
-pytest tests/test_workspace_manager.py::TestWorkspaceCreation::test_create_workspace
-
-# Run with coverage
-pytest --cov=goldfish --cov-report=html
-
-# Run security tests only
-pytest tests/test_security*.py tests/test_tracker_security.py tests/test_exporter_security.py
-
-# Run E2E tests
-pytest tests/test_e2e_pipeline_execution.py tests/test_e2e_workflows.py
+# First-time setup
+uv pip install -e ".[dev]"
+make install-hooks     # REQUIRED: installs pre-commit hooks
 ```
 
-### Running the MCP Server
+**Golden rule**: Never suppress lint errors—always fix the source.
 
-```bash
-# Development mode (with specific project)
-python -m goldfish serve --project /path/to/project
+---
 
-# Initialize new project
-python -m goldfish init myproject
-cd myproject
+## What is Goldfish?
+
+An MCP server enabling Claude Code to conduct ML experiments by managing:
+- **Workspaces** = isolated experiment environments (copy-based, NO git in user workspace)
+- **Versions** = immutable snapshots (auto-created on every run, 100% provenance)
+- **Pipelines** = YAML workflows (stage definitions + signal wiring)
+- **Stages** = Python modules (run in Docker containers)
+- **Signals** = typed data flow (dataset, npy, csv, directory, file)
+
+**Core invariants**:
+- All infrastructure (Docker, GCS, GCE) is hidden from the MCP client
+- User workspace is plain files (no `.git`) - all versioning in dev repo
+- Every `run()` syncs and commits BEFORE execution (100% provenance)
+
+---
+
+## Architecture at a Glance
+
+```
+MCP Client (Claude) ─── JSON-RPC ───▶ server.py
+                                          │
+                    ┌─────────────────────┼─────────────────────┐
+                    ▼                     ▼                     ▼
+             server_tools/*         context.py            db/database.py
+             (39 MCP tools)      (ServerContext DI)         (SQLite)
+                    │                     │
+        ┌───────────┼───────────┐         │
+        ▼           ▼           ▼         ▼
+   workspace/    jobs/      pipeline/   infra/
+   manager.py   stage_      parser.py   docker_builder.py
+   git_layer.py executor.py             local_executor.py
+                                        gce_launcher.py
 ```
 
-### Code Quality
+### Key Files
 
-```bash
-# Format code (if configured)
-black src/ tests/
+| File | Lines | Purpose |
+|------|-------|---------|
+| `jobs/stage_executor.py` | 900 | **Core**: Stage execution + sync + provenance |
+| `db/database.py` | 1200 | All database operations |
+| `workspace/manager.py` | 400 | Workspace CRUD + copy-based mounting |
+| `workspace/git_layer.py` | 500 | Git ops + sync_slot_to_branch |
+| `infra/gce_launcher.py` | 600 | GCE instance lifecycle |
+| `server.py` | 350 | MCP server initialization |
 
-# Type checking (if configured)
-mypy src/
+---
+
+## The Six Abstractions
+
+### 1. Workspaces = Copy-Based Isolation
+
+```
+MOUNT:  dev-repo/branch ──copy──▶ user/workspaces/w1/ (plain files, NO .git)
+WORK:   Claude edits user/workspaces/w1/
+RUN:    user/w1/ ──sync──▶ dev-repo/branch ──commit──▶ execute
 ```
 
-## Architecture: The Five Core Abstractions
+**Key operations**: `create_workspace()`, `mount()`, `hibernate()`, `checkpoint()`
 
-Understanding these five concepts is critical to working with Goldfish:
+### 2. Versions = Git Tags (100% Provenance)
 
-### 1. Workspaces = Git Branches
-- **What**: Development environments for ML experiments
-- **Git mapping**: Each workspace is a branch `experiment/{name}`
-- **Filesystem**: Mounted to slots (w1, w2, w3) via git worktrees
-- **Key insight**: All workspace operations are git operations in disguise
-- **Files**: `workspace/manager.py` (high-level), `workspace/git_layer.py` (low-level git ops)
+Every `run()` syncs changes back to dev repo, commits, THEN creates version:
+```
+user edits ──sync──▶ commit in dev-repo ──tag──▶ baseline_lstm-v1
+```
 
-### 2. Versions = Git Tags
-- **What**: Immutable snapshots of workspace state
-- **Git mapping**: Git tags like `workspace-v1`, `workspace-v2`
-- **Creation**: Automatic on every `run_stage()` call OR manual via `checkpoint()`
-- **Purpose**: Full reproducibility - can recreate exact workspace state from any version
-- **Database**: `workspace_versions` table tracks version → git tag → git SHA mapping
+Stored in `workspace_versions` table with `created_by: run|checkpoint|manual`
 
-### 3. Pipelines = YAML Workflows
-- **What**: ML workflow definitions (preprocess → tokenize → train)
-- **Location**: `workspaces/w1/pipeline.yaml` (Claude edits directly)
-- **Signal chaining**: Stage outputs wire to next stage inputs (`from_stage: preprocess`)
-- **Validation**: Checks file existence, type compatibility, no cycles
-- **Files**: `pipeline/parser.py` (YAML parsing), `pipeline/manager.py` (validation)
+### 3. Pipelines = YAML
 
-### 4. Stages = Execution Units
-- **What**: Individual steps in a pipeline (e.g., "preprocess", "tokenize")
-- **Execution**: Runs in Docker container with mounted inputs/outputs
-- **Code**: Python modules in `workspaces/w1/modules/{stage}.py`
-- **Config**: YAML files in `workspaces/w1/configs/{stage}.yaml` (compute resources, env vars)
-- **Key insight**: One stage can run independently (partial pipeline execution)
+```yaml
+stages:
+  - name: preprocess
+    inputs: {raw: {type: dataset, dataset: sales_v1}}
+    outputs: {features: {type: npy}}
+  - name: train
+    inputs: {features: {from_stage: preprocess, signal: features}}
+```
+
+**Parser** validates: unique names, type compatibility, no cycles, datasets exist.
+
+### 4. Stages = Docker Containers
+
+```python
+# modules/train.py - runs in container
+from goldfish.io import load_input, save_output
+features = load_input("features")  # from /mnt/inputs/
+save_output("model", model_dir)    # to /mnt/outputs/
+```
 
 ### 5. Signals = Data Flow
-- **What**: Data passed between stages (inputs/outputs)
-- **Types**: dataset (external), npy, csv, directory, file
-- **Lineage**: Tracked in `signal_lineage` table (stage_run → signal → consumed_by)
-- **Storage**: Can be local, GCS, or hyperdisk (abstracted from Claude)
 
-### 6. Resource Profiles = Compute Abstraction
-- **What**: Pre-defined GCE machine configurations (cpu-small, h100-spot, a100-on-demand)
-- **Built-in profiles**: Goldfish ships with optimized profiles for ML workloads
-- **Stage usage**: Claude specifies `profile: "h100-spot"` in stage config, Goldfish handles machine types/zones/disks
-- **Customization**: Users can override profiles in goldfish.yaml if needed
-- **Key insight**: Claude doesn't see GCE internals (machine types, accelerator strings, disk types)
+| Type | Format | Use Case |
+|------|--------|----------|
+| `dataset` | External | Registered project data |
+| `npy` | NumPy | Arrays, embeddings |
+| `csv` | Pandas | Tabular data |
+| `directory` | Dir | Model checkpoints |
+| `file` | Single file | Configs, small outputs |
 
-## Critical Implementation Details
+Tracked in `signal_lineage` table for full provenance.
 
-### Git Layer is Internal
-**CRITICAL**: Git operations must NEVER be exposed to Claude. All git errors are translated to Goldfish-speak in `workspace/git_layer.py`.
-
-```python
-# BAD - exposes git internals
-raise Exception("fatal: not a valid object name: 'main'")
-
-# GOOD - translated to Goldfish concepts
-raise WorkspaceNotFoundError("Workspace 'baseline_lstm' not found")
-```
-
-The `translate_git_error()` function in `errors.py` handles this translation.
-
-### Error Handling Philosophy
-All errors inherit from `GoldfishError` with structured details:
-
-```python
-raise GoldfishError(
-    "Operation failed: workspace not found",
-    details={"workspace": name, "available": available_workspaces}
-)
-```
-
-This allows MCP tools to return structured error information to Claude.
-
-### Database: SQLite with Transactions
-- **Pattern**: Always use `with db._conn() as conn:` for transactions
-- **Atomic operations**: Commit or rollback, never partial state
-- **Schema**: See `db/schema.sql` for full table definitions
-- **Key tables**: `workspaces`, `workspace_versions`, `stage_runs`, `signal_lineage`, `audit_log`
-
-### Security: Four Layers
-
-1. **Path Validation** (`validation.py`):
-   - Reject `../` traversal attempts
-   - Validate against workspace root
-   - Check for symlinks (TOCTOU prevention)
-
-2. **Input Validation**:
-   - Workspace names: `^[a-zA-Z0-9_-]+$` (no shell metacharacters)
-   - Snapshot IDs: `^snap-[a-f0-9]{8}-\d{8}-\d{6}$`
-   - All inputs validated before database/git operations
-
-3. **Resource Limits**:
-   - Docker containers: 4GB memory, 2.0 CPU, 100 PIDs
-   - File size limits in exporter
-   - Job timeouts (configurable)
-
-4. **Concurrency Safety**:
-   - Slot-level locking prevents workspace corruption
-   - Database transactions for atomicity
-   - Git worktree operations are atomic (either succeed or fail completely)
-
-### The Execution Pipeline (run_stage)
-
-When `run_stage("w1", "preprocess")` is called, this happens:
-
-1. **Auto-version** (`stage_executor.py:_auto_version()`):
-   - Get current workspace HEAD SHA
-   - Create git tag `{workspace}-v{n}`
-   - Record in `workspace_versions` table
-
-2. **Input resolution** (`stage_executor.py:_resolve_inputs()`):
-   - Find where inputs come from (datasets or previous stage runs)
-   - Query `signal_lineage` table for upstream outputs
-   - Validate types match
-
-3. **Docker build** (`infra/docker_builder.py`):
-   - Generate Dockerfile from workspace code
-   - Include Goldfish IO library
-   - Build image: `goldfish-{workspace}-{version}`
-
-4. **Container launch** (`infra/local_executor.py` or `infra/gce_launcher.py`):
-   - Mount `/mnt/inputs` and `/mnt/outputs`
-   - Set environment variables from config
-   - Execute `python -m modules.{stage_name}`
-
-5. **Job tracking** (`jobs/tracker.py`):
-   - Poll container status
-   - Update `stage_runs` table
-   - Record output signals in `signal_lineage`
-
-### STATE.md Generation
-
-**Purpose**: Context recovery after conversation summarization
-
-Generated by `state/state_md.py`, includes:
-- Current slot status (what's mounted where)
-- Recent operations (from audit log)
-- Workspace lineage and versions
-- Active jobs and their status
-
-**Critical**: Always keep STATE.md up-to-date so Claude can resume work after context loss.
-
-## MCP Server Architecture
-
-The server is split into tool modules in `server_tools/`:
-
-- `workspace_tools.py` - 15 tools for workspace management
-- `execution_tools.py` - 8 tools for running stages/pipelines
-- `data_tools.py` - 9 tools for datasets and sources
-- `pipeline_tools.py` - 3 tools for pipeline operations
-- `lineage_tools.py` - 3 tools for provenance tracking
-- `utility_tools.py` - 3 tools for status and audit
-
-Each tool:
-1. Validates inputs using `validation.py`
-2. Performs operation via managers (`workspace/`, `jobs/`, etc.)
-3. Records audit log entry
-4. Returns structured result (success + data OR error)
-
-## Resource Profiles (GCE Compute)
-
-### Built-in Profiles
-
-Goldfish ships with optimized GCE profiles for ML workloads:
-
-**CPU Profiles:**
-- `cpu-small` - n2-standard-4 for light compute
-- `cpu-large` - c4-highcpu-192 for heavy CPU workloads
-
-**GPU Profiles:**
-- `h100-spot` - H100 GPU, preemptible (cost-optimized)
-- `h100-on-demand` - H100 GPU, on-demand (reliability)
-- `a100-spot` - A100 GPU, preemptible
-- `a100-on-demand` - A100 GPU, on-demand
-
-### Using Profiles in Stage Configs
-
-Claude specifies profiles by name in stage configs:
+### 6. Resource Profiles
 
 ```yaml
-# workspaces/w1/configs/train.yaml
+# configs/train.yaml
 compute:
-  profile: "h100-spot"  # Simple! No GCE internals
-
-env:
-  EPOCHS: "100"
-  LEARNING_RATE: "0.001"
+  profile: "h100-spot"  # Claude writes this
 ```
 
-Goldfish automatically resolves to:
-- Machine type: `a3-highgpu-1g`
-- GPU: `nvidia-h100-80gb` (1x)
-- Zones: `[us-central1-a, us-central1-b, us-central1-c, us-west4-a]`
-- Disks: `hyperdisk-balanced` 600GB boot + data
-- Preemptibility: spot-first with fallback
+Goldfish resolves to: `a3-highgpu-1g`, H100 GPU, spot pricing, multi-zone.
 
-### Customizing Profiles (Optional)
+Built-in: `cpu-small`, `cpu-large`, `h100-spot`, `h100-on-demand`, `a100-spot`, `a100-on-demand`
 
-Power users can override profiles in goldfish.yaml:
+---
 
-```yaml
-gce:
-  project_id: "my-gcp-project"
+## Critical Patterns
 
-  # Override zones for a built-in profile
-  profile_overrides:
-    h100-spot:
-      zones: ["us-west1-a"]  # Restrict to one zone
-
-    # Or define a completely custom profile
-    my-custom-machine:
-      machine_type: "n2-standard-16"
-      zones: ["us-east1-b"]
-      gpu:
-        type: "none"
-        count: 0
-      boot_disk:
-        type: "pd-ssd"
-        size_gb: 200
-      data_disk:
-        type: "pd-ssd"
-        size_gb: 500
-```
-
-### Implementation Files
-
-- `infra/profiles.py` - Built-in profiles and ProfileResolver
-- `config.py` - GCEConfig with profile_overrides
-- Stage configs reference profiles by name
-
-## Common Patterns
-
-### Creating New Tools
+### Database Access
 
 ```python
-# In server_tools/your_category_tools.py
+# ALWAYS use context manager
+with self.db._conn() as conn:
+    conn.execute("INSERT INTO ...")
+# Transaction auto-commits on success, auto-rollbacks on exception
+```
+
+### Error Handling
+
+```python
+# ALWAYS use specific error types with details
+raise WorkspaceNotFoundError(
+    f"Workspace '{name}' not found",
+    details={"available": available_workspaces}
+)
+
+# NEVER expose git internals
+# BAD:  raise Exception("fatal: not a valid object name")
+# GOOD: raise WorkspaceNotFoundError("Workspace not found")
+```
+
+### TypedDict Returns from Database
+
+```python
+# When returning TypedDict, ALWAYS use cast()
+from typing import cast
+return cast(JobRow, dict(row)) if row else None
+
+# For lists:
+return [cast(SourceRow, dict(r)) for r in rows]
+```
+
+### MCP Tool Pattern
+
+```python
 @mcp.tool()
-def your_tool(param: str) -> dict:
-    """Tool description for Claude.
-
-    Args:
-        param: Parameter description
-
-    Returns:
-        dict with success, result, or error
-    """
+def my_tool(param: str) -> dict:
+    """Docstring for Claude."""
     try:
-        # 1. Validate inputs
-        validate_workspace_name(param)
-
-        # 2. Perform operation
-        result = manager.do_operation(param)
-
-        # 3. Record audit
-        context.db.record_audit(
-            operation="your_tool",
-            details={"param": param}
-        )
-
-        # 4. Return result
-        return {"success": True, "result": result}
-
+        validate_workspace_name(param)           # 1. Validate
+        result = manager.do_thing(param)         # 2. Execute
+        ctx.db.record_audit("my_tool", {...})    # 3. Audit
+        return {"success": True, "result": result}  # 4. Return
     except GoldfishError as e:
         return {"success": False, "error": e.message}
 ```
 
-### Adding Database Tables
+---
 
-1. Add schema to `db/schema.sql`
-2. Add methods to `db/database.py`
-3. Add migration (if needed)
-4. Update tests
+## Security Model (4 Layers)
 
-### Extending Pipeline Stages
+### 1. Input Validation (`validation.py`)
 
-To add a new signal type:
-1. Update `models.py` SignalDef types
-2. Update `pipeline/parser.py` validation
-3. Update Goldfish IO library (`io/__init__.py`)
-4. Add tests
+| Input | Pattern | Example |
+|-------|---------|---------|
+| Workspace name | `^[a-zA-Z0-9_-]+$` | `baseline_lstm` |
+| Snapshot ID | `^snap-[a-f0-9]{8}-\d{8}-\d{6}$` | `snap-abc12345-20251210-143000` |
+| Stage run ID | `^stage-[a-f0-9]+$` | `stage-abc123` |
 
-## Test Architecture
+### 2. Path Traversal Protection
 
-**Philosophy**: Test real components, minimize mocks
+```python
+# ALWAYS validate paths
+def validate_path_within_root(path: Path, root: Path) -> None:
+    if not path.resolve().is_relative_to(root.resolve()):
+        raise ValidationError("Path traversal")
 
-### Directory Structure
+# ALWAYS check symlinks (TOCTOU prevention)
+if path.is_symlink():
+    raise InvalidLogPathError("Symlink detected")
+```
+
+### 3. Docker Sandboxing (`local_executor.py`)
+
+```python
+# Containers run with:
+--memory 4g --cpus 2.0 --pids-limit 100
+--user 1000:1000  # non-root
+-v inputs:/mnt/inputs:ro  # read-only inputs
+```
+
+### 4. Git Error Translation (`errors.py`)
+
+All git errors translated to Goldfish concepts before reaching Claude.
+
+---
+
+## Stage Execution Flow
+
+```
+run("w1", stages=["train"])
+         │
+         ├─▶ 1. Validate workspace mounted
+         ├─▶ 2. SYNC: Copy user/w1 → dev-repo/branch (with delete semantics)
+         ├─▶ 3. COMMIT: Auto-commit changes in dev-repo
+         ├─▶ 4. PUSH: Push to remote (for GCE execution)
+         ├─▶ 5. Auto-version (create git tag from committed SHA)
+         ├─▶ 6. Load pipeline, validate stage exists
+         ├─▶ 7. Resolve inputs (datasets or upstream signals)
+         ├─▶ 8. Build Docker image
+         ├─▶ 9. Launch container (local or GCE)
+         ├─▶ 10. Monitor status, stream logs
+         └─▶ 11. Finalize: register outputs in signal_lineage
+```
+
+Key methods:
+- `GitLayer.sync_slot_to_branch()` - sync + commit (provenance guard)
+- `StageExecutor.run_stage()` in `jobs/stage_executor.py`
+
+---
+
+## Database Schema (Key Tables)
+
+```sql
+workspace_versions(workspace_name, version, git_sha, created_by, created_at)
+stage_runs(id, workspace_name, version, stage_name, status, backend_type, ...)
+signal_lineage(stage_run_id, signal_name, signal_type, storage_location)
+audit(operation, workspace, details_json, created_at)
+```
+
+Full schema: `db/schema.sql`
+
+---
+
+## Testing
+
+### Structure
 
 ```
 tests/
-├── unit/           # Fast, isolated tests (~164 tests, <1s each)
-├── integration/    # Component tests with real resources (~408 tests)
-├── e2e/            # Full system tests
-│   ├── deluxe/     # GCE cloud tests (opt-in, ~30 min)
-│   └── *.py        # Local e2e tests
-└── conftest.py     # Shared fixtures
+├── unit/           # 164 tests, <1s, pure logic, all mocked
+├── integration/    # 408 tests, ~2min, real DB + git
+├── e2e/            # Full Docker tests
+│   └── deluxe/     # GCE tests (@pytest.mark.deluxe_gce)
+└── conftest.py     # Fixtures: test_db, temp_git_repo
 ```
 
-### Test Categories and Criteria
+### Key Fixtures
 
-1. **Unit tests** (`tests/unit/`):
-   - Test pure logic in isolation
-   - All external dependencies mocked (DB, git, Docker, GCS)
-   - Fast: each test completes in <100ms
-   - No filesystem side effects (use temp dirs if needed)
-   - Examples: validation, config parsing, utility functions, profiles
-
-2. **Integration tests** (`tests/integration/`):
-   - Test component interactions with real resources
-   - Use real SQLite databases (in temp dirs)
-   - Use real git repos (in temp dirs)
-   - Mock only external services (GCS, Docker daemon)
-   - May take 1-5 seconds per test
-   - Examples: database CRUD, git operations, workspace management
-
-3. **E2E tests** (`tests/e2e/`):
-   - Full system tests with real Docker containers
-   - May take 10-60 seconds per test
-   - Examples: complete pipeline execution, signal flow
-
-4. **Deluxe GCE tests** (`tests/e2e/deluxe/`):
-   - Real cloud infrastructure tests
-   - Marked with `@pytest.mark.deluxe_gce`
-   - Require GCP credentials and ~30 min to run
-   - Run manually or via `make test-deluxe`
-
-### Test Markers
-
-- `@pytest.mark.deluxe_gce` - Cloud tests requiring GCP access (opt-in)
+```python
+test_db        # Fresh SQLite with schema
+temp_git_repo  # Initialized git repo with main branch
+test_config    # GoldfishConfig for testing
+```
 
 ### Writing Tests
 
 ```python
-def test_your_feature(test_db, test_config):
-    """Test description.
-
-    Use descriptive docstrings explaining WHAT is being tested
-    and WHY it matters.
-    """
-    # Setup
-    manager = YourManager(db=test_db, config=test_config)
-
-    # Execute
-    result = manager.operation()
-
-    # Verify
-    assert result.success is True
-    assert result.data["key"] == "expected_value"
-
-    # Verify database state
+def test_feature(test_db, temp_git_repo):
+    """What + Why in docstring."""
+    manager = WorkspaceManager(db=test_db, ...)
+    result = manager.create_workspace("test", "goal")
+    assert result.name == "test"
+    # Always verify DB state too
     with test_db._conn() as conn:
-        record = conn.execute("SELECT * FROM table WHERE id = ?", (id,)).fetchone()
-        assert record["status"] == "expected"
+        row = conn.execute("SELECT ...").fetchone()
+        assert row is not None
 ```
 
-### Fixtures (`conftest.py`)
+---
 
-- `test_db` - Temporary database with schema
-- `test_config` - Test configuration
-- `temp_dir` - Temporary directory (auto-cleanup)
-- `pipeline_project` - Full project setup (for E2E tests)
+## DO and DON'T
 
-## Infrastructure Layer
+| DO | DON'T |
+|----|-------|
+| `make lint` before committing | `# type: ignore` (fix the issue) |
+| Specific error types (`WorkspaceNotFoundError`) | Expose git terminology to MCP clients |
+| `cast()` for TypedDict database returns | Bare `except:` (use `except Exception:`) |
+| Validate all inputs before operations | `raise X` without `from e` when re-raising |
+| Record audit log for user-facing operations | Commit with failing tests or lint |
+| Write tests for new functionality | Skip input validation |
 
-### Local vs GCE Execution
+---
 
-**Local** (`infra/local_executor.py`):
-- Uses Docker API directly
-- Suitable for development
-- Fast iteration
-- No cloud costs
+## Adding New Features
 
-**GCE** (`infra/gce_launcher.py`):
-- Launches VM instances on Google Compute Engine
-- GPU support via NVIDIA drivers
-- Capacity-aware multi-zone search (`infra/resource_launcher.py`)
-- Automatic cleanup after job completion
+### New MCP Tool
 
-### Docker Security
+1. Add to appropriate `server_tools/*.py`
+2. Follow the tool pattern (validate → execute → audit → return)
+3. Add tests in `tests/integration/`
+4. Update tool count in README if significant
 
-All Docker containers run with:
-- Non-root user (UID 1000)
-- Memory limit (4GB)
-- CPU limit (2.0 cores)
-- PID limit (100 processes)
-- Read-only input volumes
-- No network access (unless explicitly needed)
+### New Database Table
 
-Version strings are sanitized to prevent injection:
-```python
-# BAD - allows injection
-image_tag = f"goldfish-{workspace}-{version}"
+1. Add schema to `db/schema.sql`
+2. Add CRUD methods to `db/database.py`
+3. Add TypedDict to `db/types.py`
+4. Add tests
 
-# GOOD - validates version format
-validate_version(version)  # Must match ^v\d+$
-image_tag = f"goldfish-{workspace}-{version}"
-```
+### New Signal Type
 
-## Debugging Tips
+1. Update `SignalDef` in `models.py`
+2. Update `pipeline/parser.py` validation
+3. Update `io/__init__.py` load/save handling
+4. Add tests
 
-### Enable Verbose Logging
+---
 
-```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
-```
-
-### Inspect Database State
+## Debugging
 
 ```bash
-sqlite3 .goldfish/goldfish.db
-sqlite> SELECT * FROM workspace_versions;
-sqlite> SELECT * FROM stage_runs ORDER BY started_at DESC LIMIT 10;
+# Database state (in dev repo)
+sqlite3 ../myproject-dev/.goldfish/goldfish.db "SELECT * FROM stage_runs ORDER BY started_at DESC LIMIT 5"
+
+# Git state (dev repo has all branches/tags)
+cd ../myproject-dev && git log --all --oneline --graph
+
+# Check workspace mount metadata
+cat workspaces/w1/.goldfish-mount
+
+# Docker
+docker ps                           # Running containers
+docker logs goldfish-workspace-v1   # Container logs
+
+# Verbose logging
+import logging; logging.basicConfig(level=logging.DEBUG)
 ```
 
-### Git State
+---
 
-```bash
-cd .goldfish/dev
-git log --all --graph --oneline
-git worktree list
-git tag -l
-```
+## File Quick Reference
 
-### Docker Inspection
+| Component | Files |
+|-----------|-------|
+| **Entry** | `server.py`, `cli.py`, `__main__.py` |
+| **Context** | `context.py` (ServerContext DI) |
+| **Models** | `models.py` (Pydantic), `db/types.py` (TypedDict) |
+| **Validation** | `validation.py`, `errors.py` |
+| **Workspace** | `workspace/manager.py`, `workspace/git_layer.py` (copy-based + sync) |
+| **Execution** | `jobs/stage_executor.py`, `jobs/pipeline_executor.py` |
+| **Pipeline** | `pipeline/parser.py`, `pipeline/manager.py` |
+| **Infra** | `infra/docker_builder.py`, `infra/local_executor.py`, `infra/gce_launcher.py` |
+| **Data** | `datasets/registry.py`, `sources/registry.py` |
+| **State** | `state/state_md.py` (per-workspace + global STATE.md) |
+| **IO** | `io/__init__.py` (container load_input/save_output) |
+| **Tools** | `server_tools/*.py` (39 MCP tools) |
 
-```bash
-docker ps  # Running containers
-docker logs goldfish-{workspace}-v1  # Container logs
-docker inspect goldfish-{workspace}-v1  # Full container details
-```
+---
 
-## Key Files Reference
+## Conventions
 
-### Entry Points
-- `server.py` - MCP server (loads all tools)
-- `__main__.py` - CLI entry point
-- `cli.py` - Command-line interface
+- **Ruff** for linting/formatting (via pre-commit)
+- **mypy** strict mode for type checking
+- **Google-style** docstrings for public APIs
+- **Semantic** error types (not generic Exception)
+- **Context managers** for database transactions
+- **cast()** for TypedDict returns from SQLite
 
-### Core Managers
-- `workspace/manager.py` - Workspace operations (create, mount, checkpoint)
-- `jobs/stage_executor.py` - Stage execution engine
-- `pipeline/manager.py` - Pipeline validation and management
-- `db/database.py` - All database operations
+---
 
-### Infrastructure
-- `infra/docker_builder.py` - Docker image building
-- `infra/local_executor.py` - Local Docker execution
-- `infra/gce_launcher.py` - GCE instance management (594 lines)
-- `infra/resource_launcher.py` - Capacity-aware launcher (540 lines)
-- `infra/startup_builder.py` - GCE startup scripts (289 lines)
+## Common Fixes
 
-### Validation & Errors
-- `validation.py` - Input validation (paths, names, IDs)
-- `errors.py` - Error types and git error translation
+| Error | Fix |
+|-------|-----|
+| TypedDict return type mismatch | `return cast(JobRow, dict(row))` |
+| Closure captures `None`-able var | Assign to local: `registry = self.registry` then use in closure |
+| `no-any-return` from mypy | Add explicit type annotation to return variable |
+| Forward reference error | Add `from __future__ import annotations` |
+| E402 module import order | Move ALL imports to top, constants below |
 
-## Design Constraints
+---
 
-### What Claude Should NOT See
-
-1. **Git internals**: All git terminology hidden behind workspace/snapshot abstractions
-2. **Docker details**: Containerization completely abstracted
-3. **File system paths**: All operations relative to workspace root
-4. **Database schema**: Access only through manager APIs
-
-### Performance Considerations
-
-1. **Database queries**: Use indexes for workspace_name, status, created_at
-2. **Git operations**: Worktrees allow parallel workspace access
-3. **Docker builds**: Layer caching critical for fast iteration
-4. **Signal storage**: Local for intermediates, GCS for artifacts
-
-### Future Extension Points
-
-1. **New execution backends**: Implement LocalExecutor/GCELauncher interface
-2. **New signal types**: Update SignalDef + parser + IO library
-3. **New audit operations**: Add to AuditOperation enum
-4. **New MCP tools**: Add to appropriate tool module in `server_tools/`
-- When getting ruff, mypy or test errors, never cheat, always solve properly.
+*When getting ruff, mypy, or test errors: never cheat with ignores—always fix properly.*

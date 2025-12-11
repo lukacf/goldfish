@@ -1,0 +1,56 @@
+# Goldfish
+
+> Goldfish is an ML experimentation platform for AI agents that manages workspaces (isolated experiments), executes pipeline stages (Docker containers), and tracks full experiment provenance. The core abstractions: workspaces=branches, versions=tags, pipelines=YAML, stages=Python modules, signals=typed data flow.
+
+Key concepts for LLMs working on this codebase:
+- All infrastructure (Docker, GCS, GCE) is hidden from the MCP client
+- STATE.md provides context recovery after conversation summarization
+- 39 MCP tools organized into: workspace, execution, data, pipeline, lineage, utility
+- Security: input validation, path traversal protection, Docker sandboxing, git error translation
+
+## Primary Documentation
+
+- [CLAUDE.md](CLAUDE.md): Complete guide for AI assistants developing on this codebase. Contains architecture, patterns, commands, security model, and gotchas.
+- [README.md](README.md): Project overview, quick start, and feature summary.
+- [CONTRIBUTING.md](CONTRIBUTING.md): Development setup, architecture deep-dive, testing, and code style.
+
+## Source Code Reference
+
+- [src/goldfish/server.py](src/goldfish/server.py): MCP server entry point and initialization
+- [src/goldfish/context.py](src/goldfish/context.py): ServerContext dependency injection container
+- [src/goldfish/models.py](src/goldfish/models.py): All Pydantic models (PipelineDef, StageDef, WorkspaceInfo, etc.)
+- [src/goldfish/errors.py](src/goldfish/errors.py): Error types and git error translation
+- [src/goldfish/validation.py](src/goldfish/validation.py): Input validation and security checks
+
+## Core Subsystems
+
+- [src/goldfish/workspace/manager.py](src/goldfish/workspace/manager.py): Workspace operations (create, mount, hibernate, checkpoint)
+- [src/goldfish/workspace/git_layer.py](src/goldfish/workspace/git_layer.py): Low-level git operations
+- [src/goldfish/jobs/stage_executor.py](src/goldfish/jobs/stage_executor.py): Stage execution engine (900 lines, core logic)
+- [src/goldfish/jobs/pipeline_executor.py](src/goldfish/jobs/pipeline_executor.py): Pipeline orchestration
+- [src/goldfish/pipeline/parser.py](src/goldfish/pipeline/parser.py): YAML parsing and validation
+- [src/goldfish/db/database.py](src/goldfish/db/database.py): All database operations
+
+## MCP Tools
+
+- [src/goldfish/server_tools/workspace_tools.py](src/goldfish/server_tools/workspace_tools.py): 15 workspace management tools
+- [src/goldfish/server_tools/execution_tools.py](src/goldfish/server_tools/execution_tools.py): 6 execution tools (run, get_run, logs, cancel, list_runs, get_outputs)
+- [src/goldfish/server_tools/data_tools.py](src/goldfish/server_tools/data_tools.py): 7 data tools
+- [src/goldfish/server_tools/pipeline_tools.py](src/goldfish/server_tools/pipeline_tools.py): 4 pipeline tools
+- [src/goldfish/server_tools/lineage_tools.py](src/goldfish/server_tools/lineage_tools.py): 3 provenance tracking tools
+- [src/goldfish/server_tools/utility_tools.py](src/goldfish/server_tools/utility_tools.py): 4 utility tools
+
+## Infrastructure
+
+- [src/goldfish/infra/docker_builder.py](src/goldfish/infra/docker_builder.py): Dockerfile generation and image building
+- [src/goldfish/infra/local_executor.py](src/goldfish/infra/local_executor.py): Local Docker execution
+- [src/goldfish/infra/gce_launcher.py](src/goldfish/infra/gce_launcher.py): GCE instance management
+- [src/goldfish/infra/profiles.py](src/goldfish/infra/profiles.py): Resource profiles (H100, A100, CPU)
+
+## Optional
+
+- [src/goldfish/db/schema.sql](src/goldfish/db/schema.sql): SQLite schema definitions (11 tables)
+- [src/goldfish/io/__init__.py](src/goldfish/io/__init__.py): Goldfish IO library for containers (load_input/save_output)
+- [src/goldfish/state/state_md.py](src/goldfish/state/state_md.py): STATE.md generation for context recovery
+- [src/goldfish/config.py](src/goldfish/config.py): Configuration loading and validation
+- [tests/conftest.py](tests/conftest.py): Test fixtures (temp_git_repo, test_db, etc.)
