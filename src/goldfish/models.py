@@ -52,6 +52,13 @@ class SlotInfo(BaseModel):
     branches: list[dict] | None = None  # Child workspaces
 
 
+class WorkflowInfo(BaseModel):
+    """Pipeline/workflow information for a workspace."""
+
+    stages: list[str]  # List of stage names in pipeline
+    has_pipeline: bool = True
+
+
 class WorkspaceInfo(BaseModel):
     """Information about a workspace."""
 
@@ -62,6 +69,7 @@ class WorkspaceInfo(BaseModel):
     last_activity: datetime
     is_mounted: bool
     mounted_slot: str | None = None
+    workflow: WorkflowInfo | None = None  # Pipeline info (replaces deprecated get_pipeline)
 
 
 # --- Response Models ---
@@ -437,6 +445,8 @@ class StageRunInfo(BaseModel):
     pipeline: str | None = None
     version: str
     stage: str
+    stage_version: int | None = None  # Stage version ID (FK to stage_versions)
+    stage_version_num: int | None = None  # Human-readable version number (1, 2, 3...)
     profile: str | None = None
     hints: dict | None = None
     status: str  # pending, running, completed, failed

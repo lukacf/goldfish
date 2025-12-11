@@ -1,9 +1,19 @@
 """High-level workspace operations.
 
 Coordinates git_layer, audit, and state_md updates.
+
+Architecture: Copy-based workspaces with no git in user workspace.
+
+MOUNT:  gf-dev/branch ──copy──▶ user/w1 (plain files, NO .git)
+WORK:   Claude edits user/w1
+RUN:    user/w1 ──sync──▶ gf-dev/branch ──commit──▶ execute with SHA
+
+All git operations happen in the goldfish dev repo. The user's workspace
+is just a directory of plain files with a `.goldfish-mount` metadata file.
 """
 
 import fcntl
+import json
 import os
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -30,6 +40,7 @@ from goldfish.models import (
     RollbackResponse,
     SlotInfo,
     SlotState,
+    WorkflowInfo,
     WorkspaceInfo,
 )
 from goldfish.workspace.git_layer import GitLayer
@@ -53,10 +64,10 @@ class WorkspaceManager:
         self.state_manager = state_manager
 
         # Resolve dev repo path (relative to project parent, not project itself)
-        dev_repo = (project_root.parent / config.dev_repo_path).resolve()
+        self.dev_repo = config.get_dev_repo_path(project_root)
         self.workspaces_dir = project_root / config.workspaces_dir
 
-        self.git = GitLayer(dev_repo, project_root, config.workspaces_dir)
+        self.git = GitLayer(self.dev_repo, project_root, config.workspaces_dir)
 
     def _slot_path(self, slot: str) -> Path:
         """Get filesystem path for a slot."""
@@ -83,8 +94,8 @@ class WorkspaceManager:
         Raises:
             GoldfishError: If lock cannot be acquired within timeout
         """
-        # Create locks directory if it doesn't exist
-        locks_dir = self.project_root / ".goldfish-locks"
+        # Create locks directory in dev repo (Goldfish runtime artifact)
+        locks_dir = self.dev_repo / ".goldfish" / "locks"
         locks_dir.mkdir(parents=True, exist_ok=True)
 
         lock_file_path = locks_dir / f"{slot}.lock"
@@ -124,7 +135,11 @@ class WorkspaceManager:
                     pass  # Best effort cleanup
 
     def _get_slot_state(self, slot: str) -> SlotInfo:
-        """Get current state of a slot."""
+        """Get current state of a slot.
+
+        With copy-based mounting, we check for the .goldfish-mount metadata file
+        instead of git worktrees. The slot is just a plain directory.
+        """
         slot_path = self._slot_path(slot)
 
         # Check if slot directory exists and has content
@@ -138,28 +153,29 @@ class WorkspaceManager:
         except PermissionError:
             return SlotInfo(slot=slot, state=SlotState.EMPTY)
 
-        # Find which branch is mounted here
-        wt = self.git.get_worktree_for_slot(slot_path)
-        if wt is None:
-            # Directory exists but isn't a worktree - treat as empty
+        # Check for .goldfish-mount metadata file (copy-based mounting)
+        metadata_file = slot_path / ".goldfish-mount"
+        if not metadata_file.exists():
+            # Directory exists but isn't a Goldfish workspace - treat as empty
             return SlotInfo(slot=slot, state=SlotState.EMPTY)
 
-        # Extract workspace name from branch
-        branch = wt.get("branch", "")
-        workspace = None
-        if branch.startswith("refs/heads/experiment/"):
-            workspace = branch.replace("refs/heads/experiment/", "")
-        elif branch.startswith("experiment/"):
-            workspace = branch.replace("experiment/", "")
+        try:
+            metadata = json.loads(metadata_file.read_text())
+            workspace = metadata.get("workspace_name")
+        except (json.JSONDecodeError, OSError):
+            return SlotInfo(slot=slot, state=SlotState.EMPTY)
 
         if workspace is None:
             return SlotInfo(slot=slot, state=SlotState.EMPTY)
 
-        # Check dirty state
-        dirty = DirtyState.DIRTY if self.git.is_dirty(slot_path) else DirtyState.CLEAN
+        # Check dirty state by comparing file hashes
+        # For copy-based mounting, we always consider it potentially dirty
+        # since we can't easily compare without syncing
+        dirty = DirtyState.DIRTY
 
-        # Get last checkpoint
-        last_checkpoint = self.git.get_latest_snapshot(slot_path)
+        # Get last checkpoint from the workspace (use list_snapshots to get from branch)
+        snapshots = self.git.list_snapshots(workspace)
+        last_checkpoint = snapshots[0] if snapshots else None
 
         return SlotInfo(
             slot=slot,
@@ -213,14 +229,117 @@ class WorkspaceManager:
             return result
         return "# Project\n\nSTATE.md not yet initialized"
 
+    def _write_workspace_state_md(self, slot_path: Path, workspace: str, slot: str, event: str | None = None) -> None:
+        """Write per-workspace STATE.md to slot directory.
+
+        This provides workspace-specific context for Claude's compaction recovery.
+        Each mounted workspace has its own STATE.md with:
+        - Workspace name and goal
+        - Current slot
+        - Version history
+        - Recent actions for this workspace
+        """
+        lines = [f"# Workspace: {workspace}", ""]
+
+        # Goal
+        goal = self.db.get_workspace_goal(workspace) or "Not set"
+        lines.extend(["## Goal", goal, ""])
+
+        # Status
+        lines.append("## Status")
+        lines.append(f"- Mounted to: {slot}")
+
+        # Get version info
+        versions = self.db.list_versions(workspace)
+        if versions:
+            latest = versions[0]
+            lines.append(f"- Current version: {latest['version']}")
+            lines.append(f"- Total versions: {len(versions)}")
+        else:
+            lines.append("- No versions yet (run checkpoint or execute to create)")
+        lines.append("")
+
+        # Lineage info
+        lineage = self.db.get_workspace_lineage(workspace)
+        if lineage and lineage.get("parent_workspace"):
+            lines.append("## Lineage")
+            parent_info = f"Branched from: {lineage['parent_workspace']}"
+            if lineage.get("parent_version"):
+                parent_info += f" @ {lineage['parent_version']}"
+            lines.append(f"- {parent_info}")
+            lines.append("")
+
+        # Recent versions (up to 5)
+        if versions:
+            lines.append("## Version History")
+            for v in versions[:5]:
+                desc = v.get("description", "")
+                created = v.get("created_at", "")
+                if created and isinstance(created, str) and len(created) > 10:
+                    created = created[:10]  # Just date
+                line = f"- {v['version']}"
+                if created:
+                    line += f" ({created})"
+                if desc:
+                    line += f": {desc[:50]}"
+                lines.append(line)
+            if len(versions) > 5:
+                lines.append(f"- ... and {len(versions) - 5} more")
+            lines.append("")
+
+        # Recent actions for this workspace (from audit log)
+        recent_audits = self.db.get_recent_audit(limit=20)
+        workspace_actions = [a for a in recent_audits if a.get("workspace") == workspace][:10]
+
+        lines.append("## Recent Actions")
+        if workspace_actions:
+            for a in workspace_actions:
+                timestamp = a.get("timestamp", "")
+                if timestamp and isinstance(timestamp, str) and len(timestamp) > 16:
+                    timestamp = timestamp[11:16]  # Just time HH:MM
+                op = a.get("operation", "unknown")
+                reason_text = a.get("reason", "")[:40]
+                lines.append(f"- [{timestamp}] {op}: {reason_text}")
+        else:
+            lines.append("- No recent actions")
+
+        if event:
+            lines.append(f"- [now] {event}")
+        lines.append("")
+
+        # Configuration invariants
+        if self.config.invariants:
+            lines.append("## Invariants (DO NOT CHANGE)")
+            for inv in self.config.invariants:
+                lines.append(f"- {inv}")
+            lines.append("")
+
+        content = "\n".join(lines)
+
+        # Write atomically
+        state_path = slot_path / "STATE.md"
+        state_path.write_text(content)
+
     def mount(self, workspace: str, slot: str, reason: str) -> MountResponse:
-        """Mount a workspace into a slot."""
+        """Mount a workspace into a slot.
+
+        Copy-based mounting: Copies files from dev repo branch to slot directory.
+        No .git in the slot - all versioning happens in the dev repo.
+        """
         self._validate_slot(slot)
         validate_reason(reason, self.config.audit.min_reason_length)
 
         # Check workspace exists
         if not self.git.branch_exists(workspace):
             raise WorkspaceNotFoundError(f"Workspace '{workspace}' does not exist")
+
+        # Check if workspace is already mounted elsewhere
+        existing_mount = self.db.get_mount_by_workspace(workspace)
+        if existing_mount and existing_mount["status"] == "active":
+            raise GoldfishError(
+                f"Workspace '{workspace}' is already mounted in slot '{existing_mount['slot']}'. "
+                f"Hibernate it first before mounting elsewhere."
+            )
 
         # Check soft limit
         warning = None
@@ -229,28 +348,35 @@ class WorkspaceManager:
             warning = f"You have {active} active workspaces. Consider hibernating one to maintain focus."
 
         # Use file-based locking to prevent concurrent mounts to the same slot
-        # This prevents TOCTOU race conditions and git lock conflicts
+        # This prevents TOCTOU race conditions
         slot_path = self._slot_path(slot)
         with self._acquire_slot_lock(slot):
             # Check if slot is already mounted (under lock)
             slot_info = self._get_slot_state(slot)
             if slot_info.state == SlotState.MOUNTED:
-                raise SlotNotEmptyError(
-                    f"Slot {slot} already has workspace '{slot_info.workspace}'. Hibernate it first."
-                )
-
-            # Perform mount - now protected by lock
-            try:
-                self.git.add_worktree(workspace, slot_path)
-            except GoldfishError as e:
-                # Mount failed - re-check slot state to provide better error message
-                slot_info = self._get_slot_state(slot)
-                if slot_info.state == SlotState.MOUNTED:
+                # Check if DB knows about this mount - if not, it's stale from a crash
+                db_mount = self.db.get_mount(slot)
+                if db_mount is not None:
+                    # DB has record - it's really mounted
                     raise SlotNotEmptyError(
                         f"Slot {slot} already has workspace '{slot_info.workspace}'. Hibernate it first."
-                    ) from e
-                # Otherwise, re-raise original error
-                raise
+                    )
+                # No DB record - stale mount from crash, we can overwrite
+                # Clean up the stale directory first
+                import shutil
+
+                shutil.rmtree(slot_path)
+
+            # Perform copy-based mount
+            mount_info = self.git.copy_mount_workspace(workspace, slot_path)
+
+            # Record mount in database
+            self.db.record_mount(
+                slot=slot,
+                workspace_name=workspace,
+                branch=mount_info["branch"],
+                mounted_sha=mount_info["mounted_sha"],
+            )
 
         # Log to audit
         self.db.log_audit(
@@ -258,10 +384,13 @@ class WorkspaceManager:
             slot=slot,
             workspace=workspace,
             reason=reason,
-            details={"warning": warning},
+            details={"warning": warning, "mounted_sha": mount_info["mounted_sha"]},
         )
 
-        # Update STATE.md
+        # Write per-workspace STATE.md to slot
+        self._write_workspace_state_md(slot_path, workspace, slot, event=f"Mounted: {reason}")
+
+        # Update global STATE.md
         if self.state_manager:
             self.state_manager.add_action(f"Mounted '{workspace}' to {slot}")
 
@@ -281,7 +410,11 @@ class WorkspaceManager:
         )
 
     def hibernate(self, slot: str, reason: str) -> HibernateResponse:
-        """Save and free a slot."""
+        """Save and free a slot.
+
+        Copy-based hibernate: Syncs changes back to dev repo branch,
+        commits them, then removes the slot directory.
+        """
         self._validate_slot(slot)
         validate_reason(reason, self.config.audit.min_reason_length)
 
@@ -292,12 +425,25 @@ class WorkspaceManager:
         workspace = slot_info.workspace
         slot_path = self._slot_path(slot)
 
-        # Auto-checkpoint if dirty
+        # Sync changes back to branch and commit (always, since we can't easily detect dirty)
         auto_checkpointed = False
         checkpoint_id = None
-        if slot_info.dirty == DirtyState.DIRTY:
-            checkpoint_id = self.git.create_snapshot(slot_path, f"Auto-checkpoint before hibernate: {reason}")
-            auto_checkpointed = True
+        try:
+            commit_sha = self.git.copy_unmount_workspace(
+                slot_path=slot_path,
+                workspace_name=workspace,
+                commit_msg=f"Hibernate: {reason}",
+            )
+            if commit_sha:
+                auto_checkpointed = True
+                # Create a snapshot-style ID for the checkpoint
+                from datetime import datetime
+
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                checkpoint_id = f"snap-{commit_sha[:8]}-{timestamp}"
+        except GoldfishError:
+            # If sync fails, still try to clean up
+            pass
 
         # Push to remote (best effort - log failures but don't block hibernate)
         pushed = False
@@ -316,8 +462,8 @@ class WorkspaceManager:
                     reason=f"Push failed during hibernate: {push_error}",
                 )
 
-        # Remove worktree
-        self.git.remove_worktree(slot_path)
+        # Delete mount record from database
+        self.db.delete_mount(slot)
 
         # Log to audit
         self.db.log_audit(
@@ -475,7 +621,10 @@ class WorkspaceManager:
         return workspaces[offset : offset + limit]
 
     def checkpoint(self, slot: str, message: str) -> CheckpointResponse:
-        """Create a snapshot of the current slot state."""
+        """Create a snapshot of the current slot state.
+
+        Copy-based checkpoint: Syncs slot changes to branch, commits, and tags.
+        """
         self._validate_slot(slot)
         validate_reason(message, self.config.audit.min_reason_length)
 
@@ -484,7 +633,10 @@ class WorkspaceManager:
             raise SlotEmptyError(f"Slot {slot} is empty")
 
         slot_path = self._slot_path(slot)
-        snapshot_id = self.git.create_snapshot(slot_path, message)
+        workspace = slot_info.workspace
+        if workspace is None:
+            raise SlotEmptyError(f"Slot {slot} has no workspace")
+        snapshot_id = self.git.create_snapshot_copy_based(slot_path, workspace, message)
 
         # Log to audit
         self.db.log_audit(
@@ -495,7 +647,10 @@ class WorkspaceManager:
             details={"snapshot_id": snapshot_id},
         )
 
-        # Update STATE.md
+        # Update per-workspace STATE.md
+        self._write_workspace_state_md(slot_path, workspace, slot, event=f"Checkpoint {snapshot_id}: {message[:30]}")
+
+        # Update global STATE.md
         if self.state_manager:
             self.state_manager.add_action(f"Checkpoint {snapshot_id}: {message[:40]}...")
 
@@ -508,6 +663,80 @@ class WorkspaceManager:
             message=message,
             state_md=state_md,
         )
+
+    def sync_and_version(self, slot: str, stage_name: str, reason: str | None = None) -> tuple[str, str]:
+        """Sync slot changes to branch and create a version tag.
+
+        This is the core provenance guard: ensures all code is committed
+        before any run() execution. Every stage run has 100% provenance.
+
+        Args:
+            slot: Slot with mounted workspace
+            stage_name: Name of stage being run (for version description)
+            reason: Optional reason for version
+
+        Returns:
+            Tuple of (version_string, git_sha) - e.g., ("v1", "abc123...")
+
+        Raises:
+            SlotEmptyError: If slot is not mounted
+        """
+        self._validate_slot(slot)
+
+        slot_info = self._get_slot_state(slot)
+        if slot_info.state == SlotState.EMPTY or slot_info.workspace is None:
+            raise SlotEmptyError(f"Slot {slot} is empty - cannot version")
+
+        workspace = slot_info.workspace
+        slot_path = self._slot_path(slot)
+
+        # Ensure workspace lineage exists in database
+        if not self.db.workspace_exists(workspace):
+            self.db.create_workspace_lineage(
+                workspace_name=workspace,
+                description=f"Auto-created for {stage_name}",
+            )
+
+        # 1. Sync slot changes to branch and commit
+        commit_msg = reason or f"Auto-version for {stage_name}"
+        git_sha = self.git.sync_slot_to_branch(slot_path, workspace, commit_msg)
+
+        # 2. Get next version number and create tag
+        next_version = self.db.get_next_version_number(workspace)
+        git_tag = f"{workspace}-{next_version}"
+        self.git.create_tag(workspace, git_tag, git_sha)
+
+        # 3. Record version in database
+        description = reason or f"Auto-version for {stage_name} run"
+        self.db.create_version(
+            workspace_name=workspace,
+            version=next_version,
+            git_tag=git_tag,
+            git_sha=git_sha,
+            created_by="run",
+            description=description,
+        )
+
+        # 4. Update slot metadata to reflect synced state
+        metadata_file = slot_path / ".goldfish-mount"
+        if metadata_file.exists():
+            metadata = json.loads(metadata_file.read_text())
+            metadata["mounted_sha"] = git_sha
+            metadata_file.write_text(json.dumps(metadata, indent=2))
+
+        # 5. Record in audit log
+        self.db.log_audit(
+            operation="sync_and_version",
+            slot=slot,
+            workspace=workspace,
+            reason=f"Version {next_version}: {commit_msg}",
+            details={"version": next_version, "git_sha": git_sha, "stage": stage_name},
+        )
+
+        # 6. Update per-workspace STATE.md
+        self._write_workspace_state_md(slot_path, workspace, slot, event=f"Version {next_version} for {stage_name}")
+
+        return next_version, git_sha
 
     def get_slot_path(self, slot: str) -> Path:
         """Get the filesystem path for a slot (for job launcher)."""
@@ -663,6 +892,23 @@ class WorkspaceManager:
         # Get goal from database
         goal = self.db.get_workspace_goal(name) or ""
 
+        # Try to get pipeline/workflow info
+        workflow = None
+        try:
+            workspace_path = self.get_workspace_path(name)
+            pipeline_path = workspace_path / "pipeline.yaml"
+            if pipeline_path.exists():
+                import yaml
+
+                with open(pipeline_path) as f:
+                    pipeline_data = yaml.safe_load(f)
+                if pipeline_data and "stages" in pipeline_data:
+                    stage_names = [s.get("name", f"stage_{i}") for i, s in enumerate(pipeline_data["stages"])]
+                    workflow = WorkflowInfo(stages=stage_names, has_pipeline=True)
+        except Exception:
+            # If we can't read pipeline, just skip it
+            pass
+
         return WorkspaceInfo(
             name=name,
             created_at=created_at,
@@ -671,6 +917,7 @@ class WorkspaceManager:
             last_activity=last_activity,
             is_mounted=name in mounted_map,
             mounted_slot=mounted_map.get(name),
+            workflow=workflow,
         )
 
     def list_snapshots(self, workspace: str, limit: int = 50, offset: int = 0) -> list[dict]:

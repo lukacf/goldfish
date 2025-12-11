@@ -1,6 +1,6 @@
 """Goldfish MCP tools - Execution Tools
 
-Extracted from server.py for better organization.
+Provides tools for running pipeline stages and monitoring execution.
 """
 
 import json
@@ -10,155 +10,30 @@ from typing import Any
 
 from goldfish.errors import (
     GoldfishError,
-    JobNotFoundError,
-    SourceNotFoundError,
     validate_reason,
 )
 from goldfish.jobs.conversion import stage_run_dict_to_info
 from goldfish.models import (
-    CancelJobResponse,
     CancelRunResponse,
     GetOutputsResponse,
     GetRunResponse,
-    JobInfo,
-    JobLogsResponse,
-    JobStatus,
-    ListJobsResponse,
     ListRunsResponse,
-    RunJobResponse,
     StageRunInfo,
 )
 from goldfish.server import (
     _get_config,
     _get_db,
-    _get_job_launcher,
-    _get_job_tracker,
     _get_pipeline_executor,
     _get_stage_executor,
-    _get_state_md,
     _get_workspace_manager,
     mcp,
 )
-from goldfish.utils import parse_datetime, parse_optional_datetime
+from goldfish.utils import parse_datetime
 from goldfish.validation import (
-    validate_job_id,
-    validate_script_path,
-    validate_slot_name,
-    validate_source_name,
     validate_workspace_name,
 )
 
 logger = logging.getLogger("goldfish.server")
-
-
-@mcp.tool()
-def run_job(
-    slot: str,
-    script: str,
-    reason: str,
-    source_inputs: dict[str, str] | None = None,
-) -> RunJobResponse:
-    """Launch a job on the current snapshot.
-
-    Creates a snapshot first, then exports to experiment directory
-    and launches the job. You can continue editing while the job runs.
-
-    Args:
-        slot: Slot containing the code to run
-        script: Script to execute (e.g., "scripts/train.py")
-        reason: What this job is testing (min 15 chars)
-        source_inputs: Optional map of input names to source IDs
-                       (e.g., {"raw_data": "eurusd_ticks"})
-    """
-    logger.info("run_job() called", extra={"slot": slot, "script": script})
-
-    config = _get_config()
-    job_launcher = _get_job_launcher()
-    db = _get_db()
-
-    # Validate inputs
-    validate_slot_name(slot, config.slots)
-    validate_script_path(script)
-    validate_reason(reason, config.audit.min_reason_length)
-
-    # Validate source_inputs if provided
-    if source_inputs:
-        for input_name, source_id in source_inputs.items():
-            # Validate input name (alphanumeric + underscores)
-            if not input_name or not input_name.replace("_", "").isalnum():
-                raise GoldfishError(f"Invalid input name '{input_name}': must be alphanumeric with underscores")
-            # Validate source exists
-            validate_source_name(source_id)
-            if not db.source_exists(source_id):
-                raise SourceNotFoundError(f"Source not found: {source_id}")
-
-    try:
-        response = job_launcher.run_job(
-            slot=slot,
-            script=script,
-            reason=reason,
-            source_inputs=source_inputs,
-        )
-
-        logger.info(
-            "run_job() succeeded",
-            extra={
-                "slot": slot,
-                "script": script,
-                "job_id": response.job_id,
-                "snapshot_id": response.snapshot_id,
-            },
-        )
-
-        # Add STATE.md to response
-        state_md = _get_state_md()
-
-        return RunJobResponse(
-            success=response.success,
-            job_id=response.job_id,
-            snapshot_id=response.snapshot_id,
-            experiment_dir=response.experiment_dir,
-            artifact_uri=response.artifact_uri,
-            state_md=state_md,
-        )
-    except Exception as e:
-        logger.error("run_job() failed", extra={"slot": slot, "script": script, "error": str(e)})
-        raise
-
-
-@mcp.tool()
-def job_status(job_id: str) -> JobInfo:
-    """Get status and logs for a job.
-
-    Args:
-        job_id: The job ID returned by run_job()
-    """
-    db = _get_db()
-
-    validate_job_id(job_id)
-
-    job = db.get_job(job_id)
-    if job is None:
-        raise JobNotFoundError(f"Job not found: {job_id}")
-
-    # Get input sources
-    job_inputs = db.get_job_inputs(job_id)
-    input_sources = [inp["source_name"] for inp in job_inputs]
-
-    return JobInfo(
-        job_id=job["id"],
-        status=JobStatus(job["status"]),
-        workspace=job["workspace"],
-        snapshot_id=job["snapshot_id"],
-        script=job["script"],
-        started_at=parse_datetime(job["started_at"]),
-        completed_at=parse_optional_datetime(job.get("completed_at")),
-        log_uri=job.get("log_uri"),
-        artifact_uri=job.get("artifact_uri"),
-        error=job.get("error"),
-        input_sources=input_sources,
-    )
-
 
 # Maximum lines that can be requested from logs (prevents memory exhaustion)
 _MAX_TAIL_LINES = 10000
@@ -169,144 +44,144 @@ def _stage_run_row_to_info(row: dict) -> StageRunInfo:
 
 
 @mcp.tool()
-def get_job_logs(job_id: str, tail_lines: int = 100) -> JobLogsResponse:
-    """Get logs from a running or completed job.
-
-    Args:
-        job_id: The job ID returned by run_job()
-        tail_lines: Number of lines from end to return (default 100, max 10000)
-    """
-    db = _get_db()
-    job_tracker = _get_job_tracker()
-
-    validate_job_id(job_id)
-
-    # Validate tail_lines bounds
-    if tail_lines < 1:
-        raise GoldfishError("tail_lines must be at least 1")
-    if tail_lines > _MAX_TAIL_LINES:
-        raise GoldfishError(f"tail_lines cannot exceed {_MAX_TAIL_LINES}")
-
-    job = db.get_job(job_id)
-    if job is None:
-        raise JobNotFoundError(f"Job not found: {job_id}")
-
-    # Get logs from tracker
-    logs = job_tracker.get_job_logs(job_id)
-
-    # Tail the logs
-    if logs and tail_lines > 0:
-        lines = logs.splitlines()
-        if len(lines) > tail_lines:
-            logs = "\n".join(lines[-tail_lines:])
-
-    return JobLogsResponse(
-        job_id=job_id,
-        status=job["status"],
-        logs=logs,
-        log_uri=job.get("log_uri"),
-        error="Logs not available" if logs is None else None,
-    )
-
-
-@mcp.tool()
-def cancel_job(job_id: str, reason: str) -> CancelJobResponse:
-    """Cancel a running or pending job.
-
-    Args:
-        job_id: The job ID to cancel
-        reason: Why you're cancelling (min 15 chars)
-    """
-    logger.info("cancel_job() called", extra={"job_id": job_id})
-
-    config = _get_config()
-    job_tracker = _get_job_tracker()
-
-    validate_job_id(job_id)
-    validate_reason(reason, config.audit.min_reason_length)
-
-    try:
-        response = job_tracker.cancel_job(job_id, reason)
-
-        logger.info(
-            "cancel_job() succeeded",
-            extra={
-                "job_id": job_id,
-                "previous_status": response.previous_status,
-            },
-        )
-
-        # Add STATE.md to response
-        state_md = _get_state_md()
-
-        return CancelJobResponse(
-            success=response.success,
-            job_id=response.job_id,
-            previous_status=response.previous_status,
-            state_md=state_md,
-        )
-    except Exception as e:
-        logger.error("cancel_job() failed", extra={"job_id": job_id, "error": str(e)})
-        raise
-
-
-# ---------------- Stage Observability (new) -----------------
-
-
-@mcp.tool()
-def stage_status(stage_run_id: str) -> StageRunInfo:
-    """Get status and metadata for a stage run."""
-    db = _get_db()
-    # Refresh once for stateless update
-    _get_stage_executor().refresh_status_once(stage_run_id)
-    row = db.get_stage_run(stage_run_id)
-    if not row:
-        raise GoldfishError(f"Stage run not found: {stage_run_id}")
-    return _stage_run_row_to_info(row)
-
-
-@mcp.tool()
-def list_runs(
-    workspace: str | None = None,
-    stage: str | None = None,
-    status: str | None = None,
-    pipeline_run_id: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
+def run(
+    workspace: str,
+    stages: list[str] | None = None,
+    pipeline: str | None = None,
+    config_override: dict | None = None,
+    inputs_override: dict | None = None,
+    reason: str | None = None,
+    wait: bool = False,
 ) -> dict:
-    """List stage runs (newest first)."""
+    """Run pipeline stages.
+
+    Args:
+        workspace: Workspace name (e.g., "baseline_lstm") or slot (e.g., "w1")
+        stages: Which stages to run:
+            - None or empty: Run ALL stages in pipeline order
+            - ["train"]: Run single stage
+            - ["preprocess", "train"]: Run multiple specific stages in order
+        pipeline: Pipeline file (default: pipeline.yaml, or pipelines/<name>.yaml)
+        config_override: Override config vars. For single stage: {"VAR": "value"}.
+                        For multiple stages: {"stage_name": {"VAR": "value"}}
+        inputs_override: Override input sources for debugging
+        reason: Why running (min 15 chars)
+        wait: False (default) returns immediately; True blocks until completion
+
+    Returns:
+        Dict with:
+        - runs: List of stage run info (run_id, workspace, version, stage, status)
+        - pipeline_run_id: If running multiple stages
+
+    Examples:
+        run("w1")                           # Run all stages
+        run("w1", stages=["train"])         # Run single stage
+        run("w1", stages=["preprocess", "train", "evaluate"])  # Run specific stages
+    """
+    config = _get_config()
+    workspace_manager = _get_workspace_manager()
+    stage_executor = _get_stage_executor()
+    pipeline_executor = _get_pipeline_executor()
+
+    validate_workspace_name(workspace)
+    if reason:
+        validate_reason(reason, config.audit.min_reason_length)
+
+    # Resolve workspace (could be slot like "w1")
+    workspace_name = workspace_manager.get_workspace_for_slot(workspace)
+    if not workspace_name:
+        workspace_name = workspace
+
+    # Determine execution mode based on stages parameter
+    if stages is None or len(stages) == 0:
+        # Run ALL stages
+        runs: dict[str, Any] = pipeline_executor.run_pipeline(
+            workspace=workspace_name,
+            pipeline_name=pipeline,
+            config_override=config_override or {},
+            reason=reason or "Run all stages",
+            async_mode=not wait,
+        )
+        return runs
+
+    elif len(stages) == 1:
+        # Run SINGLE stage
+        stage_run = stage_executor.run_stage(
+            workspace=workspace_name,
+            stage_name=stages[0],
+            pipeline_name=pipeline,
+            config_override=config_override or {},
+            inputs_override=inputs_override or {},
+            reason=reason or f"Run stage {stages[0]}",
+            wait=wait,
+        )
+        result: dict[str, Any] = {"runs": [stage_run.model_dump(mode="json")]}
+        return result
+
+    else:
+        # Run MULTIPLE specific stages
+        # Find the range in the pipeline and run that subset
+        runs = pipeline_executor.run_partial_pipeline(
+            workspace=workspace_name,
+            pipeline_name=pipeline,
+            from_stage=stages[0],
+            to_stage=stages[-1],
+            config_override=config_override or {},
+            reason=reason or f"Run stages {stages[0]} to {stages[-1]}",
+            async_mode=not wait,
+        )
+        return runs
+
+
+@mcp.tool()
+def get_run(run_id: str) -> dict:
+    """Get full details of a run: metadata, inputs, outputs, config.
+
+    Args:
+        run_id: The run ID (e.g., "stage-abc123")
+
+    Returns:
+        Dict with stage_run info, inputs, outputs, and config
+    """
     db = _get_db()
-    rows = db.list_stage_runs_with_total(
-        workspace_name=workspace,
-        stage_name=stage,
-        status=status,
-        pipeline_run_id=pipeline_run_id,
-        limit=limit,
-        offset=offset,
-    )
-    total = rows[0]["total_count"] if rows else 0
-    result: dict[str, Any] = ListRunsResponse(
-        runs=[_stage_run_row_to_info(r) for r in rows],
-        total_count=total,
-        has_more=offset + len(rows) < total,
+    # Refresh status from backend
+    _get_stage_executor().refresh_status_once(run_id)
+
+    row = db.get_stage_run(run_id)
+    if not row:
+        raise GoldfishError(f"Run not found: {run_id}")
+
+    result: dict[str, Any] = GetRunResponse(
+        stage_run=_stage_run_row_to_info(row),
+        inputs=json.loads(row["inputs_json"]) if row.get("inputs_json") else {},
+        outputs=json.loads(row["outputs_json"]) if row.get("outputs_json") else [],
+        config=json.loads(row["config_json"]) if row.get("config_json") else {},
     ).model_dump(mode="json")
     return result
 
 
 @mcp.tool()
-def stage_logs(stage_run_id: str, tail_lines: int = 200, since: str | None = None) -> dict:
-    """Fetch logs for a stage run (supports tail and since)."""
-    if tail_lines < 1 or tail_lines > _MAX_TAIL_LINES:
-        raise GoldfishError(f"tail_lines must be 1-{_MAX_TAIL_LINES}")
+def logs(run_id: str, tail: int = 200, since: str | None = None) -> dict:
+    """Get logs from a run.
+
+    Args:
+        run_id: The run ID (e.g., "stage-abc123")
+        tail: Number of lines from end (default 200, max 10000)
+        since: Only show logs after this ISO timestamp
+
+    Returns:
+        Dict with run_id, status, logs, log_uri
+    """
+    if tail < 1 or tail > _MAX_TAIL_LINES:
+        raise GoldfishError(f"tail must be 1-{_MAX_TAIL_LINES}")
 
     db = _get_db()
-    row = db.get_stage_run(stage_run_id)
+    row = db.get_stage_run(run_id)
     if not row:
-        raise GoldfishError(f"Stage run not found: {stage_run_id}")
+        raise GoldfishError(f"Run not found: {run_id}")
 
-    # Prefer persisted log file if present
     log_uri = row.get("log_uri")
-    logs: str | None = None
+    log_content: str | None = None
 
     def _parse_since(s: str | None) -> datetime | None:
         if not s:
@@ -332,14 +207,13 @@ def stage_logs(stage_run_id: str, tail_lines: int = 200, since: str | None = Non
         except Exception:
             return None
 
-    def _filter_lines(lines_iter, since_ts: datetime | None) -> list[str]:
+    def _filter_lines(lines_iter: list[str], since_ts: datetime | None) -> list[str]:
         if since_ts is None:
             return list(lines_iter)
         filtered = []
         for ln in lines_iter:
             ts = _line_ts(ln)
             if ts is None:
-                # If we can't parse the timestamp, keep the line to avoid hiding logs
                 filtered.append(ln)
                 continue
             if ts >= since_ts:
@@ -348,88 +222,69 @@ def stage_logs(stage_run_id: str, tail_lines: int = 200, since: str | None = Non
 
     since_ts = _parse_since(since)
 
+    # Try persisted log file first
     if log_uri and log_uri.startswith("/"):
         try:
             from collections import deque
 
             with open(log_uri) as f:
-                if tail_lines:
-                    lines_raw = deque(f, maxlen=tail_lines)
+                if tail:
+                    lines_raw = deque(f, maxlen=tail)
                     lines = list(lines_raw)
                 else:
                     lines = list(f)
             lines = _filter_lines(lines, since_ts)
-            logs = "".join(lines)
+            log_content = "".join(lines)
         except FileNotFoundError:
-            logs = None
+            log_content = None
 
-    if logs is None:
-        # Fallback to backend live logs
+    # Fallback to backend live logs
+    if log_content is None:
         backend = row.get("backend_type") or "local"
-        handle = row.get("backend_handle") or stage_run_id
+        handle = row.get("backend_handle") or run_id
         try:
             if backend == "local":
-                logs = _get_stage_executor().local_executor.get_container_logs(
-                    handle, tail_lines=tail_lines, since=since
+                log_content = _get_stage_executor().local_executor.get_container_logs(
+                    handle, tail_lines=tail, since=since
                 )
             elif backend == "gce":
-                logs = _get_stage_executor().gce_launcher.get_instance_logs(handle, tail_lines=tail_lines, since=since)
-                if logs is None:
-                    logs = "[GCE logs unavailable - not yet synced]"
+                log_content = _get_stage_executor().gce_launcher.get_instance_logs(handle, tail_lines=tail, since=since)
+                if log_content is None:
+                    log_content = "[GCE logs unavailable - not yet synced]"
             else:
-                logs = "Logs not available"
+                log_content = "Logs not available"
         except Exception as e:
-            logs = f"[Error fetching logs: {e}]"
+            log_content = f"[Error fetching logs: {e}]"
 
     return {
-        "stage_run_id": stage_run_id,
+        "run_id": run_id,
         "status": row.get("status"),
-        "logs": logs,
+        "logs": log_content,
         "log_uri": log_uri,
     }
 
 
 @mcp.tool()
-def get_outputs(stage_run_id: str) -> dict:
-    """Return outputs recorded for a stage run."""
-    db = _get_db()
-    row = db.get_stage_run(stage_run_id)
-    if not row:
-        raise GoldfishError(f"Stage run not found: {stage_run_id}")
-    outputs = json.loads(row["outputs_json"]) if row.get("outputs_json") else []
-    result: dict[str, Any] = GetOutputsResponse(stage_run_id=stage_run_id, outputs=outputs).model_dump(mode="json")
-    return result
+def cancel(run_id: str, reason: str) -> dict:
+    """Cancel a running stage.
 
+    Args:
+        run_id: The run ID to cancel
+        reason: Why cancelling (min 15 chars)
 
-@mcp.tool()
-def get_run(stage_run_id: str) -> dict:
-    """One-stop view: metadata + inputs + outputs + config."""
-    db = _get_db()
-    row = db.get_stage_run(stage_run_id)
-    if not row:
-        raise GoldfishError(f"Stage run not found: {stage_run_id}")
-    result: dict[str, Any] = GetRunResponse(
-        stage_run=_stage_run_row_to_info(row),
-        inputs=json.loads(row["inputs_json"]) if row.get("inputs_json") else {},
-        outputs=json.loads(row["outputs_json"]) if row.get("outputs_json") else [],
-        config=json.loads(row["config_json"]) if row.get("config_json") else {},
-    ).model_dump(mode="json")
-    return result
-
-
-@mcp.tool()
-def cancel_run(stage_run_id: str, reason: str) -> dict:
-    """Cancel a running stage (local or GCE)."""
+    Returns:
+        Dict with success status and previous_status
+    """
     config = _get_config()
     validate_reason(reason, config.audit.min_reason_length)
 
     db = _get_db()
-    row = db.get_stage_run(stage_run_id)
+    row = db.get_stage_run(run_id)
     if not row:
-        raise GoldfishError(f"Stage run not found: {stage_run_id}")
+        raise GoldfishError(f"Run not found: {run_id}")
 
     backend = row.get("backend_type") or "local"
-    handle = row.get("backend_handle") or stage_run_id
+    handle = row.get("backend_handle") or run_id
 
     # Attempt state change atomically: only if still running
     updated = 0
@@ -439,19 +294,19 @@ def cancel_run(stage_run_id: str, reason: str) -> dict:
             (
                 datetime.now(UTC).isoformat(),
                 f"Canceled: {reason}",
-                stage_run_id,
+                run_id,
             ),
         ).rowcount
 
     if updated == 0:
         fail_result: dict[str, Any] = CancelRunResponse(
             success=False,
-            error="Stage is not running (already completed/failed/canceled)",
+            error="Run is not running (already completed/failed/canceled)",
             previous_status=row.get("status"),
         ).model_dump(mode="json")
         return fail_result
 
-    # Best-effort backend stop; ignore failures
+    # Best-effort backend stop
     try:
         if backend == "local":
             _get_stage_executor().local_executor.stop_container(handle)
@@ -467,233 +322,59 @@ def cancel_run(stage_run_id: str, reason: str) -> dict:
 
 
 @mcp.tool()
-def list_jobs(
-    status: str | None = None,
+def list_runs(
     workspace: str | None = None,
+    stage: str | None = None,
+    status: str | None = None,
+    pipeline_run_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
-) -> ListJobsResponse:
-    """List jobs with optional filters and pagination.
-
-    Args:
-        status: Filter by status (pending, running, completed, failed, cancelled)
-        workspace: Filter by workspace name
-        limit: Maximum number of jobs to return (default 50, max 200)
-        offset: Number of jobs to skip for pagination (default 0)
-    """
-    db = _get_db()
-
-    # Validate limit bounds
-    if limit < 1:
-        raise GoldfishError("limit must be at least 1")
-    if limit > 200:
-        raise GoldfishError("limit cannot exceed 200")
-
-    # Validate offset bounds
-    if offset < 0:
-        raise GoldfishError("offset must be non-negative")
-
-    # Validate workspace if provided
-    if workspace:
-        validate_workspace_name(workspace)
-
-    # Validate status if provided
-    valid_statuses = {"pending", "running", "completed", "failed", "cancelled"}
-    if status and status not in valid_statuses:
-        raise GoldfishError(f"Invalid status. Must be one of: {', '.join(sorted(valid_statuses))}")
-
-    # Get total count for pagination
-    total_count = db.count_jobs(status=status, workspace=workspace)
-
-    # Get jobs from database with pagination
-    jobs_raw = db.list_jobs(status=status, workspace=workspace, limit=limit, offset=offset)
-
-    from goldfish.jobs.conversion import job_dict_to_info
-
-    jobs = [job_dict_to_info(j, db) for j in jobs_raw]
-
-    filters = {}
-    if status:
-        filters["status"] = status
-    if workspace:
-        filters["workspace"] = workspace
-
-    return ListJobsResponse(
-        jobs=jobs,
-        total_count=total_count,
-        offset=offset,
-        limit=limit,
-        has_more=(offset + len(jobs)) < total_count,
-        filters_applied=filters,
-    )
-
-
-# ============== SOURCE TOOLS ==============
-
-
-@mcp.tool()
-def run_stage(
-    workspace: str,
-    stage: str,
-    pipeline: str | None = None,
-    config_override: dict | None = None,
-    inputs_override: dict | None = None,
-    reason: str | None = None,
-    wait: bool = False,
 ) -> dict:
-    """Run a single pipeline stage.
+    """List runs (newest first).
 
     Args:
-        workspace: Workspace name (e.g., "baseline_lstm") or slot (e.g., "w1")
-        stage: Stage name (e.g., "tokenize")
-        config_override: Override config env vars (e.g., {"VOCAB_SIZE": "20000"})
-        inputs_override: Override input sources for debugging
-        reason: Why running this stage (min 15 chars)
-        wait: When False (default) return immediately after launch; when True block until completion.
-
-    Non-blocking usage:
-        - wait=False returns as soon as the container/instance is launched
-        - use stage_status()/stage_logs() to monitor progress
-        - progress field will advance through build → launch → running → finalizing
+        workspace: Filter by workspace name
+        stage: Filter by stage name
+        status: Filter by status (pending, running, completed, failed, canceled)
+        pipeline_run_id: Filter by pipeline run
+        limit: Max results (default 50)
+        offset: Pagination offset
 
     Returns:
-        Dict with:
-        - stage_run_id: Stage run identifier
-        - workspace: Workspace name
-        - version: Auto-created version (e.g., "v1")
-        - stage: Stage name
-        - status: Job status ("running", "pending")
-
-    Auto-creates workspace version (git tag).
+        Dict with runs list, total_count, has_more
     """
-    config = _get_config()
-    workspace_manager = _get_workspace_manager()
-    stage_executor = _get_stage_executor()
-
-    validate_workspace_name(workspace)
-    if reason:
-        validate_reason(reason, config.audit.min_reason_length)
-
-    # Resolve workspace (could be slot like "w1")
-    workspace_name = workspace_manager.get_workspace_for_slot(workspace)
-    if not workspace_name:
-        workspace_name = workspace
-
-    stage_run = stage_executor.run_stage(
-        workspace=workspace_name,
+    db = _get_db()
+    rows = db.list_stage_runs_with_total(
+        workspace_name=workspace,
         stage_name=stage,
-        pipeline_name=pipeline,
-        config_override=config_override or {},
-        inputs_override=inputs_override or {},
-        reason=reason or "Manual stage run",
-        wait=wait,
+        status=status,
+        pipeline_run_id=pipeline_run_id,
+        limit=limit,
+        offset=offset,
     )
-
-    result: dict[str, Any] = stage_run.model_dump(mode="json")
+    total = rows[0]["total_count"] if rows else 0
+    result: dict[str, Any] = ListRunsResponse(
+        runs=[_stage_run_row_to_info(r) for r in rows],
+        total_count=total,
+        has_more=offset + len(rows) < total,
+    ).model_dump(mode="json")
     return result
 
 
 @mcp.tool()
-def run_pipeline(
-    workspace: str,
-    pipeline: str | None = None,
-    config_override: dict | None = None,
-    reason: str | None = None,
-    async_mode: bool = True,
-) -> dict:
-    """Run full pipeline (all stages in sequence).
+def get_outputs(run_id: str) -> dict:
+    """Get outputs from a completed run.
 
     Args:
-        workspace: Workspace name or slot
-        pipeline: Named pipeline file under pipelines/<name>.yaml (default pipeline.yaml)
-        config_override: Dict of {stage_name: {var: value}}
-        reason: Why running this pipeline (min 15 chars)
-        async_mode: True (default) enqueues stages and returns immediately; False runs sequentially and blocks.
-
-    Non-blocking usage:
-        - async_mode=True returns pipeline_run_id plus any immediately launched stages
-        - use list_runs(pipeline_run_id=...) and stage_status() to follow execution
-        - cancel_run(stage_run_id) and get_outputs() operate on returned stage_run_ids
+        run_id: The run ID
 
     Returns:
-        Dict with:
-        - runs: List of stage run info dicts
-
-    Auto-creates workspace version (git tag).
+        Dict with run_id and outputs list
     """
-    config = _get_config()
-    workspace_manager = _get_workspace_manager()
-    pipeline_executor = _get_pipeline_executor()
-
-    validate_workspace_name(workspace)
-    if reason:
-        validate_reason(reason, config.audit.min_reason_length)
-
-    # Resolve workspace
-    workspace_name = workspace_manager.get_workspace_for_slot(workspace)
-    if not workspace_name:
-        workspace_name = workspace
-
-    runs: dict[str, Any] = pipeline_executor.run_pipeline(
-        workspace=workspace_name,
-        pipeline_name=pipeline,
-        config_override=config_override or {},
-        reason=reason or "Manual pipeline run",
-        async_mode=async_mode,
-    )
-
-    return runs
-
-
-@mcp.tool()
-def run_partial_pipeline(
-    workspace: str,
-    from_stage: str,
-    to_stage: str,
-    pipeline: str | None = None,
-    config_override: dict | None = None,
-    reason: str | None = None,
-    async_mode: bool = True,
-) -> dict:
-    """Run stages from_stage through to_stage (inclusive).
-
-    Args:
-        workspace: Workspace name or slot
-        pipeline: Optional pipeline name (pipelines/<name>.yaml). Defaults to pipeline.yaml
-        from_stage: First stage to run
-        to_stage: Last stage to run (inclusive)
-        config_override: Dict of {stage_name: {var: value}}
-        reason: Why running these stages (min 15 chars)
-
-    Returns:
-        Dict with:
-        - stage_runs: List of stage run info dicts
-    """
-    config = _get_config()
-    workspace_manager = _get_workspace_manager()
-    pipeline_executor = _get_pipeline_executor()
-
-    validate_workspace_name(workspace)
-    if reason:
-        validate_reason(reason, config.audit.min_reason_length)
-
-    # Resolve workspace
-    workspace_name = workspace_manager.get_workspace_for_slot(workspace)
-    if not workspace_name:
-        workspace_name = workspace
-
-    runs = pipeline_executor.run_partial_pipeline(
-        workspace=workspace_name,
-        pipeline_name=pipeline,
-        from_stage=from_stage,
-        to_stage=to_stage,
-        config_override=config_override or {},
-        reason=reason or "Manual partial pipeline run",
-        async_mode=async_mode,
-    )
-
-    runs_typed: dict[str, Any] = runs
-    return runs_typed
-
-
-# ============== ENTRY POINT ==============
+    db = _get_db()
+    row = db.get_stage_run(run_id)
+    if not row:
+        raise GoldfishError(f"Run not found: {run_id}")
+    outputs = json.loads(row["outputs_json"]) if row.get("outputs_json") else []
+    result: dict[str, Any] = GetOutputsResponse(stage_run_id=run_id, outputs=outputs).model_dump(mode="json")
+    return result

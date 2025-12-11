@@ -1,100 +1,12 @@
-"""Tests for cancel_job() tool - P2.
+"""Tests for cancel functionality.
 
-TDD: Write failing tests first, then implement.
+Tests for the internal JobTracker.cancel_job method.
+The MCP cancel() tool tests are in test_execution_tools.py.
 """
 
 from unittest.mock import MagicMock
 
 import pytest
-
-
-class TestCancelJobTool:
-    """Tests for cancel_job tool."""
-
-    def test_cancel_job_cancels_running_job(self, temp_dir):
-        """cancel_job should cancel a running job."""
-        from goldfish import server
-        from goldfish.models import CancelJobResponse
-
-        mock_config = MagicMock()
-        mock_config.audit.min_reason_length = 15
-
-        mock_job_tracker = MagicMock()
-        mock_job_tracker.cancel_job.return_value = CancelJobResponse(
-            success=True,
-            job_id="job-a1b2c3d4",
-            previous_status="running",
-            state_md="# State",
-        )
-
-        mock_state_manager = MagicMock()
-        mock_state_manager.regenerate.return_value = "# State"
-
-        mock_workspace_manager = MagicMock()
-        mock_workspace_manager.get_all_slots.return_value = []
-
-        mock_db = MagicMock()
-        mock_db.get_active_jobs.return_value = []
-        mock_db.list_sources.return_value = []
-
-        server.configure_server(
-            project_root=temp_dir,
-            config=mock_config,
-            db=mock_db,
-            workspace_manager=mock_workspace_manager,
-            state_manager=mock_state_manager,
-            job_launcher=MagicMock(),
-            job_tracker=mock_job_tracker,
-            pipeline_manager=MagicMock(),
-            dataset_registry=MagicMock(),
-            stage_executor=MagicMock(),
-            pipeline_executor=MagicMock(),
-        )
-
-        try:
-            cancel_fn = server.cancel_job.fn if hasattr(server.cancel_job, "fn") else server.cancel_job
-            result = cancel_fn(
-                job_id="job-a1b2c3d4",
-                reason="Job taking too long, need to iterate",
-            )
-
-            assert result.success is True
-            assert result.job_id == "job-a1b2c3d4"
-            mock_job_tracker.cancel_job.assert_called_once()
-        finally:
-            server.reset_server()
-
-    def test_cancel_job_validates_reason(self, temp_dir):
-        """cancel_job should validate reason length."""
-        from goldfish import server
-        from goldfish.errors import GoldfishError
-
-        mock_config = MagicMock()
-        mock_config.audit.min_reason_length = 15
-
-        server.configure_server(
-            project_root=temp_dir,
-            config=mock_config,
-            db=MagicMock(),
-            workspace_manager=MagicMock(),
-            state_manager=MagicMock(),
-            job_launcher=MagicMock(),
-            job_tracker=MagicMock(),
-            pipeline_manager=MagicMock(),
-            dataset_registry=MagicMock(),
-            stage_executor=MagicMock(),
-            pipeline_executor=MagicMock(),
-        )
-
-        try:
-            cancel_fn = server.cancel_job.fn if hasattr(server.cancel_job, "fn") else server.cancel_job
-            with pytest.raises(GoldfishError):
-                cancel_fn(
-                    job_id="job-a1b2c3d4",
-                    reason="short",  # Too short
-                )
-        finally:
-            server.reset_server()
 
 
 class TestJobTrackerCancel:
