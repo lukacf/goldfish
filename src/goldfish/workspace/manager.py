@@ -15,6 +15,7 @@ is just a directory of plain files with a `.goldfish-mount` metadata file.
 import fcntl
 import json
 import os
+import warnings
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +39,7 @@ from goldfish.models import (
     HibernateResponse,
     MountResponse,
     RollbackResponse,
+    SaveVersionResponse,
     SlotInfo,
     SlotState,
     WorkflowInfo,
@@ -620,10 +622,19 @@ class WorkspaceManager:
         # Apply pagination
         return workspaces[offset : offset + limit]
 
-    def checkpoint(self, slot: str, message: str) -> CheckpointResponse:
-        """Create a snapshot of the current slot state.
+    def save_version(self, slot: str, message: str) -> SaveVersionResponse:
+        """Create a version of the current slot state.
 
-        Copy-based checkpoint: Syncs slot changes to branch, commits, and tags.
+        Syncs slot changes to branch, commits, and creates a tagged version.
+        The version (v1, v2, etc.) is the primary identifier for rollback
+        and branching operations.
+
+        Args:
+            slot: Slot to save version from (w1, w2, or w3)
+            message: Describe what this version represents (min 15 chars)
+
+        Returns:
+            SaveVersionResponse with version as primary identifier
         """
         self._validate_slot(slot)
         validate_reason(message, self.config.audit.min_reason_length)
@@ -636,32 +647,78 @@ class WorkspaceManager:
         workspace = slot_info.workspace
         if workspace is None:
             raise SlotEmptyError(f"Slot {slot} has no workspace")
-        snapshot_id = self.git.create_snapshot_copy_based(slot_path, workspace, message)
+        git_tag, git_sha = self.git.create_snapshot_copy_based(slot_path, workspace, message)
+
+        # Ensure workspace lineage exists in database
+        if not self.db.workspace_exists(workspace):
+            self.db.create_workspace_lineage(
+                workspace_name=workspace,
+                description="Auto-created for save_version",
+            )
+
+        # Register version in database (critical for branching/lineage)
+        version = self.db.get_next_version_number(workspace)
+        self.db.create_version(
+            workspace_name=workspace,
+            version=version,
+            git_tag=git_tag,
+            git_sha=git_sha,
+            created_by="save_version",
+            description=message,
+        )
 
         # Log to audit
         self.db.log_audit(
-            operation="checkpoint",
+            operation="save_version",
             slot=slot,
             workspace=slot_info.workspace,
             reason=message,
-            details={"snapshot_id": snapshot_id},
+            details={"version": version, "git_tag": git_tag, "git_sha": git_sha},
         )
 
         # Update per-workspace STATE.md
-        self._write_workspace_state_md(slot_path, workspace, slot, event=f"Checkpoint {snapshot_id}: {message[:30]}")
+        self._write_workspace_state_md(slot_path, workspace, slot, event=f"Version {version}: {message[:30]}")
 
         # Update global STATE.md
         if self.state_manager:
-            self.state_manager.add_action(f"Checkpoint {snapshot_id}: {message[:40]}...")
+            self.state_manager.add_action(f"Version {version}: {message[:40]}...")
 
         state_md = self._regenerate_state_md()
 
-        return CheckpointResponse(
+        return SaveVersionResponse(
             success=True,
             slot=slot,
-            snapshot_id=snapshot_id,
+            version=version,
+            git_tag=git_tag,
+            git_sha=git_sha,
             message=message,
             state_md=state_md,
+        )
+
+    def checkpoint(self, slot: str, message: str) -> CheckpointResponse:
+        """Create a snapshot of the current slot state.
+
+        DEPRECATED: Use save_version() instead. checkpoint() will be removed
+        in a future version.
+
+        Copy-based checkpoint: Syncs slot changes to branch, commits, and tags.
+        """
+        warnings.warn(
+            "checkpoint() is deprecated, use save_version() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        # Use save_version internally
+        result = self.save_version(slot, message)
+
+        # Return old-style response for backwards compatibility
+        return CheckpointResponse(
+            success=result.success,
+            slot=result.slot,
+            snapshot_id=result.git_tag,  # Map git_tag to old snapshot_id field
+            message=result.message,
+            state_md=result.state_md,
         )
 
     def sync_and_version(self, slot: str, stage_name: str, reason: str | None = None) -> tuple[str, str]:
@@ -809,14 +866,14 @@ class WorkspaceManager:
             diff_text=diff_text,
         )
 
-    def rollback(self, slot: str, snapshot_id: str, reason: str) -> RollbackResponse:
-        """Rollback a slot to a previous snapshot.
+    def rollback(self, slot: str, version: str, reason: str) -> RollbackResponse:
+        """Rollback a slot to a previous version.
 
-        Discards all changes since the snapshot.
+        Discards all changes since the version.
 
         Args:
             slot: Slot to rollback
-            snapshot_id: Snapshot to rollback to
+            version: Version to rollback to (e.g., "v1", "v2")
             reason: Why rolling back (min 15 chars)
 
         Returns:
@@ -829,33 +886,45 @@ class WorkspaceManager:
         if slot_info.state == SlotState.EMPTY:
             raise SlotEmptyError(f"Slot {slot} is empty")
 
+        workspace = slot_info.workspace
+        if workspace is None:
+            raise SlotEmptyError(f"Slot {slot} has no workspace")
+
+        # Look up version to get git_tag
+        version_info = self.db.get_version(workspace, version)
+        if version_info is None:
+            raise GoldfishError(f"Version '{version}' not found for workspace '{workspace}'")
+
+        git_tag = version_info["git_tag"]
         slot_path = self._slot_path(slot)
 
-        # Perform the rollback
-        files_reverted = self.git.checkout_snapshot(slot_path, snapshot_id)
+        # Perform the rollback using git_tag (copy-based)
+        files_reverted = self.git.checkout_snapshot_copy_based(slot_path, git_tag)
 
         # Log to audit
         self.db.log_audit(
             operation="rollback",
             slot=slot,
-            workspace=slot_info.workspace,
+            workspace=workspace,
             reason=reason,
             details={
-                "snapshot_id": snapshot_id,
+                "version": version,
+                "git_tag": git_tag,
                 "files_reverted": files_reverted,
             },
         )
 
         # Update STATE.md
         if self.state_manager:
-            self.state_manager.add_action(f"Rolled back {slot} to {snapshot_id} ({files_reverted} files)")
+            self.state_manager.add_action(f"Rolled back {slot} to {version} ({files_reverted} files)")
 
         state_md = self._regenerate_state_md()
 
         return RollbackResponse(
             success=True,
             slot=slot,
-            snapshot_id=snapshot_id,
+            version=version,
+            git_tag=git_tag,
             files_reverted=files_reverted,
             state_md=state_md,
         )
