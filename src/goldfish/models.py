@@ -526,3 +526,36 @@ class CancelRunResponse(BaseModel):
     success: bool
     previous_status: str | None = None
     error: str | None = None
+
+
+# --- Run Reason Structure ---
+
+
+class RunReason(BaseModel):
+    """Structured reason for running stages with experiment hypothesis and goals."""
+
+    description: str  # Brief description of what's being run
+    hypothesis: str | None = None  # What you expect to happen
+    approach: str | None = None  # How you're implementing/testing the hypothesis
+    minimum_acceptable_result: str | None = None  # Minimum bar for success
+    optimal_result: str | None = None  # Best case outcome
+
+    def to_summary(self) -> str:
+        """Convert to a single-line summary for display."""
+        parts = [self.description]
+        if self.hypothesis:
+            parts.append(f"H: {self.hypothesis}")
+        return " | ".join(parts)
+
+    def to_markdown(self) -> str:
+        """Convert to markdown format for STATE.md."""
+        lines = [f"**Description:** {self.description}"]
+        if self.hypothesis:
+            lines.append(f"**Hypothesis:** {self.hypothesis}")
+        if self.approach:
+            lines.append(f"**Approach:** {self.approach}")
+        if self.minimum_acceptable_result:
+            lines.append(f"**Min Result:** {self.minimum_acceptable_result}")
+        if self.optimal_result:
+            lines.append(f"**Optimal Result:** {self.optimal_result}")
+        return "\n".join(lines)

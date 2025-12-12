@@ -17,6 +17,7 @@ from goldfish.models import (
     CancelRunResponse,
     GetOutputsResponse,
     GetRunResponse,
+    RunReason,
     StageRunInfo,
 )
 from goldfish.server import (
@@ -49,8 +50,9 @@ def run(
     pipeline: str | None = None,
     config_override: dict | None = None,
     inputs_override: dict | None = None,
-    reason: str | None = None,
+    reason: str | dict | None = None,
     wait: bool = False,
+    skip_review: bool = False,
 ) -> dict:
     """Run pipeline stages.
 
@@ -64,31 +66,114 @@ def run(
         config_override: Override config vars. For single stage: {"VAR": "value"}.
                         For multiple stages: {"stage_name": {"VAR": "value"}}
         inputs_override: Override input sources for debugging
-        reason: Why running (min 15 chars)
+        reason: Why running - can be:
+            - String (min 15 chars) for backward compatibility
+            - Dict with structured fields:
+                {
+                    "description": "What's being run",
+                    "hypothesis": "What you expect to happen",
+                    "approach": "How you're testing it",
+                    "minimum_acceptable_result": "Min bar for success",
+                    "optimal_result": "Best case outcome"
+                }
         wait: False (default) returns immediately; True blocks until completion
+        skip_review: Skip pre-run review (if enabled in config)
 
     Returns:
         Dict with:
         - runs: List of stage run info (run_id, workspace, version, stage, status)
         - pipeline_run_id: If running multiple stages
+        - review: Review decision (if review was performed)
 
     Examples:
         run("w1")                           # Run all stages
         run("w1", stages=["train"])         # Run single stage
         run("w1", stages=["preprocess", "train", "evaluate"])  # Run specific stages
+        run("w1", reason={"description": "Test new architecture", "hypothesis": "Will improve accuracy"})
     """
     config = _get_config()
     workspace_manager = _get_workspace_manager()
     pipeline_executor = _get_pipeline_executor()
 
     validate_workspace_name(workspace)
+
+    # Parse reason into RunReason object
+    run_reason: RunReason | None = None
+    reason_str: str = "Run stages"
+
     if reason:
-        validate_reason(reason, config.audit.min_reason_length)
+        if isinstance(reason, dict):
+            # Structured reason
+            try:
+                run_reason = RunReason(**reason)
+                reason_str = run_reason.to_summary()
+                # Validate minimum length of description
+                validate_reason(run_reason.description, config.audit.min_reason_length)
+            except Exception as e:
+                raise GoldfishError(f"Invalid structured reason: {e}") from e
+        elif isinstance(reason, str):
+            # Simple string reason (backward compatibility)
+            validate_reason(reason, config.audit.min_reason_length)
+            reason_str = reason
+            run_reason = RunReason(description=reason)
+        else:
+            raise GoldfishError("reason must be a string or dict")
 
     # Resolve workspace (could be slot like "w1")
     workspace_name = workspace_manager.get_workspace_for_slot(workspace)
     if not workspace_name:
         workspace_name = workspace
+
+    # Pre-run review (if enabled)
+    review_result = None
+    if config.pre_run_review.enabled and not skip_review:
+        from goldfish.pre_run_review import create_reviewer_from_config
+
+        # Get workspace path and diff
+        workspace_path = workspace_manager.get_workspace_path(workspace_name)
+        diff_output = ""
+
+        # Get git diff if workspace is mounted
+        slot = workspace_manager.find_slot_for_workspace(workspace_name)
+        if slot:
+            try:
+                import subprocess
+
+                slot_path = workspace_manager.get_slot_path(slot)
+                diff_result = subprocess.run(
+                    ["git", "diff", "HEAD"],
+                    cwd=slot_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                diff_output = diff_result.stdout
+            except Exception as e:
+                logger.warning(f"Failed to get diff for review: {e}")
+
+        # Skip review if no changes and configured to do so
+        if config.pre_run_review.skip_on_no_changes and not diff_output.strip():
+            review_result = {"skipped": True, "reason": "no uncommitted changes"}
+        else:
+            # Perform review
+            reviewer = create_reviewer_from_config(config.pre_run_review.model_dump())
+            decision = reviewer.review_run(
+                workspace_path=workspace_path,
+                diff_output=diff_output,
+                run_reason=run_reason,
+                stage_names=stages or ["all"],
+                pipeline_name=pipeline,
+            )
+
+            review_result = decision.model_dump()
+
+            # Block run if not approved and require_approval is True
+            if not decision.approved and config.pre_run_review.require_approval:
+                return {
+                    "success": False,
+                    "error": "Run blocked by pre-run review",
+                    "review": review_result,
+                }
 
     # Unified execution through run_stages
     result: dict[str, Any] = pipeline_executor.run_stages(
@@ -97,9 +182,15 @@ def run(
         pipeline_name=pipeline,
         config_override=config_override or {},
         inputs_override=inputs_override or {},
-        reason=reason or "Run stages",
+        reason=reason_str,
+        reason_structured=run_reason,
         async_mode=not wait,
     )
+
+    # Add review result to response if review was performed
+    if review_result:
+        result["review"] = review_result
+
     return result
 
 

@@ -77,6 +77,7 @@ class Database:
                 ("outputs_json", "TEXT"),
                 ("config_json", "TEXT"),
                 ("inputs_json", "TEXT"),
+                ("reason_json", "TEXT"),  # Structured RunReason
                 ("backend_type", "TEXT"),
                 ("backend_handle", "TEXT"),
                 ("artifact_uri", "TEXT"),
@@ -1035,6 +1036,7 @@ class Database:
         hints: dict | None = None,
         config: dict | None = None,
         inputs: dict | None = None,
+        reason: dict | None = None,
         backend_type: str | None = None,
         backend_handle: str | None = None,
     ) -> None:
@@ -1052,6 +1054,7 @@ class Database:
             hints: Hint dict
             config: Full merged config (base + overrides, computed by caller)
             inputs: Resolved input URIs/refs
+            reason: Structured RunReason dict (description, hypothesis, approach, etc.)
             backend_type: local|gce
             backend_handle: container_id or instance_name for cancel/logs
         """
@@ -1059,14 +1062,15 @@ class Database:
         config_json = json.dumps(config) if config is not None else None
         hints_json = json.dumps(hints) if hints else None
         inputs_json = json.dumps(inputs) if inputs else None
+        reason_json = json.dumps(reason) if reason else None
 
         with self._conn() as conn:
             conn.execute(
                 """
                 INSERT INTO stage_runs
                 (id, job_id, pipeline_run_id, workspace_name, pipeline_name, version, stage_name, status,
-                 started_at, profile, hints_json, config_json, inputs_json, backend_type, backend_handle)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+                 started_at, profile, hints_json, config_json, inputs_json, reason_json, backend_type, backend_handle)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stage_run_id,
@@ -1081,6 +1085,7 @@ class Database:
                     hints_json,
                     config_json,
                     inputs_json,
+                    reason_json,
                     backend_type,
                     backend_handle,
                 ),
