@@ -586,6 +586,71 @@ class GitLayer:
 
         return metadata
 
+    def checkout_snapshot_copy_based(self, slot_path: Path, git_tag: str) -> int:
+        """Checkout a snapshot/version in a copy-based workspace.
+
+        Replaces slot contents with the contents at the specified git tag.
+        Works with copy-based workspaces (no .git in slot).
+
+        Args:
+            slot_path: Path to the user workspace slot
+            git_tag: Git tag/version to checkout (e.g., "snap-xxx" or branch ref)
+
+        Returns:
+            Number of files changed (approximate)
+        """
+        # Read current metadata to preserve workspace_name
+        metadata_file = slot_path / ".goldfish-mount"
+        if not metadata_file.exists():
+            raise GoldfishError(f"Slot '{slot_path}' is not a Goldfish workspace")
+
+        metadata = json.loads(metadata_file.read_text())
+
+        # Count files before
+        files_before = set()
+        for f in slot_path.rglob("*"):
+            if f.is_file() and ".goldfish-mount" not in str(f):
+                files_before.add(f.relative_to(slot_path))
+
+        # Clear slot contents (except metadata)
+        for item in slot_path.iterdir():
+            if item.name != ".goldfish-mount":
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+
+        # Extract contents from git tag
+        tar_path = slot_path.parent / f".{slot_path.name}.tar"
+
+        try:
+            # Export tag content to tar
+            self._run_git("archive", git_tag, "--format=tar", f"--output={tar_path}", cwd=self.dev_repo)
+
+            # Extract to slot
+            with tarfile.open(tar_path) as tar:
+                tar.extractall(slot_path)
+        finally:
+            # Clean up tar file
+            if tar_path.exists():
+                tar_path.unlink()
+
+        # Count files after
+        files_after = set()
+        for f in slot_path.rglob("*"):
+            if f.is_file() and ".goldfish-mount" not in str(f):
+                files_after.add(f.relative_to(slot_path))
+
+        # Update metadata with new SHA
+        tag_sha = self._run_git("rev-parse", git_tag, cwd=self.dev_repo)[0].strip()
+        metadata["mounted_sha"] = tag_sha
+        metadata["mounted_at"] = datetime.now(UTC).isoformat()
+        metadata["rolledback_to"] = git_tag
+        metadata_file.write_text(json.dumps(metadata, indent=2))
+
+        # Return count of changed files
+        return len(files_before.symmetric_difference(files_after))
+
     def _sync_directory(
         self,
         src: Path,
@@ -765,7 +830,7 @@ class GitLayer:
 
         return sha
 
-    def create_snapshot_copy_based(self, slot_path: Path, workspace_name: str, message: str) -> str:
+    def create_snapshot_copy_based(self, slot_path: Path, workspace_name: str, message: str) -> tuple[str, str]:
         """Create a snapshot for copy-based mounting.
 
         Syncs slot changes to branch, commits, and creates a snapshot tag.
@@ -776,7 +841,7 @@ class GitLayer:
             message: Snapshot message
 
         Returns:
-            The snapshot ID (snap-{sha}-{timestamp})
+            Tuple of (snapshot_id, git_sha) where snapshot_id is snap-{sha}-{timestamp}
         """
         # Sync changes to branch and commit
         sha = self.sync_slot_to_branch(slot_path, workspace_name, message)
@@ -787,4 +852,4 @@ class GitLayer:
 
         self._run_git("tag", snapshot_id, sha, cwd=self.dev_repo)
 
-        return snapshot_id
+        return snapshot_id, sha
