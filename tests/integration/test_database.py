@@ -187,6 +187,150 @@ class TestDatabaseOperationHelpers:
         assert job is None
 
 
+class TestPipelineRunStatus:
+    """Tests for pipeline run status and queue queries."""
+
+    def test_get_pipeline_run_status_returns_none_for_nonexistent(self, temp_dir):
+        """Should return None when pipeline run doesn't exist."""
+        db = Database(temp_dir / "test.db")
+        result = db.get_pipeline_run_status("prun-nonexistent")
+        assert result is None
+
+    def test_get_pipeline_run_status_returns_pipeline_info(self, temp_dir):
+        """Should return pipeline run info with queue status."""
+        db = Database(temp_dir / "test.db")
+
+        # Create pipeline run
+        with db._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO pipeline_runs (id, workspace_name, pipeline_name, status, started_at)
+                VALUES ('prun-test123', 'my_workspace', 'pipeline.yaml', 'running', '2024-01-01T12:00:00')
+                """
+            )
+            # Add queue entries
+            conn.execute(
+                """
+                INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, status, deps)
+                VALUES ('prun-test123', 'preprocess', 'completed', '[]')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, status, deps)
+                VALUES ('prun-test123', 'train', 'running', '["preprocess"]')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, status, deps)
+                VALUES ('prun-test123', 'evaluate', 'pending', '["train"]')
+                """
+            )
+
+        result = db.get_pipeline_run_status("prun-test123")
+
+        assert result is not None
+        assert result["pipeline_run_id"] == "prun-test123"
+        assert result["workspace"] == "my_workspace"
+        assert result["pipeline"] == "pipeline.yaml"
+        assert result["status"] == "running"
+        assert result["started_at"] == "2024-01-01T12:00:00"
+        assert result["completed_at"] is None
+        assert result["error"] is None
+        assert len(result["queue"]) == 3
+        assert result["queue"][0]["stage_name"] == "preprocess"
+        assert result["queue"][0]["status"] == "completed"
+        assert result["queue"][1]["stage_name"] == "train"
+        assert result["queue"][1]["status"] == "running"
+        assert result["queue"][2]["stage_name"] == "evaluate"
+        assert result["queue"][2]["status"] == "pending"
+
+    def test_get_queued_stages_for_pipeline_returns_pending_entries(self, temp_dir):
+        """Should return stages that are queued but not yet have stage_runs."""
+        db = Database(temp_dir / "test.db")
+
+        # Create pipeline run
+        with db._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO pipeline_runs (id, workspace_name, pipeline_name, status, started_at)
+                VALUES ('prun-queue123', 'test_ws', 'pipeline.yaml', 'running', '2024-01-01T12:00:00')
+                """
+            )
+            # Add queue entries - some with stage_run_id (already started), some without
+            conn.execute(
+                """
+                INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, status, stage_run_id)
+                VALUES ('prun-queue123', 'preprocess', 'completed', 'stage-abc123')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, status, stage_run_id)
+                VALUES ('prun-queue123', 'train', 'pending', NULL)
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, status, stage_run_id)
+                VALUES ('prun-queue123', 'evaluate', 'pending', NULL)
+                """
+            )
+
+        result = db.get_queued_stages_for_pipeline("prun-queue123")
+
+        # Should only return entries without stage_run_id that are pending/running
+        assert len(result) == 2
+        assert result[0]["stage_name"] == "train"
+        assert result[0]["status"] == "pending"
+        assert result[1]["stage_name"] == "evaluate"
+        assert result[1]["status"] == "pending"
+
+    def test_get_queued_stages_for_pipeline_excludes_completed(self, temp_dir):
+        """Should not return completed/failed/canceled entries without stage_run_id."""
+        db = Database(temp_dir / "test.db")
+
+        # Create pipeline run
+        with db._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO pipeline_runs (id, workspace_name, pipeline_name, status, started_at)
+                VALUES ('prun-exclude', 'test_ws', 'pipeline.yaml', 'completed', '2024-01-01T12:00:00')
+                """
+            )
+            # All entries don't have stage_run_id but are in terminal states
+            conn.execute(
+                """
+                INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, status, stage_run_id)
+                VALUES ('prun-exclude', 'stage1', 'completed', NULL)
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, status, stage_run_id)
+                VALUES ('prun-exclude', 'stage2', 'failed', NULL)
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, status, stage_run_id)
+                VALUES ('prun-exclude', 'stage3', 'canceled', NULL)
+                """
+            )
+
+        result = db.get_queued_stages_for_pipeline("prun-exclude")
+
+        # Should return empty - all entries are in terminal states
+        assert len(result) == 0
+
+    def test_get_queued_stages_for_pipeline_empty_for_nonexistent(self, temp_dir):
+        """Should return empty list for non-existent pipeline."""
+        db = Database(temp_dir / "test.db")
+        result = db.get_queued_stages_for_pipeline("prun-nonexistent")
+        assert result == []
+
+
 class TestDatabaseInitialization:
     """Tests for database initialization."""
 

@@ -1,12 +1,13 @@
 """Server context management for Goldfish.
 
-Provides thread-safe context management using contextvars,
-eliminating global state in server.py.
+Provides context management for the MCP server.
+Uses a simple module-level variable since all MCP tool calls
+run in the same process (ContextVar doesn't work well with
+async frameworks where each handler runs in a different context).
 """
 
 from __future__ import annotations
 
-from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -32,7 +33,6 @@ class ServerContext:
     This replaces the global variables in server.py with a proper
     context object that can be:
     - Easily mocked in tests
-    - Thread-safe via contextvars
     - Type-checked by static analyzers
     """
 
@@ -58,8 +58,8 @@ class ServerContext:
         )
 
 
-# Context variable for thread-safe access
-_server_context: ContextVar[ServerContext | None] = ContextVar("server_context", default=None)
+# Module-level context storage (simple and reliable for single-process MCP)
+_server_context: ServerContext | None = None
 
 
 def get_context() -> ServerContext:
@@ -68,10 +68,10 @@ def get_context() -> ServerContext:
     Raises:
         RuntimeError: If server is not initialized
     """
-    ctx = _server_context.get()
-    if ctx is None:
+    global _server_context
+    if _server_context is None:
         raise RuntimeError("Server not initialized - call set_context() first")
-    return ctx
+    return _server_context
 
 
 def set_context(ctx: ServerContext | None) -> None:
@@ -80,12 +80,14 @@ def set_context(ctx: ServerContext | None) -> None:
     Args:
         ctx: Server context to set, or None to clear
     """
-    _server_context.set(ctx)
+    global _server_context
+    _server_context = ctx
 
 
 def has_context() -> bool:
     """Check if server context is initialized."""
-    return _server_context.get() is not None
+    global _server_context
+    return _server_context is not None
 
 
 class ServerContextManager:
@@ -101,12 +103,14 @@ class ServerContextManager:
 
     def __init__(self, ctx: ServerContext):
         self.ctx = ctx
-        self.token: Token[ServerContext | None] | None = None
+        self.previous: ServerContext | None = None
 
     def __enter__(self) -> ServerContext:
-        self.token = _server_context.set(self.ctx)
+        global _server_context
+        self.previous = _server_context
+        _server_context = self.ctx
         return self.ctx
 
     def __exit__(self, *args) -> None:
-        if self.token is not None:
-            _server_context.reset(self.token)
+        global _server_context
+        _server_context = self.previous

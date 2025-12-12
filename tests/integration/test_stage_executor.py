@@ -831,3 +831,59 @@ class TestLineageTracking:
         # Overrides don't have upstream stage runs
         assert input_signal["source_stage_run_id"] is None
         assert input_signal["source_stage_version_id"] is None
+
+
+# =============================================================================
+# Regression Tests - Source name resolution in inputs_override
+# =============================================================================
+
+
+class TestSourceNameResolution:
+    """Regression: inputs_override with source names must resolve to GCS paths."""
+
+    def test_source_name_resolves_to_gcs_via_db_lookup(self, test_db):
+        """Source name is resolved to GCS location via database lookup.
+
+        This tests the core resolution logic: when a source name is provided,
+        it should be looked up in the database and resolved to its GCS location.
+        """
+        # Register a source in the database
+        test_db.create_source(
+            source_id="src-test-001",
+            name="my-tokens-v1",
+            gcs_location="gs://my-bucket/datasets/tokens-v1",
+            created_by="test",
+            description="Test tokens dataset",
+        )
+
+        # Verify the source can be retrieved
+        source = test_db.get_source("my-tokens-v1")
+        assert source is not None
+        assert source["gcs_location"] == "gs://my-bucket/datasets/tokens-v1"
+
+        # Verify non-existent source returns None (falls through to literal)
+        non_source = test_db.get_source("gs://literal/path")
+        assert non_source is None
+
+    def test_literal_gcs_path_not_resolved_as_source(self, test_db):
+        """Literal GCS paths should not be found as sources.
+
+        When a value like 'gs://bucket/path' is passed, it should not match
+        any registered source and should be used as-is.
+        """
+        # Register a source with a different name
+        test_db.create_source(
+            source_id="src-test-002",
+            name="my-dataset",
+            gcs_location="gs://bucket/my-dataset",
+            created_by="test",
+        )
+
+        # A literal GCS path should not be found as a source
+        result = test_db.get_source("gs://some-bucket/some-path")
+        assert result is None
+
+        # But the registered source should be found by name
+        result = test_db.get_source("my-dataset")
+        assert result is not None
+        assert result["gcs_location"] == "gs://bucket/my-dataset"

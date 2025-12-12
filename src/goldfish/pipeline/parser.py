@@ -57,18 +57,27 @@ class PipelineParser:
                 stages = []
                 for stage_data in data["stages"]:
 
-                    def _normalize_input_item(item):
+                    def _normalize_input_item(item, index: int = 0):
                         if isinstance(item, str):
                             item = {"name": item, "type": "dataset"}
-                        if "type" not in item:
-                            item = {"type": "dataset", **item}
+                        elif isinstance(item, dict):
+                            item = dict(item)  # Copy to avoid mutation
+                            if "type" not in item:
+                                item["type"] = "dataset"
+                            if "name" not in item:
+                                # Generate name from dataset or use index
+                                item["name"] = item.get("dataset", f"input_{index}")
                         return item
 
-                    def _normalize_output_item(item):
+                    def _normalize_output_item(item, index: int = 0):
                         if isinstance(item, str):
                             item = {"name": item, "type": "directory"}
-                        if "type" not in item:
-                            item = {"type": "directory", **item}
+                        elif isinstance(item, dict):
+                            item = dict(item)  # Copy to avoid mutation
+                            if "type" not in item:
+                                item["type"] = "directory"
+                            if "name" not in item:
+                                item["name"] = f"output_{index}"
                         return item
 
                     # Convert input/output dicts to SignalDef objects
@@ -77,10 +86,8 @@ class PipelineParser:
                         inputs_raw = stage_data["inputs"]
                         if isinstance(inputs_raw, list):
                             # Convert list to dict: [{name: "x", ...}] -> {"x": SignalDef(...)}
-                            stage_data["inputs"] = {
-                                _normalize_input_item(item)["name"]: SignalDef(**_normalize_input_item(item))
-                                for item in inputs_raw
-                            }
+                            normalized_inputs = [_normalize_input_item(item, i) for i, item in enumerate(inputs_raw)]
+                            stage_data["inputs"] = {item["name"]: SignalDef(**item) for item in normalized_inputs}
                         elif isinstance(inputs_raw, dict):
                             # Dict format: {name: {type: ...}} -> {name: SignalDef(name=name, ...)}
                             stage_data["inputs"] = {
@@ -104,10 +111,8 @@ class PipelineParser:
                         outputs_raw = stage_data["outputs"]
                         if isinstance(outputs_raw, list):
                             # Convert list to dict: [{name: "y", ...}] -> {"y": SignalDef(...)}
-                            stage_data["outputs"] = {
-                                _normalize_output_item(item)["name"]: SignalDef(**_normalize_output_item(item))
-                                for item in outputs_raw
-                            }
+                            normalized_outputs = [_normalize_output_item(item, i) for i, item in enumerate(outputs_raw)]
+                            stage_data["outputs"] = {item["name"]: SignalDef(**item) for item in normalized_outputs}
                         elif isinstance(outputs_raw, dict):
                             # Dict format: {name: {type: ...}} -> {name: SignalDef(name=name, ...)}
                             stage_data["outputs"] = {

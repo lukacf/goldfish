@@ -38,8 +38,8 @@ def initialize_project(project_name: str, project_root: str, from_existing: str 
     This must be called before using other Goldfish tools in a new project.
 
     Args:
-        project_name: Name for the project
-        project_root: Root directory where the project should be created
+        project_name: Name for the project (used for config and dev repo naming)
+        project_root: Root directory of the project (goldfish.yaml goes here)
         from_existing: Optional path to import existing code from
 
     Returns:
@@ -51,9 +51,8 @@ def initialize_project(project_name: str, project_root: str, from_existing: str 
     from goldfish.server import _init_server
 
     try:
-        # Create project as subdirectory of the specified root
-        root_dir = Path(project_root).resolve()
-        project_path = root_dir / project_name
+        # Project root IS the project directory (don't create subdirectory)
+        project_path = Path(project_root).resolve()
 
         if from_existing:
             source_path = Path(from_existing)
@@ -64,7 +63,27 @@ def initialize_project(project_name: str, project_root: str, from_existing: str 
             message = f"Initialized '{project_name}'"
 
         # Initialize the server context now that project is set up
-        _init_server(project_path)
+        try:
+            _init_server(project_path)
+            # Log to file for debugging
+            try:
+                with open("/tmp/goldfish_init_project.log", "a") as f:
+                    f.write(f"✓ _init_server succeeded for {project_path}\n")
+            except OSError:
+                pass
+            logger.info(f"Server initialized for project: {project_path}")
+        except Exception as init_err:
+            try:
+                with open("/tmp/goldfish_init_project.log", "a") as f:
+                    f.write(f"✗ _init_server FAILED for {project_path}: {init_err}\n")
+            except OSError:
+                pass
+            logger.error(f"Failed to initialize server context: {init_err}")
+            import traceback
+
+            traceback.print_exc()
+            # Re-raise to ensure the caller knows initialization failed
+            raise
 
         # Dev repo path (relative to project parent)
         dev_repo_path = config.get_dev_repo_path(project_path)
@@ -84,12 +103,60 @@ def initialize_project(project_name: str, project_root: str, from_existing: str 
 
 
 @mcp.tool()
+def reload_config() -> dict:
+    """Reload configuration from goldfish.yaml.
+
+    Call this after editing goldfish.yaml to pick up changes without
+    restarting the MCP server.
+
+    Returns:
+        dict with success status and loaded configuration summary
+    """
+    from goldfish.server import _get_project_root, _init_server
+
+    try:
+        project_root = _get_project_root()
+        _init_server(project_root)
+
+        # Get the new config to show what was loaded
+        config = _get_config()
+
+        result = {
+            "success": True,
+            "message": "Configuration reloaded successfully",
+            "project_name": config.project_name,
+            "jobs_backend": config.jobs.backend,
+            "gcs_configured": config.gcs is not None,
+            "gce_configured": config.gce is not None,
+        }
+
+        if config.gce:
+            result["gce_project"] = config.gce.effective_project_id
+            result["gce_artifact_registry"] = config.gce.artifact_registry
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to reload config: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
 def status() -> StatusResponse:
     """Get current status: slots, jobs, sources, and STATE.md content.
 
     Returns complete context for orientation after context compaction.
     Call this first when resuming work.
     """
+    from goldfish.context import has_context
+
+    # Debug logging
+    try:
+        with open("/tmp/goldfish_status.log", "a") as f:
+            f.write(f"status() called, has_context={has_context()}\n")
+    except OSError:
+        pass
+
     config = _get_config()
     db = _get_db()
     workspace_manager = _get_workspace_manager()
@@ -181,6 +248,81 @@ def log_thought(thought: str) -> LogThoughtResponse:
         thought=thought,
         timestamp=datetime.now(),
     )
+
+
+@mcp.tool()
+def build_base_images(
+    image_type: str | None = None,
+    push: bool = True,
+    no_cache: bool = False,
+) -> dict:
+    """Build and push pre-built base images to Artifact Registry.
+
+    Base images contain common ML libraries (numpy, pandas, torch, etc.)
+    so workspaces don't need to include a requirements.txt for standard dependencies.
+
+    Args:
+        image_type: "cpu", "gpu", or None for both (default: build both)
+        push: Push to Artifact Registry after build (default: True)
+        no_cache: Force rebuild without Docker cache (default: False)
+
+    Returns:
+        dict with success status and image tags
+    """
+    from goldfish.infra.base_images import build_base_image, push_base_image
+    from goldfish.infra.profiles import BASE_IMAGE_VERSION, get_base_image_names
+
+    config = _get_config()
+
+    # Determine which images to build
+    if image_type:
+        if image_type not in ("cpu", "gpu"):
+            return {"success": False, "error": f"Invalid image_type: {image_type}. Must be 'cpu' or 'gpu'"}
+        types_to_build = [image_type]
+    else:
+        types_to_build = ["cpu", "gpu"]
+
+    # Get registry URL
+    registry_url = None
+    if config.gce:
+        registry_url = config.gce.artifact_registry
+        if not registry_url:
+            try:
+                project_id = config.gce.effective_project_id
+                registry_url = f"us-docker.pkg.dev/{project_id}/goldfish"
+            except ValueError:
+                pass
+
+    if push and not registry_url:
+        return {
+            "success": False,
+            "error": "Cannot push images: no artifact registry configured. Set gce.artifact_registry in goldfish.yaml",
+        }
+
+    images: dict[str, dict[str, str]] = {}
+    descriptions = get_base_image_names()
+
+    for img_type in types_to_build:
+        try:
+            # Build locally
+            local_tag = build_base_image(img_type, no_cache=no_cache)
+            result: dict[str, str] = {
+                "local_tag": local_tag,
+                "description": descriptions.get(f"goldfish-base-{img_type}", ""),
+            }
+
+            # Push to registry if requested
+            if push and registry_url:
+                registry_tag = push_base_image(img_type, registry_url)
+                result["registry_tag"] = registry_tag
+
+            images[img_type] = result
+
+        except Exception as e:
+            images[img_type] = {"error": str(e)}
+            return {"success": False, "images": images, "version": BASE_IMAGE_VERSION}
+
+    return {"success": True, "images": images, "version": BASE_IMAGE_VERSION}
 
 
 # ============== LINEAGE TOOLS ==============

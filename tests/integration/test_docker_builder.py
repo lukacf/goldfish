@@ -34,3 +34,96 @@ def test_push_image_auth_failure(monkeypatch):
 
     # Ensure we attempted auth
     assert any("configure-docker" in c for c in [" ".join(cmd) for cmd in calls])
+
+
+# =============================================================================
+# Regression Tests - Dockerfile must use --chown for non-root containers
+# =============================================================================
+
+
+def test_dockerfile_copy_uses_chown(tmp_path):
+    """Regression: All COPY commands must use --chown=1000:100 for non-root containers.
+
+    Base images like pytorch-notebook run as non-root user (jovyan, UID 1000).
+    Without --chown, copied files are owned by root and the container can't read them.
+    """
+    # Create minimal workspace structure
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    (workspace_path / "modules").mkdir()
+    (workspace_path / "modules" / "train.py").write_text("# test module")
+    (workspace_path / "configs").mkdir()
+    (workspace_path / "configs" / "train.yaml").write_text("key: value")
+
+    builder = DockerBuilder()
+
+    # Generate dockerfile
+    dockerfile = builder.generate_dockerfile(
+        workspace_dir=workspace_path,
+        base_image="quay.io/jupyter/pytorch-notebook:latest",
+    )
+
+    # All COPY commands should have --chown=1000:100
+    copy_lines = [line for line in dockerfile.split("\n") if line.strip().startswith("COPY")]
+    assert len(copy_lines) >= 3  # goldfish_io, modules, configs at minimum
+
+    for line in copy_lines:
+        assert "--chown=1000:100" in line, f"COPY missing --chown: {line}"
+
+
+def test_dockerfile_copy_loaders_uses_chown(tmp_path):
+    """Regression: COPY loaders/ must also use --chown when loaders exist."""
+    # Create workspace structure with loaders
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    (workspace_path / "modules").mkdir()
+    (workspace_path / "modules" / "train.py").write_text("# test module")
+    (workspace_path / "configs").mkdir()
+    (workspace_path / "loaders").mkdir()
+    (workspace_path / "loaders" / "custom_loader.py").write_text("# loader")
+
+    builder = DockerBuilder()
+
+    dockerfile = builder.generate_dockerfile(
+        workspace_dir=workspace_path,
+        base_image="quay.io/jupyter/pytorch-notebook:latest",
+    )
+
+    # Find the loaders COPY line
+    copy_lines = [line for line in dockerfile.split("\n") if "loaders/" in line and "COPY" in line]
+    assert len(copy_lines) == 1, "Should have exactly one COPY for loaders"
+    assert "--chown=1000:100" in copy_lines[0], f"loaders COPY missing --chown: {copy_lines[0]}"
+
+
+def test_dockerfile_pythonpath_includes_modules_dir(tmp_path):
+    """Regression: PYTHONPATH must include /app/modules for sibling imports.
+
+    Stage modules like train.py often import sibling modules like:
+        from model import LSTMModel
+
+    This requires /app/modules to be in PYTHONPATH, not just /app.
+    Without this, users get ModuleNotFoundError for sibling imports.
+    """
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    (workspace_path / "modules").mkdir()
+    (workspace_path / "modules" / "train.py").write_text("from model import Foo")
+    (workspace_path / "modules" / "model.py").write_text("class Foo: pass")
+    (workspace_path / "configs").mkdir()
+
+    builder = DockerBuilder()
+
+    dockerfile = builder.generate_dockerfile(
+        workspace_dir=workspace_path,
+        base_image="quay.io/jupyter/pytorch-notebook:latest",
+    )
+
+    # Find the PYTHONPATH ENV line
+    pythonpath_lines = [line for line in dockerfile.split("\n") if "PYTHONPATH" in line]
+    assert len(pythonpath_lines) >= 1, "Should have PYTHONPATH ENV"
+
+    # Must include /app/modules for sibling imports
+    pythonpath_line = pythonpath_lines[0]
+    assert (
+        "/app/modules" in pythonpath_line
+    ), f"PYTHONPATH must include /app/modules for sibling imports: {pythonpath_line}"

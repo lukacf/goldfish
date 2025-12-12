@@ -175,6 +175,62 @@ def reset_server() -> None:
     set_context(None)
 
 
+def _ensure_worker_running(project_root: Path, dev_repo_path: Path) -> None:
+    """Ensure the pipeline worker daemon is running.
+
+    Spawns the worker as a detached subprocess if not already running.
+    The worker continues running even after the MCP server exits.
+    """
+    import subprocess
+
+    pid_file = dev_repo_path / ".goldfish" / "worker.pid"
+
+    # Check if worker is already running
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            # Check if process is still alive
+            import os
+
+            os.kill(pid, 0)  # Doesn't kill, just checks
+            logger.debug("Worker already running (pid=%d)", pid)
+            return
+        except (ValueError, ProcessLookupError, PermissionError):
+            # PID file exists but process is dead - remove stale file
+            pid_file.unlink(missing_ok=True)
+
+    # Spawn worker as detached subprocess
+    logger.info("Spawning pipeline worker daemon...")
+    try:
+        # Build command to run worker
+        import sys
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "goldfish",
+            "worker",
+            "--project",
+            str(project_root),
+            "--pid-file",
+            str(pid_file),
+        ]
+
+        # Spawn detached subprocess that survives parent exit
+        # Use start_new_session=True on Unix to detach from terminal
+        kwargs: dict = {
+            "start_new_session": True,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+
+        subprocess.Popen(cmd, **kwargs)
+        logger.info("Worker daemon spawned")
+    except Exception as e:
+        logger.warning("Failed to spawn worker daemon: %s", e)
+
+
 def _init_server(project_root: Path) -> None:
     """Initialize server components."""
     project_root = project_root.resolve()
@@ -216,6 +272,9 @@ def _init_server(project_root: Path) -> None:
         dataset_registry=dataset_registry,
     )
     pipeline_executor = PipelineExecutor(stage_executor=stage_executor, pipeline_manager=pipeline_manager, db=db)
+
+    # Ensure worker daemon is running (spawns if needed)
+    _ensure_worker_running(project_root, dev_repo_path)
 
     # Create and set context
     ctx = ServerContext(
@@ -272,11 +331,16 @@ from goldfish.server_tools.lineage_tools import (  # noqa: E402, F401
     get_version_diff,
     get_workspace_lineage,
 )
+from goldfish.server_tools.logging_tools import (  # noqa: E402, F401
+    get_logsql_guide,
+    search_goldfish_logs,
+)
 from goldfish.server_tools.pipeline_tools import get_pipeline, update_pipeline, validate_pipeline  # noqa: E402, F401
 from goldfish.server_tools.utility_tools import (  # noqa: E402, F401
     get_audit_log,
     initialize_project,
     log_thought,
+    reload_config,
     status,
 )
 
@@ -303,6 +367,11 @@ from goldfish.server_tools.workspace_tools import (  # noqa: E402, F401
 def run_server(project_root: Path) -> None:
     """Run the MCP server."""
     from goldfish.errors import ProjectNotInitializedError
+    from goldfish.logging import setup_logging
+
+    # Initialize centralized logging
+    setup_logging(component="server")
+    logger.info("Goldfish MCP server starting [project=%s]", project_root)
 
     # Debug logging
     try:

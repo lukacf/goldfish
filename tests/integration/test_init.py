@@ -31,12 +31,12 @@ class TestInitProject:
             dev_repo_path=dev_repo_path,
         )
 
-        # Check project directory structure (only goldfish.yaml in user project)
+        # Check project directory structure (goldfish.yaml + workspaces in user project)
         assert project_path.exists()
         assert (project_path / "goldfish.yaml").exists()
+        assert (project_path / "workspaces").exists()  # User edits files here
 
-        # Check dev repo structure (runtime artifacts live here)
-        assert (dev_repo_path / "workspaces").exists()
+        # Check dev repo structure (git, database, state live here)
         assert (dev_repo_path / ".goldfish").exists()
         assert (dev_repo_path / "STATE.md").exists()
 

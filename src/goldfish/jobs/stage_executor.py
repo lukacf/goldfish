@@ -1,6 +1,7 @@
 """Stage execution engine for Goldfish."""
 
 import json
+import logging
 import os
 import time
 from datetime import UTC, datetime
@@ -23,6 +24,8 @@ from goldfish.pipeline.manager import PipelineManager
 from goldfish.utils import parse_optional_datetime
 from goldfish.utils.config_hash import compute_config_hash
 from goldfish.workspace.manager import WorkspaceManager
+
+logger = logging.getLogger(__name__)
 
 STAGE_LOG_TAIL_FOR_FINALIZE = int(os.getenv("GOLDFISH_FINALIZE_LOG_TAIL", "1000"))
 
@@ -55,8 +58,8 @@ class StageExecutor:
 
         # Initialize profile resolver
         profile_overrides = None
-        if config.gce and config.gce.profile_overrides:
-            profile_overrides = config.gce.profile_overrides
+        if config.gce:
+            profile_overrides = config.gce.effective_profile_overrides
         self.profile_resolver = ProfileResolver(profile_overrides=profile_overrides)
 
         # Initialize GCE launcher with full config
@@ -71,7 +74,11 @@ class StageExecutor:
             gce_bucket = config.gcs.bucket
 
         if config.gce:
-            gce_project = config.gce.project_id
+            # Use effective_project_id to support both project_id and project aliases
+            try:
+                gce_project = config.gce.effective_project_id
+            except ValueError:
+                pass  # Neither project_id nor project set, leave as None for gcloud defaults
             if config.gce.zones:
                 gce_zone = config.gce.zones[0]
                 gce_zones = config.gce.zones  # Pass all zones for multi-zone lookups
@@ -96,15 +103,21 @@ class StageExecutor:
         inputs_override: dict | None = None,
         reason: str | None = None,
         wait: bool = False,
+        stage_run_id: str | None = None,
     ) -> StageRunInfo:
         """Run a single pipeline stage.
 
         Args:
             workspace: Workspace name
             stage_name: Stage to run
+            pipeline_name: Pipeline file name
+            pipeline_run_id: Parent pipeline run ID
             config_override: Override env vars from config
             inputs_override: Override input sources (for debugging)
             reason: Why this stage is being run
+            wait: Block until completion
+            stage_run_id: Pre-created stage_run_id (from pipeline queue). If provided,
+                         updates existing record; if None, creates new one.
 
         Flow:
             1. Auto-version workspace (git tag)
@@ -140,26 +153,38 @@ class StageExecutor:
         # 3. Resolve inputs (with source metadata for lineage tracking)
         inputs, input_sources = self._resolve_inputs(workspace, stage, inputs_override)
 
-        # 4. Generate stage run ID
-        stage_run_id = f"stage-{uuid4().hex[:8]}"
-
-        # 5. Create stage run record (with stage version ID and input lineage)
-        self._create_stage_run_record(
-            stage_run_id=stage_run_id,
-            workspace=workspace,
-            version=version,
-            stage_name=stage_name,
-            stage_version_id=stage_version_id,
-            inputs=inputs,
-            input_sources=input_sources,
-            config_override=config_override,
-            reason=reason,
-            pipeline_run_id=pipeline_run_id,
-            pipeline_name=pipeline_name,
-            profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
-            hints=stage_config.get("hints"),
-            config=stage_config,
-        )
+        # 4. Generate or use provided stage run ID
+        if stage_run_id is None:
+            stage_run_id = f"stage-{uuid4().hex[:8]}"
+            # Create new stage run record
+            self._create_stage_run_record(
+                stage_run_id=stage_run_id,
+                workspace=workspace,
+                version=version,
+                stage_name=stage_name,
+                stage_version_id=stage_version_id,
+                inputs=inputs,
+                input_sources=input_sources,
+                config_override=config_override,
+                reason=reason,
+                pipeline_run_id=pipeline_run_id,
+                pipeline_name=pipeline_name,
+                profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
+                hints=stage_config.get("hints"),
+                config=stage_config,
+            )
+        else:
+            # Update existing queued stage run record with resolved values
+            self._update_queued_stage_run(
+                stage_run_id=stage_run_id,
+                version=version,
+                stage_version_id=stage_version_id,
+                inputs=inputs,
+                input_sources=input_sources,
+                config=stage_config,
+                profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
+                hints=stage_config.get("hints"),
+            )
 
         try:
             # Emit phase progress: building image
@@ -168,8 +193,9 @@ class StageExecutor:
                 status="running",
                 progress="build",
             )
-            # 6. Build Docker image
-            image_tag = self._build_docker_image(workspace, version)
+            # 6. Build Docker image (use profile's base image)
+            profile_name = stage_config.get("compute", {}).get("profile")
+            image_tag = self._build_docker_image(workspace, version, profile_name=profile_name)
 
             # Emit phase progress: launching container/instance
             self.db.update_stage_run_status(
@@ -178,7 +204,26 @@ class StageExecutor:
                 progress="launch",
             )
             # 7. Launch container
-            self._launch_container(stage_run_id, workspace, stage_name, image_tag, inputs)
+            # Build input config with format info for goldfish.io
+            input_configs = {}
+            for input_name, input_def in stage.inputs.items():
+                input_configs[input_name] = {
+                    "location": inputs.get(input_name, ""),
+                    "format": input_def.format or input_def.type,  # Use format override or fall back to type
+                    "type": input_def.type,
+                }
+
+            # Build output config with format info
+            output_configs = {}
+            for output_name, output_def in stage.outputs.items():
+                output_configs[output_name] = {
+                    "format": output_def.format or output_def.type,
+                    "type": output_def.type,
+                }
+
+            self._launch_container(
+                stage_run_id, workspace, stage_name, image_tag, inputs, input_configs, output_configs
+            )
         except Exception as e:
             # Mark failed immediately with error and re-raise
             self.db.update_stage_run_status(
@@ -212,8 +257,12 @@ class StageExecutor:
             self.wait_for_completion(stage_run_id)
             refreshed = self.db.get_stage_run(stage_run_id)
             if refreshed:
+                # Exclude fields we're overriding to avoid duplicate keyword args
+                base_fields = info.model_dump(
+                    exclude={"status", "completed_at", "log_uri", "artifact_uri", "progress", "outputs", "error"}
+                )
                 return StageRunInfo(
-                    **info.model_dump(),
+                    **base_fields,
                     status=refreshed.get("status", info.status),
                     completed_at=parse_optional_datetime(refreshed.get("completed_at")),
                     log_uri=refreshed.get("log_uri"),
@@ -244,8 +293,16 @@ class StageExecutor:
         for input_name, input_def in stage.inputs.items():
             # Check for override
             if inputs_override and input_name in inputs_override:
-                inputs[input_name] = inputs_override[input_name]
-                sources[input_name] = {"source_type": "override"}
+                override_value = inputs_override[input_name]
+                # Try to resolve as a registered source name first
+                source = self.db.get_source(override_value)
+                if source:
+                    inputs[input_name] = source["gcs_location"]
+                    sources[input_name] = {"source_type": "source", "source_name": override_value}
+                else:
+                    # Use as literal path
+                    inputs[input_name] = override_value
+                    sources[input_name] = {"source_type": "override"}
                 continue
 
             # Resolve precedence: from_stage first, then dataset
@@ -390,6 +447,66 @@ class StageExecutor:
                 source_stage_version_id=source_stage_version_id,
             )
 
+    def _update_queued_stage_run(
+        self,
+        stage_run_id: str,
+        version: str,
+        stage_version_id: int,
+        inputs: dict,
+        input_sources: dict[str, dict],
+        config: dict | None,
+        profile: str | None,
+        hints: dict | None,
+    ):
+        """Update a queued stage run record with resolved values.
+
+        Called when processing a pre-created stage_run from the pipeline queue.
+        Updates version, config, inputs, and records input lineage.
+        """
+        # Update the stage run with resolved values
+        with self.db._conn() as conn:
+            conn.execute(
+                """
+                UPDATE stage_runs
+                SET version = ?,
+                    config_json = ?,
+                    inputs_json = ?,
+                    profile = ?,
+                    hints_json = ?,
+                    backend_type = ?,
+                    backend_handle = ?
+                WHERE id = ?
+                """,
+                (
+                    version,
+                    json.dumps(config) if config else None,
+                    json.dumps(inputs) if inputs else None,
+                    profile,
+                    json.dumps(hints) if hints else None,
+                    self.config.jobs.backend,
+                    stage_run_id,  # provisional handle for cancel/logs
+                    stage_run_id,
+                ),
+            )
+
+        # Link stage run to its stage version
+        self.db.update_stage_run_version(stage_run_id, stage_version_id)
+
+        # Record input signals in lineage with source tracking
+        for input_name, storage_location in inputs.items():
+            source_meta = input_sources.get(input_name, {})
+            source_stage_run_id = source_meta.get("source_stage_run_id")
+            source_stage_version_id = source_meta.get("source_stage_version_id")
+
+            self.db.add_signal_with_source(
+                stage_run_id=stage_run_id,
+                signal_name=input_name,
+                signal_type="input",
+                storage_location=storage_location,
+                source_stage_run_id=source_stage_run_id,
+                source_stage_version_id=source_stage_version_id,
+            )
+
     def _record_output_signals(
         self,
         stage_run_id: str,
@@ -430,7 +547,15 @@ class StageExecutor:
                     storage_location = gcs_marker.read_text().strip()
                 elif gcs_base:
                     # Default GCS location for GCE runs
-                    storage_location = f"{gcs_base.rstrip('/')}/{output_name}/"
+                    # Use appropriate suffix based on output type
+                    output_type = output_def.type or "directory"
+                    if output_type == "npy":
+                        storage_location = f"{gcs_base.rstrip('/')}/{output_name}.npy"
+                    elif output_type == "csv":
+                        storage_location = f"{gcs_base.rstrip('/')}/{output_name}.csv"
+                    else:
+                        # directory, file, or other types use trailing /
+                        storage_location = f"{gcs_base.rstrip('/')}/{output_name}/"
 
                 conn.execute(
                     """
@@ -521,35 +646,68 @@ class StageExecutor:
         log_path.write_text(logs or "")
         return str(log_path)
 
-    def _build_docker_image(self, workspace: str, version: str) -> str:
+    def _build_docker_image(self, workspace: str, version: str, profile_name: str | None = None) -> str:
         """Build Docker image for this run.
+
+        Args:
+            workspace: Workspace name
+            version: Version identifier
+            profile_name: Optional profile name to determine base image
 
         Returns image tag (local for local backend, registry for GCE backend).
         """
+        from goldfish.infra.profiles import resolve_base_image
+
         # Get workspace directory
         workspace_dir = self.workspace_manager.get_workspace_path(workspace)
 
+        # Resolve base image from profile
+        base_image = None
+        if profile_name:
+            profile = self.profile_resolver.resolve(profile_name)
+            # Get artifact registry for base image URL
+            artifact_registry = None
+            if self.config.gce:
+                artifact_registry = self.config.gce.artifact_registry
+                if not artifact_registry:
+                    # Auto-generate registry URL from project_id
+                    try:
+                        project_id = self.config.gce.effective_project_id
+                        artifact_registry = f"us-docker.pkg.dev/{project_id}/goldfish"
+                    except ValueError:
+                        pass  # No project configured
+            base_image = resolve_base_image(profile, artifact_registry)
+
         # Build image using DockerBuilder
         local_image_tag = self.docker_builder.build_image(
-            workspace_dir=workspace_dir, workspace_name=workspace, version=version, use_cache=True
+            workspace_dir=workspace_dir,
+            workspace_name=workspace,
+            version=version,
+            use_cache=True,
+            base_image=base_image,
         )
 
-        # If using GCE backend and artifact_registry is configured, push to registry
+        # If using GCE backend, push to Artifact Registry
         backend = self.config.jobs.backend
         if backend == "gce":
             if not self.config.gce:
                 raise GoldfishError("GCE backend requires gce configuration in goldfish.yaml")
 
-            if not self.config.gce.artifact_registry:
-                raise GoldfishError(
-                    "GCE backend requires artifact_registry URL in gce configuration. "
-                    "Example: artifact_registry: us-docker.pkg.dev/{project_id}/goldfish"
-                )
+            # Get or create artifact registry URL
+            registry_url = self.config.gce.artifact_registry
+            if not registry_url:
+                # Auto-generate registry URL from project_id
+                project_id = self.config.gce.effective_project_id
+                registry_url = f"us-docker.pkg.dev/{project_id}/goldfish"
+                logger.info(f"Using auto-generated artifact registry: {registry_url}")
+
+                # Ensure the repository exists (create if needed)
+                self._ensure_artifact_registry(project_id, "goldfish")
 
             # Push image to Artifact Registry
             registry_image_tag = self.docker_builder.push_image(
                 local_tag=local_image_tag,
-                registry_url=self.config.gce.artifact_registry,
+                registry_url=registry_url,
                 workspace_name=workspace,
                 version=version,
             )
@@ -557,6 +715,64 @@ class StageExecutor:
             return registry_image_tag
 
         return local_image_tag
+
+    def _ensure_artifact_registry(self, project_id: str, repo_name: str) -> None:
+        """Ensure Artifact Registry repository exists, creating if needed.
+
+        Args:
+            project_id: GCP project ID
+            repo_name: Repository name (e.g., "goldfish")
+        """
+        import subprocess
+
+        # Check if repository exists
+        check_result = subprocess.run(
+            [
+                "gcloud",
+                "artifacts",
+                "repositories",
+                "describe",
+                repo_name,
+                f"--project={project_id}",
+                "--location=us",
+                "--format=value(name)",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if check_result.returncode == 0:
+            logger.debug(f"Artifact Registry repository {repo_name} already exists")
+            return
+
+        # Create repository
+        logger.info(f"Creating Artifact Registry repository: {repo_name} in project {project_id}")
+        create_result = subprocess.run(
+            [
+                "gcloud",
+                "artifacts",
+                "repositories",
+                "create",
+                repo_name,
+                f"--project={project_id}",
+                "--location=us",
+                "--repository-format=docker",
+                "--description=Goldfish ML experiment images",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        if create_result.returncode != 0:
+            # Check if it was a race condition (already exists)
+            if "already exists" in create_result.stderr.lower():
+                logger.debug(f"Artifact Registry repository {repo_name} created by concurrent process")
+                return
+            raise GoldfishError(f"Failed to create Artifact Registry repository: {create_result.stderr}")
+
+        logger.info(f"Created Artifact Registry repository: us-docker.pkg.dev/{project_id}/{repo_name}")
 
     def _load_stage_config(self, workspace: str, stage_name: str) -> dict:
         """Load stage config from configs/{stage}.yaml.
@@ -621,9 +837,18 @@ class StageExecutor:
         stage_name: str,
         image_tag: str,
         inputs: dict,
+        input_configs: dict | None = None,
+        output_configs: dict | None = None,
     ):
         """Launch Docker container (local) or GCE instance."""
         backend = self.config.jobs.backend
+
+        # Build stage config for goldfish.io
+        stage_config = {
+            "stage": stage_name,
+            "inputs": input_configs or inputs,  # Use input_configs if provided
+            "outputs": output_configs or {},
+        }
 
         if backend == "local":
             # Create work directory for this run
@@ -646,13 +871,6 @@ python -m modules.{stage_name}
 
 echo "Stage completed successfully"
 """
-
-            # Generate stage config
-            stage_config = {
-                "stage": stage_name,
-                "inputs": inputs,
-                "outputs": {},  # Will be populated by module
-            }
 
             # Launch container using LocalExecutor
             self.local_executor.launch_container(
@@ -703,7 +921,7 @@ python -m modules.{stage_name}
 
 echo "Stage completed successfully"
 """,
-                stage_config={"stage": stage_name, "inputs": inputs, "outputs": {}},
+                stage_config=stage_config,
                 work_dir=self.dev_repo / ".goldfish" / "runs" / stage_run_id,
                 machine_type=machine_type,
                 gpu_type=gpu_type,

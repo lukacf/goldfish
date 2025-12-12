@@ -108,7 +108,88 @@ class GCELauncher:
         env_map = {
             "GOLDFISH_STAGE_CONFIG": json.dumps(stage_config),
             "GOLDFISH_RUN_ID": stage_run_id,
+            "GOLDFISH_INPUTS_DIR": "/mnt/inputs",
+            "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
         }
+
+        # Build input staging commands
+        # Transform gs://bucket/path to /mnt/gcs/path (symlinks on host)
+        pre_run_cmds = [
+            f"cat > /mnt/entrypoint.sh << 'ENTRYPOINT_EOF'\n{entrypoint_script}\nENTRYPOINT_EOF",
+            "chmod +x /mnt/entrypoint.sh",
+            "mkdir -p /mnt/inputs /mnt/outputs",
+        ]
+
+        # Stage inputs from GCS to /mnt/inputs/
+        inputs = stage_config.get("inputs", {})
+        debug_log = f"/mnt/gcs/{run_path}/logs/staging_debug.log"
+        # Create logs directory first so debug logging works
+        pre_run_cmds.append(f'mkdir -p "/mnt/gcs/{run_path}/logs"')
+        pre_run_cmds.append(
+            f'echo "DEBUG: Staging {len(inputs)} inputs, bucket_name={bucket_name}" | tee -a {debug_log}'
+        )
+        for input_name, input_config in inputs.items():
+            # Handle both old format (string URI) and new format (dict with location)
+            if isinstance(input_config, str):
+                gcs_uri = input_config
+            elif isinstance(input_config, dict):
+                gcs_uri = input_config.get("location", "")
+            else:
+                pre_run_cmds.append(f'echo "DEBUG: Skipping {input_name} - not string or dict" | tee -a {debug_log}')
+                continue
+
+            pre_run_cmds.append(f'echo "DEBUG: Input {input_name} -> {gcs_uri}" | tee -a {debug_log}')
+
+            if gcs_uri and gcs_uri.startswith("gs://"):
+                # Extract bucket and path from gs://bucket/path
+                uri_parts = gcs_uri.replace("gs://", "").split("/", 1)
+                if len(uri_parts) == 2:
+                    input_bucket, input_path = uri_parts
+                    pre_run_cmds.append(
+                        f'echo "DEBUG: input_bucket={input_bucket}, input_path={input_path}" | tee -a {debug_log}'
+                    )
+                    # If input is from same bucket, use gcsfuse; otherwise gsutil
+                    if input_bucket == bucket_name:
+                        # Symlink from gcsfuse mount
+                        pre_run_cmds.append(
+                            f'echo "DEBUG: Creating symlink /mnt/gcs/{input_path.rstrip("/")} -> /mnt/inputs/{input_name}" | tee -a {debug_log}'
+                        )
+                        pre_run_cmds.append(
+                            f'ls -la "/mnt/gcs/{input_path.rstrip("/")}" 2>&1 | tee -a {debug_log} || echo "DEBUG: Source does not exist!" | tee -a {debug_log}'
+                        )
+                        pre_run_cmds.append(f'ln -sf "/mnt/gcs/{input_path.rstrip("/")}" "/mnt/inputs/{input_name}"')
+                    else:
+                        # Different bucket - use gsutil to copy
+                        pre_run_cmds.append(f'echo "DEBUG: Different bucket, using gsutil cp" | tee -a {debug_log}')
+                        pre_run_cmds.append(f'gsutil -m cp -r "{gcs_uri.rstrip("/")}" "/mnt/inputs/{input_name}"')
+
+        # Debug: show what's in /mnt/inputs after staging
+        pre_run_cmds.append(f'echo "DEBUG: Contents of /mnt/inputs:" | tee -a {debug_log}')
+        pre_run_cmds.append(
+            f'ls -la /mnt/inputs/ 2>&1 | tee -a {debug_log} || echo "DEBUG: /mnt/inputs is empty or does not exist" | tee -a {debug_log}'
+        )
+
+        # Make inputs/outputs accessible by container user (jovyan, UID 1000)
+        # The startup script runs as root, but Docker container runs as non-root
+        # Use -h to change symlink ownership (not the target), don't use -R to avoid following symlinks
+        pre_run_cmds.append("chown 1000:100 /mnt/inputs /mnt/outputs")
+        pre_run_cmds.append("chown -h 1000:100 /mnt/inputs/* 2>/dev/null || true")
+
+        # Debug: verify permissions after chown
+        pre_run_cmds.append(f'echo "DEBUG: Permissions after chown:" | tee -a {debug_log}')
+        pre_run_cmds.append(f"ls -la /mnt/inputs/ 2>&1 | tee -a {debug_log}")
+        pre_run_cmds.append(f'echo "DEBUG: gcsfuse mount info:" | tee -a {debug_log}')
+        pre_run_cmds.append(f"mount | grep gcsfuse 2>&1 | tee -a {debug_log}")
+        pre_run_cmds.append(f'echo "DEBUG: Testing access as user 1000:" | tee -a {debug_log}')
+        pre_run_cmds.append(
+            f'su -s /bin/bash -c "ls -la /mnt/inputs/" nobody 2>&1 | tee -a {debug_log} || echo "DEBUG: Access test failed" | tee -a {debug_log}'
+        )
+
+        # Build output staging commands (run after Docker)
+        outputs_gcs_path = f"gs://{bucket_name}/{run_path}/outputs"
+        post_run_cmds = [
+            f'gsutil -m cp -r /mnt/outputs/* "{outputs_gcs_path}/" || true',
+        ]
 
         # Build startup script with proper orchestration
         startup_script = build_startup_script(
@@ -117,13 +198,17 @@ class GCELauncher:
             run_path=run_path,
             image=image_tag,
             entrypoint="/bin/bash",
+            cmd="/entrypoint.sh",
             env_map=env_map,
-            mounts=[("/mnt/entrypoint.sh", "/entrypoint.sh")],
-            gcsfuse=True,
-            pre_run_cmds=[
-                f"cat > /mnt/entrypoint.sh << 'ENTRYPOINT_EOF'\n{entrypoint_script}\nENTRYPOINT_EOF",
-                "chmod +x /mnt/entrypoint.sh",
+            mounts=[
+                ("/mnt/entrypoint.sh", "/entrypoint.sh"),
+                ("/mnt/gcs", "/mnt/gcs"),  # Mount gcsfuse for input access
+                ("/mnt/inputs", "/mnt/inputs"),  # Input staging directory
+                ("/mnt/outputs", "/mnt/outputs"),  # Output staging directory
             ],
+            gcsfuse=True,
+            pre_run_cmds=pre_run_cmds,
+            post_run_cmds=post_run_cmds,
         )
 
         if use_capacity_search and self.resources:

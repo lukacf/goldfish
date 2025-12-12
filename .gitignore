@@ -51,8 +51,11 @@ htmlcov/
 .ruff_cache/
 .env
 
-# Claude Code local files
-.claude/
+# Claude Code local files (except goldfish-ml skill which is project-specific)
+.claude/*
+!.claude/skills
+.claude/skills/*
+!.claude/skills/goldfish-ml
 .mcp-the-force/
 
 # Coverage artifacts
