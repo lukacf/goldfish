@@ -250,4 +250,79 @@ def log_thought(thought: str) -> LogThoughtResponse:
     )
 
 
+@mcp.tool()
+def build_base_images(
+    image_type: str | None = None,
+    push: bool = True,
+    no_cache: bool = False,
+) -> dict:
+    """Build and push pre-built base images to Artifact Registry.
+
+    Base images contain common ML libraries (numpy, pandas, torch, etc.)
+    so workspaces don't need to include a requirements.txt for standard dependencies.
+
+    Args:
+        image_type: "cpu", "gpu", or None for both (default: build both)
+        push: Push to Artifact Registry after build (default: True)
+        no_cache: Force rebuild without Docker cache (default: False)
+
+    Returns:
+        dict with success status and image tags
+    """
+    from goldfish.infra.base_images import build_base_image, push_base_image
+    from goldfish.infra.profiles import BASE_IMAGE_VERSION, get_base_image_names
+
+    config = _get_config()
+
+    # Determine which images to build
+    if image_type:
+        if image_type not in ("cpu", "gpu"):
+            return {"success": False, "error": f"Invalid image_type: {image_type}. Must be 'cpu' or 'gpu'"}
+        types_to_build = [image_type]
+    else:
+        types_to_build = ["cpu", "gpu"]
+
+    # Get registry URL
+    registry_url = None
+    if config.gce:
+        registry_url = config.gce.artifact_registry
+        if not registry_url:
+            try:
+                project_id = config.gce.effective_project_id
+                registry_url = f"us-docker.pkg.dev/{project_id}/goldfish"
+            except ValueError:
+                pass
+
+    if push and not registry_url:
+        return {
+            "success": False,
+            "error": "Cannot push images: no artifact registry configured. Set gce.artifact_registry in goldfish.yaml",
+        }
+
+    images: dict[str, dict[str, str]] = {}
+    descriptions = get_base_image_names()
+
+    for img_type in types_to_build:
+        try:
+            # Build locally
+            local_tag = build_base_image(img_type, no_cache=no_cache)
+            result: dict[str, str] = {
+                "local_tag": local_tag,
+                "description": descriptions.get(f"goldfish-base-{img_type}", ""),
+            }
+
+            # Push to registry if requested
+            if push and registry_url:
+                registry_tag = push_base_image(img_type, registry_url)
+                result["registry_tag"] = registry_tag
+
+            images[img_type] = result
+
+        except Exception as e:
+            images[img_type] = {"error": str(e)}
+            return {"success": False, "images": images, "version": BASE_IMAGE_VERSION}
+
+    return {"success": True, "images": images, "version": BASE_IMAGE_VERSION}
+
+
 # ============== LINEAGE TOOLS ==============

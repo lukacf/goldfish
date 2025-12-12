@@ -47,7 +47,7 @@ class PipelineExecutor:
         """On startup, reschedule any pipelines that were mid-flight."""
         with self.db._conn() as conn:
             rows = conn.execute(
-                "SELECT id, workspace_name, pipeline_name FROM pipeline_runs WHERE status IN ('pending','running')"
+                "SELECT id, workspace_name, pipeline_name, config_override, inputs_override FROM pipeline_runs WHERE status IN ('pending','running')"
             ).fetchall()
             for row in rows:
                 prun = row["id"]
@@ -59,14 +59,17 @@ class PipelineExecutor:
                 if (counts["pending"] or 0) > 0 or (counts["running"] or 0) > 0:
                     workspace = row["workspace_name"]
                     pipeline_name = row["pipeline_name"]
+                    # Load persisted overrides
+                    config_override = json.loads(row["config_override"]) if row["config_override"] else None
+                    inputs_override = json.loads(row["inputs_override"]) if row["inputs_override"] else None
                     # submit worker to continue processing
                     self._pool.submit(
                         self._worker_loop,
                         prun,
                         workspace,
                         pipeline_name,
-                        None,  # config_override
-                        None,  # inputs_override
+                        config_override,
+                        inputs_override,
                         None,  # reason
                     )
 
@@ -140,6 +143,9 @@ class PipelineExecutor:
         safe_config_override = copy.deepcopy(normalized_config) if normalized_config else None
         safe_inputs_override = copy.deepcopy(normalized_inputs) if normalized_inputs else None
 
+        # Validate all inputs can be resolved BEFORE queuing
+        self._validate_inputs_resolvable(workspace, stages_to_execute, safe_inputs_override)
+
         if not async_mode:
             # Sequential blocking mode - run each stage and wait
             runs: list[StageRunInfo] = []
@@ -166,10 +172,17 @@ class PipelineExecutor:
         with self.db._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO pipeline_runs (id, workspace_name, pipeline_name, status, started_at)
-                VALUES (?, ?, ?, 'running', ?)
+                INSERT INTO pipeline_runs (id, workspace_name, pipeline_name, status, started_at, config_override, inputs_override)
+                VALUES (?, ?, ?, 'running', ?, ?, ?)
                 """,
-                (pipeline_run_id, workspace, pipeline_name, now),
+                (
+                    pipeline_run_id,
+                    workspace,
+                    pipeline_name,
+                    now,
+                    json.dumps(safe_config_override) if safe_config_override else None,
+                    json.dumps(safe_inputs_override) if safe_inputs_override else None,
+                ),
             )
 
             # Build dependency chain - each stage depends on the previous one in the run list
@@ -178,6 +191,8 @@ class PipelineExecutor:
                 deps: list[str] = []
                 if prev:
                     deps.append(prev)
+
+                # Create queue entry (stage_run created when worker picks it up)
                 conn.execute(
                     """
                     INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, deps, status)
@@ -185,17 +200,11 @@ class PipelineExecutor:
                     """,
                     (pipeline_run_id, stage.name, json.dumps(deps)),
                 )
+
                 prev = stage.name
 
-        launched = self._process_pipeline_queue_once(
-            pipeline_run_id,
-            workspace,
-            pipeline_name,
-            safe_config_override,
-            safe_inputs_override,
-            reason,
-        )
-
+        # Submit to thread pool immediately - don't block on docker build
+        # The worker loop will handle all stage execution asynchronously
         self._pool.submit(
             self._worker_loop,
             pipeline_run_id,
@@ -206,19 +215,78 @@ class PipelineExecutor:
             reason,
         )
 
+        # Build queued stage info for immediate feedback
+        queued_stages = [
+            {
+                "stage": stage.name,
+                "status": "queued",
+                "pipeline_run_id": pipeline_run_id,
+            }
+            for stage in stages_to_execute
+        ]
+
         return {
             "pipeline_run_id": pipeline_run_id,
-            "stage_runs": [r.model_dump(mode="json") for r in launched],
+            "stages_queued": [s.name for s in stages_to_execute],
+            "status": "Pipeline queued. Use list_runs(pipeline_run_id=...) to check progress.",
+            "queued": queued_stages,
         }
 
+    def _validate_inputs_resolvable(
+        self,
+        workspace: str,
+        stages: list,
+        inputs_override: dict | None,
+    ) -> None:
+        """Validate all stage inputs can be resolved before queuing.
+
+        Raises:
+            GoldfishError: If any input cannot be resolved and has no override
+        """
+        from goldfish.errors import GoldfishError
+
+        for stage in stages:
+            stage_override = inputs_override.get(stage.name, {}) if inputs_override else {}
+
+            for input_name, input_def in stage.inputs.items():
+                # If there's an override for this input, it's valid
+                # (source names are resolved at runtime, paths used as-is)
+                if input_name in stage_override:
+                    continue
+
+                # Check if input can be resolved
+                if input_def.from_stage:
+                    # Need a completed run of the upstream stage
+                    stage_runs = self.db.list_stage_runs(workspace_name=workspace, stage_name=input_def.from_stage)
+                    has_completed = any(r["status"] == "completed" for r in stage_runs)
+                    if not has_completed:
+                        raise GoldfishError(
+                            f"Stage '{stage.name}' requires input '{input_name}' from stage "
+                            f"'{input_def.from_stage}', but no successful run exists. "
+                            f"Either run '{input_def.from_stage}' first, or provide inputs_override."
+                        )
+
+                elif input_def.dataset:
+                    # Need the dataset to exist
+                    dataset = self.db.get_source(input_def.dataset)
+                    if not dataset:
+                        raise GoldfishError(
+                            f"Stage '{stage.name}' requires dataset '{input_def.dataset}' "
+                            f"for input '{input_name}', but dataset not found. "
+                            f"Register it first, or provide inputs_override."
+                        )
+
     def _worker_loop(self, pipeline_run_id, workspace, pipeline_name, config_override, inputs_override, reason):
+        self._logger.info("Worker started for pipeline %s workspace=%s", pipeline_run_id, workspace)
         start_time = time.time()
         error_count = 0
         while True:
             try:
                 pending, running = self._pipeline_queue_counts(pipeline_run_id)
+                self._logger.debug("Pipeline %s: pending=%d running=%d", pipeline_run_id, pending, running)
                 if pending == 0 and running == 0:
                     self._finalize_pipeline_run(pipeline_run_id)
+                    self._logger.info("Pipeline %s completed", pipeline_run_id)
                     break
                 self._process_pipeline_queue_once(
                     pipeline_run_id, workspace, pipeline_name, config_override, inputs_override, reason
@@ -226,7 +294,7 @@ class PipelineExecutor:
                 error_count = 0
             except Exception as e:
                 error_count += 1
-                self._logger.exception("Pipeline worker error (run=%s err#=%s)", pipeline_run_id, error_count)
+                self._logger.exception("Pipeline worker error (run=%s err#=%s): %s", pipeline_run_id, error_count, e)
                 if error_count >= self.MAX_WORKER_ERRORS:
                     with self.db._conn() as conn:
                         conn.execute(
@@ -466,21 +534,32 @@ class PipelineExecutor:
 
         # Second pass: launch outside the transaction to avoid DB locks
         for queue_id, stage_name, stage_config, stage_inputs in to_launch:
-            stage_run = self.stage_executor.run_stage(
-                workspace=workspace,
-                stage_name=stage_name,
-                pipeline_name=pipeline_name,  # Pass original, not effective (for file resolution)
-                pipeline_run_id=pipeline_run_id,
-                config_override=stage_config,
-                inputs_override=stage_inputs,
-                reason=reason,
-            )
-            launched.append(stage_run)
-            with self.db._conn() as conn:
-                conn.execute(
-                    "UPDATE pipeline_stage_queue SET stage_run_id = ? WHERE id = ?",
-                    (stage_run.stage_run_id, queue_id),
+            try:
+                stage_run = self.stage_executor.run_stage(
+                    workspace=workspace,
+                    stage_name=stage_name,
+                    pipeline_name=pipeline_name,  # Pass original, not effective (for file resolution)
+                    pipeline_run_id=pipeline_run_id,
+                    config_override=stage_config,
+                    inputs_override=stage_inputs,
+                    reason=reason,
                 )
+                launched.append(stage_run)
+                # Update queue with the stage_run_id for status tracking
+                with self.db._conn() as conn:
+                    conn.execute(
+                        "UPDATE pipeline_stage_queue SET stage_run_id = ? WHERE id = ?",
+                        (stage_run.stage_run_id, queue_id),
+                    )
+            except Exception as e:
+                # Mark queue entry as failed with error message so it's visible to the user
+                error_msg = str(e)
+                self._logger.error("Stage %s failed to launch: %s", stage_name, error_msg)
+                with self.db._conn() as conn:
+                    conn.execute(
+                        "UPDATE pipeline_stage_queue SET status = 'failed', error = ? WHERE id = ?",
+                        (error_msg, queue_id),
+                    )
 
         return launched
 

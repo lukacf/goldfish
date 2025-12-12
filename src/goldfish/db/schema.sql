@@ -193,7 +193,9 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     status TEXT NOT NULL DEFAULT 'pending',
     started_at TEXT NOT NULL,
     completed_at TEXT,
-    error TEXT
+    error TEXT,
+    config_override TEXT,             -- JSON: per-stage config overrides
+    inputs_override TEXT              -- JSON: per-stage input overrides
 );
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_workspace ON pipeline_runs(workspace_name);

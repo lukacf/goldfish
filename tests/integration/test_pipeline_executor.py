@@ -259,9 +259,12 @@ class TestAsyncQueueSemantics:
         )
 
         assert "pipeline_run_id" in result
-        assert len(result["stage_runs"]) == 1  # only first stage launched immediately
+        assert "queued" in result
+        assert len(result["queued"]) == 2  # all stages queued
+        assert result["stages_queued"] == ["prep", "train"]
         fake_pool.submit.assert_called_once()
-        assert stage_executor.calls == ["prep"]
+        # Worker hasn't run yet, so no stages have been executed
+        assert stage_executor.calls == []
 
     def test_pipeline_queue_respects_dependencies(self, test_db, monkeypatch):
         pipeline_def = PipelineDef(
@@ -281,12 +284,26 @@ class TestAsyncQueueSemantics:
             reason="queue deps",
         )
         prun = result["pipeline_run_id"]
+        assert len(result["queued"]) == 2
+
+        # Process queue to launch first stage (creates stage_run record)
+        first_launched = executor._process_pipeline_queue_once(
+            prun,
+            workspace="ws",
+            pipeline_name="train",
+            config_override=None,
+            inputs_override=None,
+            reason="queue deps",
+        )
+        assert len(first_launched) == 1
+        assert first_launched[0].stage == "prep"
+        first_stage_id = first_launched[0].stage_run_id
 
         # Mark first stage complete in DB to satisfy dependency
-        first_stage_id = result["stage_runs"][0]["stage_run_id"]
         test_db.update_stage_run_status(first_stage_id, status="completed")
 
-        launched = executor._process_pipeline_queue_once(
+        # Process queue again - now second stage should be runnable
+        second_launched = executor._process_pipeline_queue_once(
             prun,
             workspace="ws",
             pipeline_name="train",
@@ -295,7 +312,7 @@ class TestAsyncQueueSemantics:
             reason="queue deps",
         )
 
-        assert [sr.stage for sr in launched] == ["train"]
+        assert [sr.stage for sr in second_launched] == ["train"]
         assert stage_executor.calls == ["prep", "train"]
         # submit should have been invoked once by run_pipeline
         fake_pool.submit.assert_called_once()
@@ -318,7 +335,18 @@ class TestAsyncQueueSemantics:
         )
         prun = result["pipeline_run_id"]
 
-        # Second pass should not relaunch the same stage when status is still running
+        # First call processes and launches the stage
+        executor._process_pipeline_queue_once(
+            prun,
+            workspace="ws",
+            pipeline_name="train",
+            config_override=None,
+            inputs_override=None,
+            reason="cas",
+        )
+        assert len(stage_executor.calls) == 1  # Stage launched once
+
+        # Second pass should NOT relaunch - CAS prevents double launch
         before_calls = len(stage_executor.calls)
         executor._process_pipeline_queue_once(
             prun,
@@ -328,7 +356,7 @@ class TestAsyncQueueSemantics:
             inputs_override=None,
             reason="cas",
         )
-        assert len(stage_executor.calls) == before_calls
+        assert len(stage_executor.calls) == before_calls  # No new launches
 
     def test_worker_recovery_on_restart(self, test_db, monkeypatch):
         # Seed DB with a pending pipeline run so __init__ schedules recovery
@@ -406,9 +434,24 @@ class TestAsyncQueueSemantics:
             async_mode=True,
             reason="wait flag",
         )
+        prun = result["pipeline_run_id"]
 
-        sr = result["stage_runs"][0]
-        assert sr["status"] == "running"
+        # run_stages() with async_mode=True only queues stages
+        assert len(result["queued"]) == 1
+        assert result["queued"][0]["status"] == "queued"
+
+        # Process queue to actually launch the stage
+        launched = executor._process_pipeline_queue_once(
+            prun,
+            workspace="ws",
+            pipeline_name="train",
+            config_override=None,
+            inputs_override=None,
+            reason="wait flag",
+        )
+
+        assert len(launched) == 1
+        assert launched[0].status == "running"
         # stage_executor.run_stage is invoked once with default wait=False (not supplied)
         assert len(executor.stage_executor.call_kwargs) == 1
         assert executor.stage_executor.call_kwargs[0]["wait"] is False
@@ -476,3 +519,253 @@ class TestNamedPipelines:
         result = executor.run_stages(workspace="ws", pipeline_name="train", async_mode=False)
 
         assert all(r["pipeline"] == "train" for r in result["stage_runs"])
+
+
+# =============================================================================
+# Regression Tests - Issues fixed in pipeline execution
+# =============================================================================
+
+
+class TestOverridePersistence:
+    """Regression: inputs_override and config_override must be persisted to DB."""
+
+    def test_inputs_override_stored_in_db(self, test_db):
+        """inputs_override is stored in pipeline_runs table."""
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+        stage_executor = DummyStageExecutor(test_db)
+
+        executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
+        result = executor.run_stages(
+            workspace="ws",
+            pipeline_name="train",
+            inputs_override={"prep": {"data": "gs://bucket/data"}},
+            async_mode=True,
+        )
+
+        prun_id = result["pipeline_run_id"]
+        with test_db._conn() as conn:
+            row = conn.execute("SELECT inputs_override FROM pipeline_runs WHERE id=?", (prun_id,)).fetchone()
+
+        assert row is not None
+        override = json.loads(row["inputs_override"])
+        assert override == {"prep": {"data": "gs://bucket/data"}}
+
+    def test_config_override_stored_in_db(self, test_db):
+        """config_override is stored in pipeline_runs table."""
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+        stage_executor = DummyStageExecutor(test_db)
+
+        executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
+        result = executor.run_stages(
+            workspace="ws",
+            pipeline_name="train",
+            config_override={"prep": {"LR": "0.001"}},
+            async_mode=True,
+        )
+
+        prun_id = result["pipeline_run_id"]
+        with test_db._conn() as conn:
+            row = conn.execute("SELECT config_override FROM pipeline_runs WHERE id=?", (prun_id,)).fetchone()
+
+        assert row is not None
+        override = json.loads(row["config_override"])
+        assert override == {"prep": {"LR": "0.001"}}
+
+    def test_overrides_loaded_in_recovery(self, test_db, monkeypatch):
+        """Overrides are loaded when recovering inflight pipelines."""
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+        stage_executor = DummyStageExecutor(test_db)
+
+        # Create a pipeline run with overrides directly in DB
+        now = datetime.now(UTC).isoformat()
+        prun_id = "prun-recovery-test"
+        with test_db._conn() as conn:
+            conn.execute(
+                """INSERT INTO pipeline_runs
+                   (id, workspace_name, pipeline_name, status, started_at, config_override, inputs_override)
+                   VALUES (?, ?, ?, 'running', ?, ?, ?)""",
+                (
+                    prun_id,
+                    "ws",
+                    "train",
+                    now,
+                    '{"prep": {"LR": "0.01"}}',
+                    '{"prep": {"data": "gs://test"}}',
+                ),
+            )
+            conn.execute(
+                """INSERT INTO pipeline_stage_queue
+                   (pipeline_run_id, stage_name, status) VALUES (?, ?, 'pending')""",
+                (prun_id, "prep"),
+            )
+
+        # Track what _pool.submit receives
+        submitted_args = []
+
+        def mock_submit(fn, *args):
+            submitted_args.append(args)
+            # Don't actually run the worker
+
+        # Patch the class-level _pool.submit directly
+        monkeypatch.setattr(PipelineExecutor._pool, "submit", mock_submit)
+
+        # Creating executor triggers _recover_inflight_pipelines
+        executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
+
+        # Verify overrides were passed to worker
+        assert len(submitted_args) == 1
+        # Args: pipeline_run_id, workspace, pipeline_name, config_override, inputs_override, reason
+        _, _, _, config_override, inputs_override, _ = submitted_args[0]
+        assert config_override == {"prep": {"LR": "0.01"}}
+        assert inputs_override == {"prep": {"data": "gs://test"}}
+
+
+class TestStageLaunchErrorVisibility:
+    """Regression: Stage launch errors must be visible in queue status."""
+
+    def test_launch_error_stored_in_queue(self, test_db, monkeypatch):
+        """When stage launch fails, error is stored in pipeline_stage_queue."""
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+
+        # Stage executor that raises an error
+        class FailingStageExecutor(DummyStageExecutor):
+            def run_stage(self, **kwargs):
+                raise RuntimeError("Stage launch failed: missing dependency")
+
+        stage_executor = FailingStageExecutor(test_db)
+
+        # Disable thread pool
+        mock_pool = MagicMock()
+        monkeypatch.setattr(
+            "goldfish.jobs.pipeline_executor.ThreadPoolExecutor",
+            lambda **kw: mock_pool,
+        )
+
+        executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
+        result = executor.run_stages(workspace="ws", pipeline_name="train", async_mode=True)
+
+        prun_id = result["pipeline_run_id"]
+
+        # Process queue - this should catch the error
+        executor._process_pipeline_queue_once(prun_id, "ws", "train", None, None, "test")
+
+        # Check queue entry has error
+        with test_db._conn() as conn:
+            row = conn.execute(
+                "SELECT status, error FROM pipeline_stage_queue WHERE pipeline_run_id=?",
+                (prun_id,),
+            ).fetchone()
+
+        assert row["status"] == "failed"
+        assert "Stage launch failed" in row["error"]
+
+
+class TestInputValidationBeforeQueuing:
+    """Regression: Input validation must fail fast before any pipeline run is created."""
+
+    def test_validation_fails_if_upstream_stage_not_completed(self, test_db, monkeypatch):
+        """Pipeline fails validation if input depends on non-completed upstream stage."""
+        from goldfish.models import SignalDef
+
+        # Pipeline where train depends on prep output
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[
+                StageDef(name="prep", inputs={}, outputs={}),
+                StageDef(
+                    name="train",
+                    inputs={"features": SignalDef(name="features", from_stage="prep", type="npy")},
+                    outputs={},
+                ),
+            ],
+        )
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+        stage_executor = DummyStageExecutor(test_db)
+
+        # Disable thread pool
+        mock_pool = MagicMock()
+        monkeypatch.setattr(
+            "goldfish.jobs.pipeline_executor.ThreadPoolExecutor",
+            lambda **kw: mock_pool,
+        )
+
+        executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
+
+        # Try to run just "train" without "prep" having completed
+        # This should fail validation BEFORE creating a pipeline run
+        from goldfish.errors import GoldfishError
+
+        with pytest.raises(GoldfishError, match="requires input.*from stage"):
+            executor.run_stages(
+                workspace="ws",
+                pipeline_name="train",
+                stages=["train"],  # Only run train, not prep
+                async_mode=True,
+            )
+
+        # Verify NO pipeline_run was created
+        with test_db._conn() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM pipeline_runs").fetchone()[0]
+        assert count == 0
+
+    def test_validation_passes_with_override(self, test_db, monkeypatch):
+        """Pipeline passes validation if missing input has an override."""
+        from goldfish.models import SignalDef
+
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[
+                StageDef(
+                    name="train",
+                    inputs={"features": SignalDef(name="features", from_stage="prep", type="npy")},
+                    outputs={},
+                ),
+            ],
+        )
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+        stage_executor = DummyStageExecutor(test_db)
+
+        mock_pool = MagicMock()
+        monkeypatch.setattr(
+            "goldfish.jobs.pipeline_executor.ThreadPoolExecutor",
+            lambda **kw: mock_pool,
+        )
+
+        executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
+
+        # Run with override - should pass validation
+        result = executor.run_stages(
+            workspace="ws",
+            pipeline_name="train",
+            stages=["train"],
+            inputs_override={"train": {"features": "gs://bucket/features"}},
+            async_mode=True,
+        )
+
+        # Pipeline run should be created
+        assert "pipeline_run_id" in result
+        with test_db._conn() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM pipeline_runs").fetchone()[0]
+        assert count == 1

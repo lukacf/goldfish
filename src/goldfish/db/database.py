@@ -271,10 +271,20 @@ class Database:
                 ),
             )
 
-    def get_source(self, source_id: str) -> SourceRow | None:
-        """Get a source by ID."""
+    def get_source(self, source_id_or_name: str) -> SourceRow | None:
+        """Get a source by ID or name.
+
+        Looks up by ID first, then by name as fallback. This allows users
+        to reference sources by either their ID (e.g., "src-123") or their
+        human-readable name (e.g., "v37-tokens").
+        """
         with self._conn() as conn:
-            row = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+            # Try by ID first
+            row = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id_or_name,)).fetchone()
+            if row:
+                return cast(SourceRow, dict(row))
+            # Fallback to name lookup
+            row = conn.execute("SELECT * FROM sources WHERE name = ?", (source_id_or_name,)).fetchone()
             return cast(SourceRow, dict(row)) if row else None
 
     def count_sources(
@@ -1247,6 +1257,82 @@ class Database:
             row = conn.execute(query, params).fetchone()
             count: int = row[0] if row else 0
             return count
+
+    def get_queued_stages_for_pipeline(self, pipeline_run_id: str) -> list[dict]:
+        """Get queued stages from pipeline_stage_queue that don't have stage_runs yet.
+
+        Returns queue entries that are pending/running but haven't created a stage_run record.
+        These represent stages that are queued but not yet processing.
+
+        Args:
+            pipeline_run_id: Pipeline run ID to filter by
+
+        Returns:
+            List of dicts with stage info for display in list_runs
+        """
+        with self._conn() as conn:
+            # Get queue entries that don't have a corresponding stage_run yet
+            rows = conn.execute(
+                """
+                SELECT
+                    q.id,
+                    q.pipeline_run_id,
+                    q.stage_name,
+                    q.status,
+                    p.workspace_name,
+                    p.pipeline_name,
+                    p.started_at
+                FROM pipeline_stage_queue q
+                JOIN pipeline_runs p ON p.id = q.pipeline_run_id
+                WHERE q.pipeline_run_id = ?
+                AND q.stage_run_id IS NULL
+                AND q.status IN ('pending', 'running')
+                ORDER BY q.id
+                """,
+                (pipeline_run_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_pipeline_run_status(self, pipeline_run_id: str) -> dict | None:
+        """Get detailed status of a pipeline run including queue state.
+
+        Args:
+            pipeline_run_id: Pipeline run ID
+
+        Returns:
+            Dict with pipeline run info and queue status, or None if not found
+        """
+        with self._conn() as conn:
+            # Get pipeline run
+            row = conn.execute(
+                "SELECT * FROM pipeline_runs WHERE id = ?",
+                (pipeline_run_id,),
+            ).fetchone()
+            if not row:
+                return None
+            prun = dict(row)
+
+            # Get queue entries - use SELECT * to handle schema variations
+            queue = conn.execute(
+                """
+                SELECT *
+                FROM pipeline_stage_queue
+                WHERE pipeline_run_id = ?
+                ORDER BY id
+                """,
+                (pipeline_run_id,),
+            ).fetchall()
+
+            return {
+                "pipeline_run_id": prun["id"],
+                "workspace": prun["workspace_name"],
+                "pipeline": prun["pipeline_name"],
+                "status": prun["status"],
+                "started_at": prun["started_at"],
+                "completed_at": prun.get("completed_at"),
+                "error": prun.get("error"),
+                "queue": [dict(q) for q in queue],
+            }
 
     def get_latest_stage_run(
         self,

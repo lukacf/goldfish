@@ -542,3 +542,49 @@ def test_launch_filters_gpu_resources(mock_build_startup, mock_resource_launcher
     assert len(resources) == 1
     assert resources[0]["name"] == "gpu-resource"
     assert resources[0]["gpu"]["type"] == "a100"
+
+
+# =============================================================================
+# Regression Tests - Container permission fixes
+# =============================================================================
+
+
+@patch("goldfish.infra.gce_launcher.ResourceLauncher")
+@patch("goldfish.infra.gce_launcher.build_startup_script")
+def test_launch_instance_chown_for_container_user(mock_build_startup, mock_resource_launcher_class, launcher):
+    """Regression: pre_run_cmds must chown /mnt/inputs and /mnt/outputs for container user.
+
+    Docker containers (like pytorch-notebook) run as non-root user (jovyan, UID 1000).
+    The startup script runs as root, so we need to chown the input/output directories
+    before Docker starts, otherwise the container gets PermissionError.
+    """
+    mock_build_startup.return_value = "#!/bin/bash\necho startup"
+
+    # Mock ResourceLauncher
+    mock_launcher = MagicMock()
+    mock_result = Mock(instance_name="test-instance")
+    mock_launcher.launch.return_value = mock_result
+    mock_resource_launcher_class.return_value = mock_launcher
+
+    # Launch instance
+    launcher.launch_instance(
+        image_tag="test-image:latest",
+        stage_run_id="perm-test",
+        entrypoint_script="#!/bin/bash\necho test",
+        stage_config={"inputs": {}, "outputs": {}},
+        work_dir=Path("/tmp/work"),
+        use_capacity_search=True,
+    )
+
+    # Verify build_startup_script was called with pre_run_cmds containing chown
+    call_kwargs = mock_build_startup.call_args[1]
+    pre_run_cmds = call_kwargs.get("pre_run_cmds", [])
+
+    # Must have chown commands for UID 1000 (jovyan) and GID 100 (users)
+    pre_run_str = "\n".join(pre_run_cmds)
+    assert (
+        "chown 1000:100 /mnt/inputs /mnt/outputs" in pre_run_str
+    ), "Missing chown command for container user (UID 1000, GID 100)"
+
+    # Must also chown symlinks inside /mnt/inputs (using -h flag)
+    assert "chown -h 1000:100 /mnt/inputs/*" in pre_run_str, "Missing chown -h for symlinks inside /mnt/inputs"
