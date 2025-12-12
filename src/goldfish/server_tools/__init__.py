@@ -7,4 +7,5 @@ from goldfish.server_tools.lineage_tools import *  # noqa: F401, F403
 from goldfish.server_tools.logging_tools import *  # noqa: F401, F403
 from goldfish.server_tools.pipeline_tools import *  # noqa: F401, F403
 from goldfish.server_tools.utility_tools import *  # noqa: F401, F403
+from goldfish.server_tools.web_tools import *  # noqa: F401, F403
 from goldfish.server_tools.workspace_tools import *  # noqa: F401, F403
