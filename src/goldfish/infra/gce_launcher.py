@@ -169,6 +169,22 @@ class GCELauncher:
             f'ls -la /mnt/inputs/ 2>&1 | tee -a {debug_log} || echo "DEBUG: /mnt/inputs is empty or does not exist" | tee -a {debug_log}'
         )
 
+        # Make inputs/outputs accessible by container user (jovyan, UID 1000)
+        # The startup script runs as root, but Docker container runs as non-root
+        # Use -h to change symlink ownership (not the target), don't use -R to avoid following symlinks
+        pre_run_cmds.append("chown 1000:100 /mnt/inputs /mnt/outputs")
+        pre_run_cmds.append("chown -h 1000:100 /mnt/inputs/* 2>/dev/null || true")
+
+        # Debug: verify permissions after chown
+        pre_run_cmds.append(f'echo "DEBUG: Permissions after chown:" | tee -a {debug_log}')
+        pre_run_cmds.append(f"ls -la /mnt/inputs/ 2>&1 | tee -a {debug_log}")
+        pre_run_cmds.append(f'echo "DEBUG: gcsfuse mount info:" | tee -a {debug_log}')
+        pre_run_cmds.append(f"mount | grep gcsfuse 2>&1 | tee -a {debug_log}")
+        pre_run_cmds.append(f'echo "DEBUG: Testing access as user 1000:" | tee -a {debug_log}')
+        pre_run_cmds.append(
+            f'su -s /bin/bash -c "ls -la /mnt/inputs/" nobody 2>&1 | tee -a {debug_log} || echo "DEBUG: Access test failed" | tee -a {debug_log}'
+        )
+
         # Build output staging commands (run after Docker)
         outputs_gcs_path = f"gs://{bucket_name}/{run_path}/outputs"
         post_run_cmds = [

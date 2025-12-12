@@ -81,7 +81,7 @@ START: What task?
 
    workspaces/w1/
    ├── pipeline.yaml          # Define stages and signals
-   ├── requirements.txt       # Python dependencies (CRITICAL!)
+   ├── requirements.txt       # Optional: only for project-specific packages
    ├── configs/
    │   ├── preprocess.yaml
    │   └── train.yaml
@@ -89,8 +89,8 @@ START: What task?
        ├── preprocess.py
        └── train.py
 
-   **IMPORTANT:** The `requirements.txt` is essential! Without it, stages run in
-   a bare Python container with NO packages (no numpy, torch, pandas, etc.).
+   **Note:** Stages automatically use pre-built images with common ML libraries
+   (numpy, pandas, torch, scikit-learn, etc.). No setup required.
 
 4. Run the pipeline
    run("w1")                   # All stages
@@ -346,14 +346,13 @@ status()  # Recover orientation: slots, jobs, STATE.md
 
 ## Best Practices
 
-1. **Always include requirements.txt** - Without it, no packages are installed (no numpy, torch, etc.)
-2. **Always provide clear goals** when creating workspaces
-3. **Checkpoint frequently** with descriptive messages
-4. **Use descriptive stage names** that reflect the operation
-5. **Register datasets** before referencing in pipelines
-6. **Check status()** after context recovery
-7. **Use log_thought()** to document decisions
-8. **Monitor long runs** with logs() and list_runs()
+1. **Always provide clear goals** when creating workspaces
+2. **Checkpoint frequently** with descriptive messages
+3. **Use descriptive stage names** that reflect the operation
+4. **Register datasets** before referencing in pipelines
+5. **Check status()** after context recovery
+6. **Use log_thought()** to document decisions
+7. **Monitor long runs** with logs() and list_runs()
 
 ## Resources
 

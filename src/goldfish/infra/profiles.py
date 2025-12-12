@@ -20,11 +20,36 @@ class ProfileValidationError(Exception):
     pass
 
 
+# Pre-built base images with ML libraries
+# Uses well-maintained PUBLIC images - NO setup required by users
+#
+# CPU: Jupyter pytorch-notebook (numpy, pandas, scikit-learn, torch, matplotlib)
+# GPU: Jupyter pytorch-notebook with CUDA (same + CUDA support)
+#
+# Source: https://jupyter-docker-stacks.readthedocs.io/
+
+# Public base images (no registry setup needed)
+# CPU: Jupyter pytorch-notebook - has numpy, pandas, scikit-learn, torch, matplotlib, seaborn
+PUBLIC_BASE_IMAGE_CPU = "quay.io/jupyter/pytorch-notebook:python-3.11"
+
+# GPU: Jupyter pytorch-notebook with CUDA 12 - same libraries + CUDA support
+PUBLIC_BASE_IMAGE_GPU = "quay.io/jupyter/pytorch-notebook:cuda12-python-3.11"
+
+# Fallback (bare Python - requires requirements.txt)
+FALLBACK_BASE_IMAGE = "python:3.11-slim"
+
+# For custom registry images (optional override in goldfish.yaml)
+BASE_IMAGE_CPU = "goldfish-base-cpu"
+BASE_IMAGE_GPU = "goldfish-base-gpu"
+BASE_IMAGE_VERSION = "v1"
+
+
 # Built-in resource profiles optimized for ML workloads
 # Based on legacy infra/gcp.yaml
 BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
     # CPU-only profiles
     "cpu-small": {
+        "base_image": PUBLIC_BASE_IMAGE_CPU,  # GHCR public image with ML libs
         "machine_type": "n2-standard-4",
         "gpu": {
             "type": "none",
@@ -49,6 +74,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         },
     },
     "cpu-large": {
+        "base_image": PUBLIC_BASE_IMAGE_CPU,  # GHCR public image with ML libs
         "machine_type": "c4-highcpu-192",
         "gpu": {
             "type": "none",
@@ -73,6 +99,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
     },
     # H100 GPU profiles
     "h100-spot": {
+        "base_image": PUBLIC_BASE_IMAGE_GPU,  # PyTorch official with CUDA
         "machine_type": "a3-highgpu-1g",
         "gpu": {
             "type": "h100",
@@ -98,6 +125,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         },
     },
     "h100-on-demand": {
+        "base_image": PUBLIC_BASE_IMAGE_GPU,  # PyTorch official with CUDA
         "machine_type": "a3-highgpu-1g",
         "gpu": {
             "type": "h100",
@@ -124,6 +152,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
     },
     # A100 GPU profiles
     "a100-spot": {
+        "base_image": PUBLIC_BASE_IMAGE_GPU,  # PyTorch official with CUDA
         "machine_type": "a2-highgpu-1g",
         "gpu": {
             "type": "a100",
@@ -149,6 +178,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         },
     },
     "a100-on-demand": {
+        "base_image": PUBLIC_BASE_IMAGE_GPU,  # PyTorch official with CUDA
         "machine_type": "a2-highgpu-1g",
         "gpu": {
             "type": "a100",
@@ -296,3 +326,47 @@ class ProfileResolver:
         """
         all_profiles = set(BUILTIN_PROFILES.keys()) | set(self.profile_overrides.keys())
         return sorted(all_profiles)
+
+
+def resolve_base_image(profile: dict[str, Any], artifact_registry: str | None = None) -> str:
+    """Resolve the base image for a profile.
+
+    Built-in profiles use public images (PyTorch official, GHCR) that require
+    NO setup - they just work. Custom profiles can use private registry images.
+
+    Args:
+        profile: Resolved profile dictionary
+        artifact_registry: Optional registry URL for custom images
+
+    Returns:
+        Full image URL ready to use in FROM directive
+    """
+    base_image: str | None = profile.get("base_image")
+
+    # No base image specified - use fallback
+    if not base_image:
+        return FALLBACK_BASE_IMAGE
+
+    # If it's already a full image reference (contains / or :), use as-is
+    # This handles: pytorch/pytorch:..., ghcr.io/..., us-docker.pkg.dev/...
+    if "/" in base_image or ":" in base_image:
+        return str(base_image)
+
+    # Short name (e.g., "goldfish-base-cpu") - needs registry
+    if artifact_registry:
+        return f"{artifact_registry}/{base_image}:{BASE_IMAGE_VERSION}"
+
+    # No registry for short name - use fallback
+    return FALLBACK_BASE_IMAGE
+
+
+def get_base_image_names() -> dict[str, str]:
+    """Get all base image names and their descriptions.
+
+    Returns:
+        Dict of base image name -> description
+    """
+    return {
+        BASE_IMAGE_CPU: "CPU image with numpy, pandas, scikit-learn, and common ML libraries",
+        BASE_IMAGE_GPU: "GPU image with CUDA, PyTorch, numpy, pandas, and common ML libraries",
+    }

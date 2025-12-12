@@ -91,8 +91,11 @@ echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.clou
 apt-get update -y
 timeout 120 apt-get install -y gcsfuse || true
 mkdir -p {mount_point}
+# Enable user_allow_other in fuse.conf for allow_other to work
+grep -q "^user_allow_other" /etc/fuse.conf 2>/dev/null || echo "user_allow_other" >> /etc/fuse.conf
+echo "DEBUG: Mounting gcsfuse with uid=1000 gid=100 file-mode=0644 dir-mode=0755 allow_other"
 for attempt in $(seq 1 {GCSFUSE_MAX_ATTEMPTS}); do
-  if gcsfuse --implicit-dirs {bucket} {mount_point}; then
+  if gcsfuse --implicit-dirs --uid=1000 --gid=100 --file-mode=0644 --dir-mode=0755 -o allow_other {bucket} {mount_point}; then
     if mountpoint -q {mount_point}; then
       break
     fi

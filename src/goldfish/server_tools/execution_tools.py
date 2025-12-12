@@ -17,7 +17,6 @@ from goldfish.models import (
     CancelRunResponse,
     GetOutputsResponse,
     GetRunResponse,
-    ListRunsResponse,
     StageRunInfo,
 )
 from goldfish.server import (
@@ -106,13 +105,13 @@ def run(
 
 @mcp.tool()
 def get_run(run_id: str) -> dict:
-    """Get full details of a run: metadata, inputs, outputs, config.
+    """Get full details of a run: metadata, inputs, outputs, config, full error.
 
     Args:
         run_id: The run ID (e.g., "stage-abc123")
 
     Returns:
-        Dict with stage_run info, inputs, outputs, and config
+        Dict with stage_run info, inputs, outputs, config, and complete error message
     """
     db = _get_db()
     # Refresh status from backend
@@ -122,8 +121,9 @@ def get_run(run_id: str) -> dict:
     if not row:
         raise GoldfishError(f"Run not found: {run_id}")
 
+    # Use truncate_error=False to get full error message
     result: dict[str, Any] = GetRunResponse(
-        stage_run=_stage_run_row_to_info(row),
+        stage_run=stage_run_dict_to_info(row, truncate_error=False),
         inputs=json.loads(row["inputs_json"]) if row.get("inputs_json") else {},
         outputs=json.loads(row["outputs_json"]) if row.get("outputs_json") else [],
         config=json.loads(row["config_json"]) if row.get("config_json") else {},
@@ -298,23 +298,43 @@ def list_runs(
     stage: str | None = None,
     status: str | None = None,
     pipeline_run_id: str | None = None,
-    limit: int = 50,
+    limit: int = 5,
     offset: int = 0,
 ) -> dict:
-    """List runs (newest first).
+    """List runs (newest first) - compact view.
+
+    Returns a compact summary of recent runs. Use get_run(run_id) for full details.
+    When filtering by pipeline_run_id, also shows queued stages that haven't started yet.
 
     Args:
         workspace: Filter by workspace name
         stage: Filter by stage name
-        status: Filter by status (pending, running, completed, failed, canceled)
+        status: Filter by status (pending, running, completed, failed, canceled, queued)
         pipeline_run_id: Filter by pipeline run
-        limit: Max results (default 50)
+        limit: Max results (default 5)
         offset: Pagination offset
 
     Returns:
-        Dict with runs list, total_count, has_more
+        Dict with compact runs list showing: run_id, stage, status, progress, started_at
     """
     db = _get_db()
+    compact_runs = []
+
+    # When filtering by pipeline_run_id, first show queued stages that haven't started
+    queued_stages = []
+    if pipeline_run_id and offset == 0:
+        queued_stages = db.get_queued_stages_for_pipeline(pipeline_run_id)
+        for q in queued_stages:
+            compact_runs.append(
+                {
+                    "run_id": None,  # No run_id yet - still queued
+                    "stage": q["stage_name"],
+                    "status": "queued",
+                    "started": None,
+                    "error": None,
+                }
+            )
+
     rows = db.list_stage_runs_with_total(
         workspace_name=workspace,
         stage_name=stage,
@@ -324,12 +344,39 @@ def list_runs(
         offset=offset,
     )
     total = rows[0]["total_count"] if rows else 0
-    result: dict[str, Any] = ListRunsResponse(
-        runs=[_stage_run_row_to_info(r) for r in rows],
-        total_count=total,
-        has_more=offset + len(rows) < total,
-    ).model_dump(mode="json")
-    return result
+
+    # Compact view: just essential fields, one line per run
+    for r in rows:
+        # Build compact status string
+        status_str = r["status"]
+        if r.get("progress"):
+            status_str = f"{r['status']}:{r['progress']}"
+
+        # Truncate error to ~50 chars for compact view
+        error_snippet = None
+        if r.get("error"):
+            err = r["error"].split("\n")[0][:50]
+            error_snippet = err + "..." if len(r["error"]) > 50 else err
+
+        compact_runs.append(
+            {
+                "run_id": r.get("id") or r.get("stage_run_id"),
+                "stage": r["stage_name"],
+                "status": status_str,
+                "started": r.get("started_at", "")[:19] if r.get("started_at") else None,  # Trim to datetime
+                "error": error_snippet,
+            }
+        )
+
+    # Adjust total to include queued stages
+    total_with_queued = total + len(queued_stages)
+
+    return {
+        "runs": compact_runs,
+        "total_count": total_with_queued,
+        "has_more": offset + len(rows) < total,
+        "hint": "Use get_run(run_id) for full details including logs and complete error messages",
+    }
 
 
 @mcp.tool()
@@ -348,4 +395,23 @@ def get_outputs(run_id: str) -> dict:
         raise GoldfishError(f"Run not found: {run_id}")
     outputs = json.loads(row["outputs_json"]) if row.get("outputs_json") else []
     result: dict[str, Any] = GetOutputsResponse(stage_run_id=run_id, outputs=outputs).model_dump(mode="json")
+    return result
+
+
+@mcp.tool()
+def get_pipeline_status(pipeline_run_id: str) -> dict:
+    """Get detailed status of a pipeline run including queue state.
+
+    Use this to debug why a pipeline isn't progressing.
+
+    Args:
+        pipeline_run_id: The pipeline run ID (e.g., "prun-abc123")
+
+    Returns:
+        Dict with pipeline run info, queue entries, and their statuses
+    """
+    db = _get_db()
+    result = db.get_pipeline_run_status(pipeline_run_id)
+    if not result:
+        raise GoldfishError(f"Pipeline run not found: {pipeline_run_id}")
     return result
