@@ -1,0 +1,32 @@
+# Goldfish Base CPU - Pre-installed ML libraries
+# Version pinned for reproducibility
+
+# Core scientific computing
+numpy>=1.24,<2.0
+pandas>=2.0,<3.0
+scipy>=1.11,<2.0
+
+# Machine learning
+scikit-learn>=1.3,<2.0
+xgboost>=2.0,<3.0
+
+# Deep learning (CPU versions)
+torch>=2.1,<3.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Data handling
+pyarrow>=14.0,<16.0
+fastparquet>=2023.0
+
+# Visualization (for notebooks/debugging)
+matplotlib>=3.8,<4.0
+seaborn>=0.13,<1.0
+
+# Utilities
+tqdm>=4.66,<5.0
+pyyaml>=6.0,<7.0
+requests>=2.31,<3.0
+
+# Jupyter support (optional but commonly used)
+jupyterlab>=4.0,<5.0
+ipykernel>=6.25,<7.0

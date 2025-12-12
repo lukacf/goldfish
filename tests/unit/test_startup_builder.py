@@ -26,7 +26,9 @@ def test_gcsfuse_section_correct_mount_point():
     """Test that gcsfuse section uses correct bucket and mount point."""
     script = gcsfuse_section(bucket="my-bucket", mount_point="/mnt/gcs")
 
-    assert "gcsfuse --implicit-dirs my-bucket /mnt/gcs" in script
+    assert "gcsfuse" in script
+    assert "--implicit-dirs" in script
+    assert "my-bucket /mnt/gcs" in script
     assert "mkdir -p /mnt/gcs" in script
     assert "for attempt in $(seq 1 5)" in script  # 5 retry attempts
 
@@ -38,6 +40,65 @@ def test_gcsfuse_section_retry_logic():
     assert "for attempt in $(seq 1 5)" in script
     assert "fusermount -u /mnt/test" in script  # Cleanup on retry
     assert "sleep 2" in script
+
+
+# =============================================================================
+# Regression Tests - gcsfuse must use allow_other for Docker access
+# =============================================================================
+
+
+def test_gcsfuse_section_allow_other_for_docker():
+    """Regression: gcsfuse must use -o allow_other for Docker containers to access mount.
+
+    FUSE filesystems only allow the mounting user (root) by default. Docker containers
+    run in a different process context and need allow_other to access the mount.
+    """
+    script = gcsfuse_section(bucket="test-bucket", mount_point="/mnt/gcs")
+
+    # Must have allow_other FUSE option
+    assert "-o allow_other" in script
+
+    # Must enable user_allow_other in fuse.conf (required for allow_other)
+    assert "user_allow_other" in script
+    assert "/etc/fuse.conf" in script
+
+
+def test_gcsfuse_section_uses_correct_flag_syntax():
+    """Regression: gcsfuse uses -o for FUSE options, NOT --allow-other.
+
+    gcsfuse 3.5.4+ doesn't recognize --allow-other flag. Must use -o allow_other.
+    This was a bug where we used --allow-other which caused:
+    'Error: unknown flag: --allow-other'
+    """
+    script = gcsfuse_section(bucket="test-bucket", mount_point="/mnt/gcs")
+
+    # Must use -o syntax for FUSE mount options
+    assert "-o allow_other" in script
+
+    # Must NOT use the incorrect --allow-other syntax
+    assert "--allow-other" not in script
+
+
+def test_gcsfuse_section_uid_gid_for_container_user():
+    """Regression: gcsfuse must set uid/gid=1000 for non-root container user.
+
+    Container images like pytorch-notebook run as jovyan (UID 1000, GID 100).
+    Files need to appear owned by this user for the container to read them.
+    """
+    script = gcsfuse_section(bucket="test-bucket", mount_point="/mnt/gcs")
+
+    assert "--uid=1000" in script
+    assert "--gid=100" in script
+
+
+def test_gcsfuse_section_file_dir_modes():
+    """Regression: gcsfuse must set readable file/dir modes."""
+    script = gcsfuse_section(bucket="test-bucket", mount_point="/mnt/gcs")
+
+    # Files should be readable (0644)
+    assert "--file-mode=0644" in script
+    # Directories should be traversable (0755)
+    assert "--dir-mode=0755" in script
 
 
 def test_disk_mount_section_device_candidates():
@@ -210,7 +271,9 @@ def test_build_startup_script_with_gcsfuse():
         gcsfuse=True,
     )
 
-    assert "gcsfuse --implicit-dirs test-bucket" in script
+    assert "gcsfuse" in script
+    assert "--implicit-dirs" in script
+    assert "test-bucket" in script
     assert "gcsfuse_begin" in script
     assert "gcsfuse_ready" in script
 

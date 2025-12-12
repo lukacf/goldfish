@@ -103,15 +103,21 @@ class StageExecutor:
         inputs_override: dict | None = None,
         reason: str | None = None,
         wait: bool = False,
+        stage_run_id: str | None = None,
     ) -> StageRunInfo:
         """Run a single pipeline stage.
 
         Args:
             workspace: Workspace name
             stage_name: Stage to run
+            pipeline_name: Pipeline file name
+            pipeline_run_id: Parent pipeline run ID
             config_override: Override env vars from config
             inputs_override: Override input sources (for debugging)
             reason: Why this stage is being run
+            wait: Block until completion
+            stage_run_id: Pre-created stage_run_id (from pipeline queue). If provided,
+                         updates existing record; if None, creates new one.
 
         Flow:
             1. Auto-version workspace (git tag)
@@ -147,26 +153,38 @@ class StageExecutor:
         # 3. Resolve inputs (with source metadata for lineage tracking)
         inputs, input_sources = self._resolve_inputs(workspace, stage, inputs_override)
 
-        # 4. Generate stage run ID
-        stage_run_id = f"stage-{uuid4().hex[:8]}"
-
-        # 5. Create stage run record (with stage version ID and input lineage)
-        self._create_stage_run_record(
-            stage_run_id=stage_run_id,
-            workspace=workspace,
-            version=version,
-            stage_name=stage_name,
-            stage_version_id=stage_version_id,
-            inputs=inputs,
-            input_sources=input_sources,
-            config_override=config_override,
-            reason=reason,
-            pipeline_run_id=pipeline_run_id,
-            pipeline_name=pipeline_name,
-            profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
-            hints=stage_config.get("hints"),
-            config=stage_config,
-        )
+        # 4. Generate or use provided stage run ID
+        if stage_run_id is None:
+            stage_run_id = f"stage-{uuid4().hex[:8]}"
+            # Create new stage run record
+            self._create_stage_run_record(
+                stage_run_id=stage_run_id,
+                workspace=workspace,
+                version=version,
+                stage_name=stage_name,
+                stage_version_id=stage_version_id,
+                inputs=inputs,
+                input_sources=input_sources,
+                config_override=config_override,
+                reason=reason,
+                pipeline_run_id=pipeline_run_id,
+                pipeline_name=pipeline_name,
+                profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
+                hints=stage_config.get("hints"),
+                config=stage_config,
+            )
+        else:
+            # Update existing queued stage run record with resolved values
+            self._update_queued_stage_run(
+                stage_run_id=stage_run_id,
+                version=version,
+                stage_version_id=stage_version_id,
+                inputs=inputs,
+                input_sources=input_sources,
+                config=stage_config,
+                profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
+                hints=stage_config.get("hints"),
+            )
 
         try:
             # Emit phase progress: building image
@@ -175,8 +193,9 @@ class StageExecutor:
                 status="running",
                 progress="build",
             )
-            # 6. Build Docker image
-            image_tag = self._build_docker_image(workspace, version)
+            # 6. Build Docker image (use profile's base image)
+            profile_name = stage_config.get("compute", {}).get("profile")
+            image_tag = self._build_docker_image(workspace, version, profile_name=profile_name)
 
             # Emit phase progress: launching container/instance
             self.db.update_stage_run_status(
@@ -274,8 +293,16 @@ class StageExecutor:
         for input_name, input_def in stage.inputs.items():
             # Check for override
             if inputs_override and input_name in inputs_override:
-                inputs[input_name] = inputs_override[input_name]
-                sources[input_name] = {"source_type": "override"}
+                override_value = inputs_override[input_name]
+                # Try to resolve as a registered source name first
+                source = self.db.get_source(override_value)
+                if source:
+                    inputs[input_name] = source["gcs_location"]
+                    sources[input_name] = {"source_type": "source", "source_name": override_value}
+                else:
+                    # Use as literal path
+                    inputs[input_name] = override_value
+                    sources[input_name] = {"source_type": "override"}
                 continue
 
             # Resolve precedence: from_stage first, then dataset
@@ -411,6 +438,66 @@ class StageExecutor:
             source_stage_version_id = source_meta.get("source_stage_version_id")
 
             # Use add_signal_with_source to properly track upstream lineage
+            self.db.add_signal_with_source(
+                stage_run_id=stage_run_id,
+                signal_name=input_name,
+                signal_type="input",
+                storage_location=storage_location,
+                source_stage_run_id=source_stage_run_id,
+                source_stage_version_id=source_stage_version_id,
+            )
+
+    def _update_queued_stage_run(
+        self,
+        stage_run_id: str,
+        version: str,
+        stage_version_id: int,
+        inputs: dict,
+        input_sources: dict[str, dict],
+        config: dict | None,
+        profile: str | None,
+        hints: dict | None,
+    ):
+        """Update a queued stage run record with resolved values.
+
+        Called when processing a pre-created stage_run from the pipeline queue.
+        Updates version, config, inputs, and records input lineage.
+        """
+        # Update the stage run with resolved values
+        with self.db._conn() as conn:
+            conn.execute(
+                """
+                UPDATE stage_runs
+                SET version = ?,
+                    config_json = ?,
+                    inputs_json = ?,
+                    profile = ?,
+                    hints_json = ?,
+                    backend_type = ?,
+                    backend_handle = ?
+                WHERE id = ?
+                """,
+                (
+                    version,
+                    json.dumps(config) if config else None,
+                    json.dumps(inputs) if inputs else None,
+                    profile,
+                    json.dumps(hints) if hints else None,
+                    self.config.jobs.backend,
+                    stage_run_id,  # provisional handle for cancel/logs
+                    stage_run_id,
+                ),
+            )
+
+        # Link stage run to its stage version
+        self.db.update_stage_run_version(stage_run_id, stage_version_id)
+
+        # Record input signals in lineage with source tracking
+        for input_name, storage_location in inputs.items():
+            source_meta = input_sources.get(input_name, {})
+            source_stage_run_id = source_meta.get("source_stage_run_id")
+            source_stage_version_id = source_meta.get("source_stage_version_id")
+
             self.db.add_signal_with_source(
                 stage_run_id=stage_run_id,
                 signal_name=input_name,
@@ -559,17 +646,45 @@ class StageExecutor:
         log_path.write_text(logs or "")
         return str(log_path)
 
-    def _build_docker_image(self, workspace: str, version: str) -> str:
+    def _build_docker_image(self, workspace: str, version: str, profile_name: str | None = None) -> str:
         """Build Docker image for this run.
+
+        Args:
+            workspace: Workspace name
+            version: Version identifier
+            profile_name: Optional profile name to determine base image
 
         Returns image tag (local for local backend, registry for GCE backend).
         """
+        from goldfish.infra.profiles import resolve_base_image
+
         # Get workspace directory
         workspace_dir = self.workspace_manager.get_workspace_path(workspace)
 
+        # Resolve base image from profile
+        base_image = None
+        if profile_name:
+            profile = self.profile_resolver.resolve(profile_name)
+            # Get artifact registry for base image URL
+            artifact_registry = None
+            if self.config.gce:
+                artifact_registry = self.config.gce.artifact_registry
+                if not artifact_registry:
+                    # Auto-generate registry URL from project_id
+                    try:
+                        project_id = self.config.gce.effective_project_id
+                        artifact_registry = f"us-docker.pkg.dev/{project_id}/goldfish"
+                    except ValueError:
+                        pass  # No project configured
+            base_image = resolve_base_image(profile, artifact_registry)
+
         # Build image using DockerBuilder
         local_image_tag = self.docker_builder.build_image(
-            workspace_dir=workspace_dir, workspace_name=workspace, version=version, use_cache=True
+            workspace_dir=workspace_dir,
+            workspace_name=workspace,
+            version=version,
+            use_cache=True,
+            base_image=base_image,
         )
 
         # If using GCE backend, push to Artifact Registry

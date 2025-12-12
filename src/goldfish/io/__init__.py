@@ -118,8 +118,9 @@ def load_input(name: str, format: str | None = None) -> Any:
             return pd.read_csv(csv_files[0])
         raise FileNotFoundError(f"Input not found: {input_path}")
 
-    elif fmt in ("directory", "file"):
+    elif fmt in ("directory", "file", "dataset"):
         # Return path for manual loading
+        # "dataset" is a Goldfish registered source, treated as a directory
         if not input_path.exists():
             raise FileNotFoundError(f"Input not found: {input_path}")
         return input_path

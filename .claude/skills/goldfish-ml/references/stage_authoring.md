@@ -20,25 +20,28 @@ workspace/
 └── loaders/              # Optional custom data loaders
 ```
 
-## Requirements.txt (CRITICAL!)
+## Pre-built Base Images
 
-**You MUST include a `requirements.txt` file in your workspace root.** Without it, stages run in a bare `python:3.11-slim` container with NO packages installed - no numpy, torch, pandas, or any ML libraries.
+Goldfish automatically uses pre-built Docker images with common ML libraries:
+
+| Profile Type | Base Image | Included Libraries |
+|--------------|------------|-------------------|
+| CPU (`cpu-small`, `cpu-large`) | Jupyter pytorch-notebook | numpy, pandas, scikit-learn, torch, matplotlib, seaborn |
+| GPU (`h100-*`, `a100-*`) | Jupyter pytorch-notebook + CUDA | Same as CPU + CUDA 12 support |
+
+**No setup required** - the appropriate base image is automatically selected based on your stage's compute profile.
+
+## Requirements.txt (Optional)
+
+Use `requirements.txt` only for project-specific dependencies not in the base images:
 
 ```txt
-# requirements.txt - Example for ML workloads
-numpy>=1.21
-pandas>=1.3
-torch>=2.0
-scikit-learn>=1.0
-tqdm>=4.60
+# requirements.txt - Only project-specific extras
+my-custom-package>=1.0
+specialized-ml-lib>=2.0
 ```
 
-**Common error without requirements.txt:**
-```
-ModuleNotFoundError: No module named 'numpy'
-```
-
-This file is read during Docker image build and all packages are installed before your stage runs.
+Most ML workloads don't need a `requirements.txt` at all since common libraries are pre-installed.
 
 ## Basic Template
 
