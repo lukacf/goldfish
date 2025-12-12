@@ -1,0 +1,642 @@
+# Stage Module Development Guide
+
+Complete guide to writing stage modules for Goldfish ML pipelines.
+
+## Stage Module Structure
+
+Each stage corresponds to a Python module:
+
+```
+workspace/
+├── requirements.txt      # Python dependencies (CRITICAL!)
+├── pipeline.yaml         # Stage definitions and data flow
+├── modules/
+│   ├── preprocess.py     # Stage: preprocess
+│   ├── train.py          # Stage: train
+│   └── evaluate.py       # Stage: evaluate
+├── configs/
+│   ├── preprocess.yaml
+│   └── train.yaml
+└── loaders/              # Optional custom data loaders
+```
+
+## Requirements.txt (CRITICAL!)
+
+**You MUST include a `requirements.txt` file in your workspace root.** Without it, stages run in a bare `python:3.11-slim` container with NO packages installed - no numpy, torch, pandas, or any ML libraries.
+
+```txt
+# requirements.txt - Example for ML workloads
+numpy>=1.21
+pandas>=1.3
+torch>=2.0
+scikit-learn>=1.0
+tqdm>=4.60
+```
+
+**Common error without requirements.txt:**
+```
+ModuleNotFoundError: No module named 'numpy'
+```
+
+This file is read during Docker image build and all packages are installed before your stage runs.
+
+## Basic Template
+
+```python
+#!/usr/bin/env python3
+"""Stage: train - Train the prediction model."""
+
+from goldfish.io import load_input, save_output
+
+
+def main():
+    # 1. Load inputs (from /mnt/inputs/)
+    features = load_input("features")
+    labels = load_input("labels")
+
+    # 2. Your ML logic
+    model = train_model(features, labels)
+
+    # 3. Save outputs (to /mnt/outputs/)
+    save_output("model", model_path)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## The goldfish.io Module
+
+Goldfish provides I/O helpers for stages running in containers.
+
+### load_input(name)
+
+Load an input signal by name.
+
+```python
+from goldfish.io import load_input
+
+# Load numpy array (type: npy)
+features = load_input("features")  # Returns np.ndarray
+
+# Load CSV (type: csv)
+df = load_input("data")  # Returns pd.DataFrame
+
+# Load directory (type: directory)
+model_path = load_input("checkpoint")  # Returns Path to dir
+
+# Load file (type: file)
+config_path = load_input("config")  # Returns Path to file
+```
+
+**Input mapping:**
+| Signal Type | Returned Type |
+|-------------|---------------|
+| `npy` | `np.ndarray` |
+| `csv` | `pd.DataFrame` |
+| `directory` | `pathlib.Path` |
+| `file` | `pathlib.Path` |
+| `dataset` | `pathlib.Path` to the dataset directory |
+
+### Loading Dataset Inputs
+
+When a stage input is `type: dataset`, it references a registered dataset:
+
+```yaml
+# In pipeline.yaml
+stages:
+  - name: train
+    inputs:
+      tokens:
+        type: dataset
+        dataset: v37-tokens    # Name of registered dataset
+    outputs:
+      model:
+        type: directory
+```
+
+In the stage module:
+
+```python
+from goldfish.io import load_input
+
+def main():
+    # Returns Path to the dataset directory
+    tokens_path = load_input("tokens")
+
+    # Load data from the directory
+    # (structure depends on how dataset was created)
+    import numpy as np
+    train_data = np.load(tokens_path / "train.npy")
+    val_data = np.load(tokens_path / "val.npy")
+```
+
+**Register datasets before use:**
+```
+register_dataset(
+    name="v37-tokens",
+    source="gs://my-bucket/datasets/v37-tokens/",
+    description="Tokenized training data v37",
+    format="directory"
+)
+```
+
+### save_output(name, data)
+
+Save an output signal.
+
+```python
+from goldfish.io import save_output
+import numpy as np
+import pandas as pd
+
+# Save numpy array (type: npy)
+embeddings = np.array([...])
+save_output("embeddings", embeddings)
+
+# Save DataFrame (type: csv)
+results = pd.DataFrame({...})
+save_output("results", results)
+
+# Save directory (type: directory)
+# Copy entire directory contents
+save_output("model", "/path/to/model_dir")
+
+# Save single file (type: file)
+save_output("config", "/path/to/config.json")
+```
+
+### get_config()
+
+Access stage configuration.
+
+```python
+from goldfish.io import get_config
+
+config = get_config()
+learning_rate = config.get("learning_rate", 0.001)
+batch_size = config.get("batch_size", 32)
+```
+
+## Container Environment
+
+Stages run in Docker containers with specific mount points:
+
+```
+/mnt/
+├── inputs/          # Read-only inputs
+│   ├── features/    # Input signals mounted here
+│   └── labels/
+├── outputs/         # Write outputs here
+│   ├── model/
+│   └── metrics/
+├── code/            # Workspace code (read-only)
+│   ├── modules/
+│   └── configs/
+└── config.yaml      # Merged config file
+```
+
+## Complete Examples
+
+### Preprocessing Stage
+
+```python
+#!/usr/bin/env python3
+"""Stage: preprocess - Clean and transform raw data."""
+
+import numpy as np
+import pandas as pd
+from goldfish.io import load_input, save_output, get_config
+
+
+def main():
+    # Load config
+    config = get_config()
+    normalize = config.get("normalize", True)
+    fill_na = config.get("fill_na", "mean")
+
+    # Load raw dataset
+    df = load_input("raw_data")  # From registered dataset
+
+    # Clean data
+    if fill_na == "mean":
+        df = df.fillna(df.mean())
+    elif fill_na == "zero":
+        df = df.fillna(0)
+
+    # Split features and labels
+    feature_cols = [c for c in df.columns if c != "target"]
+    X = df[feature_cols].values
+    y = df["target"].values
+
+    # Normalize if configured
+    if normalize:
+        mean = X.mean(axis=0)
+        std = X.std(axis=0) + 1e-8
+        X = (X - mean) / std
+
+    # Save outputs
+    save_output("features", X)
+    save_output("labels", y)
+
+    print(f"Processed {len(df)} samples")
+    print(f"Features shape: {X.shape}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### Training Stage
+
+```python
+#!/usr/bin/env python3
+"""Stage: train - Train LSTM model."""
+
+import numpy as np
+import torch
+import torch.nn as nn
+from pathlib import Path
+from goldfish.io import load_input, save_output, get_config
+
+
+class LSTMModel(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        lstm_out, _ = self.lstm(x)
+        return self.fc(lstm_out[:, -1, :])
+
+
+def main():
+    # Load config
+    config = get_config()
+    hidden_dim = config.get("hidden_dim", 64)
+    learning_rate = config.get("learning_rate", 0.001)
+    epochs = config.get("epochs", 100)
+    batch_size = config.get("batch_size", 32)
+
+    # Load inputs
+    features = load_input("features")
+    labels = load_input("labels")
+
+    # Convert to tensors
+    X = torch.FloatTensor(features)
+    y = torch.FloatTensor(labels)
+
+    # Create model
+    model = LSTMModel(
+        input_dim=X.shape[-1],
+        hidden_dim=hidden_dim,
+        output_dim=1
+    )
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = nn.MSELoss()
+
+    # Training loop
+    for epoch in range(epochs):
+        model.train()
+        optimizer.zero_grad()
+        outputs = model(X.unsqueeze(1))
+        loss = criterion(outputs.squeeze(), y)
+        loss.backward()
+        optimizer.step()
+
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch}: Loss = {loss.item():.4f}")
+
+    # Save model checkpoint
+    model_dir = Path("/mnt/outputs/model")
+    model_dir.mkdir(exist_ok=True)
+    torch.save(model.state_dict(), model_dir / "model.pt")
+    torch.save({
+        "hidden_dim": hidden_dim,
+        "input_dim": X.shape[-1],
+        "output_dim": 1
+    }, model_dir / "config.pt")
+
+    save_output("model", model_dir)
+
+    print(f"Training complete. Final loss: {loss.item():.4f}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### Evaluation Stage
+
+```python
+#!/usr/bin/env python3
+"""Stage: evaluate - Evaluate model performance."""
+
+import numpy as np
+import pandas as pd
+import torch
+from pathlib import Path
+from goldfish.io import load_input, save_output, get_config
+
+
+def main():
+    config = get_config()
+    threshold = config.get("threshold", 0.5)
+
+    # Load model
+    model_dir = load_input("model")
+    model_config = torch.load(model_dir / "config.pt")
+
+    # Recreate model architecture
+    from train import LSTMModel  # Import from training module
+    model = LSTMModel(**model_config)
+    model.load_state_dict(torch.load(model_dir / "model.pt"))
+    model.eval()
+
+    # Load test data
+    features = load_input("features")
+    labels = load_input("labels")
+
+    # Run inference
+    X = torch.FloatTensor(features).unsqueeze(1)
+    with torch.no_grad():
+        predictions = model(X).squeeze().numpy()
+
+    # Calculate metrics
+    mse = np.mean((predictions - labels) ** 2)
+    mae = np.mean(np.abs(predictions - labels))
+    rmse = np.sqrt(mse)
+
+    # Direction accuracy (for time series)
+    pred_direction = np.diff(predictions) > 0
+    true_direction = np.diff(labels) > 0
+    direction_acc = np.mean(pred_direction == true_direction)
+
+    # Save metrics
+    metrics_df = pd.DataFrame([{
+        "mse": mse,
+        "mae": mae,
+        "rmse": rmse,
+        "direction_accuracy": direction_acc,
+        "samples": len(labels)
+    }])
+    save_output("metrics", metrics_df)
+
+    # Save predictions
+    save_output("predictions", predictions)
+
+    print(f"Evaluation Results:")
+    print(f"  MSE: {mse:.4f}")
+    print(f"  MAE: {mae:.4f}")
+    print(f"  RMSE: {rmse:.4f}")
+    print(f"  Direction Accuracy: {direction_acc:.2%}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## Stage Config Files
+
+Corresponding config files in `configs/`:
+
+### configs/preprocess.yaml
+
+```yaml
+# Data preprocessing settings
+normalize: true
+fill_na: mean
+train_split: 0.8
+random_seed: 42
+
+# Compute profile (CPU is sufficient for preprocessing)
+compute:
+  profile: cpu-small
+```
+
+### configs/train.yaml
+
+```yaml
+# Model architecture
+hidden_dim: 128
+num_layers: 2
+dropout: 0.2
+
+# Training hyperparameters
+learning_rate: 0.001
+batch_size: 64
+epochs: 200
+early_stopping_patience: 20
+
+# Compute profile (GPU for training)
+compute:
+  profile: h100-spot
+
+# Environment variables
+environment:
+  CUDA_VISIBLE_DEVICES: "0"
+  WANDB_PROJECT: forex-prediction
+```
+
+### configs/evaluate.yaml
+
+```yaml
+# Evaluation settings
+threshold: 0.5
+metrics:
+  - mse
+  - mae
+  - rmse
+  - direction_accuracy
+
+# Compute profile
+compute:
+  profile: cpu-small
+```
+
+## Logging Best Practices
+
+### Use print() for Progress
+
+```python
+print(f"Loading data...")
+print(f"Processed {n} samples")
+print(f"Epoch {epoch}: loss={loss:.4f}")
+print(f"Final accuracy: {acc:.2%}")
+```
+
+Logs are captured and available via `logs(run_id)`.
+
+### Structured Logging
+
+```python
+import json
+
+# Log metrics as JSON for easy parsing
+metrics = {"epoch": epoch, "loss": loss, "accuracy": acc}
+print(f"METRICS: {json.dumps(metrics)}")
+```
+
+### Progress Indicators
+
+```python
+from tqdm import tqdm
+
+for batch in tqdm(dataloader, desc="Training"):
+    # Training code
+    pass
+```
+
+## Error Handling
+
+### Graceful Failures
+
+```python
+def main():
+    try:
+        features = load_input("features")
+    except FileNotFoundError as e:
+        print(f"ERROR: Required input 'features' not found: {e}")
+        raise SystemExit(1)
+
+    try:
+        model = train_model(features)
+    except Exception as e:
+        print(f"ERROR: Training failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise SystemExit(1)
+
+    save_output("model", model)
+    print("SUCCESS: Training completed")
+```
+
+### Validation
+
+```python
+def main():
+    features = load_input("features")
+
+    # Validate inputs
+    if len(features) == 0:
+        raise ValueError("Empty features array")
+
+    if np.isnan(features).any():
+        raise ValueError("Features contain NaN values")
+
+    # Continue with processing
+```
+
+## Custom Docker Images (Advanced)
+
+For custom environments beyond `requirements.txt` (e.g., system dependencies, custom base images):
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+# Additional system dependencies
+RUN apt-get update && apt-get install -y \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+Note: Most workloads only need `requirements.txt`. Custom Dockerfiles are for advanced cases requiring system-level packages.
+
+## Testing Stages Locally
+
+Test stages before running in Goldfish:
+
+```python
+# test_train.py
+import tempfile
+import numpy as np
+from pathlib import Path
+
+# Create mock inputs
+with tempfile.TemporaryDirectory() as tmpdir:
+    input_dir = Path(tmpdir) / "inputs"
+    output_dir = Path(tmpdir) / "outputs"
+    input_dir.mkdir()
+    output_dir.mkdir()
+
+    # Create test data
+    np.save(input_dir / "features.npy", np.random.randn(100, 10))
+    np.save(input_dir / "labels.npy", np.random.randn(100))
+
+    # Set environment for goldfish.io
+    import os
+    os.environ["GOLDFISH_INPUT_DIR"] = str(input_dir)
+    os.environ["GOLDFISH_OUTPUT_DIR"] = str(output_dir)
+
+    # Run stage
+    from modules.train import main
+    main()
+
+    # Verify outputs
+    assert (output_dir / "model").exists()
+```
+
+## Common Patterns
+
+### Checkpointing During Training
+
+```python
+def main():
+    model = create_model()
+    best_loss = float("inf")
+
+    for epoch in range(epochs):
+        loss = train_epoch(model)
+
+        if loss < best_loss:
+            best_loss = loss
+            save_checkpoint(model, "best")
+            print(f"New best model: loss={loss:.4f}")
+
+    # Final save
+    save_output("model", checkpoint_dir)
+```
+
+### Resumable Training
+
+```python
+def main():
+    config = get_config()
+
+    # Check for existing checkpoint
+    checkpoint_path = Path("/mnt/inputs/checkpoint")
+    if checkpoint_path.exists():
+        model, start_epoch = load_checkpoint(checkpoint_path)
+        print(f"Resuming from epoch {start_epoch}")
+    else:
+        model = create_model()
+        start_epoch = 0
+
+    # Continue training
+    for epoch in range(start_epoch, config["epochs"]):
+        train_epoch(model)
+```
+
+### Multi-GPU Training
+
+```python
+def main():
+    import torch.distributed as dist
+
+    # Initialize distributed training
+    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+
+    model = create_model().cuda()
+    model = torch.nn.parallel.DistributedDataParallel(model)
+
+    # Training loop
+    train(model)
+```
