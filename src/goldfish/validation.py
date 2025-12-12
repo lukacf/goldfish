@@ -82,6 +82,17 @@ class InvalidSnapshotIdError(ValidationError):
         )
 
 
+class InvalidVersionError(ValidationError):
+    """Version identifier is invalid."""
+
+    def __init__(self, version: str, reason: str):
+        super().__init__(
+            f"Invalid version '{version}': {reason}",
+            value=version,
+            field="version",
+        )
+
+
 class InvalidOutputNameError(ValidationError):
     """Output name is invalid."""
 
@@ -147,6 +158,9 @@ _SCRIPT_PATH_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_/.-]*\.(py|sh)$")
 
 # Snapshot ID: snap-{7-8 hex chars}-{YYYYMMDD}-{HHMMSS}
 _SNAPSHOT_ID_PATTERN = re.compile(r"^snap-[a-f0-9]{7,8}-\d{8}-\d{6}$")
+
+# Version: v{digits} (e.g., v1, v2, v123)
+_VERSION_PATTERN = re.compile(r"^v[0-9]+$")
 
 # Output name: alphanumeric, hyphens, underscores only. No slashes. Max 64 chars.
 _OUTPUT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
@@ -363,6 +377,35 @@ def validate_snapshot_id(snapshot_id: str) -> None:
         raise InvalidSnapshotIdError(
             snapshot_id, "must match format snap-{hex}-{YYYYMMDD}-{HHMMSS} (e.g., snap-a1b2c3d-20251205-143000)"
         )
+
+
+def validate_version(version: str) -> None:
+    """Validate a version identifier.
+
+    Versions must match format: v{digits} (e.g., v1, v2, v123)
+    This prevents command injection via rollback().
+
+    Args:
+        version: The version to validate (e.g., "v1", "v12")
+
+    Raises:
+        InvalidVersionError: If validation fails
+    """
+    if not version:
+        raise InvalidVersionError(version, "version cannot be empty")
+
+    # Check for dangerous characters first (better error message)
+    dangerous = _contains_dangerous_chars(version)
+    if dangerous:
+        raise InvalidVersionError(version, f"contains invalid character: '{dangerous}'")
+
+    # Check for path traversal
+    if _contains_path_traversal(version) or "/" in version:
+        raise InvalidVersionError(version, "cannot contain path components")
+
+    # Must match exact format
+    if not _VERSION_PATTERN.match(version):
+        raise InvalidVersionError(version, "must match format v{number} (e.g., v1, v2)")
 
 
 def validate_output_name(name: str) -> None:

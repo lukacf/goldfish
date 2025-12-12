@@ -118,8 +118,9 @@ def load_input(name: str, format: str | None = None) -> Any:
             return pd.read_csv(csv_files[0])
         raise FileNotFoundError(f"Input not found: {input_path}")
 
-    elif fmt in ("directory", "file"):
+    elif fmt in ("directory", "file", "dataset"):
         # Return path for manual loading
+        # "dataset" is a Goldfish registered source, treated as a directory
         if not input_path.exists():
             raise FileNotFoundError(f"Input not found: {input_path}")
         return input_path
@@ -185,6 +186,14 @@ def save_output(name: str, data: Any, artifact: bool = False):
 
     if artifact:
         _mark_as_artifact(name)
+
+
+def get_config() -> dict[str, Any]:
+    """Get stage configuration.
+
+    Returns the full stage config dict from GOLDFISH_STAGE_CONFIG.
+    """
+    return _get_stage_config()
 
 
 def get_input_path(name: str) -> Path:

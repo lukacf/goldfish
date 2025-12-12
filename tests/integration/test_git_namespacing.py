@@ -152,10 +152,11 @@ class TestSyncWithNewNamespace:
         git_layer.copy_mount_workspace("snapshot_test", slot_path)
         (slot_path / "model.py").write_text("# model code")
 
-        snapshot_id = git_layer.create_snapshot_copy_based(slot_path, "snapshot_test", "Checkpoint model")
+        snapshot_id, git_sha = git_layer.create_snapshot_copy_based(slot_path, "snapshot_test", "Checkpoint model")
 
         # Snapshot should be created
         assert snapshot_id.startswith("snap-")
+        assert len(git_sha) == 40  # Full SHA
 
 
 class TestHibernateWithNewNamespace:

@@ -8,48 +8,72 @@ from pathlib import Path
 
 from goldfish.errors import GoldfishError
 
+# Path to goldfish.io module (relative to this file)
+GOLDFISH_IO_PATH = Path(__file__).parent.parent / "io" / "__init__.py"
+
+# Default base image when none specified (backwards compatibility)
+DEFAULT_BASE_IMAGE = "python:3.11-slim"
+
 
 class DockerBuilder:
-    """Build Docker images for stage execution."""
+    """Build Docker images for stage execution.
+
+    Uses pre-built base images with common ML libraries. If a workspace has
+    a requirements.txt, those are installed on top of the base image for
+    project-specific dependencies.
+    """
 
     def __init__(self, config: object | None = None):
         # Store config for backend checks (may be GoldfishConfig or partial)
         self.config = config
 
-    def generate_dockerfile(self, workspace_dir: Path) -> str:
+    def generate_dockerfile(self, workspace_dir: Path, base_image: str | None = None) -> str:
         """Generate Dockerfile for workspace.
 
         Args:
             workspace_dir: Path to workspace directory
+            base_image: Base image to use (e.g., "us-docker.pkg.dev/.../goldfish-base-cpu:v1")
+                       Defaults to python:3.11-slim if not specified
 
         Returns:
             Dockerfile content as string
         """
+        # Use provided base image or fallback
+        base = base_image or DEFAULT_BASE_IMAGE
+
         # Check for optional files/directories
         has_requirements = (workspace_dir / "requirements.txt").exists()
         has_loaders = (workspace_dir / "loaders").exists()
 
-        dockerfile = "FROM python:3.11-slim\n\n"
+        dockerfile = f"FROM {base}\n\n"
 
-        # Install dependencies (optional)
+        # Install additional dependencies from requirements.txt if present
+        # Note: Pre-built base images already have common ML libraries
+        # requirements.txt is for project-specific extras only
         if has_requirements:
-            dockerfile += """# Install dependencies
+            # Use USER root to install packages, then switch back
+            # Jupyter images run as non-root user (jovyan, uid 1000)
+            dockerfile += """# Install additional project dependencies
+USER root
 COPY requirements.txt /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
+USER 1000
 
 """
 
+        # All COPY commands use --chown=1000:100 because base images (pytorch-notebook)
+        # run as non-root user (jovyan, uid=1000, gid=100)
         dockerfile += """# Install Goldfish IO library
-# TODO: Package goldfish.io separately and install from wheel
-# For now, assume it's available in the image or mounted
+COPY --chown=1000:100 goldfish_io/ /app/goldfish_io/
+ENV PYTHONPATH="/app/goldfish_io:/app/modules:/app:${PYTHONPATH}"
 
 # Copy workspace code
-COPY modules/ /app/modules/
-COPY configs/ /app/configs/
+COPY --chown=1000:100 modules/ /app/modules/
+COPY --chown=1000:100 configs/ /app/configs/
 """
 
         if has_loaders:
-            dockerfile += "COPY loaders/ /app/loaders/\n"
+            dockerfile += "COPY --chown=1000:100 loaders/ /app/loaders/\n"
 
         dockerfile += """
 WORKDIR /app
@@ -60,7 +84,14 @@ CMD ["/bin/bash"]
 
         return dockerfile
 
-    def build_image(self, workspace_dir: Path, workspace_name: str, version: str, use_cache: bool = True) -> str:
+    def build_image(
+        self,
+        workspace_dir: Path,
+        workspace_name: str,
+        version: str,
+        use_cache: bool = True,
+        base_image: str | None = None,
+    ) -> str:
         """Build Docker image for workspace.
 
         Uses a temporary directory as build context to avoid dirtying
@@ -71,6 +102,8 @@ CMD ["/bin/bash"]
             workspace_name: Workspace name
             version: Version identifier
             use_cache: Use Docker layer caching (default True)
+            base_image: Pre-built base image to use (e.g., "registry/goldfish-base-cpu:v1")
+                       If None, falls back to python:3.11-slim
 
         Returns:
             Image tag (e.g., "goldfish-test_ws-v1")
@@ -98,8 +131,20 @@ CMD ["/bin/bash"]
             if (workspace_dir / "loaders").exists():
                 shutil.copytree(workspace_dir / "loaders", build_context / "loaders")
 
+            # Copy goldfish.io module into build context
+            # This creates a goldfish/io package structure so `from goldfish.io import ...` works
+            goldfish_io_dest = build_context / "goldfish_io" / "goldfish" / "io"
+            goldfish_io_dest.mkdir(parents=True, exist_ok=True)
+            if GOLDFISH_IO_PATH.exists():
+                shutil.copy2(GOLDFISH_IO_PATH, goldfish_io_dest / "__init__.py")
+                # Create parent __init__.py for package structure
+                (build_context / "goldfish_io" / "goldfish" / "__init__.py").write_text(
+                    '"""Goldfish ML package (container runtime)."""\n'
+                )
+                (build_context / "goldfish_io" / "__init__.py").write_text("")
+
             # Generate Dockerfile in build context (not workspace)
-            dockerfile_content = self.generate_dockerfile(workspace_dir)
+            dockerfile_content = self.generate_dockerfile(workspace_dir, base_image=base_image)
             dockerfile_path = build_context / "Dockerfile"
             dockerfile_path.write_text(dockerfile_content)
 

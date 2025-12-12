@@ -23,6 +23,7 @@ from goldfish.models import (
     ListSnapshotsResponse,
     MountResponse,
     RollbackResponse,
+    SaveVersionResponse,
     SnapshotInfo,
     UpdateWorkspaceGoalResponse,
     WorkspaceGoalResponse,
@@ -39,6 +40,7 @@ from goldfish.server import (
 from goldfish.validation import (
     validate_slot_name,
     validate_snapshot_id,
+    validate_version,
     validate_workspace_name,
 )
 
@@ -235,8 +237,38 @@ def delete_workspace(workspace: str, reason: str) -> DeleteWorkspaceResponse:
 
 
 @mcp.tool()
+def save_version(slot: str, message: str) -> SaveVersionResponse:
+    """Create a version of the current slot state.
+
+    Args:
+        slot: Slot to save version from (w1, w2, or w3)
+        message: Describe what this version represents (min 15 chars)
+
+    Creates an immutable version that can be used for rollback and branching.
+    The version (v1, v2, etc.) is the primary identifier.
+    """
+    logger.info("save_version() called", extra={"slot": slot})
+
+    config = _get_config()
+    workspace_manager = _get_workspace_manager()
+
+    # Validate inputs
+    validate_slot_name(slot, config.slots)
+
+    try:
+        result = workspace_manager.save_version(slot, message)
+        logger.info("save_version() succeeded", extra={"slot": slot, "version": result.version})
+        return result
+    except Exception as e:
+        logger.error("save_version() failed", extra={"slot": slot, "error": str(e)})
+        raise
+
+
+@mcp.tool()
 def checkpoint(slot: str, message: str) -> CheckpointResponse:
-    """Create a snapshot of the current slot state.
+    """[DEPRECATED] Create a snapshot of the current slot state.
+
+    Use save_version() instead. checkpoint() will be removed in a future version.
 
     Args:
         slot: Slot to checkpoint (w1, w2, or w3)
@@ -244,7 +276,12 @@ def checkpoint(slot: str, message: str) -> CheckpointResponse:
 
     Creates an immutable snapshot that jobs can run against.
     """
-    logger.info("checkpoint() called", extra={"slot": slot})
+    warnings.warn(
+        "checkpoint() is deprecated, use save_version() instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    logger.info("checkpoint() called (deprecated)", extra={"slot": slot})
 
     config = _get_config()
     workspace_manager = _get_workspace_manager()
@@ -280,14 +317,14 @@ def diff(slot: str) -> DiffResponse:
 
 
 @mcp.tool()
-def rollback(slot: str, snapshot_id: str, reason: str) -> RollbackResponse:
-    """Rollback a slot to a previous snapshot.
+def rollback(slot: str, version: str, reason: str) -> RollbackResponse:
+    """Rollback a slot to a previous version.
 
-    Discards all changes since the snapshot. Use with caution.
+    Discards all changes since the version. Use with caution.
 
     Args:
         slot: Slot to rollback (w1, w2, or w3)
-        snapshot_id: Snapshot ID to rollback to (e.g., "snap-a1b2c3d-20251205-143000")
+        version: Version to rollback to (e.g., "v1", "v2")
         reason: Why you're rolling back (min 15 chars)
     """
     config = _get_config()
@@ -295,10 +332,10 @@ def rollback(slot: str, snapshot_id: str, reason: str) -> RollbackResponse:
 
     # Validate inputs
     validate_slot_name(slot, config.slots)
-    validate_snapshot_id(snapshot_id)
+    validate_version(version)  # Validates format: v1, v2, etc.
     validate_reason(reason, config.audit.min_reason_length)
 
-    return workspace_manager.rollback(slot, snapshot_id, reason)
+    return workspace_manager.rollback(slot, version, reason)
 
 
 @mcp.tool()
