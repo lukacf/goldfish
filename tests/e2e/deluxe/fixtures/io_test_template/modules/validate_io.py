@@ -39,7 +39,7 @@ def main():
     # Test 1: Load numpy array
     print("\n=== Test 1: Load NPY array ===")
     try:
-        array_data = load_input("array_input")
+        array_data = load_input("test_array")
         assert isinstance(array_data, np.ndarray), f"Expected np.ndarray, got {type(array_data)}"
         assert array_data.shape == (100, 10), f"Wrong shape: {array_data.shape}"
         validation_results.append(
@@ -57,7 +57,7 @@ def main():
     # Test 2: Load CSV as DataFrame
     print("\n=== Test 2: Load CSV as DataFrame ===")
     try:
-        csv_data = load_input("csv_input")
+        csv_data = load_input("test_csv")
         assert isinstance(csv_data, pd.DataFrame), f"Expected pd.DataFrame, got {type(csv_data)}"
         assert len(csv_data) == 50, f"Wrong row count: {len(csv_data)}"
         assert "id" in csv_data.columns, "Missing 'id' column"
@@ -78,7 +78,7 @@ def main():
     # Test 3: Load directory
     print("\n=== Test 3: Load directory ===")
     try:
-        dir_path = load_input("dir_input")
+        dir_path = load_input("test_directory")
         assert isinstance(dir_path, Path), f"Expected Path, got {type(dir_path)}"
         assert dir_path.exists(), f"Directory does not exist: {dir_path}"
 
