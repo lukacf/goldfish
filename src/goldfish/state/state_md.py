@@ -76,6 +76,7 @@ class StateManager:
         slots: list[SlotInfo],
         jobs: list[dict[str, Any]],
         source_count: int = 0,
+        recent_runs: list[dict[str, Any]] | None = None,
     ) -> str:
         """Generate complete STATE.md content and write to file."""
         lines = [f"# {self.config.project_name}", ""]
@@ -143,6 +144,30 @@ class StateManager:
         if source_count > 0:
             lines.append("## Data Sources")
             lines.append(f"- {source_count} sources registered (use list_sources() to see)")
+            lines.append("")
+
+        # Recent Runs with structured reasons
+        if recent_runs:
+            lines.append("## Recent Runs")
+            for run in recent_runs:
+                status_emoji = "✓" if run.get("status") == "completed" else "⏳" if run.get("status") == "running" else "✗"
+                run_line = f"- {status_emoji} {run.get('stage_name', 'unknown')} ({run.get('status', 'unknown')})"
+                if run.get("started_at"):
+                    run_line += f" - {run['started_at'][:16]}"
+                lines.append(run_line)
+
+                # Show structured reason if present
+                reason_json = run.get("reason_json")
+                if reason_json:
+                    import json
+                    try:
+                        reason_data = json.loads(reason_json) if isinstance(reason_json, str) else reason_json
+                        if reason_data.get("description"):
+                            lines.append(f"  └─ {reason_data['description']}")
+                        if reason_data.get("hypothesis"):
+                            lines.append(f"  └─ Hypothesis: {reason_data['hypothesis']}")
+                    except (json.JSONDecodeError, KeyError):
+                        pass
             lines.append("")
 
         # Recent Actions
