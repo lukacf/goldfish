@@ -286,11 +286,18 @@ class PipelineExecutor:
                     if any(d["status"] != "completed" for d in dep_states):
                         continue
 
-                updated = conn.execute(
-                    "UPDATE pipeline_stage_queue SET status='running', claimed_at=? WHERE id=? AND status='pending' AND (claimed_at IS NULL)",
+                # Try to claim this row atomically using UPDATE ... RETURNING
+                claimed = conn.execute(
+                    """
+                    UPDATE pipeline_stage_queue
+                    SET status='running', claimed_at=?
+                    WHERE id=? AND status='pending' AND (claimed_at IS NULL)
+                    RETURNING *
+                    """,
                     (datetime.now(UTC).isoformat(), row["id"]),
-                ).rowcount
-                if updated == 0:
+                ).fetchone()
+                if not claimed:
+                    # Lost the race - another worker claimed it
                     self._race_loss_counter += 1
                     if self._race_loss_counter > 10000:
                         self._race_loss_counter = 0
