@@ -26,7 +26,7 @@ def test_gcsfuse_section_correct_mount_point():
     """Test that gcsfuse section uses correct bucket and mount point."""
     script = gcsfuse_section(bucket="my-bucket", mount_point="/mnt/gcs")
 
-    assert "gcsfuse my-bucket /mnt/gcs" in script
+    assert "gcsfuse --implicit-dirs my-bucket /mnt/gcs" in script
     assert "mkdir -p /mnt/gcs" in script
     assert "for attempt in $(seq 1 5)" in script  # 5 retry attempts
 
@@ -112,6 +112,33 @@ def test_docker_run_section_shm_size():
     assert "--shm-size=32g" in script
 
 
+def test_docker_run_section_cmd():
+    """Test that Docker run section includes cmd as argument to entrypoint."""
+    script = docker_run_section(
+        image="test-image",
+        env_keys=[],
+        mounts=[],
+        entrypoint="/bin/bash",
+        cmd="/entrypoint.sh",
+    )
+
+    # The cmd should appear after the image name
+    assert "test-image /entrypoint.sh" in script
+
+
+def test_docker_run_section_no_cmd():
+    """Test that Docker run section works without cmd (just entrypoint)."""
+    script = docker_run_section(
+        image="test-image",
+        env_keys=[],
+        mounts=[],
+        entrypoint="/bin/bash",
+    )
+
+    # Image should be the last thing in the DOCKER_CMD array (no trailing space)
+    assert "test-image\n)" in script
+
+
 def test_stage_log_section_gcs_uri():
     """Test that stage log section logs to GCS."""
     script = stage_log_section(gcs_uri="gs://bucket/path/stage_times.log")
@@ -183,7 +210,7 @@ def test_build_startup_script_with_gcsfuse():
         gcsfuse=True,
     )
 
-    assert "gcsfuse test-bucket" in script
+    assert "gcsfuse --implicit-dirs test-bucket" in script
     assert "gcsfuse_begin" in script
     assert "gcsfuse_ready" in script
 
@@ -309,3 +336,19 @@ def test_build_startup_script_multiple_env_vars():
     for key, value in [("VAR1", "value1"), ("VAR2", "value2")]:
         expected = f"export {key}={shlex.quote(value)}"
         assert expected in script
+
+
+def test_build_startup_script_with_cmd():
+    """Test that cmd is passed to docker_run_section for entrypoint script."""
+    script = build_startup_script(
+        bucket="test-bucket",
+        bucket_prefix="",
+        run_path="runs/test",
+        image="test-image:latest",
+        entrypoint="/bin/bash",
+        cmd="/entrypoint.sh",
+        env_map={},
+    )
+
+    # The cmd should appear after the image in the DOCKER_CMD array
+    assert "test-image:latest /entrypoint.sh" in script

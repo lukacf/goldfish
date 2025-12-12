@@ -24,7 +24,7 @@ from goldfish.server import (
     _get_config,
     _get_db,
     _get_pipeline_executor,
-    _get_stage_executor,
+    _get_stage_executor,  # Used for logs, cancel, refresh
     _get_workspace_manager,
     mcp,
 )
@@ -80,7 +80,6 @@ def run(
     """
     config = _get_config()
     workspace_manager = _get_workspace_manager()
-    stage_executor = _get_stage_executor()
     pipeline_executor = _get_pipeline_executor()
 
     validate_workspace_name(workspace)
@@ -92,45 +91,17 @@ def run(
     if not workspace_name:
         workspace_name = workspace
 
-    # Determine execution mode based on stages parameter
-    if stages is None or len(stages) == 0:
-        # Run ALL stages
-        runs: dict[str, Any] = pipeline_executor.run_pipeline(
-            workspace=workspace_name,
-            pipeline_name=pipeline,
-            config_override=config_override or {},
-            reason=reason or "Run all stages",
-            async_mode=not wait,
-        )
-        return runs
-
-    elif len(stages) == 1:
-        # Run SINGLE stage
-        stage_run = stage_executor.run_stage(
-            workspace=workspace_name,
-            stage_name=stages[0],
-            pipeline_name=pipeline,
-            config_override=config_override or {},
-            inputs_override=inputs_override or {},
-            reason=reason or f"Run stage {stages[0]}",
-            wait=wait,
-        )
-        result: dict[str, Any] = {"runs": [stage_run.model_dump(mode="json")]}
-        return result
-
-    else:
-        # Run MULTIPLE specific stages
-        # Find the range in the pipeline and run that subset
-        runs = pipeline_executor.run_partial_pipeline(
-            workspace=workspace_name,
-            pipeline_name=pipeline,
-            from_stage=stages[0],
-            to_stage=stages[-1],
-            config_override=config_override or {},
-            reason=reason or f"Run stages {stages[0]} to {stages[-1]}",
-            async_mode=not wait,
-        )
-        return runs
+    # Unified execution through run_stages
+    result: dict[str, Any] = pipeline_executor.run_stages(
+        workspace=workspace_name,
+        stages=stages if stages else None,
+        pipeline_name=pipeline,
+        config_override=config_override or {},
+        inputs_override=inputs_override or {},
+        reason=reason or "Run stages",
+        async_mode=not wait,
+    )
+    return result
 
 
 @mcp.tool()

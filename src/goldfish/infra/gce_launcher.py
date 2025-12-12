@@ -122,6 +122,12 @@ class GCELauncher:
 
         # Stage inputs from GCS to /mnt/inputs/
         inputs = stage_config.get("inputs", {})
+        debug_log = f"/mnt/gcs/{run_path}/logs/staging_debug.log"
+        # Create logs directory first so debug logging works
+        pre_run_cmds.append(f'mkdir -p "/mnt/gcs/{run_path}/logs"')
+        pre_run_cmds.append(
+            f'echo "DEBUG: Staging {len(inputs)} inputs, bucket_name={bucket_name}" | tee -a {debug_log}'
+        )
         for input_name, input_config in inputs.items():
             # Handle both old format (string URI) and new format (dict with location)
             if isinstance(input_config, str):
@@ -129,20 +135,39 @@ class GCELauncher:
             elif isinstance(input_config, dict):
                 gcs_uri = input_config.get("location", "")
             else:
+                pre_run_cmds.append(f'echo "DEBUG: Skipping {input_name} - not string or dict" | tee -a {debug_log}')
                 continue
+
+            pre_run_cmds.append(f'echo "DEBUG: Input {input_name} -> {gcs_uri}" | tee -a {debug_log}')
 
             if gcs_uri and gcs_uri.startswith("gs://"):
                 # Extract bucket and path from gs://bucket/path
                 uri_parts = gcs_uri.replace("gs://", "").split("/", 1)
                 if len(uri_parts) == 2:
                     input_bucket, input_path = uri_parts
+                    pre_run_cmds.append(
+                        f'echo "DEBUG: input_bucket={input_bucket}, input_path={input_path}" | tee -a {debug_log}'
+                    )
                     # If input is from same bucket, use gcsfuse; otherwise gsutil
                     if input_bucket == bucket_name:
                         # Symlink from gcsfuse mount
+                        pre_run_cmds.append(
+                            f'echo "DEBUG: Creating symlink /mnt/gcs/{input_path.rstrip("/")} -> /mnt/inputs/{input_name}" | tee -a {debug_log}'
+                        )
+                        pre_run_cmds.append(
+                            f'ls -la "/mnt/gcs/{input_path.rstrip("/")}" 2>&1 | tee -a {debug_log} || echo "DEBUG: Source does not exist!" | tee -a {debug_log}'
+                        )
                         pre_run_cmds.append(f'ln -sf "/mnt/gcs/{input_path.rstrip("/")}" "/mnt/inputs/{input_name}"')
                     else:
                         # Different bucket - use gsutil to copy
+                        pre_run_cmds.append(f'echo "DEBUG: Different bucket, using gsutil cp" | tee -a {debug_log}')
                         pre_run_cmds.append(f'gsutil -m cp -r "{gcs_uri.rstrip("/")}" "/mnt/inputs/{input_name}"')
+
+        # Debug: show what's in /mnt/inputs after staging
+        pre_run_cmds.append(f'echo "DEBUG: Contents of /mnt/inputs:" | tee -a {debug_log}')
+        pre_run_cmds.append(
+            f'ls -la /mnt/inputs/ 2>&1 | tee -a {debug_log} || echo "DEBUG: /mnt/inputs is empty or does not exist" | tee -a {debug_log}'
+        )
 
         # Build output staging commands (run after Docker)
         outputs_gcs_path = f"gs://{bucket_name}/{run_path}/outputs"
@@ -157,6 +182,7 @@ class GCELauncher:
             run_path=run_path,
             image=image_tag,
             entrypoint="/bin/bash",
+            cmd="/entrypoint.sh",
             env_map=env_map,
             mounts=[
                 ("/mnt/entrypoint.sh", "/entrypoint.sh"),

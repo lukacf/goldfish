@@ -44,7 +44,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
         dockerfile += """# Install Goldfish IO library
 COPY goldfish_io/ /app/goldfish_io/
-ENV PYTHONPATH="/app:${PYTHONPATH}"
+ENV PYTHONPATH="/app/goldfish_io:/app:${PYTHONPATH}"
 
 # Copy workspace code
 COPY modules/ /app/modules/

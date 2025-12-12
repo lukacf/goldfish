@@ -205,9 +205,10 @@ CREATE TABLE IF NOT EXISTS pipeline_stage_queue (
     pipeline_run_id TEXT NOT NULL,
     stage_name TEXT NOT NULL,
     deps TEXT,                        -- JSON list of dependent stage names
-    status TEXT NOT NULL DEFAULT 'pending', -- pending, running, completed, failed
+    status TEXT NOT NULL DEFAULT 'pending', -- pending, running, completed, failed, canceled, skipped
     stage_run_id TEXT,                -- filled when launched
     claimed_at TEXT,                  -- worker locking
+    error TEXT,                       -- error message for skipped/failed stages
     FOREIGN KEY (pipeline_run_id) REFERENCES pipeline_runs(id)
 );
 

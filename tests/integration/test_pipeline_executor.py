@@ -43,6 +43,7 @@ class DummyStageExecutor:
         pipeline_name: str | None = None,
         pipeline_run_id: str | None = None,
         config_override=None,
+        inputs_override=None,
         reason: str | None = None,
         wait: bool = False,
     ) -> StageRunInfo:
@@ -118,7 +119,7 @@ class TestRunFullPipeline:
         executor = PipelineExecutor(stage_executor=stage_executor, pipeline_manager=pipeline_manager, db=test_db)
 
         # Execute
-        result = executor.run_pipeline(
+        result = executor.run_stages(
             workspace="test_ws",
             reason="Test full pipeline",
             async_mode=False,
@@ -150,7 +151,7 @@ class TestRunFullPipeline:
         # Execute with config overrides
         config_override = {"preprocess": {"BATCH_SIZE": "128"}, "train": {"EPOCHS": "20"}}
 
-        executor.run_pipeline(
+        executor.run_stages(
             workspace="test_ws",
             config_override=config_override,
             reason="Test overrides",
@@ -165,11 +166,11 @@ class TestRunFullPipeline:
         assert stage_executor.run_stage.call_args_list[1][1]["config_override"] == {"EPOCHS": "20"}
 
 
-class TestRunPartialPipeline:
-    """Test running subset of pipeline stages."""
+class TestRunSpecificStages:
+    """Test running specific pipeline stages."""
 
-    def test_run_partial_pipeline_from_to(self, test_db):
-        """Should run stages from_stage through to_stage."""
+    def test_run_specific_stages(self, test_db):
+        """Should run only the specified stages."""
         # Setup
         pipeline_def = PipelineDef(
             name="test_pipeline",
@@ -192,11 +193,10 @@ class TestRunPartialPipeline:
 
         executor = PipelineExecutor(stage_executor=stage_executor, pipeline_manager=pipeline_manager, db=test_db)
 
-        # Execute
-        result = executor.run_partial_pipeline(
+        # Execute - run specific stages
+        result = executor.run_stages(
             workspace="test_ws",
-            from_stage="tokenize",
-            to_stage="train",
+            stages=["tokenize", "train"],
             reason="Test partial run",
             async_mode=False,
         )
@@ -206,28 +206,7 @@ class TestRunPartialPipeline:
         assert len(stage_runs) == 2
         assert [r["stage"] for r in stage_runs] == ["tokenize", "train"]
 
-    def test_run_partial_pipeline_raises_on_invalid_stage_order(self, test_db):
-        """Should raise error if from_stage comes after to_stage."""
-        # Setup
-        pipeline_def = PipelineDef(
-            name="test_pipeline",
-            stages=[
-                StageDef(name="preprocess", inputs={}, outputs={}),
-                StageDef(name="tokenize", inputs={}, outputs={}),
-                StageDef(name="train", inputs={}, outputs={}),
-            ],
-        )
-
-        pipeline_manager = MagicMock()
-        pipeline_manager.get_pipeline.return_value = pipeline_def
-
-        executor = PipelineExecutor(stage_executor=MagicMock(), pipeline_manager=pipeline_manager, db=test_db)
-
-        # Execute - should raise
-        with pytest.raises(ValueError, match="from_stage must come before to_stage"):
-            executor.run_partial_pipeline(workspace="test_ws", from_stage="train", to_stage="preprocess", reason="Test")
-
-    def test_run_partial_pipeline_raises_on_unknown_stage(self, test_db):
+    def test_run_stages_raises_on_unknown_stage(self, test_db):
         """Should raise error if stage not found in pipeline."""
         # Setup
         pipeline_def = PipelineDef(
@@ -241,10 +220,8 @@ class TestRunPartialPipeline:
         executor = PipelineExecutor(stage_executor=MagicMock(), pipeline_manager=pipeline_manager, db=test_db)
 
         # Execute - should raise
-        with pytest.raises(ValueError, match="Stage not found"):
-            executor.run_partial_pipeline(
-                workspace="test_ws", from_stage="nonexistent", to_stage="train", reason="Test"
-            )
+        with pytest.raises(ValueError, match="not found in pipeline"):
+            executor.run_stages(workspace="test_ws", stages=["nonexistent"], reason="Test")
 
 
 class TestAsyncQueueSemantics:
@@ -274,7 +251,7 @@ class TestAsyncQueueSemantics:
 
         executor, stage_executor, pipeline_manager, fake_pool = self._make_executor(test_db, pipeline_def, monkeypatch)
 
-        result = executor.run_pipeline(
+        result = executor.run_stages(
             workspace="ws",
             pipeline_name="train",
             async_mode=True,
@@ -297,7 +274,7 @@ class TestAsyncQueueSemantics:
 
         executor, stage_executor, _, fake_pool = self._make_executor(test_db, pipeline_def, monkeypatch)
 
-        result = executor.run_pipeline(
+        result = executor.run_stages(
             workspace="ws",
             pipeline_name="train",
             async_mode=True,
@@ -314,6 +291,7 @@ class TestAsyncQueueSemantics:
             workspace="ws",
             pipeline_name="train",
             config_override=None,
+            inputs_override=None,
             reason="queue deps",
         )
 
@@ -332,7 +310,7 @@ class TestAsyncQueueSemantics:
 
         executor, stage_executor, _, _ = self._make_executor(test_db, pipeline_def, monkeypatch)
 
-        result = executor.run_pipeline(
+        result = executor.run_stages(
             workspace="ws",
             pipeline_name="train",
             async_mode=True,
@@ -347,6 +325,7 @@ class TestAsyncQueueSemantics:
             workspace="ws",
             pipeline_name="train",
             config_override=None,
+            inputs_override=None,
             reason="cas",
         )
         assert len(stage_executor.calls) == before_calls
@@ -403,6 +382,7 @@ class TestAsyncQueueSemantics:
             workspace="ws",
             pipeline_name="train",
             config_override=None,
+            inputs_override=None,
             reason="fail",
         )
 
@@ -420,7 +400,7 @@ class TestAsyncQueueSemantics:
         )
         executor, stage_executor, _, _ = self._make_executor(test_db, pipeline_def, monkeypatch)
 
-        result = executor.run_pipeline(
+        result = executor.run_stages(
             workspace="ws",
             pipeline_name="train",
             async_mode=True,
@@ -450,7 +430,7 @@ class TestNamedPipelines:
             db=test_db,
         )
 
-        executor.run_pipeline(workspace="ws", pipeline_name="train", async_mode=False)
+        executor.run_stages(workspace="ws", pipeline_name="train", async_mode=False)
         pipeline_manager.get_pipeline.assert_called_with("ws", "train")
 
     def test_get_pipeline_default_fallback(self, test_db):
@@ -463,7 +443,7 @@ class TestNamedPipelines:
         stage_executor = DummyStageExecutor(test_db)
 
         executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
-        executor.run_pipeline(workspace="ws", pipeline_name=None, async_mode=False)
+        executor.run_stages(workspace="ws", pipeline_name=None, async_mode=False)
 
         pipeline_manager.get_pipeline.assert_called_with("ws", None)
 
@@ -477,13 +457,13 @@ class TestNamedPipelines:
         stage_executor = DummyStageExecutor(test_db)
 
         executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
-        executor.run_pipeline(workspace="ws", pipeline_name="train", async_mode=False)
+        executor.run_stages(workspace="ws", pipeline_name="train", async_mode=False)
 
         assert stage_executor.calls == ["prep"]
         row = test_db.list_stage_runs()[0]
         assert row["pipeline_name"] == "train"
 
-    def test_run_pipeline_with_named_pipeline(self, test_db):
+    def test_run_stages_with_named_pipeline(self, test_db):
         pipeline_def = PipelineDef(
             name="train",
             stages=[StageDef(name="prep", inputs={}, outputs={}), StageDef(name="train", inputs={}, outputs={})],
@@ -493,6 +473,6 @@ class TestNamedPipelines:
         stage_executor = DummyStageExecutor(test_db)
 
         executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
-        result = executor.run_pipeline(workspace="ws", pipeline_name="train", async_mode=False)
+        result = executor.run_stages(workspace="ws", pipeline_name="train", async_mode=False)
 
         assert all(r["pipeline"] == "train" for r in result["stage_runs"])

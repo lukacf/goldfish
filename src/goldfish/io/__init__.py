@@ -187,6 +187,14 @@ def save_output(name: str, data: Any, artifact: bool = False):
         _mark_as_artifact(name)
 
 
+def get_config() -> dict[str, Any]:
+    """Get stage configuration.
+
+    Returns the full stage config dict from GOLDFISH_STAGE_CONFIG.
+    """
+    return _get_stage_config()
+
+
 def get_input_path(name: str) -> Path:
     """Get path to input for manual loading.
 

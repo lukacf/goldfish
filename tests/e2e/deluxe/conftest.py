@@ -98,7 +98,8 @@ def deluxe_project(gce_config, tmp_path):
     skip_if_not_enabled()
 
     # Create project directory
-    project_root = tmp_path / f"deluxe-test-{uuid4().hex[:8]}"
+    project_name = f"deluxe-test-{uuid4().hex[:8]}"
+    project_root = tmp_path / project_name
     project_root.mkdir()
 
     # Create project structure
@@ -106,7 +107,7 @@ def deluxe_project(gce_config, tmp_path):
     (project_root / ".goldfish").mkdir()
     (project_root / "experiments").mkdir()
 
-    # Initialize dev repo
+    # Initialize dev repo (inside .goldfish for simplicity in tests)
     dev_repo = project_root / ".goldfish" / "dev"
     dev_repo.mkdir(parents=True)
     subprocess.run(["git", "init"], cwd=dev_repo, capture_output=True, check=True)
@@ -140,9 +141,10 @@ def deluxe_project(gce_config, tmp_path):
     )
 
     # Create config with GCE settings
+    # dev_repo_path is relative to project_root.parent (tmp_path)
     config = GoldfishConfig(
         project_name="deluxe-ml-test",
-        dev_repo_path=".goldfish/dev",
+        dev_repo_path=f"{project_name}/.goldfish/dev",
         workspaces_dir="workspaces",
         slots=["w1", "w2", "w3"],
         jobs=JobsConfig(backend="gce", experiments_dir="experiments"),

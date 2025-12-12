@@ -116,11 +116,16 @@ class TestGCEIOStaging:
             final_status = stage_executor.wait_for_completion(run1.stage_run_id, poll_interval=5, timeout=300)
             assert final_status == "completed", f"generate_test_data failed: {final_status}"
 
-            # Verify outputs were created
-            outputs = stage_executor.get_outputs(run1.stage_run_id)
-            assert "test_array" in outputs, "Missing test_array output"
-            assert "test_csv" in outputs, "Missing test_csv output"
-            assert "test_directory" in outputs, "Missing test_directory output"
+            # Verify outputs were registered in signal_lineage
+            with db._conn() as conn:
+                outputs = conn.execute(
+                    "SELECT signal_name FROM signal_lineage WHERE stage_run_id = ?",
+                    (run1.stage_run_id,),
+                ).fetchall()
+            output_names = {row["signal_name"] for row in outputs}
+            assert "test_array" in output_names, "Missing test_array output"
+            assert "test_csv" in output_names, "Missing test_csv output"
+            assert "test_directory" in output_names, "Missing test_directory output"
             print("generate_test_data completed - outputs verified")
 
         # ======================================================================
@@ -149,11 +154,15 @@ class TestGCEIOStaging:
 
             final_status = stage_executor.wait_for_completion(run2.stage_run_id, poll_interval=10, timeout=600)
 
-            # Get logs for debugging
-            logs = stage_executor.get_logs(run2.stage_run_id, tail=200)
-            print("\n--- Stage Logs ---")
-            print(logs.get("logs", "No logs available"))
-            print("--- End Logs ---\n")
+            # Get run details for debugging
+            with db._conn() as conn:
+                run_row = conn.execute("SELECT * FROM stage_runs WHERE id = ?", (run2.stage_run_id,)).fetchone()
+            print("\n--- Stage Run Details ---")
+            if run_row:
+                print(f"  Status: {run_row['status']}")
+                print(f"  Backend: {run_row['backend_type']}")
+                print(f"  Error: {run_row.get('error_message', 'None')}")
+            print("--- End Details ---\n")
 
             assert final_status == "completed", f"validate_io failed: {final_status}"
             print("validate_io completed successfully!")
@@ -167,14 +176,18 @@ class TestGCEIOStaging:
 
         if not is_dry_run():
             # Verify outputs were staged back from GCE
-            outputs = stage_executor.get_outputs(run2.stage_run_id)
-            assert "validation_results" in outputs, "Missing validation_results output"
-            assert "transformed_array" in outputs, "Missing transformed_array output"
+            with db._conn() as conn:
+                outputs = conn.execute(
+                    "SELECT signal_name, storage_location FROM signal_lineage WHERE stage_run_id = ?",
+                    (run2.stage_run_id,),
+                ).fetchall()
+            output_dict = {row["signal_name"]: row["storage_location"] for row in outputs}
+            assert "validation_results" in output_dict, "Missing validation_results output"
+            assert "transformed_array" in output_dict, "Missing transformed_array output"
             print("Output staging verified - all outputs present")
 
-            # Load and verify validation results
-            results_location = outputs["validation_results"]["location"]
-            print(f"Validation results at: {results_location}")
+            # Show results location
+            print(f"Validation results at: {output_dict.get('validation_results', 'N/A')}")
 
             # Verify all tests passed
             with db._conn() as conn:
