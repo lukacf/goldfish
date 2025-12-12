@@ -58,8 +58,8 @@ class StageExecutor:
 
         # Initialize profile resolver
         profile_overrides = None
-        if config.gce and config.gce.profile_overrides:
-            profile_overrides = config.gce.profile_overrides
+        if config.gce:
+            profile_overrides = config.gce.effective_profile_overrides
         self.profile_resolver = ProfileResolver(profile_overrides=profile_overrides)
 
         # Initialize GCE launcher with full config
@@ -74,7 +74,11 @@ class StageExecutor:
             gce_bucket = config.gcs.bucket
 
         if config.gce:
-            gce_project = config.gce.project_id
+            # Use effective_project_id to support both project_id and project aliases
+            try:
+                gce_project = config.gce.effective_project_id
+            except ValueError:
+                pass  # Neither project_id nor project set, leave as None for gcloud defaults
             if config.gce.zones:
                 gce_zone = config.gce.zones[0]
                 gce_zones = config.gce.zones  # Pass all zones for multi-zone lookups
@@ -234,8 +238,12 @@ class StageExecutor:
             self.wait_for_completion(stage_run_id)
             refreshed = self.db.get_stage_run(stage_run_id)
             if refreshed:
+                # Exclude fields we're overriding to avoid duplicate keyword args
+                base_fields = info.model_dump(
+                    exclude={"status", "completed_at", "log_uri", "artifact_uri", "progress", "outputs", "error"}
+                )
                 return StageRunInfo(
-                    **info.model_dump(),
+                    **base_fields,
                     status=refreshed.get("status", info.status),
                     completed_at=parse_optional_datetime(refreshed.get("completed_at")),
                     log_uri=refreshed.get("log_uri"),
@@ -452,7 +460,15 @@ class StageExecutor:
                     storage_location = gcs_marker.read_text().strip()
                 elif gcs_base:
                     # Default GCS location for GCE runs
-                    storage_location = f"{gcs_base.rstrip('/')}/{output_name}/"
+                    # Use appropriate suffix based on output type
+                    output_type = output_def.type or "directory"
+                    if output_type == "npy":
+                        storage_location = f"{gcs_base.rstrip('/')}/{output_name}.npy"
+                    elif output_type == "csv":
+                        storage_location = f"{gcs_base.rstrip('/')}/{output_name}.csv"
+                    else:
+                        # directory, file, or other types use trailing /
+                        storage_location = f"{gcs_base.rstrip('/')}/{output_name}/"
 
                 conn.execute(
                     """
