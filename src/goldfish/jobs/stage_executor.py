@@ -102,6 +102,7 @@ class StageExecutor:
         config_override: dict | None = None,
         inputs_override: dict | None = None,
         reason: str | None = None,
+        reason_structured: dict | None = None,
         wait: bool = False,
         stage_run_id: str | None = None,
     ) -> StageRunInfo:
@@ -114,7 +115,8 @@ class StageExecutor:
             pipeline_run_id: Parent pipeline run ID
             config_override: Override env vars from config
             inputs_override: Override input sources (for debugging)
-            reason: Why this stage is being run
+            reason: Why this stage is being run (string summary)
+            reason_structured: Structured RunReason dict (description, hypothesis, etc.)
             wait: Block until completion
             stage_run_id: Pre-created stage_run_id (from pipeline queue). If provided,
                          updates existing record; if None, creates new one.
@@ -167,6 +169,7 @@ class StageExecutor:
                 input_sources=input_sources,
                 config_override=config_override,
                 reason=reason,
+                reason_structured=reason_structured,
                 pipeline_run_id=pipeline_run_id,
                 pipeline_name=pipeline_name,
                 profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
@@ -406,6 +409,7 @@ class StageExecutor:
         input_sources: dict[str, dict],
         config_override: dict | None,
         reason: str | None,
+        reason_structured: dict | None,
         pipeline_run_id: str | None,
         pipeline_name: str | None,
         profile: str | None,
@@ -422,6 +426,7 @@ class StageExecutor:
             pipeline_name=pipeline_name,
             config=config,
             inputs=inputs,
+            reason=reason_structured,
             profile=profile,
             hints=hints,
             backend_type=self.config.jobs.backend,
