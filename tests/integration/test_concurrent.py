@@ -641,15 +641,15 @@ class TestConcurrentWorkspaceOperations:
         test_file = slot_path / "test.txt"
         test_file.write_text("Initial content")
 
-        # 2. Create a snapshot to rollback to
-        checkpoint1 = manager.checkpoint("w1", "Initial checkpoint for rollback test")
-        snapshot_id = checkpoint1.snapshot_id
+        # 2. Create a version to rollback to (using save_version, checkpoint is deprecated)
+        version1 = manager.save_version("w1", "Initial version for rollback test")
+        version_to_rollback = version1.version  # e.g., "v1"
 
         # 3. Make changes
         test_file.write_text("Modified content")
 
-        # Create another checkpoint with the modified content
-        manager.checkpoint("w1", "Second checkpoint with modifications")
+        # Create another version with the modified content
+        manager.save_version("w1", "Second version with modifications")
 
         # Make more changes
         test_file.write_text("More modified content")
@@ -664,8 +664,8 @@ class TestConcurrentWorkspaceOperations:
         def do_rollback():
             try:
                 barrier.wait()  # Wait for both threads to be ready
-                # Rollback to first snapshot (slow operation)
-                result = manager.rollback("w1", snapshot_id, "Testing concurrent rollback operation")
+                # Rollback to first version (slow operation)
+                result = manager.rollback("w1", version_to_rollback, "Testing concurrent rollback operation")
                 with lock:
                     results["rollback"] = result
             except Exception as e:
@@ -675,8 +675,8 @@ class TestConcurrentWorkspaceOperations:
         def do_checkpoint():
             try:
                 barrier.wait()  # Wait for both threads to be ready
-                # Try to checkpoint while rollback is happening
-                result = manager.checkpoint("w1", "Testing concurrent checkpoint operation")
+                # Try to save_version while rollback is happening
+                result = manager.save_version("w1", "Testing concurrent save_version operation")
                 with lock:
                     results["checkpoint"] = result
             except Exception as e:
@@ -737,10 +737,10 @@ class TestConcurrentWorkspaceOperations:
         audit = db.get_recent_audit(limit=10)
         print(f"DEBUG: Recent audit: {[a['operation'] for a in audit]}")
 
-        # Should see checkpoint and/or rollback operations
+        # Should see save_version and/or rollback operations
         operations = [a["operation"] for a in audit]
         if results["checkpoint"]:
-            assert "checkpoint" in operations
+            assert "save_version" in operations
         if results["rollback"]:
             assert "rollback" in operations
 
