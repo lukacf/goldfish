@@ -9,6 +9,30 @@ import pytest
 from goldfish.jobs.pipeline_executor import PipelineExecutor
 from goldfish.models import PipelineDef, StageDef, StageRunInfo
 
+# Track all PipelineExecutors created during tests for cleanup
+_executors_to_shutdown: list[PipelineExecutor] = []
+_original_init = PipelineExecutor.__init__
+
+
+def _tracking_init(self, *args, **kwargs):
+    _original_init(self, *args, **kwargs)
+    _executors_to_shutdown.append(self)
+
+
+# Monkey-patch to track executors
+PipelineExecutor.__init__ = _tracking_init
+
+
+@pytest.fixture(autouse=True)
+def cleanup_pipeline_executors():
+    """Ensure all PipelineExecutors are shutdown after each test."""
+    _executors_to_shutdown.clear()
+    yield
+    # Shutdown all executors created during the test
+    for executor in _executors_to_shutdown:
+        executor.shutdown()
+    _executors_to_shutdown.clear()
+
 
 class DummyStageExecutor:
     """Lightweight stage executor used to exercise queue semantics in tests."""

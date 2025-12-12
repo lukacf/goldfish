@@ -39,9 +39,14 @@ class PipelineExecutor:
         self.stage_executor = stage_executor
         self.pipeline_manager = pipeline_manager
         self.db = db
+        self._shutdown = False  # Flag to stop workers when executor is destroyed
         self._recover_inflight_pipelines()
         self._race_loss_counter = 0
         self._race_loss_lock = threading.Lock()
+
+    def shutdown(self) -> None:
+        """Signal workers to stop. Call this before discarding the executor."""
+        self._shutdown = True
 
     def _recover_inflight_pipelines(self) -> None:
         """On startup, reschedule any pipelines that were mid-flight."""
@@ -280,7 +285,7 @@ class PipelineExecutor:
         self._logger.info("Worker started for pipeline %s workspace=%s", pipeline_run_id, workspace)
         start_time = time.time()
         error_count = 0
-        while True:
+        while not self._shutdown:
             try:
                 pending, running = self._pipeline_queue_counts(pipeline_run_id)
                 self._logger.debug("Pipeline %s: pending=%d running=%d", pipeline_run_id, pending, running)
@@ -296,15 +301,20 @@ class PipelineExecutor:
                 error_count += 1
                 self._logger.exception("Pipeline worker error (run=%s err#=%s): %s", pipeline_run_id, error_count, e)
                 if error_count >= self.MAX_WORKER_ERRORS:
-                    with self.db._conn() as conn:
-                        conn.execute(
-                            "UPDATE pipeline_stage_queue SET status='failed' WHERE pipeline_run_id=? AND status IN ('pending','running')",
-                            (pipeline_run_id,),
-                        )
-                        conn.execute(
-                            "UPDATE pipeline_runs SET status='failed', error=? WHERE id=?",
-                            (f"Worker loop crashed: {e}", pipeline_run_id),
-                        )
+                    if self._shutdown:
+                        break  # Don't try to update DB if shutting down
+                    try:
+                        with self.db._conn() as conn:
+                            conn.execute(
+                                "UPDATE pipeline_stage_queue SET status='failed' WHERE pipeline_run_id=? AND status IN ('pending','running')",
+                                (pipeline_run_id,),
+                            )
+                            conn.execute(
+                                "UPDATE pipeline_runs SET status='failed', error=? WHERE id=?",
+                                (f"Worker loop crashed: {e}", pipeline_run_id),
+                            )
+                    except Exception:
+                        pass  # DB may be gone if executor was shutdown
                     break
                 time.sleep(min(60, 5 * error_count))
                 continue
