@@ -46,8 +46,14 @@ def job_dict_to_info(job: JobRow, db: Database) -> JobInfo:
     )
 
 
-def stage_run_dict_to_info(row: dict) -> StageRunInfo:
-    """Convert database stage_run row dict to StageRunInfo model."""
+def stage_run_dict_to_info(row: dict, truncate_error: bool = True) -> StageRunInfo:
+    """Convert database stage_run row dict to StageRunInfo model.
+
+    Args:
+        row: Database row dict
+        truncate_error: If True, truncate error to first line (for list views).
+                       Use truncate_error=False in get_run() for full error.
+    """
 
     def _safe_json(val):
         if not val:
@@ -62,6 +68,17 @@ def stage_run_dict_to_info(row: dict) -> StageRunInfo:
     outputs_raw = row.get("outputs_json")
     config_raw = row.get("config_json")
     inputs_raw = row.get("inputs_json")
+
+    # Truncate error for list views - full error available via get_run()
+    error = row.get("error")
+    if error and truncate_error:
+        first_line = error.split("\n")[0]
+        if len(first_line) > 120:
+            first_line = first_line[:120] + "..."
+        if len(error) > len(first_line) + 10:
+            error = first_line + " [use get_run() for full error]"
+        else:
+            error = first_line
 
     stage_run_id = row.get("id") or row.get("stage_run_id")
     if stage_run_id is None:
@@ -84,5 +101,5 @@ def stage_run_dict_to_info(row: dict) -> StageRunInfo:
         outputs=_safe_json(outputs_raw),
         config=_safe_json(config_raw),
         inputs=_safe_json(inputs_raw),
-        error=row.get("error"),
+        error=error,
     )

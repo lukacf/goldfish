@@ -1,0 +1,51 @@
+# Goldfish Base Image - GPU (CUDA)
+# Pre-built with PyTorch + CUDA for GPU workloads
+#
+# Build: docker build -f Dockerfile.gpu -t goldfish-base-gpu:v1 .
+# Push:  docker tag goldfish-base-gpu:v1 us-docker.pkg.dev/PROJECT/goldfish/goldfish-base-gpu:v1
+#        docker push us-docker.pkg.dev/PROJECT/goldfish/goldfish-base-gpu:v1
+
+# NVIDIA CUDA base image with Python support
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+LABEL org.opencontainers.image.title="Goldfish Base GPU"
+LABEL org.opencontainers.image.description="Pre-built base image with PyTorch + CUDA for GPU workloads"
+LABEL org.opencontainers.image.vendor="Goldfish ML"
+LABEL org.opencontainers.image.version="v1"
+
+# Avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3-pip \
+    build-essential \
+    curl \
+    git \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make python3.11 the default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+# Upgrade pip
+RUN python -m pip install --upgrade pip
+
+# Core ML libraries pre-installed
+COPY requirements-gpu.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
+
+# Create non-root user for security
+RUN useradd -m -u 1000 goldfish
+USER goldfish
+
+# NVIDIA environment variables
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+WORKDIR /app
+
+CMD ["/bin/bash"]

@@ -91,8 +91,11 @@ echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.clou
 apt-get update -y
 timeout 120 apt-get install -y gcsfuse || true
 mkdir -p {mount_point}
+# Enable user_allow_other in fuse.conf for allow_other to work
+grep -q "^user_allow_other" /etc/fuse.conf 2>/dev/null || echo "user_allow_other" >> /etc/fuse.conf
+echo "DEBUG: Mounting gcsfuse with uid=1000 gid=100 file-mode=0644 dir-mode=0755 allow_other"
 for attempt in $(seq 1 {GCSFUSE_MAX_ATTEMPTS}); do
-  if gcsfuse {bucket} {mount_point}; then
+  if gcsfuse --implicit-dirs --uid=1000 --gid=100 --file-mode=0644 --dir-mode=0755 -o allow_other {bucket} {mount_point}; then
     if mountpoint -q {mount_point}; then
       break
     fi
@@ -150,6 +153,7 @@ def docker_run_section(
     env_keys: Sequence[str],
     mounts: Sequence[tuple[str, str]],
     entrypoint: str,
+    cmd: str = "",
     shm_size: str = DEFAULT_SHM_SIZE,
 ) -> str:
     """Generate Docker run command with GPU detection.
@@ -159,6 +163,7 @@ def docker_run_section(
         env_keys: Environment variable names to pass through
         mounts: List of (host_path, container_path) tuples
         entrypoint: Container entrypoint command
+        cmd: Command/script to pass to entrypoint (e.g., "/entrypoint.sh")
         shm_size: Shared memory size (default from DEFAULT_SHM_SIZE)
 
     Returns:
@@ -166,6 +171,7 @@ def docker_run_section(
     """
     env_flags = " ".join(f"-e {key}" for key in env_keys)
     mount_flags = " ".join(f"-v {host}:{target}" for host, target in mounts)
+    cmd_part = f" {cmd}" if cmd else ""
 
     return f"""
 DOCKER_GPU_ARGS=""
@@ -181,7 +187,7 @@ DOCKER_CMD=(
   {env_flags} \\
   {mount_flags} \\
   --entrypoint {entrypoint} \\
-  {image}
+  {image}{cmd_part}
 )
 """
 
@@ -220,6 +226,7 @@ def build_startup_script(
     disk_mounts: Sequence[tuple[str, str, str]] = (),
     pre_run_cmds: Sequence[str] = (),
     post_run_cmds: Sequence[str] = (),
+    cmd: str = "",
 ) -> str:
     """Build complete startup script for GCE instance.
 
@@ -237,6 +244,7 @@ def build_startup_script(
         disk_mounts: List of (disk_id, mount_point, mode) tuples
         pre_run_cmds: Commands to run before Docker
         post_run_cmds: Commands to run after Docker
+        cmd: Command/script to pass to entrypoint (e.g., "/entrypoint.sh")
 
     Returns:
         Complete startup script as string
@@ -293,8 +301,8 @@ def build_startup_script(
     parts.append('log_stage "docker_pull"')
 
     # Pre-run commands
-    for cmd in pre_run_cmds:
-        parts.append(cmd)
+    for pre_cmd in pre_run_cmds:
+        parts.append(pre_cmd)
 
     # Docker run command
     parts.append(
@@ -303,6 +311,7 @@ def build_startup_script(
             env_keys=env_keys,
             mounts=list(mounts),
             entrypoint=entrypoint,
+            cmd=cmd,
             shm_size=shm_size,
         )
     )
@@ -315,8 +324,8 @@ def build_startup_script(
     parts.append('log_stage "docker_run_end"')
 
     # Post-run commands
-    for cmd in post_run_cmds:
-        parts.append(cmd)
+    for post_cmd in post_run_cmds:
+        parts.append(post_cmd)
 
     # Upload exit code and logs
     parts.append(f'echo "$EXIT_CODE" > {bucket_mount}/{bucket_path}/logs/exit_code.txt || true')

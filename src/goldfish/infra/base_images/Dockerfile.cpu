@@ -1,0 +1,34 @@
+# Goldfish Base Image - CPU
+# Pre-built with common ML libraries for fast stage startup
+#
+# Build: docker build -f Dockerfile.cpu -t goldfish-base-cpu:v1 .
+# Push:  docker tag goldfish-base-cpu:v1 us-docker.pkg.dev/PROJECT/goldfish/goldfish-base-cpu:v1
+#        docker push us-docker.pkg.dev/PROJECT/goldfish/goldfish-base-cpu:v1
+
+FROM python:3.11-slim
+
+LABEL org.opencontainers.image.title="Goldfish Base CPU"
+LABEL org.opencontainers.image.description="Pre-built base image with common ML libraries for CPU workloads"
+LABEL org.opencontainers.image.vendor="Goldfish ML"
+LABEL org.opencontainers.image.version="v1"
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    git \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Core ML libraries pre-installed
+# These are the most common dependencies that every ML project needs
+COPY requirements-cpu.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
+
+# Create non-root user for security
+RUN useradd -m -u 1000 goldfish
+USER goldfish
+
+WORKDIR /app
+
+CMD ["/bin/bash"]

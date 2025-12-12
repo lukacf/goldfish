@@ -190,14 +190,14 @@ class TestFromRefValidation:
 
 
 class TestRollbackUsesValidation:
-    """Tests that rollback() uses snapshot_id validation."""
+    """Tests that rollback() uses version validation."""
 
-    def test_rollback_validates_snapshot_id(self, temp_dir):
-        """rollback() should validate snapshot_id before passing to git."""
+    def test_rollback_validates_version(self, temp_dir):
+        """rollback() should validate version format before looking up in database."""
         from unittest.mock import MagicMock
 
         from goldfish import server
-        from goldfish.validation import InvalidSnapshotIdError
+        from goldfish.validation import InvalidVersionError
 
         mock_config = MagicMock()
         mock_config.audit.min_reason_length = 15
@@ -220,11 +220,11 @@ class TestRollbackUsesValidation:
         try:
             rollback_fn = server.rollback.fn if hasattr(server.rollback, "fn") else server.rollback
 
-            # Should raise validation error for invalid snapshot_id
-            with pytest.raises((InvalidSnapshotIdError, GoldfishError)):
+            # Should raise validation error for invalid version (command injection attempt)
+            with pytest.raises((InvalidVersionError, GoldfishError)):
                 rollback_fn(
                     slot="w1",
-                    snapshot_id="$(whoami)",  # Injection attempt
+                    version="$(whoami)",  # Injection attempt - not a valid version format
                     reason="Testing validation works correctly",
                 )
         finally:

@@ -119,11 +119,29 @@ class CreateWorkspaceResponse(BaseModel):
 
 
 class CheckpointResponse(BaseModel):
-    """Response from checkpoint() tool."""
+    """Response from checkpoint() tool.
+
+    DEPRECATED: Use SaveVersionResponse from save_version() instead.
+    """
 
     success: bool
     slot: str
     snapshot_id: str  # e.g., "snap-a1b2c3d4"
+    message: str
+    state_md: str
+
+
+class SaveVersionResponse(BaseModel):
+    """Response from save_version() tool.
+
+    Returns version as primary identifier, with git_tag as internal detail.
+    """
+
+    success: bool
+    slot: str
+    version: str  # Primary identifier, e.g., "v1", "v2"
+    git_tag: str  # Internal git tag, e.g., "snap-a1b2c3d4-20251210-143000"
+    git_sha: str  # Full git SHA for provenance
     message: str
     state_md: str
 
@@ -267,7 +285,8 @@ class RollbackResponse(BaseModel):
 
     success: bool
     slot: str
-    snapshot_id: str  # Snapshot that was rolled back to
+    version: str  # Version that was rolled back to (e.g., "v1")
+    git_tag: str = ""  # Internal git tag (e.g., "snap-xxx")
     files_reverted: int  # Number of files changed
     state_md: str = ""  # Updated STATE.md content
 
