@@ -14,17 +14,14 @@ stages:
 
   - name: validate_io
     inputs:
-      array_input:
+      test_array:
         from_stage: generate_test_data
-        signal: test_array
         type: npy
-      csv_input:
+      test_csv:
         from_stage: generate_test_data
-        signal: test_csv
         type: csv
-      dir_input:
+      test_directory:
         from_stage: generate_test_data
-        signal: test_directory
         type: directory
     outputs:
       validation_results:
