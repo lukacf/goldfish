@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.models import StageRunInfo
+from goldfish.models import RunReason, StageRunInfo
 from goldfish.pipeline.manager import PipelineManager
 
 # Lease timeout for claimed stages (seconds) - if a stage is claimed but not launched
@@ -86,6 +86,7 @@ class PipelineExecutor:
         config_override: dict | None = None,
         inputs_override: dict | None = None,
         reason: str | None = None,
+        reason_structured: RunReason | None = None,
         async_mode: bool = True,
     ) -> dict:
         """
@@ -97,7 +98,8 @@ class PipelineExecutor:
             pipeline_name: Pipeline file (None = pipeline.yaml)
             config_override: Per-stage config overrides {"stage_name": {"VAR": "val"}}
             inputs_override: Per-stage input overrides {"stage_name": {"input": "path"}}
-            reason: Why running
+            reason: Why running (string summary)
+            reason_structured: Structured RunReason object with hypothesis/approach/etc
             async_mode: True = queue-based async, False = sequential blocking
 
         Returns:
@@ -151,6 +153,14 @@ class PipelineExecutor:
         # Validate all inputs can be resolved BEFORE queuing
         self._validate_inputs_resolvable(workspace, stages_to_execute, safe_inputs_override)
 
+        # Convert reason_structured to dict if it's a RunReason object
+        reason_dict = None
+        if reason_structured:
+            if hasattr(reason_structured, "model_dump"):
+                reason_dict = reason_structured.model_dump()
+            else:
+                reason_dict = reason_structured
+
         if not async_mode:
             # Sequential blocking mode - run each stage and wait
             runs: list[StageRunInfo] = []
@@ -165,6 +175,7 @@ class PipelineExecutor:
                     config_override=cfg,
                     inputs_override=inp,
                     reason=reason,
+                    reason_structured=reason_dict,
                     wait=True,
                 )
                 runs.append(sr)
