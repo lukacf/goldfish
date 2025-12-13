@@ -278,14 +278,17 @@ def cancel(run_id: str, reason: str) -> dict:
         ).model_dump(mode="json")
         return fail_result
 
-    # Best-effort backend stop
+    # Best-effort backend cleanup
+    # For GCE: use delete_instance() to fully terminate (stop just pauses)
+    # For local: stop_container() is correct since containers auto-remove (--rm)
     try:
         if backend == "local":
             _get_stage_executor().local_executor.stop_container(handle)
         elif backend == "gce":
-            _get_stage_executor().gce_launcher.stop_instance(handle)
-    except Exception:
-        pass
+            _get_stage_executor().gce_launcher.delete_instance(handle)
+    except Exception as e:
+        # Log error but don't fail the cancel - DB state is already updated
+        logger.warning(f"Failed to cleanup backend for {run_id} ({backend}:{handle}): {e}")
 
     success_result: dict[str, Any] = CancelRunResponse(success=True, previous_status=row.get("status")).model_dump(
         mode="json"

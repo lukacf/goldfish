@@ -505,34 +505,19 @@ class GoldfishDaemon:
     def _check_orphaned_instances(self) -> None:
         """Check for and clean up orphaned GCE instances.
 
-        1. Find stage_runs with backend_type='gce' and status='running'
-        2. Query GCE for actual instance status
-        3. If instance gone/terminated, mark stage_run as failed
-        4. Delete any terminated instances still hanging around
+        Two-way orphan detection:
+        1. DB says 'running' but instance gone → mark run as failed
+        2. Instance running but DB says terminal (canceled/completed/failed) → delete instance
+
+        This catches both directions of inconsistency.
         """
         import subprocess
 
         if not self.config:
             return
 
-        # Find running GCE stage runs
-        with self._db._conn() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, instance_id, workspace_name, stage_name
-                FROM stage_runs
-                WHERE status = 'running'
-                AND backend_type = 'gce'
-                AND instance_id IS NOT NULL
-                """
-            ).fetchall()
-
-        if not rows:
-            return
-
-        logger.debug("Checking %d running GCE stage runs", len(rows))
-
-        # Get list of all running GCE instances in one call
+        # Get list of ALL GCE stage instances (any status) in one call
+        # We need to know status to avoid killing instances that are still booting
         try:
             result = subprocess.run(
                 [
@@ -540,80 +525,67 @@ class GoldfishDaemon:
                     "compute",
                     "instances",
                     "list",
-                    "--filter=status=RUNNING",
-                    "--format=value(name)",
+                    "--filter=name~^stage-",
+                    "--format=value(name,zone,status)",
                 ],
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
-            running_instances = set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
+            # Track all instances with their status
+            # alive_instances: instances that exist and are not terminated/stopped
+            # Key is instance name, value is (zone, status)
+            all_instances: dict[str, tuple[str, str]] = {}  # name -> (zone, status)
+            if result.stdout.strip():
+                for line in result.stdout.strip().split("\n"):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        name = parts[0]
+                        zone = parts[1].split("/")[-1]  # Extract zone from full path
+                        status = parts[2]
+                        all_instances[name] = (zone, status)
+
+            # Instances are "alive" if they're in any non-terminal state
+            # PROVISIONING, STAGING, RUNNING, STOPPING, SUSPENDING, SUSPENDED are all "alive"
+            # Only TERMINATED is truly dead
+            terminal_statuses = {"TERMINATED", "STOPPED"}
+            alive_instances = {
+                name: zone for name, (zone, status) in all_instances.items() if status not in terminal_statuses
+            }
         except Exception as e:
             logger.warning("Failed to list GCE instances: %s", e)
             return
 
-        # Check each stage run
+        # === Check 1: DB says 'running' but instance is gone ===
+        with self._db._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, backend_handle, workspace_name, stage_name
+                FROM stage_runs
+                WHERE status = 'running'
+                AND backend_type = 'gce'
+                AND backend_handle IS NOT NULL
+                """
+            ).fetchall()
+
+        if rows:
+            logger.debug("Checking %d running GCE stage runs", len(rows))
+
         for row in rows:
             stage_run_id = row["id"]
-            instance_id = row["instance_id"]
+            backend_handle = row["backend_handle"]
             workspace = row["workspace_name"]
             stage = row["stage_name"]
 
             # Sanitize instance name (same logic as GCELauncher)
-            instance_name = instance_id.replace("_", "-").lower()[:60]
+            instance_name = backend_handle.replace("_", "-").lower()[:60]
 
-            if instance_name not in running_instances:
+            if instance_name not in alive_instances:
                 logger.warning(
                     "Orphaned stage run detected: %s (instance %s not running)",
                     stage_run_id,
                     instance_name,
                 )
-
-                # Check if instance exists at all (might be terminated)
-                try:
-                    check_result = subprocess.run(
-                        [
-                            "gcloud",
-                            "compute",
-                            "instances",
-                            "list",
-                            f"--filter=name={instance_name}",
-                            "--format=value(status,zone)",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-                    instance_info = check_result.stdout.strip()
-
-                    if instance_info:
-                        # Instance exists but not running - delete it
-                        parts = instance_info.split()
-                        status = parts[0] if parts else "UNKNOWN"
-                        zone = parts[1].split("/")[-1] if len(parts) > 1 else None
-
-                        logger.warning(
-                            "Instance %s status=%s, deleting...",
-                            instance_name,
-                            status,
-                        )
-
-                        if zone:
-                            subprocess.run(
-                                [
-                                    "gcloud",
-                                    "compute",
-                                    "instances",
-                                    "delete",
-                                    instance_name,
-                                    f"--zone={zone}",
-                                    "--quiet",
-                                ],
-                                capture_output=True,
-                                timeout=60,
-                            )
-                except Exception as e:
-                    logger.warning("Failed to check/delete instance %s: %s", instance_name, e)
 
                 # Mark stage run as failed
                 try:
@@ -622,8 +594,8 @@ class GoldfishDaemon:
                             """
                             UPDATE stage_runs
                             SET status = 'failed',
-                                error_message = 'Instance disappeared (orphan cleanup)',
-                                finished_at = datetime('now')
+                                error = 'Instance disappeared (orphan cleanup)',
+                                completed_at = datetime('now')
                             WHERE id = ? AND status = 'running'
                             """,
                             (stage_run_id,),
@@ -636,6 +608,63 @@ class GoldfishDaemon:
                     )
                 except Exception as e:
                     logger.exception("Failed to update stage run %s: %s", stage_run_id, e)
+
+        # === Check 2: Instance alive but DB says terminal (canceled/completed/failed) ===
+        # This catches cases where cancel() failed to delete the instance
+        if not alive_instances:
+            return
+
+        # Get all GCE runs with terminal status that might have orphaned instances
+        with self._db._conn() as conn:
+            terminal_rows = conn.execute(
+                """
+                SELECT id, backend_handle, status
+                FROM stage_runs
+                WHERE status IN ('canceled', 'completed', 'failed')
+                AND backend_type = 'gce'
+                AND backend_handle IS NOT NULL
+                AND completed_at > datetime('now', '-24 hours')
+                """
+            ).fetchall()
+
+        for row in terminal_rows:
+            stage_run_id = row["id"]
+            backend_handle = row["backend_handle"]
+            db_status = row["status"]
+
+            # Sanitize instance name (same logic as GCELauncher)
+            instance_name = backend_handle.replace("_", "-").lower()[:60]
+
+            if instance_name in alive_instances:
+                zone = alive_instances[instance_name]
+                logger.warning(
+                    "Orphaned instance detected: %s still running but DB status=%s, deleting...",
+                    instance_name,
+                    db_status,
+                )
+
+                try:
+                    subprocess.run(
+                        [
+                            "gcloud",
+                            "compute",
+                            "instances",
+                            "delete",
+                            instance_name,
+                            f"--zone={zone}",
+                            "--quiet",
+                        ],
+                        capture_output=True,
+                        timeout=60,
+                    )
+                    logger.info(
+                        "Deleted orphaned instance %s (run %s was %s)",
+                        instance_name,
+                        stage_run_id,
+                        db_status,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to delete orphaned instance %s: %s", instance_name, e)
 
     def start_http_server(self) -> None:
         """Start the HTTP server on Unix socket."""
