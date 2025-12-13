@@ -258,10 +258,11 @@ def cancel(run_id: str, reason: str) -> dict:
     handle = row.get("backend_handle") or run_id
 
     # Attempt state change atomically: only if still running
+    # Clear progress field to avoid stale "canceled:running" display
     updated = 0
     with db._conn() as conn:
         updated = conn.execute(
-            "UPDATE stage_runs SET status='canceled', completed_at=?, error=? WHERE id=? AND status='running'",
+            "UPDATE stage_runs SET status='canceled', progress=NULL, completed_at=?, error=? WHERE id=? AND status='running'",
             (
                 datetime.now(UTC).isoformat(),
                 f"Canceled: {reason}",
