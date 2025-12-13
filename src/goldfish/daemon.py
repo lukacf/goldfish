@@ -489,7 +489,7 @@ class GoldfishDaemon:
         logger.info("HTTP server listening on %s", self.socket_path)
 
     def write_pid_file(self) -> None:
-        """Write PID file atomically."""
+        """Write PID file and project_root file atomically."""
         if self.pid_file:
             logger.debug("Writing PID file: %s (pid=%d)", self.pid_file, os.getpid())
             # Write to temp file first, then rename (atomic on POSIX)
@@ -498,6 +498,14 @@ class GoldfishDaemon:
             temp_file.rename(self.pid_file)
             atexit.register(lambda: self.pid_file.unlink(missing_ok=True) if self.pid_file else None)
             logger.debug("PID file written successfully")
+
+            # Write project_root file for web server discovery
+            project_root_file = self.pid_file.parent / "project_root"
+            temp_root_file = project_root_file.with_suffix(".tmp")
+            temp_root_file.write_text(str(self.project_root))
+            temp_root_file.rename(project_root_file)
+            atexit.register(lambda: project_root_file.unlink(missing_ok=True))
+            logger.debug("Project root file written for web server discovery")
 
     def run(self) -> None:
         """Run the daemon main loop."""
