@@ -278,6 +278,7 @@ class DiffResponse(BaseModel):
     summary: str  # Human-readable summary (e.g., "2 files changed, 10 insertions(+)")
     files_changed: list[str]  # List of changed file paths
     diff_text: str = ""  # Optional full diff output
+    compared_against: str | None = None  # SHA being compared against (helps debug "no changes")
 
 
 class RollbackResponse(BaseModel):
