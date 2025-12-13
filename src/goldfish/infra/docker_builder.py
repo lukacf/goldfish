@@ -45,25 +45,39 @@ class DockerBuilder:
         has_requirements = (workspace_dir / "requirements.txt").exists()
         has_loaders = (workspace_dir / "loaders").exists()
 
+        # Detect image type to determine user handling
+        # - Jupyter images (quay.io/jupyter/*) run as non-root user (jovyan, uid 1000)
+        # - Goldfish custom images (goldfish-base-*) run as non-root user (goldfish, uid 1000)
+        # - NVIDIA NGC images (nvcr.io/nvidia/*) run as root
+        # - Other images default to root-compatible mode
+        is_nonroot_image = "jupyter" in base.lower() or "goldfish-base" in base.lower()
+
         dockerfile = f"FROM {base}\n\n"
 
         # Install additional dependencies from requirements.txt if present
         # Note: Pre-built base images already have common ML libraries
         # requirements.txt is for project-specific extras only
         if has_requirements:
-            # Use USER root to install packages, then switch back
-            # Jupyter images run as non-root user (jovyan, uid 1000)
-            dockerfile += """# Install additional project dependencies
+            if is_nonroot_image:
+                # Non-root images (Jupyter, Goldfish) run as uid 1000
+                dockerfile += """# Install additional project dependencies
 USER root
 COPY requirements.txt /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 USER 1000
 
 """
+            else:
+                # NVIDIA NGC and other images run as root
+                dockerfile += """# Install additional project dependencies
+COPY requirements.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-        # All COPY commands use --chown=1000:100 because base images (pytorch-notebook)
-        # run as non-root user (jovyan, uid=1000, gid=100)
-        dockerfile += """# Install Goldfish IO library
+"""
+
+        if is_nonroot_image:
+            # Non-root images: use --chown for uid 1000 user
+            dockerfile += """# Install Goldfish IO library
 COPY --chown=1000:100 goldfish_io/ /app/goldfish_io/
 ENV PYTHONPATH="/app/goldfish_io:/app/modules:/app:${PYTHONPATH}"
 
@@ -71,9 +85,20 @@ ENV PYTHONPATH="/app/goldfish_io:/app/modules:/app:${PYTHONPATH}"
 COPY --chown=1000:100 modules/ /app/modules/
 COPY --chown=1000:100 configs/ /app/configs/
 """
+            if has_loaders:
+                dockerfile += "COPY --chown=1000:100 loaders/ /app/loaders/\n"
+        else:
+            # Root images: no chown needed
+            dockerfile += """# Install Goldfish IO library
+COPY goldfish_io/ /app/goldfish_io/
+ENV PYTHONPATH="/app/goldfish_io:/app/modules:/app:${PYTHONPATH}"
 
-        if has_loaders:
-            dockerfile += "COPY --chown=1000:100 loaders/ /app/loaders/\n"
+# Copy workspace code
+COPY modules/ /app/modules/
+COPY configs/ /app/configs/
+"""
+            if has_loaders:
+                dockerfile += "COPY loaders/ /app/loaders/\n"
 
         dockerfile += """
 WORKDIR /app
