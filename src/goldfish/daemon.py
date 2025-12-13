@@ -257,6 +257,9 @@ class DaemonRequestHandler(BaseHTTPRequestHandler):
 class GoldfishDaemon:
     """The persistent Goldfish server daemon."""
 
+    # How often to check for orphaned GCE instances (seconds)
+    INSTANCE_MONITOR_INTERVAL = 60
+
     def __init__(self, project_root: Path):
         self.project_root = project_root.resolve()
         self.start_time = time.time()
@@ -264,6 +267,7 @@ class GoldfishDaemon:
         self.tools: dict[str, Any] = {}
         self.context: ServerContext | None = None
         self.worker_thread: threading.Thread | None = None
+        self.instance_monitor_thread: threading.Thread | None = None
         self.http_server: ThreadedUnixHTTPServer | None = None
 
         # Paths
@@ -472,6 +476,167 @@ class GoldfishDaemon:
             except Exception as e:
                 logger.exception("Error processing pipeline %s: %s", pipeline_run_id, e)
 
+    def start_instance_monitor(self) -> None:
+        """Start the GCE instance monitor thread (Cost Protection Layer 3).
+
+        This thread periodically checks for orphaned GCE instances and cleans them up.
+        It catches instances that slipped through the startup script's self-deletion.
+        """
+
+        def monitor_loop() -> None:
+            logger.info("Instance monitor thread starting")
+
+            # Wait a bit before first check to let things settle
+            self.shutdown_event.wait(timeout=30)
+
+            while not self.shutdown_event.is_set():
+                try:
+                    self._check_orphaned_instances()
+                except Exception as e:
+                    logger.exception("Instance monitor error: %s", e)
+
+                self.shutdown_event.wait(timeout=self.INSTANCE_MONITOR_INTERVAL)
+
+            logger.info("Instance monitor thread stopped")
+
+        self.instance_monitor_thread = threading.Thread(target=monitor_loop, daemon=True, name="instance-monitor")
+        self.instance_monitor_thread.start()
+
+    def _check_orphaned_instances(self) -> None:
+        """Check for and clean up orphaned GCE instances.
+
+        1. Find stage_runs with backend_type='gce' and status='running'
+        2. Query GCE for actual instance status
+        3. If instance gone/terminated, mark stage_run as failed
+        4. Delete any terminated instances still hanging around
+        """
+        import subprocess
+
+        if not self.config:
+            return
+
+        # Find running GCE stage runs
+        with self._db._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, instance_id, workspace_name, stage_name
+                FROM stage_runs
+                WHERE status = 'running'
+                AND backend_type = 'gce'
+                AND instance_id IS NOT NULL
+                """
+            ).fetchall()
+
+        if not rows:
+            return
+
+        logger.debug("Checking %d running GCE stage runs", len(rows))
+
+        # Get list of all running GCE instances in one call
+        try:
+            result = subprocess.run(
+                [
+                    "gcloud",
+                    "compute",
+                    "instances",
+                    "list",
+                    "--filter=status=RUNNING",
+                    "--format=value(name)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            running_instances = set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
+        except Exception as e:
+            logger.warning("Failed to list GCE instances: %s", e)
+            return
+
+        # Check each stage run
+        for row in rows:
+            stage_run_id = row["id"]
+            instance_id = row["instance_id"]
+            workspace = row["workspace_name"]
+            stage = row["stage_name"]
+
+            # Sanitize instance name (same logic as GCELauncher)
+            instance_name = instance_id.replace("_", "-").lower()[:60]
+
+            if instance_name not in running_instances:
+                logger.warning(
+                    "Orphaned stage run detected: %s (instance %s not running)",
+                    stage_run_id,
+                    instance_name,
+                )
+
+                # Check if instance exists at all (might be terminated)
+                try:
+                    check_result = subprocess.run(
+                        [
+                            "gcloud",
+                            "compute",
+                            "instances",
+                            "list",
+                            f"--filter=name={instance_name}",
+                            "--format=value(status,zone)",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    instance_info = check_result.stdout.strip()
+
+                    if instance_info:
+                        # Instance exists but not running - delete it
+                        parts = instance_info.split()
+                        status = parts[0] if parts else "UNKNOWN"
+                        zone = parts[1].split("/")[-1] if len(parts) > 1 else None
+
+                        logger.warning(
+                            "Instance %s status=%s, deleting...",
+                            instance_name,
+                            status,
+                        )
+
+                        if zone:
+                            subprocess.run(
+                                [
+                                    "gcloud",
+                                    "compute",
+                                    "instances",
+                                    "delete",
+                                    instance_name,
+                                    f"--zone={zone}",
+                                    "--quiet",
+                                ],
+                                capture_output=True,
+                                timeout=60,
+                            )
+                except Exception as e:
+                    logger.warning("Failed to check/delete instance %s: %s", instance_name, e)
+
+                # Mark stage run as failed
+                try:
+                    with self._db._conn() as conn:
+                        conn.execute(
+                            """
+                            UPDATE stage_runs
+                            SET status = 'failed',
+                                error_message = 'Instance disappeared (orphan cleanup)',
+                                finished_at = datetime('now')
+                            WHERE id = ? AND status = 'running'
+                            """,
+                            (stage_run_id,),
+                        )
+                    logger.info(
+                        "Marked orphaned stage run %s as failed (workspace=%s, stage=%s)",
+                        stage_run_id,
+                        workspace,
+                        stage,
+                    )
+                except Exception as e:
+                    logger.exception("Failed to update stage run %s: %s", stage_run_id, e)
+
     def start_http_server(self) -> None:
         """Start the HTTP server on Unix socket."""
         if not self.socket_path or not self.lock_file:
@@ -503,6 +668,7 @@ class GoldfishDaemon:
         """Run the daemon main loop."""
         self.write_pid_file()
         self.start_worker()
+        self.start_instance_monitor()  # Cost Protection Layer 3
         self.start_http_server()
 
         # Set up signal handlers - shutdown from a different thread to avoid deadlock
@@ -547,6 +713,9 @@ class GoldfishDaemon:
 
         if self.worker_thread and self.worker_thread.is_alive():
             self.worker_thread.join(timeout=5.0)
+
+        if self.instance_monitor_thread and self.instance_monitor_thread.is_alive():
+            self.instance_monitor_thread.join(timeout=5.0)
 
         # Clean up PID file (socket cleanup handled by server_close)
         if self.pid_file and self.pid_file.exists():
