@@ -147,8 +147,7 @@ class GCSStorageProvider(StorageProvider):
 
         except FileNotFoundError as err:
             raise GoldfishError(
-                "gsutil command not found. Install Google Cloud SDK: "
-                "https://cloud.google.com/sdk/docs/install"
+                "gsutil command not found. Install Google Cloud SDK: https://cloud.google.com/sdk/docs/install"
             ) from err
 
     def download(
@@ -188,8 +187,7 @@ class GCSStorageProvider(StorageProvider):
 
         except FileNotFoundError as err:
             raise GoldfishError(
-                "gsutil command not found. Install Google Cloud SDK: "
-                "https://cloud.google.com/sdk/docs/install"
+                "gsutil command not found. Install Google Cloud SDK: https://cloud.google.com/sdk/docs/install"
             ) from err
 
     def exists(self, remote_path: str) -> bool:

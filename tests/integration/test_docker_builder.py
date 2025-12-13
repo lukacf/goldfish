@@ -124,6 +124,6 @@ def test_dockerfile_pythonpath_includes_modules_dir(tmp_path):
 
     # Must include /app/modules for sibling imports
     pythonpath_line = pythonpath_lines[0]
-    assert (
-        "/app/modules" in pythonpath_line
-    ), f"PYTHONPATH must include /app/modules for sibling imports: {pythonpath_line}"
+    assert "/app/modules" in pythonpath_line, (
+        f"PYTHONPATH must include /app/modules for sibling imports: {pythonpath_line}"
+    )

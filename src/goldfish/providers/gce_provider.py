@@ -64,9 +64,7 @@ class GCEExecutionProvider(ExecutionProvider):
 
         self.gpu_preference = config.get("gpu_preference", ["h100", "a100", "none"])
         if not isinstance(self.gpu_preference, list):
-            raise GoldfishError(
-                f"GCE provider 'gpu_preference' must be list, got {type(self.gpu_preference).__name__}"
-            )
+            raise GoldfishError(f"GCE provider 'gpu_preference' must be list, got {type(self.gpu_preference).__name__}")
 
         self.resources = config.get("resources", [])
         if not isinstance(self.resources, list):
@@ -116,9 +114,7 @@ class GCEExecutionProvider(ExecutionProvider):
         # Workspace can contain hyphens, version is everything after last hyphen
         match = re.match(r"^goldfish-(.+?)-([^-]+)$", image_tag)
         if not match:
-            raise GoldfishError(
-                f"Invalid image tag format: {image_tag}. Expected 'goldfish-{{workspace}}-{{version}}'"
-            )
+            raise GoldfishError(f"Invalid image tag format: {image_tag}. Expected 'goldfish-{{workspace}}-{{version}}'")
 
         workspace_name = match.group(1)
         version = match.group(2)

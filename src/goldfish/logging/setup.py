@@ -122,7 +122,7 @@ def setup_logging(component: str = "server") -> None:
         stderr_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
         app_logger.addHandler(stderr_handler)
         app_logger.warning(
-            "logging_loki not installed - falling back to stderr. " "Install with: pip install python-logging-loki"
+            "logging_loki not installed - falling back to stderr. Install with: pip install python-logging-loki"
         )
     except Exception as e:
         # Don't block startup if VictoriaLogs is unavailable

@@ -13,16 +13,26 @@ class TestRegisterDataset:
     """Test dataset registration."""
 
     def test_register_dataset_with_local_source(self, test_db, test_config, temp_dir):
-        """register_dataset should upload local file to GCS and register."""
+        """register_dataset should upload local file via storage provider and register."""
+        from goldfish.providers.base import StorageLocation
+
         registry = DatasetRegistry(db=test_db, config=test_config)
 
         # Create a local test file
         local_file = temp_dir / "test_data.csv"
         local_file.write_text("col1,col2\n1,2\n3,4")
 
-        with patch(
-            "goldfish.datasets.registry.DatasetRegistry._upload_to_gcs",
-            return_value="gs://test-bucket/datasets/test_data",
+        # Mock the storage provider's upload method
+        mock_location = StorageLocation(
+            uri="gs://test-bucket/datasets/test_data",
+            size_bytes=len("col1,col2\n1,2\n3,4"),
+            metadata={},
+        )
+
+        with patch.object(
+            registry.storage_provider,
+            "upload",
+            return_value=mock_location,
         ):
             source = registry.register_dataset(
                 name="test_data",
@@ -90,9 +100,9 @@ class TestRegisterDataset:
         # Verify metadata stored (it's JSON in DB)
         assert source.name == "data_with_meta"
 
-    def test_register_dataset_requires_gcs_config(self, test_db, temp_dir):
-        """register_dataset should raise error if GCS not configured."""
-        # Config without GCS
+    def test_register_dataset_with_local_provider(self, test_db, temp_dir):
+        """register_dataset should work with local provider without GCS config."""
+        # Config without GCS - uses local provider by default
         from goldfish.config import AuditConfig, GoldfishConfig, JobsConfig, StateMdConfig
 
         config = GoldfishConfig(
@@ -112,13 +122,18 @@ class TestRegisterDataset:
         local_file = temp_dir / "test.csv"
         local_file.write_text("test data")
 
-        with pytest.raises(GoldfishError, match="GCS not configured"):
-            registry.register_dataset(
-                name="test",
-                source=f"local:{local_file}",
-                description="Test",
-                format="csv",
-            )
+        # Should succeed with local provider (no GCS needed)
+        source = registry.register_dataset(
+            name="test",
+            source=f"local:{local_file}",
+            description="Test",
+            format="csv",
+        )
+
+        # Verify it was registered with file:// URI (local provider)
+        assert source.name == "test"
+        assert source.gcs_location.startswith("file://")
+        assert source.status == SourceStatus.AVAILABLE
 
 
 class TestListDatasets:
@@ -195,61 +210,3 @@ class TestGetDataset:
 
         with pytest.raises(SourceNotFoundError, match="nonexistent"):
             registry.get_dataset("nonexistent")
-
-
-class TestGCSUpload:
-    """Test GCS upload functionality."""
-
-    def test_upload_to_gcs_single_file(self, test_db, test_config, temp_dir):
-        """_upload_to_gcs should upload single file."""
-        registry = DatasetRegistry(db=test_db, config=test_config)
-
-        # Create test file
-        test_file = temp_dir / "data.csv"
-        test_file.write_text("test data")
-
-        # Mock the actual GCS upload
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-
-            gcs_path = registry._upload_to_gcs("test_dataset", test_file)
-
-            assert gcs_path == "gs://test-bucket/datasets/test_dataset"
-            # Verify gsutil was called
-            mock_run.assert_called()
-
-    def test_upload_to_gcs_directory(self, test_db, test_config, temp_dir):
-        """_upload_to_gcs should upload directory recursively."""
-        registry = DatasetRegistry(db=test_db, config=test_config)
-
-        # Create test directory
-        test_dir = temp_dir / "dataset"
-        test_dir.mkdir()
-        (test_dir / "file1.txt").write_text("data1")
-        (test_dir / "file2.txt").write_text("data2")
-
-        # Mock the actual GCS upload
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-
-            gcs_path = registry._upload_to_gcs("test_dataset", test_dir)
-
-            assert gcs_path == "gs://test-bucket/datasets/test_dataset"
-            # Verify gsutil was called with -r for recursive
-            mock_run.assert_called()
-            call_args = str(mock_run.call_args)
-            assert "-r" in call_args or "recursive" in call_args.lower()
-
-    def test_upload_to_gcs_raises_on_failure(self, test_db, test_config, temp_dir):
-        """_upload_to_gcs should raise GoldfishError on upload failure."""
-        registry = DatasetRegistry(db=test_db, config=test_config)
-
-        test_file = temp_dir / "data.csv"
-        test_file.write_text("test")
-
-        # Mock failed upload
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stderr=b"Upload failed")
-
-            with pytest.raises(GoldfishError, match="Failed to upload"):
-                registry._upload_to_gcs("test_dataset", test_file)

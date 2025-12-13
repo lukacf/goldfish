@@ -499,17 +499,17 @@ class TestConcurrentWorkspaceOperations:
         print(f"DEBUG: Errors: {results['errors']}")
 
         # Verify results
-        assert (
-            len(results["success"]) == 1
-        ), f"Expected exactly 1 success, got {len(results['success'])}: {results['success']}"
-        assert (
-            len(results["errors"]) == 1
-        ), f"Expected exactly 1 error, got {len(results['errors'])}: {results['errors']}"
+        assert len(results["success"]) == 1, (
+            f"Expected exactly 1 success, got {len(results['success'])}: {results['success']}"
+        )
+        assert len(results["errors"]) == 1, (
+            f"Expected exactly 1 error, got {len(results['errors'])}: {results['errors']}"
+        )
 
         # The error should be SlotNotEmptyError
-        assert (
-            results["errors"][0][1] == "SlotNotEmptyError"
-        ), f"Expected SlotNotEmptyError, got {results['errors'][0][1]}"
+        assert results["errors"][0][1] == "SlotNotEmptyError", (
+            f"Expected SlotNotEmptyError, got {results['errors'][0][1]}"
+        )
 
         # Verify filesystem state is consistent - only one workspace should be mounted
         slot_info = manager.get_slot_info("w1")

@@ -582,9 +582,9 @@ def test_launch_instance_chown_for_container_user(mock_build_startup, mock_resou
 
     # Must have chown commands for UID 1000 (jovyan) and GID 100 (users)
     pre_run_str = "\n".join(pre_run_cmds)
-    assert (
-        "chown 1000:100 /mnt/inputs /mnt/outputs" in pre_run_str
-    ), "Missing chown command for container user (UID 1000, GID 100)"
+    assert "chown 1000:100 /mnt/inputs /mnt/outputs" in pre_run_str, (
+        "Missing chown command for container user (UID 1000, GID 100)"
+    )
 
     # Must also chown symlinks inside /mnt/inputs (using -h flag)
     assert "chown -h 1000:100 /mnt/inputs/*" in pre_run_str, "Missing chown -h for symlinks inside /mnt/inputs"

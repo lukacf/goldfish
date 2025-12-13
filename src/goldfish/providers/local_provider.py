@@ -65,9 +65,7 @@ class LocalExecutionProvider(ExecutionProvider):
         # Workspace can contain hyphens, version is everything after last hyphen
         match = re.match(r"^goldfish-(.+?)-([^-]+)$", image_tag)
         if not match:
-            raise GoldfishError(
-                f"Invalid image tag format: {image_tag}. Expected 'goldfish-{{workspace}}-{{version}}'"
-            )
+            raise GoldfishError(f"Invalid image tag format: {image_tag}. Expected 'goldfish-{{workspace}}-{{version}}'")
 
         workspace_name = match.group(1)
         version = match.group(2)

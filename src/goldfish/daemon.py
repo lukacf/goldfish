@@ -114,7 +114,7 @@ class ThreadedUnixHTTPServer(socketserver.ThreadingMixIn, UnixStreamServer):
         # Check if socket exists and is actually a socket
         if os.path.exists(socket_path):
             if not stat.S_ISSOCK(os.stat(socket_path).st_mode):
-                raise RuntimeError(f"Path {socket_path} exists but is not a socket. " "Remove it manually if safe.")
+                raise RuntimeError(f"Path {socket_path} exists but is not a socket. Remove it manually if safe.")
             # Try to connect to existing socket
             try:
                 test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

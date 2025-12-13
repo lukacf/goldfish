@@ -159,9 +159,7 @@ class DaemonConnection:
                     f"\r\n"
                 ).encode() + body_bytes
             else:
-                request = (
-                    f"{method} {path} HTTP/1.1\r\n" f"Host: localhost\r\n" f"Connection: close\r\n" f"\r\n"
-                ).encode()
+                request = (f"{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").encode()
 
             sock.sendall(request)
 

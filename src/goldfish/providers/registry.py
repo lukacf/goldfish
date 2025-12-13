@@ -56,9 +56,7 @@ class ExecutionProviderRegistry:
         """
         if name not in self._providers:
             available = ", ".join(sorted(self._providers.keys()))
-            raise GoldfishError(
-                f"Execution provider '{name}' not found. Available providers: {available or 'none'}"
-            )
+            raise GoldfishError(f"Execution provider '{name}' not found. Available providers: {available or 'none'}")
 
         provider_class = self._providers[name]
         try:
@@ -134,9 +132,7 @@ class StorageProviderRegistry:
         """
         if name not in self._providers:
             available = ", ".join(sorted(self._providers.keys()))
-            raise GoldfishError(
-                f"Storage provider '{name}' not found. Available providers: {available or 'none'}"
-            )
+            raise GoldfishError(f"Storage provider '{name}' not found. Available providers: {available or 'none'}")
 
         provider_class = self._providers[name]
         try:

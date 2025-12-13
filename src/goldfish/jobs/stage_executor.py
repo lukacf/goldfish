@@ -393,7 +393,7 @@ class StageExecutor:
 
         if slot is None:
             raise GoldfishError(
-                f"Workspace '{workspace}' is not mounted to any slot. " f"Mount it to a slot first using mount()."
+                f"Workspace '{workspace}' is not mounted to any slot. Mount it to a slot first using mount()."
             )
 
         # Use sync_and_version to sync changes and create version tag

@@ -1,6 +1,5 @@
 """Unit tests for provider configuration and backward compatibility."""
 
-
 from goldfish.config import GoldfishConfig, JobsConfig
 
 
