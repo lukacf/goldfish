@@ -1,6 +1,7 @@
 """Unit tests for base image module."""
 
 from goldfish.infra.profiles import (
+    BASE_IMAGE_GPU,
     FALLBACK_BASE_IMAGE,
     PUBLIC_BASE_IMAGE_CPU,
     PUBLIC_BASE_IMAGE_GPU,
@@ -90,17 +91,17 @@ class TestProfilesHaveBaseImage:
 
         assert BUILTIN_PROFILES["cpu-large"]["base_image"] == PUBLIC_BASE_IMAGE_CPU
 
-    def test_h100_spot_has_public_image(self) -> None:
-        """h100-spot profile should use public GPU base image."""
+    def test_h100_spot_has_custom_gpu_image(self) -> None:
+        """h100-spot profile should use custom GPU base image (with nvrtc for Flash Attention)."""
         from goldfish.infra.profiles import BUILTIN_PROFILES
 
-        assert BUILTIN_PROFILES["h100-spot"]["base_image"] == PUBLIC_BASE_IMAGE_GPU
+        assert BUILTIN_PROFILES["h100-spot"]["base_image"] == BASE_IMAGE_GPU
 
-    def test_a100_spot_has_public_image(self) -> None:
-        """a100-spot profile should use public GPU base image."""
+    def test_a100_spot_has_custom_gpu_image(self) -> None:
+        """a100-spot profile should use custom GPU base image (with nvrtc for Flash Attention)."""
         from goldfish.infra.profiles import BUILTIN_PROFILES
 
-        assert BUILTIN_PROFILES["a100-spot"]["base_image"] == PUBLIC_BASE_IMAGE_GPU
+        assert BUILTIN_PROFILES["a100-spot"]["base_image"] == BASE_IMAGE_GPU
 
     def test_all_profiles_have_base_image(self) -> None:
         """All built-in profiles should have a base_image set."""
