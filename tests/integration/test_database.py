@@ -368,3 +368,175 @@ class TestDatabaseInitialization:
                 conn.execute(
                     "INSERT INTO job_inputs (job_id, source_id, input_name) VALUES ('fake-job', 'fake-source', 'test')"
                 )
+
+
+class TestAttemptGrouping:
+    """Tests for attempt grouping feature."""
+
+    def _setup_workspace(self, db: Database, workspace: str = "test_ws") -> None:
+        """Helper to create workspace lineage and versions."""
+        db.create_workspace_lineage(workspace, None, None, "Test workspace")
+        for i in range(1, 6):
+            db.create_version(workspace, f"v{i}", f"{workspace}-v{i}", f"sha{i}", "run")
+
+    def test_first_run_gets_attempt_one(self, temp_dir):
+        """First run for a stage should be attempt #1."""
+        db = Database(temp_dir / "test.db")
+        self._setup_workspace(db)
+
+        db.create_stage_run("stage-1", "test_ws", "v1", "train")
+        run = db.get_stage_run("stage-1")
+
+        assert run["attempt_num"] == 1
+
+    def test_subsequent_runs_stay_in_same_attempt(self, temp_dir):
+        """Runs without success outcome stay in the same attempt."""
+        db = Database(temp_dir / "test.db")
+        self._setup_workspace(db)
+
+        # Create multiple runs without marking success
+        db.create_stage_run("stage-1", "test_ws", "v1", "train")
+        db.create_stage_run("stage-2", "test_ws", "v2", "train")
+        db.create_stage_run("stage-3", "test_ws", "v3", "train")
+
+        # All should be in attempt #1
+        for run_id in ["stage-1", "stage-2", "stage-3"]:
+            run = db.get_stage_run(run_id)
+            assert run["attempt_num"] == 1, f"{run_id} should be attempt 1"
+
+    def test_success_outcome_closes_attempt(self, temp_dir):
+        """Marking success should cause next run to start new attempt."""
+        db = Database(temp_dir / "test.db")
+        self._setup_workspace(db)
+
+        # Run 1 and 2 in attempt 1
+        db.create_stage_run("stage-1", "test_ws", "v1", "train")
+        db.create_stage_run("stage-2", "test_ws", "v2", "train")
+
+        # Mark run 2 as success
+        db.update_stage_run_status("stage-2", "completed")
+        db.update_run_outcome("stage-2", "success")
+
+        # Run 3 should be in attempt 2
+        db.create_stage_run("stage-3", "test_ws", "v3", "train")
+        run3 = db.get_stage_run("stage-3")
+
+        assert run3["attempt_num"] == 2
+
+    def test_bad_results_does_not_close_attempt(self, temp_dir):
+        """Marking bad_results should keep same attempt open."""
+        db = Database(temp_dir / "test.db")
+        self._setup_workspace(db)
+
+        db.create_stage_run("stage-1", "test_ws", "v1", "train")
+        db.update_stage_run_status("stage-1", "completed")
+        db.update_run_outcome("stage-1", "bad_results")
+
+        # Next run should still be attempt 1
+        db.create_stage_run("stage-2", "test_ws", "v2", "train")
+        run2 = db.get_stage_run("stage-2")
+
+        assert run2["attempt_num"] == 1
+
+    def test_different_stages_have_independent_attempts(self, temp_dir):
+        """Different stages should have independent attempt numbering."""
+        db = Database(temp_dir / "test.db")
+        self._setup_workspace(db)
+
+        # Train stage - attempt 1
+        db.create_stage_run("train-1", "test_ws", "v1", "train")
+
+        # Preprocess stage - also attempt 1 (independent)
+        db.create_stage_run("preprocess-1", "test_ws", "v1", "preprocess")
+
+        train = db.get_stage_run("train-1")
+        preprocess = db.get_stage_run("preprocess-1")
+
+        assert train["attempt_num"] == 1
+        assert preprocess["attempt_num"] == 1
+
+    def test_update_run_outcome_only_works_on_completed(self, temp_dir):
+        """update_run_outcome should only update completed runs."""
+        db = Database(temp_dir / "test.db")
+        self._setup_workspace(db)
+
+        db.create_stage_run("stage-1", "test_ws", "v1", "train")
+        # Run is still 'pending', not completed
+
+        result = db.update_run_outcome("stage-1", "success")
+        assert result is False  # Should fail
+
+        run = db.get_stage_run("stage-1")
+        assert run["outcome"] is None  # Should not be set
+
+    def test_update_run_outcome_validates_outcome_value(self, temp_dir):
+        """update_run_outcome should reject invalid outcome values."""
+        db = Database(temp_dir / "test.db")
+        self._setup_workspace(db)
+
+        db.create_stage_run("stage-1", "test_ws", "v1", "train")
+        db.update_stage_run_status("stage-1", "completed")
+
+        with pytest.raises(ValueError, match="Invalid outcome"):
+            db.update_run_outcome("stage-1", "invalid_value")
+
+    def test_list_attempts_groups_runs(self, temp_dir):
+        """list_attempts should return grouped attempt summaries."""
+        db = Database(temp_dir / "test.db")
+        self._setup_workspace(db)
+
+        # Attempt 1: 3 runs, 2 failed, 1 success
+        db.create_stage_run("stage-1", "test_ws", "v1", "train")
+        db.update_stage_run_status("stage-1", "failed", error="crash")
+
+        db.create_stage_run("stage-2", "test_ws", "v2", "train")
+        db.update_stage_run_status("stage-2", "failed", error="crash")
+
+        db.create_stage_run("stage-3", "test_ws", "v3", "train")
+        db.update_stage_run_status("stage-3", "completed")
+        db.update_run_outcome("stage-3", "success")
+
+        # Attempt 2: 1 run, still open
+        db.create_stage_run("stage-4", "test_ws", "v4", "train")
+
+        attempts = db.list_attempts("test_ws", stage_name="train")
+
+        assert len(attempts) == 2
+
+        # Attempt 2 (most recent first)
+        assert attempts[0]["attempt"] == 2
+        assert attempts[0]["runs"] == 1
+        assert attempts[0]["status"] == "open"
+
+        # Attempt 1
+        assert attempts[1]["attempt"] == 1
+        assert attempts[1]["runs"] == 3
+        assert attempts[1]["failed"] == 2
+        assert attempts[1]["success"] == 1
+        assert attempts[1]["status"] == "closed"
+
+    def test_list_attempts_shows_version_range(self, temp_dir):
+        """list_attempts should show version range for multi-run attempts."""
+        db = Database(temp_dir / "test.db")
+        self._setup_workspace(db)
+
+        db.create_stage_run("stage-1", "test_ws", "v1", "train")
+        db.create_stage_run("stage-2", "test_ws", "v3", "train")
+        db.create_stage_run("stage-3", "test_ws", "v5", "train")
+
+        attempts = db.list_attempts("test_ws", stage_name="train")
+
+        assert len(attempts) == 1
+        assert attempts[0]["versions"] == "v1→v5"
+
+    def test_list_attempts_single_version(self, temp_dir):
+        """list_attempts should show single version when only one run."""
+        db = Database(temp_dir / "test.db")
+        self._setup_workspace(db)
+
+        db.create_stage_run("stage-1", "test_ws", "v2", "train")
+
+        attempts = db.list_attempts("test_ws", stage_name="train")
+
+        assert len(attempts) == 1
+        assert attempts[0]["versions"] == "v2"
