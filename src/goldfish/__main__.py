@@ -101,20 +101,13 @@ def main():
         help="Project root directory",
     )
 
-    # web command - run web visualization server
-    web_parser = subparsers.add_parser("web", help="Run web visualization server")
-    web_parser.add_argument(
-        "--project",
-        "-p",
-        type=Path,
-        default=None,
-        help="Project root directory (default: auto-discover)",
-    )
+    # web command - run GLOBAL web visualization server
+    web_parser = subparsers.add_parser("web", help="Run global web visualization server (all projects)")
     web_parser.add_argument(
         "--port",
         type=int,
-        default=8080,
-        help="Port to listen on (default: 8080)",
+        default=7342,
+        help="Port to listen on (default: 7342)",
     )
     web_parser.add_argument(
         "--no-browser",
@@ -122,25 +115,11 @@ def main():
         help="Don't open browser automatically",
     )
 
-    # web-status command - check web server status
-    web_status_parser = subparsers.add_parser("web-status", help="Check web server status")
-    web_status_parser.add_argument(
-        "--project",
-        "-p",
-        type=Path,
-        default=None,
-        help="Project root directory",
-    )
+    # web-status command - check global web server status
+    _ = subparsers.add_parser("web-status", help="Check global web server status")
 
-    # web-stop command - stop web server
-    web_stop_parser = subparsers.add_parser("web-stop", help="Stop web server")
-    web_stop_parser.add_argument(
-        "--project",
-        "-p",
-        type=Path,
-        default=None,
-        help="Project root directory",
-    )
+    # web-stop command - stop global web server
+    _ = subparsers.add_parser("web-stop", help="Stop global web server")
 
     args = parser.parse_args()
 
@@ -252,21 +231,19 @@ def _handle_stop(args):
 
 
 def _handle_web(args):
-    """Handle web command."""
-    project_root = _discover_project(args.project)
-
+    """Handle web command - start global web server."""
     try:
         from goldfish.web_server import is_web_server_running, run_web_server
 
-        running, pid, port = is_web_server_running(project_root)
+        running, pid, port = is_web_server_running()
 
         if running:
-            print(f"Web server already running (pid={pid}, port={port})")
+            print(f"Global web server already running (pid={pid}, port={port})")
             print(f"Visit: http://127.0.0.1:{port}")
             return
 
-        # Run the web server
-        run_web_server(project_root, port=args.port, open_browser=not args.no_browser)
+        # Run the global web server
+        run_web_server(port=args.port, open_browser=not args.no_browser)
 
     except Exception as e:
         print(f"Error starting web server: {e}")
@@ -274,21 +251,19 @@ def _handle_web(args):
 
 
 def _handle_web_status(args):
-    """Handle web-status command."""
-    project_root = _discover_project(args.project)
-
+    """Handle web-status command - check global web server."""
     try:
         from goldfish.web_server import is_web_server_running
 
-        running, pid, port = is_web_server_running(project_root)
+        running, pid, port = is_web_server_running()
 
         if running:
-            print(f"Web server is running (pid={pid}, port={port})")
+            print(f"Global web server is running (pid={pid}, port={port})")
             print(f"Visit: http://127.0.0.1:{port}")
-            print(f"Project: {project_root}")
+            print()
+            print("The server automatically discovers all active Goldfish projects")
         else:
-            print("Web server is not running")
-            print(f"Project: {project_root}")
+            print("Global web server is not running")
             print()
             print("Start with: goldfish web")
 
@@ -298,20 +273,18 @@ def _handle_web_status(args):
 
 
 def _handle_web_stop(args):
-    """Handle web-stop command."""
-    project_root = _discover_project(args.project)
-
+    """Handle web-stop command - stop global web server."""
     try:
         from goldfish.web_server import is_web_server_running, stop_web_server
 
-        running, pid, _ = is_web_server_running(project_root)
+        running, pid, _ = is_web_server_running()
 
         if not running:
-            print("Web server is not running")
+            print("Global web server is not running")
             return
 
-        print(f"Stopping web server (pid={pid})...")
-        if stop_web_server(project_root, timeout=10.0):
+        print(f"Stopping global web server (pid={pid})...")
+        if stop_web_server(timeout=10.0):
             print("Web server stopped")
         else:
             print("Warning: Web server did not stop within timeout")
