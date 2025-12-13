@@ -31,7 +31,11 @@ from urllib.parse import parse_qs, urlparse
 from goldfish.config import GoldfishConfig
 from goldfish.db.database import Database
 from goldfish.errors import ProjectNotInitializedError
-from goldfish.validation import validate_workspace_name
+from goldfish.validation import (
+    validate_pipeline_run_id,
+    validate_stage_run_id,
+    validate_workspace_name,
+)
 
 logger = logging.getLogger("goldfish.web")
 
@@ -348,7 +352,7 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
 
             elif endpoint == "run" and len(path_parts) > 1:
                 run_id = path_parts[1]
-                # TODO: Add validation for run_id format
+                validate_stage_run_id(run_id)  # Security: validate input
                 details = self._get_run_details(db, run_id)
                 self._send_json(details)
 
@@ -359,7 +363,7 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
 
             elif endpoint == "pipeline" and len(path_parts) > 1:
                 pipeline_id = path_parts[1]
-                # TODO: Add validation for pipeline_id format
+                validate_pipeline_run_id(pipeline_id)  # Security: validate input
                 details = self._get_pipeline_details(db, pipeline_id)
                 self._send_json(details)
 
@@ -896,18 +900,628 @@ def get_index_html() -> str:
 
 def get_project_html(project: ProjectInfo) -> str:
     """Get the HTML for a specific project's provenance UI."""
-    # This would be the full UI from before, but scoped to this project
-    # For now, placeholder
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{project.name} - Goldfish Provenance</title>
+    <style>
+        /* Dieter Rams inspired design - less but better */
+        :root {{
+            --goldfish-orange: #FF6B35;
+            --goldfish-orange-light: #FF8C5A;
+            --goldfish-orange-dark: #E85A24;
+            --bg-primary: #FAFAFA;
+            --bg-secondary: #FFFFFF;
+            --text-primary: #1A1A1A;
+            --text-secondary: #6B6B6B;
+            --border-color: #E0E0E0;
+            --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+            --shadow-hover: 0 2px 8px rgba(0, 0, 0, 0.12);
+        }}
+
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }}
+
+        /* Header */
+        header {{
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            padding: 1rem 2rem;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: var(--shadow);
+        }}
+
+        .header-content {{
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }}
+
+        .logo {{
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }}
+
+        .logo-icon {{
+            width: 32px;
+            height: 32px;
+            background: var(--goldfish-orange);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+            font-size: 1.2rem;
+        }}
+
+        .logo h1 {{
+            font-size: 1.5rem;
+            font-weight: 400;
+            color: var(--text-primary);
+        }}
+
+        .logo-accent {{ color: var(--goldfish-orange); font-weight: 500; }}
+
+        .breadcrumb {{
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            margin-top: 0.25rem;
+        }}
+
+        .breadcrumb a {{
+            color: var(--goldfish-orange);
+            text-decoration: none;
+        }}
+
+        .breadcrumb a:hover {{ text-decoration: underline; }}
+
+        nav {{
+            display: flex;
+            gap: 1.5rem;
+        }}
+
+        nav button {{
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            transition: all 0.2s;
+            font-size: 0.95rem;
+        }}
+
+        nav button:hover {{
+            color: var(--text-primary);
+            background: var(--bg-primary);
+        }}
+
+        nav button.active {{
+            color: var(--goldfish-orange);
+            font-weight: 500;
+        }}
+
+        /* Main content */
+        main {{
+            max-width: 1400px;
+            margin: 2rem auto;
+            padding: 0 2rem;
+        }}
+
+        /* Cards */
+        .card {{
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: var(--shadow);
+            transition: box-shadow 0.2s;
+        }}
+
+        .card:hover {{ box-shadow: var(--shadow-hover); }}
+
+        .card-title {{
+            font-size: 1.1rem;
+            font-weight: 500;
+            margin-bottom: 1rem;
+            color: var(--text-primary);
+        }}
+
+        /* Grid layouts */
+        .workspace-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 1.5rem;
+        }}
+
+        .workspace-card {{
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            padding: 1.5rem;
+            box-shadow: var(--shadow);
+            transition: all 0.2s;
+            cursor: pointer;
+            border: 2px solid transparent;
+        }}
+
+        .workspace-card:hover {{
+            box-shadow: var(--shadow-hover);
+            border-color: var(--goldfish-orange);
+            transform: translateY(-2px);
+        }}
+
+        .workspace-card h3 {{
+            font-size: 1.2rem;
+            font-weight: 500;
+            margin-bottom: 0.5rem;
+            color: var(--text-primary);
+        }}
+
+        .workspace-card p {{
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+        }}
+
+        .workspace-meta {{
+            display: flex;
+            gap: 1rem;
+            margin-top: 1rem;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }}
+
+        .meta-item {{
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+        }}
+
+        /* Status badges */
+        .status {{
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+
+        .status-completed {{ background: #E8F5E9; color: #2E7D32; }}
+        .status-running {{ background: #FFF3E0; color: #E65100; }}
+        .status-pending {{ background: #E3F2FD; color: #1565C0; }}
+        .status-failed {{ background: #FFEBEE; color: #C62828; }}
+        .status-active {{ background: #FFE8DC; color: var(--goldfish-orange-dark); }}
+
+        /* Graph container */
+        #graph-container {{
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            min-height: 600px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }}
+
+        #graph {{ width: 100%; height: 600px; }}
+
+        /* Loading state */
+        .loading {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 3rem;
+            color: var(--text-secondary);
+        }}
+
+        .spinner {{
+            border: 3px solid var(--border-color);
+            border-top: 3px solid var(--goldfish-orange);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin-right: 1rem;
+        }}
+
+        @keyframes spin {{
+            0% {{ transform: rotate(0deg); }}
+            100% {{ transform: rotate(360deg); }}
+        }}
+
+        /* Tabs */
+        .tabs {{
+            display: flex;
+            gap: 0;
+            border-bottom: 2px solid var(--border-color);
+            margin-bottom: 2rem;
+        }}
+
+        .tab {{
+            padding: 1rem 1.5rem;
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 1rem;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.2s;
+        }}
+
+        .tab:hover {{ color: var(--text-primary); }}
+
+        .tab.active {{
+            color: var(--goldfish-orange);
+            border-bottom-color: var(--goldfish-orange);
+            font-weight: 500;
+        }}
+
+        .tab-content {{ display: none; }}
+        .tab-content.active {{ display: block; }}
+
+        /* Timeline */
+        .timeline {{
+            position: relative;
+            padding-left: 2rem;
+        }}
+
+        .timeline::before {{
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: var(--border-color);
+        }}
+
+        .timeline-item {{
+            position: relative;
+            padding-bottom: 2rem;
+        }}
+
+        .timeline-item::before {{
+            content: '';
+            position: absolute;
+            left: -2.5rem;
+            top: 0.5rem;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--goldfish-orange);
+            border: 3px solid var(--bg-primary);
+        }}
+
+        .timeline-content {{
+            background: var(--bg-secondary);
+            padding: 1rem;
+            border-radius: 6px;
+            box-shadow: var(--shadow);
+        }}
+
+        .timeline-time {{
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            margin-bottom: 0.5rem;
+        }}
+
+        /* Empty state */
+        .empty-state {{
+            text-align: center;
+            padding: 4rem 2rem;
+            color: var(--text-secondary);
+        }}
+
+        .empty-state-icon {{
+            font-size: 4rem;
+            margin-bottom: 1rem;
+            opacity: 0.3;
+        }}
+
+        .hidden {{ display: none !important; }}
+    </style>
 </head>
 <body>
-    <h1>Project: {project.name}</h1>
-    <p>Full UI coming soon...</p>
-    <p><a href="/">← Back to projects</a></p>
+    <header>
+        <div class="header-content">
+            <div class="logo">
+                <div class="logo-icon">🐠</div>
+                <div>
+                    <h1><span class="logo-accent">Goldfish</span> Provenance</h1>
+                    <div class="breadcrumb">
+                        <a href="/">All Projects</a> › {project.name}
+                    </div>
+                </div>
+            </div>
+            <nav>
+                <button class="active" onclick="showView('workspaces')">Workspaces</button>
+                <button onclick="showView('runs')">Runs</button>
+                <button onclick="showView('graph')">Graph</button>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <!-- Workspaces View -->
+        <div id="view-workspaces">
+            <h2 style="margin-bottom: 1.5rem; font-weight: 400;">Workspaces</h2>
+            <div id="workspaces-container" class="workspace-grid">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <span>Loading workspaces...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Runs View -->
+        <div id="view-runs" class="hidden">
+            <h2 style="margin-bottom: 1.5rem; font-weight: 400;">Recent Runs</h2>
+            <div class="tabs">
+                <button class="tab active" onclick="showRunsTab('stage')">Stage Runs</button>
+                <button class="tab" onclick="showRunsTab('pipeline')">Pipeline Runs</button>
+            </div>
+            <div id="tab-stage-runs" class="tab-content active">
+                <div id="stage-runs-container">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <span>Loading stage runs...</span>
+                    </div>
+                </div>
+            </div>
+            <div id="tab-pipeline-runs" class="tab-content">
+                <div id="pipeline-runs-container">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <span>Loading pipeline runs...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Graph View -->
+        <div id="view-graph" class="hidden">
+            <h2 style="margin-bottom: 1.5rem; font-weight: 400;">Provenance Graph</h2>
+            <div id="graph-container">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <span>Loading provenance graph...</span>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const PROJECT_ID = '{project.url_id}';
+        const API_BASE = '/project/' + PROJECT_ID + '/api';
+
+        // State
+        let currentView = 'workspaces';
+        let currentRunsTab = 'stage';
+        let data = {{
+            workspaces: [],
+            stageRuns: [],
+            pipelineRuns: [],
+            graph: null
+        }};
+
+        // View switching
+        function showView(view) {{
+            currentView = view;
+
+            // Update nav
+            document.querySelectorAll('nav button').forEach(btn => {{
+                btn.classList.remove('active');
+            }});
+            event.target.classList.add('active');
+
+            // Show/hide views
+            document.getElementById('view-workspaces').classList.toggle('hidden', view !== 'workspaces');
+            document.getElementById('view-runs').classList.toggle('hidden', view !== 'runs');
+            document.getElementById('view-graph').classList.toggle('hidden', view !== 'graph');
+
+            // Load data if needed
+            if (view === 'workspaces' && data.workspaces.length === 0) {{
+                loadWorkspaces();
+            }} else if (view === 'runs') {{
+                if (currentRunsTab === 'stage' && data.stageRuns.length === 0) {{
+                    loadStageRuns();
+                }} else if (currentRunsTab === 'pipeline' && data.pipelineRuns.length === 0) {{
+                    loadPipelineRuns();
+                }}
+            }} else if (view === 'graph' && !data.graph) {{
+                loadGraph();
+            }}
+        }}
+
+        function showRunsTab(tab) {{
+            currentRunsTab = tab;
+
+            // Update tabs
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+
+            // Show/hide content
+            document.getElementById('tab-stage-runs').classList.toggle('active', tab === 'stage');
+            document.getElementById('tab-pipeline-runs').classList.toggle('active', tab === 'pipeline');
+
+            // Load data if needed
+            if (tab === 'stage' && data.stageRuns.length === 0) {{
+                loadStageRuns();
+            }} else if (tab === 'pipeline' && data.pipelineRuns.length === 0) {{
+                loadPipelineRuns();
+            }}
+        }}
+
+        // API calls
+        async function loadWorkspaces() {{
+            try {{
+                const response = await fetch(API_BASE + '/workspaces');
+                const result = await response.json();
+                data.workspaces = result.workspaces;
+                renderWorkspaces();
+            }} catch (error) {{
+                console.error('Failed to load workspaces:', error);
+                document.getElementById('workspaces-container').innerHTML =
+                    '<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>Failed to load workspaces</p></div>';
+            }}
+        }}
+
+        async function loadStageRuns() {{
+            try {{
+                const response = await fetch(API_BASE + '/runs?limit=100');
+                const result = await response.json();
+                data.stageRuns = result.runs;
+                renderStageRuns();
+            }} catch (error) {{
+                console.error('Failed to load stage runs:', error);
+                document.getElementById('stage-runs-container').innerHTML =
+                    '<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>Failed to load runs</p></div>';
+            }}
+        }}
+
+        async function loadPipelineRuns() {{
+            try {{
+                const response = await fetch(API_BASE + '/pipelines?limit=100');
+                const result = await response.json();
+                data.pipelineRuns = result.pipelines;
+                renderPipelineRuns();
+            }} catch (error) {{
+                console.error('Failed to load pipeline runs:', error);
+                document.getElementById('pipeline-runs-container').innerHTML =
+                    '<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>Failed to load pipelines</p></div>';
+            }}
+        }}
+
+        async function loadGraph() {{
+            try {{
+                const response = await fetch(API_BASE + '/graph');
+                data.graph = await response.json();
+                renderGraph();
+            }} catch (error) {{
+                console.error('Failed to load graph:', error);
+                document.getElementById('graph-container').innerHTML =
+                    '<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>Failed to load graph</p></div>';
+            }}
+        }}
+
+        // Rendering
+        function renderWorkspaces() {{
+            const container = document.getElementById('workspaces-container');
+
+            if (data.workspaces.length === 0) {{
+                container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📁</div><p>No workspaces found</p></div>';
+                return;
+            }}
+
+            container.innerHTML = data.workspaces.map(ws => `
+                <div class="workspace-card">
+                    <h3>${{ws.name}}</h3>
+                    ${{ws.description ? `<p>${{ws.description}}</p>` : ''}}
+                    ${{ws.mount_status ? `<span class="status status-${{ws.mount_status}}">${{ws.mount_status}}</span>` : ''}}
+                    <div class="workspace-meta">
+                        <div class="meta-item">📦 ${{ws.version_count}} versions</div>
+                        ${{ws.parent_workspace ? `<div class="meta-item">🔀 from ${{ws.parent_workspace}}</div>` : ''}}
+                    </div>
+                </div>
+            `).join('');
+        }}
+
+        function renderStageRuns() {{
+            const container = document.getElementById('stage-runs-container');
+
+            if (data.stageRuns.length === 0) {{
+                container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🎯</div><p>No stage runs found</p></div>';
+                return;
+            }}
+
+            container.innerHTML = '<div class="timeline">' + data.stageRuns.map(run => `
+                <div class="timeline-item">
+                    <div class="timeline-content">
+                        <div class="timeline-time">${{new Date(run.started_at).toLocaleString()}}</div>
+                        <strong>${{run.workspace_name}}</strong> / ${{run.stage_name}}
+                        <span class="status status-${{run.status}}">${{run.status}}</span>
+                        ${{run.pipeline_name ? `<div style="margin-top: 0.5rem; color: var(--text-secondary); font-size: 0.9rem;">Pipeline: ${{run.pipeline_name}}</div>` : ''}}
+                    </div>
+                </div>
+            `).join('') + '</div>';
+        }}
+
+        function renderPipelineRuns() {{
+            const container = document.getElementById('pipeline-runs-container');
+
+            if (data.pipelineRuns.length === 0) {{
+                container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🔄</div><p>No pipeline runs found</p></div>';
+                return;
+            }}
+
+            container.innerHTML = '<div class="timeline">' + data.pipelineRuns.map(run => `
+                <div class="timeline-item">
+                    <div class="timeline-content">
+                        <div class="timeline-time">${{new Date(run.started_at).toLocaleString()}}</div>
+                        <strong>${{run.workspace_name}}</strong> / ${{run.pipeline_name || 'pipeline'}}
+                        <span class="status status-${{run.status}}">${{run.status}}</span>
+                        <div style="margin-top: 0.5rem; color: var(--text-secondary); font-size: 0.9rem;">
+                            ${{run.completed_stages || 0}} / ${{run.total_stages || 0}} stages completed
+                        </div>
+                    </div>
+                </div>
+            `).join('') + '</div>';
+        }}
+
+        function renderGraph() {{
+            const container = document.getElementById('graph-container');
+
+            if (!data.graph || data.graph.nodes.length === 0) {{
+                container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🕸️</div><p>No provenance data to visualize</p></div>';
+                return;
+            }}
+
+            const nodes = data.graph.nodes.length;
+            const edges = data.graph.edges.length;
+
+            container.innerHTML = `
+                <div class="card" style="width: 100%; margin: 0;">
+                    <h3 style="margin-bottom: 1rem;">Provenance Graph</h3>
+                    <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+                        ${{nodes}} stage runs connected by ${{edges}} data dependencies
+                    </p>
+                    <div id="graph"></div>
+                    <p style="margin-top: 1rem; color: var(--text-secondary); font-size: 0.9rem;">
+                        Interactive graph visualization coming soon. This will show the full data lineage across all stages.
+                    </p>
+                </div>
+            `;
+        }}
+
+        // Initialize
+        loadWorkspaces();
+
+        // Auto-refresh every 30 seconds
+        setInterval(() => {{
+            if (currentView === 'workspaces') loadWorkspaces();
+            else if (currentView === 'runs' && currentRunsTab === 'stage') loadStageRuns();
+            else if (currentView === 'runs' && currentRunsTab === 'pipeline') loadPipelineRuns();
+            else if (currentView === 'graph') loadGraph();
+        }}, 30000);
+    </script>
 </body>
 </html>"""
 
