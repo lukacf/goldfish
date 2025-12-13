@@ -823,6 +823,9 @@ class WorkspaceManager:
     def diff(self, slot: str) -> DiffResponse:
         """Show changes in a slot since last checkpoint.
 
+        For copy-based slots, compares current slot contents against
+        the mounted_sha stored in .goldfish-mount.
+
         Args:
             slot: Slot to diff
 
@@ -837,10 +840,22 @@ class WorkspaceManager:
 
         slot_path = self._slot_path(slot)
 
-        # Get diff output from git
-        has_changes = self.git.is_dirty(slot_path)
+        # Read mounted_sha from .goldfish-mount
+        metadata_file = slot_path / ".goldfish-mount"
+        if not metadata_file.exists():
+            raise GoldfishError(f"Slot {slot} is not a mounted workspace (missing .goldfish-mount)")
 
-        if not has_changes:
+        metadata = json.loads(metadata_file.read_text())
+        mounted_sha = metadata.get("mounted_sha")
+        workspace = metadata.get("workspace")
+
+        if not mounted_sha or not workspace:
+            raise GoldfishError(f"Invalid .goldfish-mount metadata in slot {slot}")
+
+        # Use git_layer to diff slot against mounted_sha
+        diff_result = self.git.diff_slot_against_sha(slot_path, workspace, mounted_sha)
+
+        if not diff_result["has_changes"]:
             return DiffResponse(
                 slot=slot,
                 has_changes=False,
@@ -849,20 +864,17 @@ class WorkspaceManager:
                 diff_text="",
             )
 
-        # Get list of changed files
-        changed_files = self.git.get_changed_files(slot_path)
-
-        # Get diff statistics
-        diff_stats = self.git.get_diff_stats(slot_path)
-
-        # Get full diff text
-        diff_text = self.git.get_diff_text(slot_path)
+        # Truncate diff text to avoid overwhelming output
+        diff_text = diff_result.get("diff_text", "")
+        max_diff_len = 5000
+        if len(diff_text) > max_diff_len:
+            diff_text = diff_text[:max_diff_len] + f"\n\n... [truncated, {len(diff_text)} chars total]"
 
         return DiffResponse(
             slot=slot,
             has_changes=True,
-            summary=diff_stats,
-            files_changed=changed_files,
+            summary=diff_result.get("summary", ""),
+            files_changed=diff_result.get("files_changed", []),
             diff_text=diff_text,
         )
 
