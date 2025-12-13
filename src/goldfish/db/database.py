@@ -81,6 +81,8 @@ class Database:
                 ("backend_handle", "TEXT"),
                 ("artifact_uri", "TEXT"),
                 ("stage_version_id", "INTEGER"),  # Links to stage_versions
+                ("outcome", "TEXT"),  # NULL, 'success', 'bad_results' - semantic result quality
+                ("attempt_num", "INTEGER"),  # Groups consecutive runs per stage
             ],
             "signal_lineage": [
                 ("source_stage_run_id", "TEXT"),  # Upstream stage run
@@ -1061,12 +1063,16 @@ class Database:
         inputs_json = json.dumps(inputs) if inputs else None
 
         with self._conn() as conn:
+            # Compute attempt_num: increment after a successful run, otherwise continue current attempt
+            attempt_num = self._compute_attempt_num(conn, workspace_name, stage_name)
+
             conn.execute(
                 """
                 INSERT INTO stage_runs
                 (id, job_id, pipeline_run_id, workspace_name, pipeline_name, version, stage_name, status,
-                 started_at, profile, hints_json, config_json, inputs_json, backend_type, backend_handle)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+                 started_at, profile, hints_json, config_json, inputs_json, backend_type, backend_handle,
+                 attempt_num)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stage_run_id,
@@ -1083,8 +1089,153 @@ class Database:
                     inputs_json,
                     backend_type,
                     backend_handle,
+                    attempt_num,
                 ),
             )
+
+    def _compute_attempt_num(self, conn: sqlite3.Connection, workspace_name: str, stage_name: str) -> int:
+        """Compute attempt number for a new stage run.
+
+        Attempt groups consecutive runs on the same stage. A new attempt starts
+        after a run is marked with outcome='success'.
+
+        Args:
+            conn: Database connection (already in transaction)
+            workspace_name: Workspace name
+            stage_name: Stage name
+
+        Returns:
+            Attempt number (1-based)
+        """
+        # Get the most recent run for this workspace/stage
+        row = conn.execute(
+            """
+            SELECT attempt_num, outcome FROM stage_runs
+            WHERE workspace_name = ? AND stage_name = ?
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            (workspace_name, stage_name),
+        ).fetchone()
+
+        if row is None:
+            # First run for this stage
+            return 1
+
+        prev_attempt = row["attempt_num"] or 1
+        prev_outcome = row["outcome"]
+
+        # If previous run was successful, start a new attempt
+        if prev_outcome == "success":
+            return prev_attempt + 1
+
+        # Otherwise continue the current attempt
+        return prev_attempt
+
+    def update_run_outcome(self, stage_run_id: str, outcome: str, note: str | None = None) -> bool:
+        """Update the outcome of a stage run.
+
+        Args:
+            stage_run_id: Stage run ID
+            outcome: 'success' or 'bad_results'
+            note: Optional note about the outcome
+
+        Returns:
+            True if updated, False if run not found
+        """
+        if outcome not in ("success", "bad_results"):
+            raise ValueError(f"Invalid outcome: {outcome}. Must be 'success' or 'bad_results'")
+
+        with self._conn() as conn:
+            # Only update completed runs
+            result = conn.execute(
+                """
+                UPDATE stage_runs
+                SET outcome = ?
+                WHERE id = ? AND status = 'completed'
+                """,
+                (outcome, stage_run_id),
+            )
+            return result.rowcount > 0
+
+    def list_attempts(
+        self,
+        workspace_name: str,
+        stage_name: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """List attempts (grouped consecutive runs) for a workspace/stage.
+
+        Args:
+            workspace_name: Workspace name
+            stage_name: Optional stage name filter
+            limit: Max attempts to return
+
+        Returns:
+            List of attempt summaries with run counts and status
+        """
+        # Build query to group runs by attempt
+        query = """
+            SELECT
+                stage_name,
+                attempt_num,
+                COUNT(*) as run_count,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+                SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) as success_count,
+                SUM(CASE WHEN outcome = 'bad_results' THEN 1 ELSE 0 END) as bad_results_count,
+                MIN(version) as first_version,
+                MAX(version) as last_version,
+                MIN(started_at) as started_at,
+                MAX(completed_at) as ended_at
+            FROM stage_runs
+            WHERE workspace_name = ?
+        """
+        params: list = [workspace_name]
+
+        if stage_name:
+            query += " AND stage_name = ?"
+            params.append(stage_name)
+
+        query += """
+            GROUP BY stage_name, attempt_num
+            ORDER BY stage_name, attempt_num DESC
+            LIMIT ?
+        """
+        params.append(limit)
+
+        with self._conn() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+            attempts = []
+            for row in rows:
+                # Determine attempt status
+                if row["success_count"] > 0:
+                    status = "closed"  # Has a successful run
+                elif row["run_count"] == row["failed_count"]:
+                    status = "all_failed"  # All runs crashed
+                else:
+                    status = "open"  # Still iterating
+
+                attempts.append(
+                    {
+                        "stage": row["stage_name"],
+                        "attempt": row["attempt_num"],
+                        "runs": row["run_count"],
+                        "completed": row["completed_count"],
+                        "failed": row["failed_count"],
+                        "success": row["success_count"],
+                        "bad_results": row["bad_results_count"],
+                        "versions": f"{row['first_version']}→{row['last_version']}"
+                        if row["first_version"] != row["last_version"]
+                        else row["first_version"],
+                        "started": row["started_at"][:19] if row["started_at"] else None,
+                        "ended": row["ended_at"][:19] if row["ended_at"] else None,
+                        "status": status,
+                    }
+                )
+
+            return attempts
 
     def update_stage_run_status(
         self,
