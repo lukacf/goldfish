@@ -1028,6 +1028,31 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
+    def get_latest_explicit_version(self, workspace_name: str) -> dict | None:
+        """Get the most recent explicit version for a workspace.
+
+        Explicit versions are those created by save_version/checkpoint, NOT by run().
+        This is used for diff() to show changes since last user-initiated save.
+
+        Args:
+            workspace_name: Workspace name
+
+        Returns:
+            Latest explicit version dict or None if no explicit versions
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM workspace_versions
+                WHERE workspace_name = ?
+                AND created_by != 'run'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (workspace_name,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def get_next_version_number(self, workspace_name: str) -> str:
         """Get the next version number for a workspace.
 

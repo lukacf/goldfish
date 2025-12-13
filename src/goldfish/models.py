@@ -273,12 +273,15 @@ class LogThoughtResponse(BaseModel):
 class DiffResponse(BaseModel):
     """Response from diff() tool."""
 
-    slot: str  # Slot that was diffed
-    has_changes: bool  # Whether there are uncommitted changes
+    has_changes: bool  # Whether there are differences
     summary: str  # Human-readable summary (e.g., "2 files changed, 10 insertions(+)")
     files_changed: list[str]  # List of changed file paths
     diff_text: str = ""  # Optional full diff output
-    compared_against: str | None = None  # SHA being compared against (helps debug "no changes")
+    # What was compared
+    left: str  # Left side of comparison (e.g., "w1", "baseline@v2")
+    right: str  # Right side of comparison (e.g., "v3", "experiment@v1")
+    left_sha: str | None = None  # Git SHA of left side (if applicable)
+    right_sha: str | None = None  # Git SHA of right side (if applicable)
 
 
 class RollbackResponse(BaseModel):
