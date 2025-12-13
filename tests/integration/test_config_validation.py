@@ -202,26 +202,187 @@ from goldfish.io import load_input, save_output
         manager.hibernate(slot="w1", reason="Done with config test")
 
 
-@pytest.mark.skip(reason="validate_config MCP tool not yet implemented")
 class TestValidateConfigTool:
     """Test the validate_config MCP tool."""
 
-    def test_validate_config_returns_all_issues(self, e2e_setup):
-        """validate_config should return all validation issues at once."""
-        # This tests the MCP tool directly
-        pass  # Implement after creating the tool
+    def test_validate_config_catches_missing_module(self, e2e_setup):
+        """validate_config should warn about missing stage modules."""
+        from goldfish.config_validation import validate_project_config
 
-    def test_validate_config_validates_goldfish_yaml(self, e2e_setup):
-        """validate_config should validate goldfish.yaml."""
-        pass
+        manager = e2e_setup["manager"]
+        project_root = e2e_setup["project_root"]
+
+        # Create workspace with pipeline
+        manager.create_workspace(
+            name="validate-test", goal="Test validate_config", reason="Testing validate_config tool"
+        )
+        manager.mount(workspace="validate-test", slot="w1", reason="Testing validate_config tool")
+
+        slot_path = project_root / "workspaces" / "w1"
+
+        # Create pipeline but NO module file
+        (slot_path / "pipeline.yaml").write_text("""
+name: validate-test
+stages:
+  - name: missing_module
+    outputs:
+      data: {type: npy}
+""")
+
+        manager.save_version(slot="w1", message="Add pipeline for validate test")
+
+        # Validate should warn about missing module
+        result = validate_project_config(
+            project_root=project_root,
+            workspace_path=slot_path,
+            workspace_name="w1",
+        )
+
+        assert result["valid"] is True  # No errors, just warnings
+        assert any("missing_module" in w and "module not found" in w for w in result["warnings"])
+        assert "w1/pipeline.yaml" in result["files_checked"]
+
+        manager.hibernate(slot="w1", reason="Done with validate test")
+
+    def test_validate_config_catches_yaml_syntax_error(self, e2e_setup):
+        """validate_config should catch YAML syntax errors in stage configs."""
+        from goldfish.config_validation import validate_project_config
+
+        manager = e2e_setup["manager"]
+        project_root = e2e_setup["project_root"]
+
+        # Create workspace
+        manager.create_workspace(
+            name="yaml-error-test", goal="Test YAML validation", reason="Testing YAML syntax validation"
+        )
+        manager.mount(workspace="yaml-error-test", slot="w1", reason="Testing YAML validation")
+
+        slot_path = project_root / "workspaces" / "w1"
+
+        # Create pipeline
+        (slot_path / "pipeline.yaml").write_text("""
+name: yaml-error-test
+stages:
+  - name: train
+    outputs:
+      model: {type: directory}
+""")
+
+        # Create configs dir with invalid YAML
+        (slot_path / "configs").mkdir(exist_ok=True)
+        (slot_path / "configs" / "train.yaml").write_text("""
+# Invalid YAML - bad indentation
+key: value
+  nested: wrong
+    very: bad
+""")
+
+        # Create module so we don't get that warning
+        (slot_path / "modules").mkdir(exist_ok=True)
+        (slot_path / "modules" / "train.py").write_text("# Train module")
+
+        manager.save_version(slot="w1", message="Add config with syntax error")
+
+        # Validate should catch the YAML error
+        result = validate_project_config(
+            project_root=project_root,
+            workspace_path=slot_path,
+            workspace_name="w1",
+        )
+
+        assert result["valid"] is False
+        assert any("train.yaml" in e and "YAML syntax error" in e for e in result["errors"])
+
+        manager.hibernate(slot="w1", reason="Done with YAML error test")
 
     def test_validate_config_validates_pipeline_yaml(self, e2e_setup):
-        """validate_config should validate pipeline.yaml."""
-        pass
+        """validate_config should catch pipeline.yaml validation errors."""
+        from goldfish.config_validation import validate_project_config
 
-    def test_validate_config_validates_stage_configs(self, e2e_setup):
-        """validate_config should validate configs/*.yaml."""
-        pass
+        manager = e2e_setup["manager"]
+        project_root = e2e_setup["project_root"]
+
+        # Create workspace
+        manager.create_workspace(
+            name="pipeline-error-test", goal="Test pipeline validation", reason="Testing pipeline validation"
+        )
+        manager.mount(workspace="pipeline-error-test", slot="w1", reason="Testing pipeline validation")
+
+        slot_path = project_root / "workspaces" / "w1"
+
+        # Create invalid pipeline (missing name)
+        (slot_path / "pipeline.yaml").write_text("""
+stages:
+  - name: train
+    outputs:
+      model: {type: directory}
+""")
+
+        manager.save_version(slot="w1", message="Add invalid pipeline")
+
+        # Validate should catch the pipeline error
+        result = validate_project_config(
+            project_root=project_root,
+            workspace_path=slot_path,
+            workspace_name="w1",
+        )
+
+        assert result["valid"] is False
+        assert any("pipeline.yaml" in e for e in result["errors"])
+
+        manager.hibernate(slot="w1", reason="Done with pipeline error test")
+
+    def test_validate_config_valid_workspace(self, e2e_setup):
+        """validate_config should return valid=True for correct workspace."""
+        from goldfish.config_validation import validate_project_config
+
+        manager = e2e_setup["manager"]
+        project_root = e2e_setup["project_root"]
+
+        # Create workspace with valid configs
+        manager.create_workspace(
+            name="valid-workspace", goal="Test valid config", reason="Testing valid workspace validation"
+        )
+        manager.mount(workspace="valid-workspace", slot="w1", reason="Testing valid workspace")
+
+        slot_path = project_root / "workspaces" / "w1"
+
+        # Create valid pipeline
+        (slot_path / "pipeline.yaml").write_text("""
+name: valid-test
+stages:
+  - name: train
+    outputs:
+      model: {type: directory}
+""")
+
+        # Create valid config
+        (slot_path / "configs").mkdir(exist_ok=True)
+        (slot_path / "configs" / "train.yaml").write_text("""
+learning_rate: 0.001
+epochs: 10
+""")
+
+        # Create module
+        (slot_path / "modules").mkdir(exist_ok=True)
+        (slot_path / "modules" / "train.py").write_text("# Train module")
+
+        manager.save_version(slot="w1", message="Add valid workspace config")
+
+        # Validate should pass
+        result = validate_project_config(
+            project_root=project_root,
+            workspace_path=slot_path,
+            workspace_name="w1",
+        )
+
+        assert result["valid"] is True
+        assert len(result["errors"]) == 0
+        assert len(result["warnings"]) == 0
+        assert "w1/pipeline.yaml" in result["files_checked"]
+        assert "w1/configs/train.yaml" in result["files_checked"]
+
+        manager.hibernate(slot="w1", reason="Done with valid workspace test")
 
 
 class TestDryRunMode:
