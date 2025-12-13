@@ -21,27 +21,30 @@ class ProfileValidationError(Exception):
 
 
 # Pre-built base images with ML libraries
-# Uses well-maintained PUBLIC images - NO setup required by users
 #
-# CPU: Jupyter pytorch-notebook (numpy, pandas, scikit-learn, torch, matplotlib)
-# GPU: Jupyter pytorch-notebook with CUDA (same + CUDA support)
+# CPU: Public Jupyter image (no setup needed)
+# GPU: Custom goldfish-base-gpu from Artifact Registry (includes nvrtc for Flash Attention)
 #
-# Source: https://jupyter-docker-stacks.readthedocs.io/
+# When artifact_registry is configured in goldfish.yaml, GPU profiles use the custom
+# image which includes the full CUDA toolkit. Without AR configured, falls back to
+# the public Jupyter CUDA image (which lacks nvrtc for Flash Attention JIT).
 
 # Public base images (no registry setup needed)
 # CPU: Jupyter pytorch-notebook - has numpy, pandas, scikit-learn, torch, matplotlib, seaborn
 PUBLIC_BASE_IMAGE_CPU = "quay.io/jupyter/pytorch-notebook:python-3.11"
 
-# GPU: Jupyter pytorch-notebook with CUDA 12 - same libraries + CUDA support
+# GPU: Jupyter pytorch-notebook with CUDA 12 - runtime only (no nvrtc for JIT)
+# NOTE: Flash Attention requires nvrtc, so use goldfish-base-gpu from Artifact Registry
 PUBLIC_BASE_IMAGE_GPU = "quay.io/jupyter/pytorch-notebook:cuda12-python-3.11"
 
 # Fallback (bare Python - requires requirements.txt)
 FALLBACK_BASE_IMAGE = "python:3.11-slim"
 
-# For custom registry images (optional override in goldfish.yaml)
+# Custom registry images (requires artifact_registry in goldfish.yaml)
+# These include the full CUDA toolkit with nvrtc for Flash Attention support
 BASE_IMAGE_CPU = "goldfish-base-cpu"
 BASE_IMAGE_GPU = "goldfish-base-gpu"
-BASE_IMAGE_VERSION = "v1"
+BASE_IMAGE_VERSION = "v2"
 
 
 # Built-in resource profiles optimized for ML workloads
@@ -99,7 +102,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
     },
     # H100 GPU profiles
     "h100-spot": {
-        "base_image": PUBLIC_BASE_IMAGE_GPU,  # PyTorch official with CUDA
+        "base_image": BASE_IMAGE_GPU,  # Custom image with nvrtc for Flash Attention
         "machine_type": "a3-highgpu-1g",
         "gpu": {
             "type": "h100",
@@ -125,7 +128,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         },
     },
     "h100-on-demand": {
-        "base_image": PUBLIC_BASE_IMAGE_GPU,  # PyTorch official with CUDA
+        "base_image": BASE_IMAGE_GPU,  # Custom image with nvrtc for Flash Attention
         "machine_type": "a3-highgpu-1g",
         "gpu": {
             "type": "h100",
@@ -152,7 +155,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
     },
     # A100 GPU profiles
     "a100-spot": {
-        "base_image": PUBLIC_BASE_IMAGE_GPU,  # PyTorch official with CUDA
+        "base_image": BASE_IMAGE_GPU,  # Custom image with nvrtc for Flash Attention
         "machine_type": "a2-highgpu-1g",
         "gpu": {
             "type": "a100",
@@ -178,7 +181,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         },
     },
     "a100-on-demand": {
-        "base_image": PUBLIC_BASE_IMAGE_GPU,  # PyTorch official with CUDA
+        "base_image": BASE_IMAGE_GPU,  # Custom image with nvrtc for Flash Attention
         "machine_type": "a2-highgpu-1g",
         "gpu": {
             "type": "a100",

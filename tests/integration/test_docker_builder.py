@@ -127,3 +127,86 @@ def test_dockerfile_pythonpath_includes_modules_dir(tmp_path):
     assert (
         "/app/modules" in pythonpath_line
     ), f"PYTHONPATH must include /app/modules for sibling imports: {pythonpath_line}"
+
+
+def test_dockerfile_nvidia_ngc_no_chown(tmp_path):
+    """NVIDIA NGC images run as root, so COPY should NOT use --chown.
+
+    Unlike Jupyter images which run as non-root user (jovyan), NVIDIA NGC
+    containers run as root and don't need the user switching or chown flags.
+    """
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    (workspace_path / "modules").mkdir()
+    (workspace_path / "modules" / "train.py").write_text("# test module")
+    (workspace_path / "configs").mkdir()
+    (workspace_path / "loaders").mkdir()
+    (workspace_path / "loaders" / "custom_loader.py").write_text("# loader")
+
+    builder = DockerBuilder()
+
+    dockerfile = builder.generate_dockerfile(
+        workspace_dir=workspace_path,
+        base_image="nvcr.io/nvidia/pytorch:24.01-py3",
+    )
+
+    # COPY commands should NOT have --chown for NGC images
+    copy_lines = [line for line in dockerfile.split("\n") if line.strip().startswith("COPY")]
+    assert len(copy_lines) >= 4  # goldfish_io, modules, configs, loaders
+
+    for line in copy_lines:
+        assert "--chown" not in line, f"NGC image COPY should NOT have --chown: {line}"
+
+    # Should NOT have USER root / USER 1000 switching
+    assert "USER root" not in dockerfile
+    assert "USER 1000" not in dockerfile
+
+
+def test_dockerfile_nvidia_ngc_with_requirements(tmp_path):
+    """NVIDIA NGC images: requirements.txt install should not switch users."""
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    (workspace_path / "modules").mkdir()
+    (workspace_path / "modules" / "train.py").write_text("# test module")
+    (workspace_path / "configs").mkdir()
+    (workspace_path / "requirements.txt").write_text("flash-attn>=2.0")
+
+    builder = DockerBuilder()
+
+    dockerfile = builder.generate_dockerfile(
+        workspace_dir=workspace_path,
+        base_image="nvcr.io/nvidia/pytorch:24.01-py3",
+    )
+
+    # Should have pip install but NO USER switching for NGC images
+    assert "pip install --no-cache-dir -r /tmp/requirements.txt" in dockerfile
+    assert "USER root" not in dockerfile
+    assert "USER 1000" not in dockerfile
+
+
+def test_dockerfile_goldfish_base_uses_chown(tmp_path):
+    """Goldfish custom base images run as non-root (uid 1000), should use --chown.
+
+    The goldfish-base-gpu image creates a 'goldfish' user with uid 1000,
+    similar to Jupyter's jovyan user. Files must be chowned for access.
+    """
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    (workspace_path / "modules").mkdir()
+    (workspace_path / "modules" / "train.py").write_text("# test module")
+    (workspace_path / "configs").mkdir()
+
+    builder = DockerBuilder()
+
+    # Test with full AR path
+    dockerfile = builder.generate_dockerfile(
+        workspace_dir=workspace_path,
+        base_image="us-docker.pkg.dev/myproject/goldfish/goldfish-base-gpu:v2",
+    )
+
+    # All COPY commands should have --chown=1000:100
+    copy_lines = [line for line in dockerfile.split("\n") if line.strip().startswith("COPY")]
+    assert len(copy_lines) >= 3  # goldfish_io, modules, configs
+
+    for line in copy_lines:
+        assert "--chown=1000:100" in line, f"goldfish-base COPY should have --chown: {line}"
