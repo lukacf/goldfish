@@ -222,7 +222,14 @@ class StageExecutor:
                 }
 
             self._launch_container(
-                stage_run_id, workspace, stage_name, image_tag, inputs, input_configs, output_configs
+                stage_run_id,
+                workspace,
+                stage_name,
+                image_tag,
+                inputs,
+                input_configs,
+                output_configs,
+                user_config=stage_config,
             )
         except Exception as e:
             # Mark failed immediately with error and re-raise
@@ -839,16 +846,17 @@ class StageExecutor:
         inputs: dict,
         input_configs: dict | None = None,
         output_configs: dict | None = None,
+        user_config: dict | None = None,
     ):
         """Launch Docker container (local) or GCE instance."""
         backend = self.config.jobs.backend
 
         # Build stage config for goldfish.io
-        stage_config = {
-            "stage": stage_name,
-            "inputs": input_configs or inputs,  # Use input_configs if provided
-            "outputs": output_configs or {},
-        }
+        # Start with user config (freeze_backbone, epochs, etc.) and add stage/inputs/outputs
+        stage_config = dict(user_config) if user_config else {}
+        stage_config["stage"] = stage_name
+        stage_config["inputs"] = input_configs or inputs
+        stage_config["outputs"] = output_configs or {}
 
         if backend == "local":
             # Create work directory for this run

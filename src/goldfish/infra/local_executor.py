@@ -71,6 +71,15 @@ class LocalExecutor:
         stage_config_json = json.dumps(stage_config)
         docker_cmd.extend(["-e", f"GOLDFISH_STAGE_CONFIG={stage_config_json}"])
 
+        # Set user-defined environment variables from config
+        # This allows configs to specify env vars like WANDB_API_KEY
+        if "environment" in stage_config and isinstance(stage_config["environment"], dict):
+            for env_name, env_value in stage_config["environment"].items():
+                # SECURITY: Validate env var name (alphanumeric + underscore only)
+                if not env_name.replace("_", "").isalnum():
+                    continue
+                docker_cmd.extend(["-e", f"{env_name}={env_value}"])
+
         # SECURITY: Mount volumes with read-only where appropriate
         # inputs are read-only, outputs are read-write
         if inputs_dir:
