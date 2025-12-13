@@ -22,9 +22,27 @@ class AuditConfig(BaseModel):
 class JobsConfig(BaseModel):
     """Job execution configuration."""
 
-    backend: str = "gce"
+    backend: str = "gce"  # DEPRECATED: use execution_provider instead
+    execution_provider: str | None = None  # Provider name (e.g., "gce", "local")
+    storage_provider: str | None = None  # Provider name (e.g., "gcs", "local")
     infra_path: str | None = None  # Path to infra scripts (e.g., "../goldfish/infra")
     experiments_dir: str = "experiments"  # Where to export experiments
+
+    @property
+    def effective_execution_provider(self) -> str:
+        """Get execution provider, falling back to backend for compatibility."""
+        if self.execution_provider:
+            return self.execution_provider
+        # Map legacy backend values to provider names
+        return "gce" if self.backend == "gce" else "local"
+
+    @property
+    def effective_storage_provider(self) -> str:
+        """Get storage provider with intelligent defaults."""
+        if self.storage_provider:
+            return self.storage_provider
+        # Default based on execution provider
+        return "gcs" if self.effective_execution_provider == "gce" else "local"
 
 
 class GCSConfig(BaseModel):
@@ -100,8 +118,9 @@ class GoldfishConfig(BaseModel):
     state_md: StateMdConfig = Field(default_factory=StateMdConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     jobs: JobsConfig = Field(default_factory=JobsConfig)
-    gcs: GCSConfig | None = None
-    gce: GCEConfig | None = None
+    gcs: GCSConfig | None = None  # DEPRECATED: use providers.gcs instead
+    gce: GCEConfig | None = None  # DEPRECATED: use providers.gce instead
+    providers: dict[str, dict] = Field(default_factory=dict)  # Provider configurations
     invariants: list[str] = Field(default_factory=list)
 
     @classmethod
@@ -183,6 +202,82 @@ class GoldfishConfig(BaseModel):
         # e.g., if project is /home/user/mlm, dev_repo_path might be "mlm-dev"
         # which resolves to /home/user/mlm-dev
         return (project_root.parent / self.dev_repo_path).resolve()
+
+    def get_execution_provider_config(self) -> dict:
+        """Get execution provider configuration with backward compatibility.
+
+        Returns:
+            Provider configuration dict
+        """
+        provider_name = self.jobs.effective_execution_provider
+
+        # Check if new-style provider config exists
+        if provider_name in self.providers:
+            return self.providers[provider_name].copy()
+
+        # Fall back to legacy GCE config
+        if provider_name == "gce" and self.gce:
+            # Build GCE provider config from legacy GCEConfig
+            config = {
+                "project_id": self.gce.project_id or self.gce.project,
+                "zone": self.gce.zones[0] if self.gce.zones else None,
+                "zones": self.gce.zones,
+                "artifact_registry": self.gce.artifact_registry,
+                "gpu_preference": self.gce.gpu_preference,
+                "service_account": self.gce.service_account,
+                "resources": [],
+            }
+            # Add bucket from GCS config if available
+            if self.gcs:
+                config["bucket"] = self.gcs.bucket
+            # Remove None values
+            return {k: v for k, v in config.items() if v is not None}
+
+        # Fall back to local config
+        if provider_name == "local":
+            return {"work_dir": "/tmp/goldfish"}
+
+        return {}
+
+    def get_storage_provider_config(self) -> dict:
+        """Get storage provider configuration with backward compatibility.
+
+        Returns:
+            Provider configuration dict
+        """
+        provider_name = self.jobs.effective_storage_provider
+
+        # Check if new-style provider config exists
+        if provider_name in self.providers:
+            return self.providers[provider_name].copy()
+
+        # Fall back to legacy GCS config
+        if provider_name == "gcs" and self.gcs:
+            # Build GCS provider config from legacy GCSConfig
+            config = {
+                "bucket": self.gcs.bucket,
+                "sources_prefix": self.gcs.sources_prefix,
+                "artifacts_prefix": self.gcs.artifacts_prefix,
+                "snapshots_prefix": self.gcs.snapshots_prefix,
+                "datasets_prefix": self.gcs.datasets_prefix,
+            }
+            # Add project_id from GCE config if available
+            if self.gce:
+                config["project_id"] = self.gce.project_id or self.gce.project
+            # Remove None values
+            return {k: v for k, v in config.items() if v is not None}
+
+        # Fall back to local config
+        if provider_name == "local":
+            # Use dev repo .goldfish directory for local storage
+            return {
+                "base_path": ".goldfish/storage",
+                "datasets_prefix": "datasets",
+                "artifacts_prefix": "artifacts",
+                "snapshots_prefix": "snapshots",
+            }
+
+        return {}
 
 
 def generate_default_config(project_name: str, dev_repo_path: str = "../{project}-dev") -> GoldfishConfig:

@@ -21,6 +21,8 @@ from goldfish.infra.local_executor import LocalExecutor
 from goldfish.infra.profiles import ProfileResolver
 from goldfish.models import PipelineDef, StageDef, StageRunInfo
 from goldfish.pipeline.manager import PipelineManager
+from goldfish.providers import get_execution_registry
+from goldfish.providers.base import ExecutionProvider
 from goldfish.utils import parse_optional_datetime
 from goldfish.utils.config_hash import compute_config_hash
 from goldfish.workspace.manager import WorkspaceManager
@@ -41,6 +43,7 @@ class StageExecutor:
         pipeline_manager: PipelineManager,
         project_root: Path,
         dataset_registry: DatasetRegistry | None = None,
+        execution_provider: ExecutionProvider | None = None,
     ):
         self.db = db
         self.config = config
@@ -52,9 +55,15 @@ class StageExecutor:
         # Dev repo contains all Goldfish runtime artifacts (.goldfish/, runs/, etc.)
         self.dev_repo = config.get_dev_repo_path(project_root)
 
-        # Initialize execution infrastructure
-        self.docker_builder = DockerBuilder(config)
-        self.local_executor = LocalExecutor()
+        # Initialize execution provider
+        if execution_provider:
+            self.execution_provider = execution_provider
+        else:
+            # Get provider from config
+            provider_name = config.jobs.effective_execution_provider
+            provider_config = config.get_execution_provider_config()
+            registry = get_execution_registry()
+            self.execution_provider = registry.get(provider_name, provider_config)
 
         # Initialize profile resolver
         profile_overrides = None
@@ -62,7 +71,12 @@ class StageExecutor:
             profile_overrides = config.gce.effective_profile_overrides
         self.profile_resolver = ProfileResolver(profile_overrides=profile_overrides)
 
-        # Initialize GCE launcher with full config
+        # DEPRECATED: Keep legacy components for backward compatibility
+        # TODO: Remove in future version once all code paths use providers
+        self.docker_builder = DockerBuilder(config)
+        self.local_executor = LocalExecutor()
+
+        # Initialize GCE launcher with full config (DEPRECATED)
         gce_bucket = None
         gce_project = None
         gce_zone = "us-central1-a"
@@ -647,14 +661,15 @@ class StageExecutor:
         return str(log_path)
 
     def _build_docker_image(self, workspace: str, version: str, profile_name: str | None = None) -> str:
-        """Build Docker image for this run.
+        """Build Docker image for this run using execution provider.
 
         Args:
             workspace: Workspace name
             version: Version identifier
             profile_name: Optional profile name to determine base image
 
-        Returns image tag (local for local backend, registry for GCE backend).
+        Returns:
+            Image tag (provider-specific, may include registry prefix)
         """
         from goldfish.infra.profiles import resolve_base_image
 
@@ -678,43 +693,19 @@ class StageExecutor:
                         pass  # No project configured
             base_image = resolve_base_image(profile, artifact_registry)
 
-        # Build image using DockerBuilder
-        local_image_tag = self.docker_builder.build_image(
-            workspace_dir=workspace_dir,
-            workspace_name=workspace,
-            version=version,
-            use_cache=True,
+        # Build image tag
+        image_tag = f"goldfish-{workspace}-{version}"
+
+        # Use execution provider to build image
+        # Provider will handle push to registry if needed
+        final_image_tag = self.execution_provider.build_image(
+            image_tag=image_tag,
+            dockerfile_path=workspace_dir / "Dockerfile",  # Unused by provider
+            context_path=workspace_dir,
             base_image=base_image,
         )
 
-        # If using GCE backend, push to Artifact Registry
-        backend = self.config.jobs.backend
-        if backend == "gce":
-            if not self.config.gce:
-                raise GoldfishError("GCE backend requires gce configuration in goldfish.yaml")
-
-            # Get or create artifact registry URL
-            registry_url = self.config.gce.artifact_registry
-            if not registry_url:
-                # Auto-generate registry URL from project_id
-                project_id = self.config.gce.effective_project_id
-                registry_url = f"us-docker.pkg.dev/{project_id}/goldfish"
-                logger.info(f"Using auto-generated artifact registry: {registry_url}")
-
-                # Ensure the repository exists (create if needed)
-                self._ensure_artifact_registry(project_id, "goldfish")
-
-            # Push image to Artifact Registry
-            registry_image_tag = self.docker_builder.push_image(
-                local_tag=local_image_tag,
-                registry_url=registry_url,
-                workspace_name=workspace,
-                version=version,
-            )
-
-            return registry_image_tag
-
-        return local_image_tag
+        return final_image_tag
 
     def _ensure_artifact_registry(self, project_id: str, repo_name: str) -> None:
         """Ensure Artifact Registry repository exists, creating if needed.
@@ -840,9 +831,7 @@ class StageExecutor:
         input_configs: dict | None = None,
         output_configs: dict | None = None,
     ):
-        """Launch Docker container (local) or GCE instance."""
-        backend = self.config.jobs.backend
-
+        """Launch stage execution using execution provider."""
         # Build stage config for goldfish.io
         stage_config = {
             "stage": stage_name,
@@ -850,19 +839,18 @@ class StageExecutor:
             "outputs": output_configs or {},
         }
 
-        if backend == "local":
-            # Create work directory for this run
-            run_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id
-            run_dir.mkdir(parents=True, exist_ok=True)
+        # Create work directory for this run
+        run_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
 
-            # Create inputs and outputs directories
-            inputs_dir = run_dir / "inputs"
-            outputs_dir = run_dir / "outputs"
-            inputs_dir.mkdir(exist_ok=True)
-            outputs_dir.mkdir(exist_ok=True)
+        # Create inputs and outputs directories
+        inputs_dir = run_dir / "inputs"
+        outputs_dir = run_dir / "outputs"
+        inputs_dir.mkdir(exist_ok=True)
+        outputs_dir.mkdir(exist_ok=True)
 
-            # Generate entrypoint script
-            entrypoint_script = f"""#!/bin/bash
+        # Generate entrypoint script
+        entrypoint_script = f"""#!/bin/bash
 set -euo pipefail
 
 echo "Running stage: {stage_name}"
@@ -872,65 +860,51 @@ python -m modules.{stage_name}
 echo "Stage completed successfully"
 """
 
-            # Launch container using LocalExecutor
-            self.local_executor.launch_container(
-                image_tag=image_tag,
-                stage_run_id=stage_run_id,
-                entrypoint_script=entrypoint_script,
-                stage_config=stage_config,
-                work_dir=run_dir,
-                inputs_dir=inputs_dir,
-                outputs_dir=outputs_dir,
-            )
+        # Load stage config and resolve profile for resource hints
+        stage_config_yaml = self._load_stage_config(workspace, stage_name)
+        profile = self._resolve_profile_from_config(stage_config_yaml)
 
-        elif backend == "gce":
-            # Load stage config and resolve profile
-            stage_config_yaml = self._load_stage_config(workspace, stage_name)
-            profile = self._resolve_profile_from_config(stage_config_yaml)
+        # Prepare launch parameters from profile
+        machine_type = "n1-standard-4"
+        gpu_type = None
+        gpu_count = 0
+        profile_hints = {}
 
-            # Prepare launch parameters
-            machine_type = "n1-standard-4"
-            gpu_type = None
-            gpu_count = 0
-            zones = None
-            use_capacity_search = False
+        if profile:
+            machine_type = profile["machine_type"]
+            gpu_info = profile.get("gpu", {})
+            if gpu_info.get("type") != "none":
+                gpu_type = gpu_info.get("accelerator")
+                gpu_count = gpu_info.get("count", 0)
 
-            if profile:
-                # Use profile for GCE launch
-                machine_type = profile["machine_type"]
-                gpu_info = profile.get("gpu", {})
-                if gpu_info.get("type") != "none":
-                    gpu_type = gpu_info.get("accelerator")
-                    gpu_count = gpu_info.get("count", 0)
-                zones = profile.get("zones")
-                use_capacity_search = True
+            # Pass zones and capacity search hints to provider
+            if profile.get("zones"):
+                profile_hints["zones"] = profile["zones"]
+            profile_hints["use_capacity_search"] = True
 
-                # Update GCE launcher with profile as resource
-                self.gce_launcher.resources = [profile]
+        # Launch using execution provider
+        result = self.execution_provider.launch_stage(
+            image_tag=image_tag,
+            stage_run_id=stage_run_id,
+            entrypoint_script=entrypoint_script,
+            stage_config=stage_config,
+            work_dir=run_dir,
+            inputs_dir=inputs_dir,
+            outputs_dir=outputs_dir,
+            machine_type=machine_type,
+            gpu_type=gpu_type,
+            gpu_count=gpu_count,
+            profile_hints=profile_hints,
+        )
 
-            # Launch on GCE (gpu_preference from config is passed via GCELauncher init)
-            self.gce_launcher.launch_instance(
-                image_tag=image_tag,
-                stage_run_id=stage_run_id,
-                entrypoint_script=f"""#!/bin/bash
-set -euo pipefail
+        # Store hyperlink in database if provided
+        if result.hyperlink:
+            # TODO: Add hyperlink column to stage_runs table
+            logger.info(f"Stage run hyperlink: {result.hyperlink}")
 
-echo "Running stage: {stage_name}"
-cd /app
-python -m modules.{stage_name}
-
-echo "Stage completed successfully"
-""",
-                stage_config=stage_config,
-                work_dir=self.dev_repo / ".goldfish" / "runs" / stage_run_id,
-                machine_type=machine_type,
-                gpu_type=gpu_type,
-                gpu_count=gpu_count,
-                zones=zones,
-                use_capacity_search=use_capacity_search,
-            )
-        else:
-            raise GoldfishError(f"Backend {backend} not supported for launch")
+        # Store provider metadata
+        if result.metadata:
+            logger.debug(f"Stage run metadata: {result.metadata}")
 
     def _finalize_stage_run(self, stage_run_id: str, backend: str, status: str) -> None:
         """Handle terminal status: record outputs, fetch logs, update status."""
@@ -951,8 +925,11 @@ echo "Stage completed successfully"
         workspace = stage_run["workspace_name"]
         stage_name_from_db = stage_run["stage_name"]
 
+        # Determine if we're using GCS-based storage (for output paths)
+        # TODO: Use storage provider to determine output base path
+        provider_name = self.config.jobs.effective_storage_provider
         gcs_base = None
-        if backend == "gce" and self.config.gcs and self.config.gcs.bucket:
+        if provider_name == "gcs" and self.config.gcs and self.config.gcs.bucket:
             bucket = self.config.gcs.bucket
             bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
             gcs_base = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/outputs"
@@ -972,14 +949,12 @@ echo "Stage completed successfully"
                 )
                 raise
 
+        # Fetch logs using execution provider
         logs = ""
         try:
-            if backend == "local":
-                logs = self.local_executor.get_container_logs(stage_run_id, tail_lines=STAGE_LOG_TAIL_FOR_FINALIZE)
-            elif backend == "gce":
-                logs = self.gce_launcher.get_instance_logs(stage_run_id, tail_lines=STAGE_LOG_TAIL_FOR_FINALIZE)
-                if not logs:
-                    logs = "[GCE logs unavailable - instance may have been deleted or logs not synced]"
+            logs = self.execution_provider.get_logs(stage_run_id, tail=STAGE_LOG_TAIL_FOR_FINALIZE)
+            if not logs:
+                logs = "[Logs unavailable - instance may have been deleted or logs not synced]"
         except Exception as e:
             logs = f"[Error fetching logs: {e}]"
 
