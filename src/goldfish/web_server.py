@@ -906,6 +906,7 @@ def get_project_html(project: ProjectInfo) -> str:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{project.name} - Goldfish Provenance</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
         /* Dieter Rams inspired design - less but better */
         :root {{
@@ -1177,6 +1178,184 @@ def get_project_html(project: ProjectInfo) -> str:
         .tab-content {{ display: none; }}
         .tab-content.active {{ display: block; }}
 
+        /* Modal */
+        .modal {{
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+        }}
+
+        .modal.active {{ display: flex; }}
+
+        .modal-content {{
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            max-width: 800px;
+            width: 100%;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+            position: relative;
+        }}
+
+        .modal-header {{
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            background: var(--bg-secondary);
+            z-index: 1;
+        }}
+
+        .modal-title {{
+            font-size: 1.3rem;
+            font-weight: 500;
+            color: var(--text-primary);
+        }}
+
+        .modal-close {{
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 0.25rem 0.5rem;
+            line-height: 1;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }}
+
+        .modal-close:hover {{
+            background: var(--bg-primary);
+            color: var(--text-primary);
+        }}
+
+        .modal-body {{
+            padding: 1.5rem;
+        }}
+
+        .detail-section {{
+            margin-bottom: 2rem;
+        }}
+
+        .detail-section:last-child {{ margin-bottom: 0; }}
+
+        .detail-section-title {{
+            font-size: 1.1rem;
+            font-weight: 500;
+            color: var(--goldfish-orange);
+            margin-bottom: 1rem;
+        }}
+
+        .detail-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+        }}
+
+        .detail-item {{
+            padding: 0.75rem;
+            background: var(--bg-primary);
+            border-radius: 4px;
+        }}
+
+        .detail-label {{
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.25rem;
+        }}
+
+        .detail-value {{
+            font-size: 1rem;
+            color: var(--text-primary);
+            font-weight: 500;
+        }}
+
+        .detail-list {{
+            list-style: none;
+        }}
+
+        .detail-list li {{
+            padding: 0.75rem;
+            border-bottom: 1px solid var(--border-color);
+        }}
+
+        .detail-list li:last-child {{ border-bottom: none; }}
+
+        /* Graph */
+        #graph-svg {{
+            width: 100%;
+            height: 600px;
+            background: var(--bg-secondary);
+            border-radius: 8px;
+            box-shadow: var(--shadow);
+        }}
+
+        .graph-node {{
+            cursor: pointer;
+            transition: all 0.2s;
+        }}
+
+        .graph-node:hover {{
+            stroke: var(--goldfish-orange);
+            stroke-width: 3px;
+        }}
+
+        .graph-node-completed {{ fill: #4CAF50; }}
+        .graph-node-running {{ fill: var(--goldfish-orange); }}
+        .graph-node-failed {{ fill: #F44336; }}
+        .graph-node-pending {{ fill: var(--text-secondary); }}
+
+        .graph-link {{
+            stroke: var(--border-color);
+            stroke-opacity: 0.6;
+            stroke-width: 2px;
+        }}
+
+        .graph-link-hover {{
+            stroke: var(--goldfish-orange);
+            stroke-opacity: 1;
+            stroke-width: 3px;
+        }}
+
+        .graph-label {{
+            font-size: 10px;
+            fill: var(--text-primary);
+            pointer-events: none;
+        }}
+
+        .graph-controls {{
+            margin-bottom: 1rem;
+            display: flex;
+            gap: 0.5rem;
+        }}
+
+        .graph-control-btn {{
+            padding: 0.5rem 1rem;
+            background: var(--bg-secondary);
+            border: 2px solid var(--border-color);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }}
+
+        .graph-control-btn:hover {{
+            border-color: var(--goldfish-orange);
+            color: var(--goldfish-orange);
+        }}
+
         /* Timeline */
         .timeline {{
             position: relative;
@@ -1223,6 +1402,64 @@ def get_project_html(project: ProjectInfo) -> str:
             margin-bottom: 0.5rem;
         }}
 
+        /* Search/Filter */
+        .search-box {{
+            margin-bottom: 1.5rem;
+            position: relative;
+        }}
+
+        .search-input {{
+            width: 100%;
+            padding: 0.75rem 1rem 0.75rem 2.5rem;
+            border: 2px solid var(--border-color);
+            border-radius: 6px;
+            font-size: 1rem;
+            background: var(--bg-secondary);
+            transition: all 0.2s;
+        }}
+
+        .search-input:focus {{
+            outline: none;
+            border-color: var(--goldfish-orange);
+            box-shadow: 0 0 0 3px rgba(255, 107, 53, 0.1);
+        }}
+
+        .search-icon {{
+            position: absolute;
+            left: 0.75rem;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-secondary);
+            pointer-events: none;
+        }}
+
+        .filter-tags {{
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }}
+
+        .filter-tag {{
+            padding: 0.5rem 1rem;
+            background: var(--bg-secondary);
+            border: 2px solid var(--border-color);
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }}
+
+        .filter-tag:hover {{
+            border-color: var(--goldfish-orange-light);
+        }}
+
+        .filter-tag.active {{
+            background: var(--goldfish-orange);
+            color: white;
+            border-color: var(--goldfish-orange);
+        }}
+
         /* Empty state */
         .empty-state {{
             text-align: center;
@@ -1263,6 +1500,15 @@ def get_project_html(project: ProjectInfo) -> str:
         <!-- Workspaces View -->
         <div id="view-workspaces">
             <h2 style="margin-bottom: 1.5rem; font-weight: 400;">Workspaces</h2>
+            <div class="search-box">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="workspace-search" class="search-input" placeholder="Search workspaces by name or description..." oninput="filterWorkspaces()">
+            </div>
+            <div class="filter-tags" id="workspace-filters">
+                <div class="filter-tag active" data-filter="all" onclick="setWorkspaceFilter('all')">All</div>
+                <div class="filter-tag" data-filter="mounted" onclick="setWorkspaceFilter('mounted')">Mounted</div>
+                <div class="filter-tag" data-filter="hibernating" onclick="setWorkspaceFilter('hibernating')">Hibernating</div>
+            </div>
             <div id="workspaces-container" class="workspace-grid">
                 <div class="loading">
                     <div class="spinner"></div>
@@ -1274,6 +1520,16 @@ def get_project_html(project: ProjectInfo) -> str:
         <!-- Runs View -->
         <div id="view-runs" class="hidden">
             <h2 style="margin-bottom: 1.5rem; font-weight: 400;">Recent Runs</h2>
+            <div class="search-box">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="runs-search" class="search-input" placeholder="Search runs by workspace, stage, or pipeline..." oninput="filterRuns()">
+            </div>
+            <div class="filter-tags" id="run-filters">
+                <div class="filter-tag active" data-filter="all" onclick="setRunFilter('all')">All</div>
+                <div class="filter-tag" data-filter="running" onclick="setRunFilter('running')">Running</div>
+                <div class="filter-tag" data-filter="completed" onclick="setRunFilter('completed')">Completed</div>
+                <div class="filter-tag" data-filter="failed" onclick="setRunFilter('failed')">Failed</div>
+            </div>
             <div class="tabs">
                 <button class="tab active" onclick="showRunsTab('stage')">Stage Runs</button>
                 <button class="tab" onclick="showRunsTab('pipeline')">Pipeline Runs</button>
@@ -1299,14 +1555,34 @@ def get_project_html(project: ProjectInfo) -> str:
         <!-- Graph View -->
         <div id="view-graph" class="hidden">
             <h2 style="margin-bottom: 1.5rem; font-weight: 400;">Provenance Graph</h2>
+            <div class="graph-controls">
+                <button class="graph-control-btn" onclick="resetGraphZoom()">Reset Zoom</button>
+                <button class="graph-control-btn" onclick="centerGraph()">Center</button>
+                <select id="workspace-filter-graph" class="graph-control-btn" onchange="loadGraph()">
+                    <option value="">All Workspaces</option>
+                </select>
+            </div>
             <div id="graph-container">
-                <div class="loading">
-                    <div class="spinner"></div>
-                    <span>Loading provenance graph...</span>
-                </div>
+                <svg id="graph-svg"></svg>
             </div>
         </div>
     </main>
+
+    <!-- Detail Modal -->
+    <div id="detail-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title" id="modal-title">Details</h2>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <span>Loading...</span>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <script>
         const PROJECT_ID = '{project.url_id}';
@@ -1315,11 +1591,15 @@ def get_project_html(project: ProjectInfo) -> str:
         // State
         let currentView = 'workspaces';
         let currentRunsTab = 'stage';
+        let workspaceFilter = 'all';
+        let runFilter = 'all';
         let data = {{
             workspaces: [],
             stageRuns: [],
             pipelineRuns: [],
-            graph: null
+            graph: null,
+            filteredWorkspaces: [],
+            filteredRuns: []
         }};
 
         // View switching
@@ -1370,13 +1650,79 @@ def get_project_html(project: ProjectInfo) -> str:
             }}
         }}
 
+        // Filter functions
+        function setWorkspaceFilter(filter) {{
+            workspaceFilter = filter;
+
+            // Update filter tags
+            document.querySelectorAll('#workspace-filters .filter-tag').forEach(tag => {{
+                tag.classList.toggle('active', tag.dataset.filter === filter);
+            }});
+
+            filterWorkspaces();
+        }}
+
+        function filterWorkspaces() {{
+            const searchTerm = document.getElementById('workspace-search').value.toLowerCase();
+
+            data.filteredWorkspaces = data.workspaces.filter(ws => {{
+                // Filter by search term
+                const matchesSearch = !searchTerm ||
+                    ws.name.toLowerCase().includes(searchTerm) ||
+                    (ws.description && ws.description.toLowerCase().includes(searchTerm));
+
+                // Filter by status
+                const matchesFilter = workspaceFilter === 'all' ||
+                    (workspaceFilter === 'mounted' && ws.mount_status === 'mounted') ||
+                    (workspaceFilter === 'hibernating' && ws.mount_status === 'hibernating');
+
+                return matchesSearch && matchesFilter;
+            }});
+
+            renderWorkspaces();
+        }}
+
+        function setRunFilter(filter) {{
+            runFilter = filter;
+
+            // Update filter tags
+            document.querySelectorAll('#run-filters .filter-tag').forEach(tag => {{
+                tag.classList.toggle('active', tag.dataset.filter === filter);
+            }});
+
+            filterRuns();
+        }}
+
+        function filterRuns() {{
+            const searchTerm = document.getElementById('runs-search').value.toLowerCase();
+
+            data.filteredRuns = data.stageRuns.filter(run => {{
+                // Filter by search term
+                const matchesSearch = !searchTerm ||
+                    run.workspace_name.toLowerCase().includes(searchTerm) ||
+                    run.stage_name.toLowerCase().includes(searchTerm) ||
+                    (run.pipeline_name && run.pipeline_name.toLowerCase().includes(searchTerm));
+
+                // Filter by status
+                const matchesFilter = runFilter === 'all' ||
+                    (runFilter === 'running' && run.status === 'running') ||
+                    (runFilter === 'completed' && run.status === 'completed') ||
+                    (runFilter === 'failed' && run.status === 'failed');
+
+                return matchesSearch && matchesFilter;
+            }});
+
+            renderStageRuns();
+        }}
+
         // API calls
         async function loadWorkspaces() {{
             try {{
                 const response = await fetch(API_BASE + '/workspaces');
                 const result = await response.json();
                 data.workspaces = result.workspaces;
-                renderWorkspaces();
+                data.filteredWorkspaces = data.workspaces;
+                filterWorkspaces();
             }} catch (error) {{
                 console.error('Failed to load workspaces:', error);
                 document.getElementById('workspaces-container').innerHTML =
@@ -1389,7 +1735,8 @@ def get_project_html(project: ProjectInfo) -> str:
                 const response = await fetch(API_BASE + '/runs?limit=100');
                 const result = await response.json();
                 data.stageRuns = result.runs;
-                renderStageRuns();
+                data.filteredRuns = data.stageRuns;
+                filterRuns();
             }} catch (error) {{
                 console.error('Failed to load stage runs:', error);
                 document.getElementById('stage-runs-container').innerHTML =
@@ -1412,27 +1759,252 @@ def get_project_html(project: ProjectInfo) -> str:
 
         async function loadGraph() {{
             try {{
-                const response = await fetch(API_BASE + '/graph');
+                const workspace = document.getElementById('workspace-filter-graph')?.value || '';
+                const url = workspace ? `${{API_BASE}}/graph?workspace=${{encodeURIComponent(workspace)}}` : `${{API_BASE}}/graph`;
+                const response = await fetch(url);
                 data.graph = await response.json();
                 renderGraph();
             }} catch (error) {{
                 console.error('Failed to load graph:', error);
-                document.getElementById('graph-container').innerHTML =
-                    '<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>Failed to load graph</p></div>';
+                const svg = document.getElementById('graph-svg');
+                if (svg) {{
+                    svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="var(--text-secondary)">Failed to load graph</text>';
+                }}
             }}
         }}
+
+        // Modal functions
+        function openModal() {{
+            document.getElementById('detail-modal').classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }}
+
+        function closeModal() {{
+            document.getElementById('detail-modal').classList.remove('active');
+            document.body.style.overflow = '';
+        }}
+
+        async function showWorkspaceDetails(workspaceName) {{
+            openModal();
+            document.getElementById('modal-title').textContent = workspaceName;
+            document.getElementById('modal-body').innerHTML = '<div class="loading"><div class="spinner"></div><span>Loading...</span></div>';
+
+            try {{
+                const response = await fetch(API_BASE + '/workspace/' + encodeURIComponent(workspaceName));
+                const details = await response.json();
+
+                const workspace = details.workspace;
+                const versions = details.versions || [];
+                const runs = details.recent_runs || [];
+
+                document.getElementById('modal-body').innerHTML = `
+                    <div class="detail-section">
+                        <div class="detail-section-title">Workspace Information</div>
+                        <div class="detail-grid">
+                            <div class="detail-item">
+                                <div class="detail-label">Name</div>
+                                <div class="detail-value">${{workspace.workspace_name}}</div>
+                            </div>
+                            <div class="detail-item">
+                                <div class="detail-label">Created</div>
+                                <div class="detail-value">${{new Date(workspace.created_at).toLocaleString()}}</div>
+                            </div>
+                            ${{workspace.parent_workspace ? `
+                            <div class="detail-item">
+                                <div class="detail-label">Parent</div>
+                                <div class="detail-value">${{workspace.parent_workspace}}</div>
+                            </div>
+                            ` : ''}}
+                            ${{workspace.mount_status ? `
+                            <div class="detail-item">
+                                <div class="detail-label">Mount Status</div>
+                                <div class="detail-value">${{workspace.mount_status}}</div>
+                            </div>
+                            ` : ''}}
+                        </div>
+                        ${{workspace.description ? `
+                        <div style="margin-top: 1rem;">
+                            <div class="detail-label">Description</div>
+                            <p style="margin-top: 0.5rem;">${{workspace.description}}</p>
+                        </div>
+                        ` : ''}}
+                    </div>
+
+                    <div class="detail-section">
+                        <div class="detail-section-title">Versions (${{versions.length}})</div>
+                        ${{versions.length > 0 ? `
+                        <ul class="detail-list">
+                            ${{versions.slice(0, 10).map(v => `
+                            <li>
+                                <strong>${{v.version}}</strong>
+                                <div style="font-size: 0.9rem; color: var(--text-secondary); margin-top: 0.25rem;">
+                                    Created: ${{new Date(v.created_at).toLocaleString()}} •
+                                    By: ${{v.created_by}}
+                                </div>
+                            </li>
+                            `).join('')}}
+                            ${{versions.length > 10 ? `<li style="color: var(--text-secondary); font-style: italic;">+ ${{versions.length - 10}} more versions</li>` : ''}}
+                        </ul>
+                        ` : '<p style="color: var(--text-secondary);">No versions yet</p>'}}
+                    </div>
+
+                    <div class="detail-section">
+                        <div class="detail-section-title">Recent Runs (${{runs.length}})</div>
+                        ${{runs.length > 0 ? `
+                        <ul class="detail-list">
+                            ${{runs.slice(0, 10).map(r => `
+                            <li style="cursor: pointer;" onclick="showRunDetails('${{r.id}}')">
+                                <strong>${{r.stage_name}}</strong>
+                                <span class="status status-${{r.status}}">${{r.status}}</span>
+                                <div style="font-size: 0.9rem; color: var(--text-secondary); margin-top: 0.25rem;">
+                                    Started: ${{new Date(r.started_at).toLocaleString()}}
+                                    ${{r.pipeline_name ? ` • Pipeline: ${{r.pipeline_name}}` : ''}}
+                                </div>
+                            </li>
+                            `).join('')}}
+                            ${{runs.length > 10 ? `<li style="color: var(--text-secondary); font-style: italic;">+ ${{runs.length - 10}} more runs</li>` : ''}}
+                        </ul>
+                        ` : '<p style="color: var(--text-secondary);">No runs yet</p>'}}
+                    </div>
+                `;
+            }} catch (error) {{
+                console.error('Failed to load workspace details:', error);
+                document.getElementById('modal-body').innerHTML =
+                    '<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>Failed to load details</p></div>';
+            }}
+        }}
+
+        async function showRunDetails(runId) {{
+            openModal();
+            document.getElementById('modal-title').textContent = 'Run ' + runId;
+            document.getElementById('modal-body').innerHTML = '<div class="loading"><div class="spinner"></div><span>Loading...</span></div>';
+
+            try {{
+                const response = await fetch(API_BASE + '/run/' + encodeURIComponent(runId));
+                const details = await response.json();
+
+                const run = details.run;
+                const signals = details.signals || [];
+
+                const inputs = signals.filter(s => s.consumed_by === runId);
+                const outputs = signals.filter(s => s.stage_run_id === runId);
+
+                document.getElementById('modal-body').innerHTML = `
+                    <div class="detail-section">
+                        <div class="detail-section-title">Run Information</div>
+                        <div class="detail-grid">
+                            <div class="detail-item">
+                                <div class="detail-label">Run ID</div>
+                                <div class="detail-value">${{run.id}}</div>
+                            </div>
+                            <div class="detail-item">
+                                <div class="detail-label">Workspace</div>
+                                <div class="detail-value">${{run.workspace_name}}</div>
+                            </div>
+                            <div class="detail-item">
+                                <div class="detail-label">Stage</div>
+                                <div class="detail-value">${{run.stage_name}}</div>
+                            </div>
+                            <div class="detail-item">
+                                <div class="detail-label">Status</div>
+                                <div class="detail-value"><span class="status status-${{run.status}}">${{run.status}}</span></div>
+                            </div>
+                            <div class="detail-item">
+                                <div class="detail-label">Started</div>
+                                <div class="detail-value">${{new Date(run.started_at).toLocaleString()}}</div>
+                            </div>
+                            ${{run.completed_at ? `
+                            <div class="detail-item">
+                                <div class="detail-label">Completed</div>
+                                <div class="detail-value">${{new Date(run.completed_at).toLocaleString()}}</div>
+                            </div>
+                            ` : ''}}
+                            ${{run.pipeline_name ? `
+                            <div class="detail-item">
+                                <div class="detail-label">Pipeline</div>
+                                <div class="detail-value">${{run.pipeline_name}}</div>
+                            </div>
+                            ` : ''}}
+                            ${{run.backend_type ? `
+                            <div class="detail-item">
+                                <div class="detail-label">Backend</div>
+                                <div class="detail-value">${{run.backend_type}}</div>
+                            </div>
+                            ` : ''}}
+                        </div>
+                    </div>
+
+                    <div class="detail-section">
+                        <div class="detail-section-title">Input Signals (${{inputs.length}})</div>
+                        ${{inputs.length > 0 ? `
+                        <ul class="detail-list">
+                            ${{inputs.map(s => `
+                            <li>
+                                <strong>${{s.signal_name}}</strong>
+                                <span style="color: var(--text-secondary);">(${{s.signal_type}})</span>
+                                ${{s.storage_location ? `
+                                <div style="font-size: 0.9rem; color: var(--text-secondary); margin-top: 0.25rem; word-break: break-all;">
+                                    ${{s.storage_location}}
+                                </div>
+                                ` : ''}}
+                            </li>
+                            `).join('')}}
+                        </ul>
+                        ` : '<p style="color: var(--text-secondary);">No input signals</p>'}}
+                    </div>
+
+                    <div class="detail-section">
+                        <div class="detail-section-title">Output Signals (${{outputs.length}})</div>
+                        ${{outputs.length > 0 ? `
+                        <ul class="detail-list">
+                            ${{outputs.map(s => `
+                            <li>
+                                <strong>${{s.signal_name}}</strong>
+                                <span style="color: var(--text-secondary);">(${{s.signal_type}})</span>
+                                ${{s.storage_location ? `
+                                <div style="font-size: 0.9rem; color: var(--text-secondary); margin-top: 0.25rem; word-break: break-all;">
+                                    ${{s.storage_location}}
+                                </div>
+                                ` : ''}}
+                            </li>
+                            `).join('')}}
+                        </ul>
+                        ` : '<p style="color: var(--text-secondary);">No output signals</p>'}}
+                    </div>
+                `;
+            }} catch (error) {{
+                console.error('Failed to load run details:', error);
+                document.getElementById('modal-body').innerHTML =
+                    '<div class="empty-state"><div class="empty-state-icon">⚠️</div><p>Failed to load details</p></div>';
+            }}
+        }}
+
+        // Close modal on background click
+        document.getElementById('detail-modal').addEventListener('click', function(e) {{
+            if (e.target.id === 'detail-modal') {{
+                closeModal();
+            }}
+        }});
+
+        // Close modal on Escape key
+        document.addEventListener('keydown', function(e) {{
+            if (e.key === 'Escape') {{
+                closeModal();
+            }}
+        }});
 
         // Rendering
         function renderWorkspaces() {{
             const container = document.getElementById('workspaces-container');
 
-            if (data.workspaces.length === 0) {{
-                container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📁</div><p>No workspaces found</p></div>';
+            if (data.filteredWorkspaces.length === 0) {{
+                const message = data.workspaces.length === 0 ? 'No workspaces found' : 'No workspaces match the current filters';
+                container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">📁</div><p>${{message}}</p></div>`;
                 return;
             }}
 
-            container.innerHTML = data.workspaces.map(ws => `
-                <div class="workspace-card">
+            container.innerHTML = data.filteredWorkspaces.map(ws => `
+                <div class="workspace-card" style="cursor: pointer;" onclick="showWorkspaceDetails('${{ws.name}}')">
                     <h3>${{ws.name}}</h3>
                     ${{ws.description ? `<p>${{ws.description}}</p>` : ''}}
                     ${{ws.mount_status ? `<span class="status status-${{ws.mount_status}}">${{ws.mount_status}}</span>` : ''}}
@@ -1447,14 +2019,15 @@ def get_project_html(project: ProjectInfo) -> str:
         function renderStageRuns() {{
             const container = document.getElementById('stage-runs-container');
 
-            if (data.stageRuns.length === 0) {{
-                container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🎯</div><p>No stage runs found</p></div>';
+            if (data.filteredRuns.length === 0) {{
+                const message = data.stageRuns.length === 0 ? 'No stage runs found' : 'No runs match the current filters';
+                container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">🎯</div><p>${{message}}</p></div>`;
                 return;
             }}
 
-            container.innerHTML = '<div class="timeline">' + data.stageRuns.map(run => `
+            container.innerHTML = '<div class="timeline">' + data.filteredRuns.map(run => `
                 <div class="timeline-item">
-                    <div class="timeline-content">
+                    <div class="timeline-content" style="cursor: pointer;" onclick="showRunDetails('${{run.id}}')">
                         <div class="timeline-time">${{new Date(run.started_at).toLocaleString()}}</div>
                         <strong>${{run.workspace_name}}</strong> / ${{run.stage_name}}
                         <span class="status status-${{run.status}}">${{run.status}}</span>
@@ -1486,29 +2059,178 @@ def get_project_html(project: ProjectInfo) -> str:
             `).join('') + '</div>';
         }}
 
-        function renderGraph() {{
-            const container = document.getElementById('graph-container');
+        // D3.js graph state
+        let graphSimulation = null;
+        let graphZoom = null;
 
+        function renderGraph() {{
             if (!data.graph || data.graph.nodes.length === 0) {{
-                container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">🕸️</div><p>No provenance data to visualize</p></div>';
+                document.getElementById('graph-svg').innerHTML = '';
                 return;
             }}
 
-            const nodes = data.graph.nodes.length;
-            const edges = data.graph.edges.length;
+            // Clear existing graph
+            d3.select('#graph-svg').selectAll('*').remove();
 
-            container.innerHTML = `
-                <div class="card" style="width: 100%; margin: 0;">
-                    <h3 style="margin-bottom: 1rem;">Provenance Graph</h3>
-                    <p style="color: var(--text-secondary); margin-bottom: 1rem;">
-                        ${{nodes}} stage runs connected by ${{edges}} data dependencies
-                    </p>
-                    <div id="graph"></div>
-                    <p style="margin-top: 1rem; color: var(--text-secondary); font-size: 0.9rem;">
-                        Interactive graph visualization coming soon. This will show the full data lineage across all stages.
-                    </p>
-                </div>
-            `;
+            const svg = d3.select('#graph-svg');
+            const container = svg.node().getBoundingClientRect();
+            const width = container.width;
+            const height = container.height;
+
+            // Create zoom behavior
+            graphZoom = d3.zoom()
+                .scaleExtent([0.1, 4])
+                .on('zoom', (event) => {{
+                    g.attr('transform', event.transform);
+                }});
+
+            svg.call(graphZoom);
+
+            // Main group for zoom/pan
+            const g = svg.append('g');
+
+            // Create copy of data for simulation
+            const nodes = data.graph.nodes.map(d => ({{...d}}));
+            const links = data.graph.edges.map(d => ({{
+                source: d.source,
+                target: d.target,
+                signal: d.signal,
+                type: d.type
+            }}));
+
+            // Create force simulation
+            graphSimulation = d3.forceSimulation(nodes)
+                .force('link', d3.forceLink(links).id(d => d.id).distance(100))
+                .force('charge', d3.forceManyBody().strength(-300))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(30));
+
+            // Create arrow markers for directed edges
+            svg.append('defs').append('marker')
+                .attr('id', 'arrowhead')
+                .attr('viewBox', '-0 -5 10 10')
+                .attr('refX', 25)
+                .attr('refY', 0)
+                .attr('orient', 'auto')
+                .attr('markerWidth', 8)
+                .attr('markerHeight', 8)
+                .append('svg:path')
+                .attr('d', 'M 0,-5 L 10 ,0 L 0,5')
+                .attr('fill', '#E0E0E0')
+                .style('stroke', 'none');
+
+            // Create links
+            const link = g.append('g')
+                .selectAll('line')
+                .data(links)
+                .join('line')
+                .attr('class', 'graph-link')
+                .attr('marker-end', 'url(#arrowhead)')
+                .on('mouseover', function(event, d) {{
+                    d3.select(this).classed('graph-link-hover', true);
+
+                    // Show tooltip
+                    const tooltip = g.append('text')
+                        .attr('class', 'link-tooltip')
+                        .attr('x', (d.source.x + d.target.x) / 2)
+                        .attr('y', (d.source.y + d.target.y) / 2)
+                        .attr('text-anchor', 'middle')
+                        .attr('fill', 'var(--goldfish-orange)')
+                        .attr('font-weight', 'bold')
+                        .text(`${{d.signal}} (${{d.type}})`);
+                }})
+                .on('mouseout', function() {{
+                    d3.select(this).classed('graph-link-hover', false);
+                    g.selectAll('.link-tooltip').remove();
+                }});
+
+            // Create nodes
+            const node = g.append('g')
+                .selectAll('circle')
+                .data(nodes)
+                .join('circle')
+                .attr('class', d => `graph-node graph-node-${{d.status}}`)
+                .attr('r', 12)
+                .attr('stroke', '#fff')
+                .attr('stroke-width', 2)
+                .on('click', (event, d) => {{
+                    event.stopPropagation();
+                    showRunDetails(d.id);
+                }})
+                .call(d3.drag()
+                    .on('start', dragStarted)
+                    .on('drag', dragged)
+                    .on('end', dragEnded));
+
+            // Create labels
+            const label = g.append('g')
+                .selectAll('text')
+                .data(nodes)
+                .join('text')
+                .attr('class', 'graph-label')
+                .attr('text-anchor', 'middle')
+                .attr('dy', -18)
+                .text(d => `${{d.workspace}}/${{d.stage}}`);
+
+            // Update positions on each tick
+            graphSimulation.on('tick', () => {{
+                link
+                    .attr('x1', d => d.source.x)
+                    .attr('y1', d => d.source.y)
+                    .attr('x2', d => d.target.x)
+                    .attr('y2', d => d.target.y);
+
+                node
+                    .attr('cx', d => d.x)
+                    .attr('cy', d => d.y);
+
+                label
+                    .attr('x', d => d.x)
+                    .attr('y', d => d.y);
+            }});
+
+            function dragStarted(event, d) {{
+                if (!event.active) graphSimulation.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+            }}
+
+            function dragged(event, d) {{
+                d.fx = event.x;
+                d.fy = event.y;
+            }}
+
+            function dragEnded(event, d) {{
+                if (!event.active) graphSimulation.alphaTarget(0);
+                d.fx = null;
+                d.fy = null;
+            }}
+
+            // Populate workspace filter dropdown
+            const workspaces = [...new Set(nodes.map(n => n.workspace))].sort();
+            const select = document.getElementById('workspace-filter-graph');
+            const currentValue = select.value;
+            select.innerHTML = '<option value="">All Workspaces</option>' +
+                workspaces.map(ws => `<option value="${{ws}}">${{ws}}</option>`).join('');
+            select.value = currentValue;
+        }}
+
+        function resetGraphZoom() {{
+            if (graphZoom) {{
+                d3.select('#graph-svg')
+                    .transition()
+                    .duration(750)
+                    .call(graphZoom.transform, d3.zoomIdentity);
+            }}
+        }}
+
+        function centerGraph() {{
+            if (graphSimulation) {{
+                const svg = d3.select('#graph-svg');
+                const container = svg.node().getBoundingClientRect();
+                graphSimulation.force('center', d3.forceCenter(container.width / 2, container.height / 2));
+                graphSimulation.alpha(0.3).restart();
+            }}
         }}
 
         // Initialize
