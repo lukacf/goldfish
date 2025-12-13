@@ -6,6 +6,7 @@ Composable functions that build shell script fragments for:
 - gcsfuse mounting
 - Disk mounting
 - Docker execution with proper environment
+- Self-deletion and watchdog timeout for cost protection
 """
 
 import shlex
@@ -18,6 +19,130 @@ GPU_DRIVER_RETRY_SLEEP_SEC = 15  # Seconds to sleep between GPU driver retries
 GCSFUSE_MAX_ATTEMPTS = 5  # Maximum attempts to mount gcsfuse
 GCSFUSE_RETRY_SLEEP_SEC = 2  # Seconds to sleep between gcsfuse retries
 DEFAULT_SHM_SIZE = "16g"  # Default Docker shared memory size
+
+
+def self_deletion_section() -> str:
+    """Generate self-deletion function and trap.
+
+    This ensures the instance deletes itself on ANY exit - success, failure,
+    signal, or timeout. Critical for cost protection.
+
+    Returns:
+        Shell script fragment with cleanup trap and self-delete function
+    """
+    return """
+# === SELF-DELETION SETUP (Cost Protection Layer 1) ===
+# Get instance metadata for self-deletion
+INSTANCE_NAME=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/name || hostname)
+INSTANCE_ZONE=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone | awk -F/ '{print $NF}' || echo "unknown")
+PROJECT_ID=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/project/project-id || echo "unknown")
+
+self_delete() {
+    echo "=== SELF-DELETING INSTANCE $INSTANCE_NAME in zone $INSTANCE_ZONE ==="
+    log_stage "self_delete_begin" || true
+    # Try to sync any remaining logs before deletion
+    sync || true
+    sleep 2
+    # Delete the instance (this terminates the script)
+    gcloud compute instances delete "$INSTANCE_NAME" --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" --quiet 2>/dev/null || {
+        echo "gcloud delete failed, falling back to shutdown"
+        shutdown -h now || true
+    }
+}
+
+# Trap ensures cleanup runs on ANY exit: normal, error, or signal
+# This is the PRIMARY defense against orphaned instances
+trap 'echo "EXIT TRAP TRIGGERED (exit code: $?)"; self_delete' EXIT
+trap 'echo "SIGTERM received"; exit 143' SIGTERM
+trap 'echo "SIGINT received"; exit 130' SIGINT
+"""
+
+
+def watchdog_section(max_runtime_seconds: int) -> str:
+    """Generate watchdog process that force-kills after timeout.
+
+    This is the SECONDARY defense - if the main process hangs indefinitely,
+    the watchdog will eventually trigger and delete the instance.
+
+    Args:
+        max_runtime_seconds: Maximum runtime before forced deletion
+
+    Returns:
+        Shell script fragment that starts background watchdog
+    """
+    return f"""
+# === WATCHDOG TIMEOUT (Cost Protection Layer 2) ===
+# Background process that will force-delete after {max_runtime_seconds}s ({max_runtime_seconds // 3600}h {(max_runtime_seconds % 3600) // 60}m)
+(
+    sleep {max_runtime_seconds}
+    echo "=== WATCHDOG TIMEOUT REACHED ({max_runtime_seconds}s) - FORCING DELETION ==="
+    log_stage "watchdog_timeout" || true
+    # Kill all user processes to trigger the EXIT trap
+    pkill -9 -u root || true
+    sleep 5
+    # If we're still alive, force delete directly
+    gcloud compute instances delete "$INSTANCE_NAME" --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" --quiet 2>/dev/null || shutdown -h now || true
+) &
+WATCHDOG_PID=$!
+echo "Watchdog started (PID=$WATCHDOG_PID, timeout={max_runtime_seconds}s)"
+"""
+
+
+def supervisor_section(idle_timeout_seconds: int = 300) -> str:
+    """Generate supervisor process that monitors job health.
+
+    This is Layer 4 defense - monitors the Docker container and detects
+    if the job has stalled (no log output for N seconds).
+
+    Args:
+        idle_timeout_seconds: Seconds of no activity before considering job stalled
+
+    Returns:
+        Shell script fragment that starts background supervisor
+    """
+    return f"""
+# === JOB SUPERVISOR (Cost Protection Layer 4) ===
+# Monitors Docker container health - if no activity for {idle_timeout_seconds}s, assumes stall
+start_supervisor() {{
+    local log_file="$1"
+    (
+        local last_size=0
+        local idle_count=0
+        local check_interval=30
+
+        while true; do
+            sleep $check_interval
+
+            # Check if main script still running
+            if ! pgrep -f "docker run" >/dev/null 2>&1; then
+                echo "SUPERVISOR: Docker container exited, supervisor stopping"
+                break
+            fi
+
+            # Check log file growth
+            if [[ -f "$log_file" ]]; then
+                local current_size=$(stat -c%s "$log_file" 2>/dev/null || echo 0)
+                if [[ "$current_size" -eq "$last_size" ]]; then
+                    ((idle_count++))
+                    echo "SUPERVISOR: No log activity for $((idle_count * check_interval))s"
+                    if [[ $((idle_count * check_interval)) -ge {idle_timeout_seconds} ]]; then
+                        echo "=== SUPERVISOR: Job stalled ({idle_timeout_seconds}s no activity) - FORCING EXIT ==="
+                        log_stage "supervisor_stall_detected" || true
+                        # Kill docker container
+                        docker kill $(docker ps -q) 2>/dev/null || true
+                        sleep 5
+                        exit 1
+                    fi
+                else
+                    idle_count=0
+                    last_size=$current_size
+                fi
+            fi
+        done
+    ) &
+    echo "Supervisor started (idle_timeout={idle_timeout_seconds}s)"
+}}
+"""
 
 
 def gpu_driver_section() -> str:
@@ -227,6 +352,7 @@ def build_startup_script(
     pre_run_cmds: Sequence[str] = (),
     post_run_cmds: Sequence[str] = (),
     cmd: str = "",
+    max_runtime_seconds: int | None = None,
 ) -> str:
     """Build complete startup script for GCE instance.
 
@@ -245,6 +371,7 @@ def build_startup_script(
         pre_run_cmds: Commands to run before Docker
         post_run_cmds: Commands to run after Docker
         cmd: Command/script to pass to entrypoint (e.g., "/entrypoint.sh")
+        max_runtime_seconds: Maximum runtime before watchdog kills instance (None=no limit)
 
     Returns:
         Complete startup script as string
@@ -265,18 +392,31 @@ def build_startup_script(
     env_keys = list(env_map.keys())
 
     # Build script parts
+    # IMPORTANT: Order matters! Log section must come before self_deletion (uses log_stage)
+    # Self-deletion trap must be set up early to catch any failures
     parts: list[str] = [
         "#!/bin/bash",
         "set -euxo pipefail",
         "export DEBIAN_FRONTEND=noninteractive",
         stage_log_section(stage_uri),
+        # Self-deletion trap - MUST be early to catch failures in apt-get, driver install, etc.
+        self_deletion_section(),
         'log_stage "startup_begin"',
-        "apt-get update -y",
-        "apt-get install -y ca-certificates gnupg curl docker.io lsb-release",
-        "systemctl enable --now docker || true",
-        'log_stage "docker_ready"',
-        env_exports_block,
     ]
+
+    # Add watchdog if max_runtime specified
+    if max_runtime_seconds is not None and max_runtime_seconds > 0:
+        parts.append(watchdog_section(max_runtime_seconds))
+
+    parts.extend(
+        [
+            "apt-get update -y",
+            "apt-get install -y ca-certificates gnupg curl docker.io lsb-release",
+            "systemctl enable --now docker || true",
+            'log_stage "docker_ready"',
+            env_exports_block,
+        ]
+    )
 
     # GPU driver installation
     parts.append(gpu_driver_section())
@@ -334,8 +474,8 @@ def build_startup_script(
         f"gsutil cp {bucket_mount}/{bucket_path}/logs/exit_code.txt gs://{bucket}/{bucket_path}/logs/exit_code.txt || true"
     )
 
-    # Shutdown
-    parts.append("shutdown -h now || true")
+    # Exit with docker exit code - the EXIT trap will handle self-deletion
+    parts.append('log_stage "cleanup_begin"')
     parts.append("exit $EXIT_CODE")
 
     return "\n".join(parts) + "\n"
