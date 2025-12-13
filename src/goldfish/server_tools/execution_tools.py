@@ -358,11 +358,17 @@ def list_runs(
             err = r["error"].split("\n")[0][:50]
             error_snippet = err + "..." if len(r["error"]) > 50 else err
 
+        # Include attempt and outcome for context
+        attempt_info = f"#{r['attempt_num']}" if r.get("attempt_num") else None
+        outcome = r.get("outcome")  # success, bad_results, or None
+
         compact_runs.append(
             {
                 "run_id": r.get("id") or r.get("stage_run_id"),
                 "stage": r["stage_name"],
+                "attempt": attempt_info,
                 "status": status_str,
+                "outcome": outcome,
                 "started": r.get("started_at", "")[:19] if r.get("started_at") else None,  # Trim to datetime
                 "error": error_snippet,
             }
@@ -415,3 +421,94 @@ def get_pipeline_status(pipeline_run_id: str) -> dict:
     if not result:
         raise GoldfishError(f"Pipeline run not found: {pipeline_run_id}")
     return result
+
+
+@mcp.tool()
+def mark_outcome(
+    run_id: str,
+    outcome: str,
+) -> dict:
+    """Mark the outcome of a completed run.
+
+    Use this to indicate whether a run produced good results or not.
+    Marking 'success' closes the current attempt and starts a new one
+    for subsequent runs.
+
+    Args:
+        run_id: Stage run ID (e.g., "stage-abc123")
+        outcome: 'success' (good results) or 'bad_results' (ran but produced garbage)
+
+    Returns:
+        Dict with success status and updated run info
+    """
+    db = _get_db()
+
+    if outcome not in ("success", "bad_results"):
+        return {
+            "success": False,
+            "error": f"Invalid outcome '{outcome}'. Must be 'success' or 'bad_results'",
+        }
+
+    # Check run exists and is completed
+    run = db.get_stage_run(run_id)
+    if not run:
+        return {"success": False, "error": f"Run not found: {run_id}"}
+
+    if run["status"] != "completed":
+        return {
+            "success": False,
+            "error": f"Can only mark outcome for completed runs. Current status: {run['status']}",
+        }
+
+    updated = db.update_run_outcome(run_id, outcome)
+    if not updated:
+        return {"success": False, "error": "Failed to update outcome"}
+
+    return {
+        "success": True,
+        "run_id": run_id,
+        "outcome": outcome,
+        "message": "Attempt closed - next run will start a new attempt"
+        if outcome == "success"
+        else "Run marked as bad_results - still in current attempt",
+    }
+
+
+@mcp.tool()
+def list_attempts(
+    workspace: str,
+    stage: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """List attempts (grouped runs) for a workspace.
+
+    Attempts group consecutive runs on the same stage. A new attempt starts
+    after a run is marked with outcome='success'. This provides a cleaner
+    view of experiment progress without listing every individual run.
+
+    Args:
+        workspace: Workspace name
+        stage: Optional stage name to filter
+        limit: Max attempts to return (default 20)
+
+    Returns:
+        Dict with attempts summary:
+        - stage: Stage name
+        - attempt: Attempt number (1, 2, 3...)
+        - runs: Total runs in this attempt
+        - completed/failed/success/bad_results: Run counts by status
+        - versions: Version range (e.g., "v5→v12" or "v5")
+        - status: 'closed' (has success), 'open' (still iterating), 'all_failed'
+    """
+    db = _get_db()
+    validate_workspace_name(workspace)
+
+    attempts = db.list_attempts(workspace, stage_name=stage, limit=limit)
+
+    return {
+        "success": True,
+        "workspace": workspace,
+        "stage_filter": stage,
+        "attempts": attempts,
+        "hint": "Use list_runs(workspace, stage) to see individual runs within an attempt",
+    }
