@@ -24,6 +24,11 @@ from goldfish.infra.startup_builder import build_startup_script
 HYPERDISK_PROVISIONED_IOPS = 80000  # IOPS for hyperdisk-balanced
 HYPERDISK_PROVISIONED_THROUGHPUT = 2400  # MB/s for hyperdisk-balanced
 
+# Cost protection defaults - ALWAYS enforced unless explicitly overridden
+# These prevent runaway instances from burning money
+DEFAULT_MAX_RUNTIME_SECONDS = 6 * 3600  # 6 hours - hard limit, instance self-deletes
+DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 600  # 10 minutes - if job uses heartbeat()
+
 
 class GCELauncher:
     """Launch stage runs on Google Compute Engine with full infrastructure support.
@@ -191,7 +196,12 @@ class GCELauncher:
             f'gsutil -m cp -r /mnt/outputs/* "{outputs_gcs_path}/" || true',
         ]
 
-        # Build startup script with proper orchestration
+        # Extract cost protection settings from stage config (with safe defaults)
+        compute_config = stage_config.get("compute", {})
+        max_runtime = compute_config.get("max_runtime_seconds", DEFAULT_MAX_RUNTIME_SECONDS)
+        heartbeat_timeout = compute_config.get("heartbeat_timeout_seconds")  # None = no supervisor
+
+        # Build startup script with proper orchestration and cost protection
         startup_script = build_startup_script(
             bucket=bucket_name,
             bucket_prefix="",
@@ -209,6 +219,9 @@ class GCELauncher:
             gcsfuse=True,
             pre_run_cmds=pre_run_cmds,
             post_run_cmds=post_run_cmds,
+            # Cost protection - ALWAYS set max_runtime to prevent runaway instances
+            max_runtime_seconds=max_runtime,
+            heartbeat_timeout_seconds=heartbeat_timeout,
         )
 
         if use_capacity_search and self.resources:
