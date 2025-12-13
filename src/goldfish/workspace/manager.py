@@ -847,7 +847,7 @@ class WorkspaceManager:
 
         metadata = json.loads(metadata_file.read_text())
         mounted_sha = metadata.get("mounted_sha")
-        workspace = metadata.get("workspace")
+        workspace = metadata.get("workspace_name") or metadata.get("workspace")
 
         if not mounted_sha or not workspace:
             raise GoldfishError(f"Invalid .goldfish-mount metadata in slot {slot}")
