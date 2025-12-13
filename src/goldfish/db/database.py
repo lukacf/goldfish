@@ -43,8 +43,26 @@ class Database:
                 f"Cannot create database directory at '{db_path.parent}': {e}",
                 operation="init",
             ) from e
-        self._init_schema()
-        self._migrate_schema()
+        # For existing databases, run migrations FIRST to add missing columns,
+        # then schema (which creates indexes that may reference new columns).
+        # For fresh databases, schema runs first (creates tables), then migrations (no-op).
+        if self._has_existing_tables():
+            self._migrate_schema()
+            self._init_schema()
+        else:
+            self._init_schema()
+            self._migrate_schema()
+
+    def _has_existing_tables(self) -> bool:
+        """Check if database already has tables (existing vs fresh)."""
+        try:
+            with self._conn() as conn:
+                result = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='stage_runs'"
+                ).fetchone()
+                return result is not None
+        except sqlite3.Error:
+            return False
 
     def _init_schema(self) -> None:
         """Initialize database schema."""
