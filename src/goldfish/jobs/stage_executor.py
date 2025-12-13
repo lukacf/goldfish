@@ -73,6 +73,9 @@ class StageExecutor:
         if config.gcs:
             gce_bucket = config.gcs.bucket
 
+        # Compute artifact_registry for base image resolution and image pushing
+        self.artifact_registry: str | None = None
+
         if config.gce:
             # Use effective_project_id to support both project_id and project aliases
             try:
@@ -83,6 +86,12 @@ class StageExecutor:
                 gce_zone = config.gce.zones[0]
                 gce_zones = config.gce.zones  # Pass all zones for multi-zone lookups
             gce_gpu_preference = config.gce.gpu_preference
+
+            # Resolve artifact_registry from config or auto-generate from project
+            self.artifact_registry = config.gce.artifact_registry
+            if not self.artifact_registry and gce_project:
+                self.artifact_registry = f"us-docker.pkg.dev/{gce_project}/goldfish"
+                logger.info(f"Auto-generated artifact_registry: {self.artifact_registry}")
 
         self.gce_launcher = GCELauncher(
             project_id=gce_project,
@@ -661,22 +670,11 @@ class StageExecutor:
         # Get workspace directory
         workspace_dir = self.workspace_manager.get_workspace_path(workspace)
 
-        # Resolve base image from profile
+        # Resolve base image from profile using pre-computed artifact_registry
         base_image = None
         if profile_name:
             profile = self.profile_resolver.resolve(profile_name)
-            # Get artifact registry for base image URL
-            artifact_registry = None
-            if self.config.gce:
-                artifact_registry = self.config.gce.artifact_registry
-                if not artifact_registry:
-                    # Auto-generate registry URL from project_id
-                    try:
-                        project_id = self.config.gce.effective_project_id
-                        artifact_registry = f"us-docker.pkg.dev/{project_id}/goldfish"
-                    except ValueError:
-                        pass  # No project configured
-            base_image = resolve_base_image(profile, artifact_registry)
+            base_image = resolve_base_image(profile, self.artifact_registry)
 
         # Build image using DockerBuilder
         local_image_tag = self.docker_builder.build_image(
@@ -690,19 +688,14 @@ class StageExecutor:
         # If using GCE backend, push to Artifact Registry
         backend = self.config.jobs.backend
         if backend == "gce":
-            if not self.config.gce:
-                raise GoldfishError("GCE backend requires gce configuration in goldfish.yaml")
+            if not self.artifact_registry:
+                raise GoldfishError(
+                    "GCE backend requires artifact_registry. "
+                    "Set gce.artifact_registry in goldfish.yaml or gce.project_id for auto-generation."
+                )
 
-            # Get or create artifact registry URL
-            registry_url = self.config.gce.artifact_registry
-            if not registry_url:
-                # Auto-generate registry URL from project_id
-                project_id = self.config.gce.effective_project_id
-                registry_url = f"us-docker.pkg.dev/{project_id}/goldfish"
-                logger.info(f"Using auto-generated artifact registry: {registry_url}")
-
-                # Ensure the repository exists (create if needed)
-                self._ensure_artifact_registry(project_id, "goldfish")
+            # Use pre-computed artifact_registry
+            registry_url = self.artifact_registry
 
             # Push image to Artifact Registry
             registry_image_tag = self.docker_builder.push_image(
