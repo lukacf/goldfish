@@ -88,59 +88,105 @@ echo "Watchdog started (PID=$WATCHDOG_PID, timeout={max_runtime_seconds}s)"
 """
 
 
-def supervisor_section(idle_timeout_seconds: int = 300) -> str:
-    """Generate supervisor process that monitors job health.
+def supervisor_section(heartbeat_timeout_seconds: int = 600, gcs_log_path: str = "") -> str:
+    """Generate supervisor process that monitors job health via heartbeat.
 
-    This is Layer 4 defense - monitors the Docker container and detects
-    if the job has stalled (no log output for N seconds).
+    This is Layer 4 defense - monitors the heartbeat file written by
+    goldfish.io.heartbeat() calls from user code. If no heartbeat for
+    the configured timeout, uploads logs and terminates.
 
     Args:
-        idle_timeout_seconds: Seconds of no activity before considering job stalled
+        heartbeat_timeout_seconds: Seconds without heartbeat before termination
+        gcs_log_path: GCS path to upload logs before termination
 
     Returns:
         Shell script fragment that starts background supervisor
     """
     return f"""
 # === JOB SUPERVISOR (Cost Protection Layer 4) ===
-# Monitors Docker container health - if no activity for {idle_timeout_seconds}s, assumes stall
+# Monitors heartbeat file from goldfish.io.heartbeat() - if stale for {heartbeat_timeout_seconds}s, terminates
+HEARTBEAT_FILE="/mnt/outputs/.goldfish/heartbeat"
+HEARTBEAT_TIMEOUT={heartbeat_timeout_seconds}
+GCS_LOG_PATH="{gcs_log_path}"
+
+check_heartbeat_age() {{
+    # Returns seconds since last heartbeat, or -1 if no file
+    if [[ ! -f "$HEARTBEAT_FILE" ]]; then
+        echo "-1"
+        return
+    fi
+    local timestamp=$(grep -o '"timestamp": *[0-9.]*' "$HEARTBEAT_FILE" 2>/dev/null | grep -o '[0-9.]*' || echo "0")
+    local now=$(date +%s)
+    echo $((now - ${{timestamp%.*}}))
+}}
+
+upload_logs_before_death() {{
+    echo "SUPERVISOR: Uploading logs before termination..."
+    if [[ -n "$GCS_LOG_PATH" ]]; then
+        gsutil -m cp -r /mnt/outputs/.goldfish "$GCS_LOG_PATH/supervisor_dump/" 2>/dev/null || true
+        gsutil cp /tmp/stage_times.log "$GCS_LOG_PATH/supervisor_dump/" 2>/dev/null || true
+        # Try to capture docker logs
+        docker logs $(docker ps -q) > /tmp/docker_final.log 2>&1 || true
+        gsutil cp /tmp/docker_final.log "$GCS_LOG_PATH/supervisor_dump/" 2>/dev/null || true
+    fi
+    log_stage "supervisor_logs_uploaded" || true
+}}
+
 start_supervisor() {{
-    local log_file="$1"
     (
-        local last_size=0
-        local idle_count=0
         local check_interval=30
+        local grace_period=120  # Initial grace period for job to start
+        local started_at=$(date +%s)
+
+        echo "SUPERVISOR: Started (heartbeat_timeout={heartbeat_timeout_seconds}s, grace_period=${{grace_period}}s)"
 
         while true; do
             sleep $check_interval
 
-            # Check if main script still running
-            if ! pgrep -f "docker run" >/dev/null 2>&1; then
-                echo "SUPERVISOR: Docker container exited, supervisor stopping"
+            # Check if docker container is still running
+            if ! docker ps -q | grep -q .; then
+                echo "SUPERVISOR: No Docker containers running, exiting"
                 break
             fi
 
-            # Check log file growth
-            if [[ -f "$log_file" ]]; then
-                local current_size=$(stat -c%s "$log_file" 2>/dev/null || echo 0)
-                if [[ "$current_size" -eq "$last_size" ]]; then
-                    ((idle_count++))
-                    echo "SUPERVISOR: No log activity for $((idle_count * check_interval))s"
-                    if [[ $((idle_count * check_interval)) -ge {idle_timeout_seconds} ]]; then
-                        echo "=== SUPERVISOR: Job stalled ({idle_timeout_seconds}s no activity) - FORCING EXIT ==="
-                        log_stage "supervisor_stall_detected" || true
-                        # Kill docker container
-                        docker kill $(docker ps -q) 2>/dev/null || true
-                        sleep 5
-                        exit 1
-                    fi
-                else
-                    idle_count=0
-                    last_size=$current_size
+            local age=$(check_heartbeat_age)
+            local elapsed=$(($(date +%s) - started_at))
+
+            # During grace period, don't enforce heartbeat
+            if [[ $elapsed -lt $grace_period ]]; then
+                echo "SUPERVISOR: In grace period ($elapsed/$grace_period s)"
+                continue
+            fi
+
+            # If no heartbeat file yet after grace period, that's a problem
+            if [[ "$age" == "-1" ]]; then
+                echo "SUPERVISOR: No heartbeat file after grace period!"
+                if [[ $elapsed -gt $((grace_period + HEARTBEAT_TIMEOUT)) ]]; then
+                    echo "=== SUPERVISOR: No heartbeat ever received - TERMINATING ==="
+                    log_stage "supervisor_no_heartbeat" || true
+                    upload_logs_before_death
+                    docker kill $(docker ps -q) 2>/dev/null || true
+                    sleep 5
+                    exit 1
                 fi
+                continue
+            fi
+
+            # Check heartbeat age
+            if [[ $age -gt $HEARTBEAT_TIMEOUT ]]; then
+                echo "=== SUPERVISOR: Heartbeat stale (${{age}}s > {heartbeat_timeout_seconds}s) - TERMINATING ==="
+                log_stage "supervisor_heartbeat_stale" || true
+                upload_logs_before_death
+                docker kill $(docker ps -q) 2>/dev/null || true
+                sleep 5
+                exit 1
+            else
+                echo "SUPERVISOR: Heartbeat OK (age=${{age}}s)"
             fi
         done
     ) &
-    echo "Supervisor started (idle_timeout={idle_timeout_seconds}s)"
+    SUPERVISOR_PID=$!
+    echo "Supervisor started (PID=$SUPERVISOR_PID, heartbeat_timeout={heartbeat_timeout_seconds}s)"
 }}
 """
 
@@ -353,6 +399,7 @@ def build_startup_script(
     post_run_cmds: Sequence[str] = (),
     cmd: str = "",
     max_runtime_seconds: int | None = None,
+    heartbeat_timeout_seconds: int | None = None,
 ) -> str:
     """Build complete startup script for GCE instance.
 
@@ -372,6 +419,7 @@ def build_startup_script(
         post_run_cmds: Commands to run after Docker
         cmd: Command/script to pass to entrypoint (e.g., "/entrypoint.sh")
         max_runtime_seconds: Maximum runtime before watchdog kills instance (None=no limit)
+        heartbeat_timeout_seconds: Heartbeat timeout for supervisor (None=no supervisor)
 
     Returns:
         Complete startup script as string
@@ -407,6 +455,11 @@ def build_startup_script(
     # Add watchdog if max_runtime specified
     if max_runtime_seconds is not None and max_runtime_seconds > 0:
         parts.append(watchdog_section(max_runtime_seconds))
+
+    # Add supervisor if heartbeat monitoring enabled
+    gcs_log_path = f"gs://{bucket}/{bucket_path}/logs"
+    if heartbeat_timeout_seconds is not None and heartbeat_timeout_seconds > 0:
+        parts.append(supervisor_section(heartbeat_timeout_seconds, gcs_log_path))
 
     parts.extend(
         [
@@ -458,6 +511,11 @@ def build_startup_script(
 
     # Execute Docker container
     parts.append(f'mkdir -p "$(dirname "{log_file}")"')
+
+    # Start supervisor before docker if heartbeat monitoring enabled
+    if heartbeat_timeout_seconds is not None and heartbeat_timeout_seconds > 0:
+        parts.append("start_supervisor")
+
     parts.append('log_stage "docker_run_begin"')
     parts.append(f'{{ "${{DOCKER_CMD[@]}}" | tee -a "{log_file}"; }}')
     parts.append("EXIT_CODE=${PIPESTATUS[0]}")
