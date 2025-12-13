@@ -51,6 +51,7 @@ def run(
     inputs_override: dict | None = None,
     reason: str | None = None,
     wait: bool = False,
+    dry_run: bool = False,
 ) -> dict:
     """Run pipeline stages.
 
@@ -66,16 +67,24 @@ def run(
         inputs_override: Override input sources for debugging
         reason: Why running (min 15 chars)
         wait: False (default) returns immediately; True blocks until completion
+        dry_run: If True, validate everything without launching. Returns what would
+                 run and any validation errors found.
 
     Returns:
         Dict with:
         - runs: List of stage run info (run_id, workspace, version, stage, status)
         - pipeline_run_id: If running multiple stages
+        If dry_run=True:
+        - valid: Whether pipeline would run successfully
+        - stages_to_run: List of stages that would execute
+        - validation_errors: List of any issues found
+        - warnings: Non-fatal issues
 
     Examples:
         run("w1")                           # Run all stages
         run("w1", stages=["train"])         # Run single stage
         run("w1", stages=["preprocess", "train", "evaluate"])  # Run specific stages
+        run("w1", dry_run=True)             # Validate without launching
     """
     config = _get_config()
     workspace_manager = _get_workspace_manager()
@@ -89,6 +98,21 @@ def run(
     workspace_name = workspace_manager.get_workspace_for_slot(workspace)
     if not workspace_name:
         workspace_name = workspace
+
+    # Dry run mode: validate without launching
+    if dry_run:
+        from goldfish.pipeline.validator import validate_pipeline_run
+
+        workspace_path = workspace_manager.get_workspace_path(workspace_name)
+        db = _get_db()
+        return validate_pipeline_run(
+            workspace_name=workspace_name,
+            workspace_path=workspace_path,
+            db=db,
+            stages=stages,
+            pipeline_name=pipeline,
+            inputs_override=inputs_override or {},
+        )
 
     # Unified execution through run_stages
     result: dict[str, Any] = pipeline_executor.run_stages(
