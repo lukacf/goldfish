@@ -507,11 +507,48 @@ class GoldfishDaemon:
             atexit.register(lambda: project_root_file.unlink(missing_ok=True))
             logger.debug("Project root file written for web server discovery")
 
+    def _maybe_start_web_server(self) -> None:
+        """Optionally auto-start the web visualization server.
+
+        Checks if:
+        1. GOLDFISH_AUTO_START_WEB environment variable is set
+        2. Web server is not already running
+
+        If both conditions are met, spawns the web server.
+        """
+        # Check if auto-start is enabled
+        auto_start = os.environ.get("GOLDFISH_AUTO_START_WEB", "").lower() in ("1", "true", "yes")
+        if not auto_start:
+            return
+
+        try:
+            # Import here to avoid circular dependency
+            from goldfish.web_server import is_web_server_running, spawn_web_server
+
+            # Check if web server is already running
+            running, pid, port = is_web_server_running()
+            if running:
+                logger.info("Web server already running (pid=%d, port=%d)", pid, port)
+                return
+
+            # Spawn web server
+            logger.info("Auto-starting web visualization server...")
+            pid = spawn_web_server(open_browser=False)  # Don't open browser on daemon start
+            logger.info("Web server started (pid=%d)", pid)
+            logger.info("Visit http://127.0.0.1:7342 to view provenance")
+
+        except Exception as e:
+            # Don't fail daemon startup if web server fails
+            logger.warning("Failed to auto-start web server: %s", e)
+
     def run(self) -> None:
         """Run the daemon main loop."""
         self.write_pid_file()
         self.start_worker()
         self.start_http_server()
+
+        # Optionally auto-start web server for visualization
+        self._maybe_start_web_server()
 
         # Set up signal handlers - shutdown from a different thread to avoid deadlock
         def handle_shutdown(signum: int, frame: Any) -> None:
