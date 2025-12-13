@@ -3,13 +3,22 @@
 This library is deployed in Docker containers and provides
 a simple API for modules to load inputs and save outputs
 without worrying about storage backends (GCS/hyperdisk/local).
+
+Also provides heartbeat functionality for job health monitoring.
 """
 
 import importlib.util
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
+
+# Heartbeat configuration
+HEARTBEAT_DIR = ".goldfish"
+HEARTBEAT_FILE = "heartbeat"
+_last_heartbeat_time: float = 0
+_heartbeat_min_interval: float = 1.0  # Don't write more than once per second
 
 try:
     import numpy as np
@@ -288,3 +297,100 @@ def _mark_as_artifact(name: str):
     marker_path = _get_outputs_dir() / ".artifacts" / name
     marker_path.parent.mkdir(parents=True, exist_ok=True)
     marker_path.touch()
+
+
+# =============================================================================
+# Heartbeat API - Job health monitoring
+# =============================================================================
+
+
+def heartbeat(message: str | None = None, force: bool = False) -> None:
+    """Signal that the job is alive and working.
+
+    Call this periodically in long-running computations to prevent
+    the job from being killed by the supervisor due to inactivity.
+
+    The heartbeat is written to a file that the supervisor monitors.
+    If no heartbeat is received for a configured timeout, the job
+    is considered stalled and will be terminated.
+
+    Args:
+        message: Optional status message (e.g., "Processing batch 50/100")
+        force: Write even if called recently (default: rate-limited to 1/sec)
+
+    Example:
+        from goldfish.io import heartbeat
+
+        for i, batch in enumerate(data_loader):
+            heartbeat(f"Processing batch {i}/{total}")
+            process(batch)
+
+        # Or just call periodically without message
+        heartbeat()
+    """
+    global _last_heartbeat_time
+
+    # Rate limit to avoid excessive disk writes
+    now = time.time()
+    if not force and (now - _last_heartbeat_time) < _heartbeat_min_interval:
+        return
+
+    _last_heartbeat_time = now
+
+    # Write heartbeat file
+    heartbeat_path = _get_heartbeat_path()
+    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+
+    heartbeat_data = {
+        "timestamp": now,
+        "iso_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "message": message,
+        "pid": os.getpid(),
+    }
+
+    # Atomic write using temp file + rename
+    temp_path = heartbeat_path.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(heartbeat_data))
+    temp_path.rename(heartbeat_path)
+
+
+def get_heartbeat_age() -> float | None:
+    """Get seconds since last heartbeat (for monitoring).
+
+    Returns:
+        Seconds since last heartbeat, or None if no heartbeat file exists.
+    """
+    heartbeat_path = _get_heartbeat_path()
+    if not heartbeat_path.exists():
+        return None
+
+    try:
+        data = json.loads(heartbeat_path.read_text())
+        last_time: float = float(data.get("timestamp", 0))
+        return time.time() - last_time
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None
+
+
+def read_heartbeat() -> dict[str, Any] | None:
+    """Read the current heartbeat data (for monitoring).
+
+    Returns:
+        Heartbeat dict with timestamp, message, pid, or None if not found.
+    """
+    heartbeat_path = _get_heartbeat_path()
+    if not heartbeat_path.exists():
+        return None
+
+    try:
+        data: dict[str, Any] = json.loads(heartbeat_path.read_text())
+        # Add computed age
+        data["age_seconds"] = time.time() - data.get("timestamp", 0)
+        return data
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _get_heartbeat_path() -> Path:
+    """Get path to heartbeat file."""
+    return _get_outputs_dir() / HEARTBEAT_DIR / HEARTBEAT_FILE
