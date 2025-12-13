@@ -510,7 +510,13 @@ class PipelineExecutor:
                         continue
 
                     # If any dep not completed, wait
-                    if any(s != "completed" for _, s in dep_statuses):
+                    pending_deps = [(d, s) for d, s in dep_statuses if s != "completed"]
+                    if pending_deps:
+                        self._logger.debug(
+                            "Stage %s waiting on deps: %s",
+                            row["stage_name"],
+                            ", ".join(f"{d}({s})" for d, s in pending_deps),
+                        )
                         continue
 
                 # All deps completed (or no deps) - try to claim this row

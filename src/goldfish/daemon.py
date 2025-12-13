@@ -457,6 +457,15 @@ class GoldfishDaemon:
                     logger.info("Pipeline %s completed", pipeline_run_id)
                     continue
 
+                # Log queue state for debugging stalls
+                logger.debug(
+                    "Pipeline %s [%s]: pending=%d, running=%d",
+                    pipeline_run_id,
+                    workspace,
+                    pending,
+                    running,
+                )
+
                 # Process one round of the queue
                 launched = self._pipeline_executor._process_pipeline_queue_once(
                     pipeline_run_id=pipeline_run_id,
@@ -472,6 +481,13 @@ class GoldfishDaemon:
                         pipeline_run_id,
                         len(launched),
                         ", ".join(s.stage for s in launched),
+                    )
+                elif pending > 0 and running == 0:
+                    # Nothing launched but stages are pending - they must be waiting on deps
+                    logger.debug(
+                        "Pipeline %s: %d stage(s) waiting (deps not ready or blocked)",
+                        pipeline_run_id,
+                        pending,
                     )
             except Exception as e:
                 logger.exception("Error processing pipeline %s: %s", pipeline_run_id, e)
