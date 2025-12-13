@@ -1,6 +1,5 @@
 """Dataset registry for project-level data sources."""
 
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -8,20 +7,38 @@ from goldfish.config import GoldfishConfig
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError, SourceAlreadyExistsError, SourceNotFoundError
 from goldfish.models import SourceInfo, SourceStatus
+from goldfish.providers import get_storage_registry
+from goldfish.providers.base import StorageProvider
 
 
 class DatasetRegistry:
     """Manage project-level datasets (immutable data sources)."""
 
-    def __init__(self, db: Database, config: GoldfishConfig):
+    def __init__(
+        self,
+        db: Database,
+        config: GoldfishConfig,
+        storage_provider: StorageProvider | None = None,
+    ):
         """Initialize dataset registry.
 
         Args:
             db: Database instance
             config: Goldfish configuration
+            storage_provider: Optional storage provider (auto-created if None)
         """
         self.db = db
         self.config = config
+
+        # Initialize storage provider
+        if storage_provider:
+            self.storage_provider = storage_provider
+        else:
+            # Get provider from config
+            provider_name = config.jobs.effective_storage_provider
+            provider_config = config.get_storage_provider_config()
+            registry = get_storage_registry()
+            self.storage_provider = registry.get(provider_name, provider_config)
 
     def register_dataset(
         self,
@@ -36,7 +53,7 @@ class DatasetRegistry:
 
         Args:
             name: Dataset identifier (e.g., "eurusd_raw_v3")
-            source: Local path or GCS URL (e.g., "local:/path/to/data.csv" or "gs://bucket/path")
+            source: Local path or storage URL (e.g., "local:/path/to/data.csv" or "gs://bucket/path")
             description: Human-readable description
             format: csv, npy, directory, etc.
             metadata: Optional metadata dict
@@ -47,7 +64,7 @@ class DatasetRegistry:
 
         Raises:
             SourceAlreadyExistsError: If dataset with this name already exists
-            GoldfishError: If GCS not configured (when source is local)
+            GoldfishError: If upload fails
         """
         # Check if dataset already exists
         if self.db.source_exists(name):
@@ -55,28 +72,36 @@ class DatasetRegistry:
 
         # Parse source location
         if source.startswith("local:"):
-            # Upload local file/directory to GCS
+            # Upload local file/directory using storage provider
             local_path = Path(source[6:])
             if not local_path.exists():
                 raise GoldfishError(f"Local source not found: {local_path}")
 
-            gcs_location = self._upload_to_gcs(name, local_path)
+            # Upload to storage provider
+            storage_location = self.storage_provider.upload(
+                local_path=local_path,
+                remote_path=name,
+                metadata=metadata,
+            )
 
-            # Get size if not provided
-            if size_bytes is None and local_path.is_file():
-                size_bytes = local_path.stat().st_size
+            storage_uri = storage_location.uri
+            size_bytes = storage_location.size_bytes or size_bytes
 
-        elif source.startswith("gs://"):
-            # Use GCS path directly
-            gcs_location = source
+        elif source.startswith("gs://") or source.startswith("s3://") or source.startswith("file://"):
+            # Use storage URL directly
+            storage_uri = source
         else:
-            raise GoldfishError(f"Invalid source format: {source}. Must start with 'local:' or 'gs://'")
+            raise GoldfishError(
+                f"Invalid source format: {source}. Must start with 'local:', 'gs://', 's3://', or 'file://'"
+            )
 
         # Register in database
+        # Note: Still using gcs_location column name for backward compatibility
+        # TODO: Rename to storage_location in database schema
         self.db.create_source(
             source_id=name,
             name=name,
-            gcs_location=gcs_location,
+            gcs_location=storage_uri,
             created_by="external",
             description=description,
             size_bytes=size_bytes,
@@ -85,54 +110,6 @@ class DatasetRegistry:
         )
 
         return self.get_dataset(name)
-
-    def _upload_to_gcs(self, name: str, local_path: Path) -> str:
-        """Upload local file/directory to GCS.
-
-        Args:
-            name: Dataset name (used as GCS path)
-            local_path: Local file or directory path
-
-        Returns:
-            GCS path (gs://bucket/prefix/name)
-
-        Raises:
-            GoldfishError: If GCS not configured or upload fails
-        """
-        if not self.config.gcs:
-            raise GoldfishError(
-                "GCS not configured. Cannot upload local datasets. Add GCS configuration to goldfish.yaml"
-            )
-
-        bucket = self.config.gcs.bucket
-        prefix = (self.config.gcs.datasets_prefix or "datasets").rstrip("/")
-        gcs_path = f"gs://{bucket}/{prefix}/{name}"
-
-        # Build gsutil command
-        if local_path.is_dir():
-            # Upload directory recursively
-            cmd = ["gsutil", "-m", "cp", "-r", str(local_path), gcs_path]
-        else:
-            # Upload single file
-            cmd = ["gsutil", "cp", str(local_path), gcs_path]
-
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                check=False,
-            )
-
-            if result.returncode != 0:
-                error_msg = result.stderr.decode() if result.stderr else "Unknown error"
-                raise GoldfishError(f"Failed to upload dataset to GCS: {error_msg}")
-
-            return gcs_path
-
-        except FileNotFoundError as err:
-            raise GoldfishError(
-                "gsutil command not found. Install Google Cloud SDK: https://cloud.google.com/sdk/docs/install"
-            ) from err
 
     def list_datasets(self, status: str | None = None) -> list[SourceInfo]:
         """List all registered datasets.
