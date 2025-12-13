@@ -299,24 +299,29 @@ def checkpoint(slot: str, message: str) -> CheckpointResponse:
 
 
 @mcp.tool()
-def diff(slot: str) -> DiffResponse:
-    """Show changes in a slot since last sync.
+def diff(target: str, against: str | None = None) -> DiffResponse:
+    """Compare changes between targets.
 
-    Note: run() syncs changes automatically, so diff may show "no changes"
-    after running a stage even if you modified files before the run.
+    Single argument: Compare slot against its last saved version (save_version/checkpoint).
+    Two arguments: Compare any two targets.
 
     Args:
-        slot: Slot to diff (w1, w2, or w3)
+        target: What to diff. Can be:
+            - Slot: "w1" (compares against last version if alone)
+            - Workspace@version: "baseline@v2"
+        against: Optional second target to compare against.
 
-    Returns changes summary, list of modified files, and the SHA being compared against.
+    Returns:
+        DiffResponse with change summary, files changed, and what was compared.
+
+    Examples:
+        diff("w1")                       # Slot vs last version (most common)
+        diff("w1", "w2")                 # Compare two slots
+        diff("w1", "baseline@v3")        # Slot vs specific version
+        diff("baseline@v1", "baseline@v5")  # Compare two versions
     """
-    config = _get_config()
     workspace_manager = _get_workspace_manager()
-
-    # Validate inputs
-    validate_slot_name(slot, config.slots)
-
-    return workspace_manager.diff(slot)
+    return workspace_manager.diff(target, against)
 
 
 @mcp.tool()

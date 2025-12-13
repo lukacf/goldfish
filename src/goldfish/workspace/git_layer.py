@@ -511,6 +511,40 @@ class GitLayer:
             "files": files,
         }
 
+    def diff_shas(self, sha1: str, sha2: str) -> dict:
+        """Diff two git SHAs.
+
+        Args:
+            sha1: First commit SHA
+            sha2: Second commit SHA
+
+        Returns:
+            Dict with has_changes, summary, files_changed, diff_text
+        """
+        # Get list of changed files
+        stdout, _ = self._run_git("diff", "--name-status", sha1, sha2)
+        files_changed = []
+        for line in stdout.strip().split("\n"):
+            if line:
+                parts = line.split("\t")
+                if len(parts) >= 2:
+                    files_changed.append(parts[1])
+
+        has_changes = len(files_changed) > 0
+
+        # Get diff text
+        diff_text = ""
+        if has_changes:
+            stdout, _ = self._run_git("diff", sha1, sha2)
+            diff_text = stdout
+
+        return {
+            "has_changes": has_changes,
+            "summary": f"{len(files_changed)} file(s) changed" if has_changes else "No differences",
+            "files_changed": files_changed,
+            "diff_text": diff_text,
+        }
+
     # --- Copy-based mounting operations (Phase 2) ---
 
     def diff_slot_against_sha(self, slot_path: Path, workspace: str, mounted_sha: str) -> dict:
