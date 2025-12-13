@@ -300,12 +300,15 @@ def checkpoint(slot: str, message: str) -> CheckpointResponse:
 
 @mcp.tool()
 def diff(slot: str) -> DiffResponse:
-    """Show changes in a slot since last checkpoint.
+    """Show changes in a slot since last sync.
+
+    Note: run() syncs changes automatically, so diff may show "no changes"
+    after running a stage even if you modified files before the run.
 
     Args:
         slot: Slot to diff (w1, w2, or w3)
 
-    Returns changes summary and list of modified files.
+    Returns changes summary, list of modified files, and the SHA being compared against.
     """
     config = _get_config()
     workspace_manager = _get_workspace_manager()
