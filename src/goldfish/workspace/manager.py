@@ -859,9 +859,10 @@ class WorkspaceManager:
             return DiffResponse(
                 slot=slot,
                 has_changes=False,
-                summary="No changes since last checkpoint",
+                summary=f"No changes since last sync (SHA: {mounted_sha[:8]}). Note: run() syncs changes automatically.",
                 files_changed=[],
                 diff_text="",
+                compared_against=mounted_sha[:8],
             )
 
         # Truncate diff text to avoid overwhelming output
@@ -876,6 +877,7 @@ class WorkspaceManager:
             summary=diff_result.get("summary", ""),
             files_changed=diff_result.get("files_changed", []),
             diff_text=diff_text,
+            compared_against=mounted_sha[:8],
         )
 
     def rollback(self, slot: str, version: str, reason: str) -> RollbackResponse:
