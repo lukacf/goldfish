@@ -377,12 +377,20 @@ def list_runs(
     # Adjust total to include queued stages
     total_with_queued = total + len(queued_stages)
 
-    return {
+    result: dict = {
         "runs": compact_runs,
         "total_count": total_with_queued,
         "has_more": offset + len(rows) < total,
         "hint": "Use get_run(run_id) for full details including logs and complete error messages",
     }
+
+    # Add attempt summary when filtering by workspace (provides context without noise)
+    if workspace and offset == 0:
+        attempts = db.list_attempts(workspace, stage_name=stage, limit=10)
+        if attempts:
+            result["attempt_summary"] = attempts
+
+    return result
 
 
 @mcp.tool()
@@ -471,44 +479,4 @@ def mark_outcome(
         "message": "Attempt closed - next run will start a new attempt"
         if outcome == "success"
         else "Run marked as bad_results - still in current attempt",
-    }
-
-
-@mcp.tool()
-def list_attempts(
-    workspace: str,
-    stage: str | None = None,
-    limit: int = 20,
-) -> dict:
-    """List attempts (grouped runs) for a workspace.
-
-    Attempts group consecutive runs on the same stage. A new attempt starts
-    after a run is marked with outcome='success'. This provides a cleaner
-    view of experiment progress without listing every individual run.
-
-    Args:
-        workspace: Workspace name
-        stage: Optional stage name to filter
-        limit: Max attempts to return (default 20)
-
-    Returns:
-        Dict with attempts summary:
-        - stage: Stage name
-        - attempt: Attempt number (1, 2, 3...)
-        - runs: Total runs in this attempt
-        - completed/failed/success/bad_results: Run counts by status
-        - versions: Version range (e.g., "v5→v12" or "v5")
-        - status: 'closed' (has success), 'open' (still iterating), 'all_failed'
-    """
-    db = _get_db()
-    validate_workspace_name(workspace)
-
-    attempts = db.list_attempts(workspace, stage_name=stage, limit=limit)
-
-    return {
-        "success": True,
-        "workspace": workspace,
-        "stage_filter": stage,
-        "attempts": attempts,
-        "hint": "Use list_runs(workspace, stage) to see individual runs within an attempt",
     }
