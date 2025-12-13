@@ -33,9 +33,9 @@ class ProfileValidationError(Exception):
 # CPU: Jupyter pytorch-notebook - has numpy, pandas, scikit-learn, torch, matplotlib, seaborn
 PUBLIC_BASE_IMAGE_CPU = "quay.io/jupyter/pytorch-notebook:python-3.11"
 
-# GPU: Jupyter pytorch-notebook with CUDA 12 - runtime only (no nvrtc for JIT)
-# NOTE: Flash Attention requires nvrtc, so use goldfish-base-gpu from Artifact Registry
-PUBLIC_BASE_IMAGE_GPU = "quay.io/jupyter/pytorch-notebook:cuda12-python-3.11"
+# GPU: NVIDIA NGC PyTorch - full CUDA toolkit including nvrtc for Flash Attention
+# This is used as fallback when artifact_registry isn't configured
+PUBLIC_BASE_IMAGE_GPU = "nvcr.io/nvidia/pytorch:24.01-py3"
 
 # Fallback (bare Python - requires requirements.txt)
 FALLBACK_BASE_IMAGE = "python:3.11-slim"
@@ -359,7 +359,13 @@ def resolve_base_image(profile: dict[str, Any], artifact_registry: str | None = 
     if artifact_registry:
         return f"{artifact_registry}/{base_image}:{BASE_IMAGE_VERSION}"
 
-    # No registry for short name - use fallback
+    # No registry for short name - fall back to appropriate public image
+    # This ensures GPU profiles still get a GPU-capable image even without AR configured
+    if base_image == BASE_IMAGE_GPU:
+        return PUBLIC_BASE_IMAGE_GPU
+    elif base_image == BASE_IMAGE_CPU:
+        return PUBLIC_BASE_IMAGE_CPU
+
     return FALLBACK_BASE_IMAGE
 
 
