@@ -643,3 +643,112 @@ def main():
     # Training loop
     train(model)
 ```
+
+## Heartbeat API (Long-Running Jobs)
+
+For long-running computations, use the heartbeat API to signal that your job is alive. This prevents the job from being terminated due to inactivity.
+
+### Basic Usage
+
+```python
+from goldfish.io import heartbeat
+
+def main():
+    for i, batch in enumerate(data_loader):
+        # Signal that we're alive (with optional status message)
+        heartbeat(f"Processing batch {i}/{total}")
+
+        # Your computation (may take minutes without log output)
+        process_batch(batch)
+```
+
+### Why Use Heartbeats?
+
+Goldfish monitors job health via the supervisor. If a job appears stalled (no activity), it may be terminated to prevent wasted compute costs. Heartbeats explicitly signal that your job is working even during:
+
+- Long computations with no log output
+- Large data transfers
+- GPU operations that block for extended periods
+- Any operation that takes minutes without printing
+
+### Heartbeat Functions
+
+```python
+from goldfish.io import heartbeat, get_heartbeat_age, read_heartbeat
+
+# Signal alive (rate-limited to 1/sec automatically)
+heartbeat()
+
+# With status message
+heartbeat("Training epoch 5/100")
+
+# Force write (bypass rate limiting)
+heartbeat(message="Critical checkpoint", force=True)
+
+# Check heartbeat age (for debugging)
+age = get_heartbeat_age()  # Returns seconds since last heartbeat
+
+# Read full heartbeat data
+data = read_heartbeat()
+# Returns: {"timestamp": 1234567890, "message": "...", "pid": 1234, "age_seconds": 5.2}
+```
+
+### When to Call heartbeat()
+
+| Scenario | Recommendation |
+|----------|----------------|
+| Training loop | Call every epoch or every N batches |
+| Data loading | Call periodically during large loads |
+| Model evaluation | Call between evaluation steps |
+| Checkpointing | Call before and after saves |
+| Any 1+ minute operation | Call at least every 5 minutes |
+
+### Example: Training with Heartbeats
+
+```python
+from goldfish.io import load_input, save_output, get_config, heartbeat
+
+def main():
+    config = get_config()
+    features = load_input("features")
+    labels = load_input("labels")
+
+    model = create_model()
+
+    heartbeat("Starting training")
+
+    for epoch in range(config["epochs"]):
+        # Heartbeat every epoch
+        heartbeat(f"Epoch {epoch}/{config['epochs']}")
+
+        for batch_idx, (X, y) in enumerate(data_loader):
+            # For very large datasets, heartbeat every N batches
+            if batch_idx % 100 == 0:
+                heartbeat(f"Epoch {epoch}, batch {batch_idx}")
+
+            train_step(model, X, y)
+
+        # Heartbeat before potentially slow checkpoint
+        heartbeat(f"Saving checkpoint after epoch {epoch}")
+        save_checkpoint(model)
+
+    heartbeat("Training complete, saving final model")
+    save_output("model", model_path)
+```
+
+### Cost Protection Layers
+
+Goldfish implements 4 layers of cost protection for GCE instances:
+
+1. **Self-Deletion Trap** - Instance deletes itself on any exit (success, failure, signal)
+2. **Watchdog Timeout** - Optional hard limit via `max_runtime_seconds`
+3. **Daemon Monitoring** - Checks for orphaned instances every 60s
+4. **Heartbeat Supervisor** - Monitors heartbeat file, terminates stalled jobs
+
+Configure in stage config:
+```yaml
+compute:
+  profile: h100-spot
+  max_runtime_seconds: 14400     # 4 hour hard limit
+  heartbeat_timeout_seconds: 600  # 10 min without heartbeat = stalled
+```

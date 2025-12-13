@@ -17,6 +17,7 @@ LABEL org.opencontainers.image.version="v1"
 ENV DEBIAN_FRONTEND=noninteractive
 
 # System dependencies
+# cuda-nvrtc-12-1 provides libnvrtc.so.12 needed for Flash Attention JIT compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3.11-venv \
@@ -25,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     libgomp1 \
+    cuda-nvrtc-12-1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Make python3.11 the default
