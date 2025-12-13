@@ -513,6 +513,123 @@ class GitLayer:
 
     # --- Copy-based mounting operations (Phase 2) ---
 
+    def diff_slot_against_sha(self, slot_path: Path, workspace: str, mounted_sha: str) -> dict:
+        """Diff a copy-based slot against its mounted SHA.
+
+        Creates a temp worktree at mounted_sha, diffs the slot against it,
+        and returns the result.
+
+        Args:
+            slot_path: Path to the slot directory
+            workspace: Workspace name (for branch context)
+            mounted_sha: The SHA the slot was mounted from
+
+        Returns:
+            Dict with has_changes, summary, files_changed, diff_text
+        """
+        # Create temp worktree at mounted_sha
+        temp_worktree = self.dev_repo / ".goldfish" / "tmp-diff" / workspace
+        temp_worktree.parent.mkdir(parents=True, exist_ok=True)
+
+        # Clean up any existing temp worktree
+        if temp_worktree.exists():
+            try:
+                self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
+            except GoldfishError:
+                pass
+            if temp_worktree.exists():
+                shutil.rmtree(temp_worktree)
+
+        try:
+            # Create worktree at the mounted SHA
+            self._run_git("worktree", "add", "--detach", str(temp_worktree), mounted_sha)
+
+            # Use diff to compare slot against worktree
+            # Exclude .goldfish-mount, STATE.md, and other goldfish files
+            exclude_patterns = [
+                ".goldfish-mount",
+                "STATE.md",
+                ".git",
+                "__pycache__",
+                "*.pyc",
+                ".pytest_cache",
+            ]
+
+            # Build diff command with excludes
+            diff_cmd = ["diff", "-rq"]  # recursive, brief (just show which files differ)
+            for pattern in exclude_patterns:
+                diff_cmd.extend(["--exclude", pattern])
+            diff_cmd.extend([str(temp_worktree), str(slot_path)])
+
+            result = subprocess.run(diff_cmd, capture_output=True, text=True, timeout=30)
+
+            # Parse diff output
+            # Format: "Files /path/a/file and /path/b/file differ" or "Only in /path: file"
+            files_changed = []
+            for line in result.stdout.strip().split("\n"):
+                if not line:
+                    continue
+                if line.startswith("Files "):
+                    # "Files /tmp/.../file and /slot/.../file differ"
+                    parts = line.split(" and ")
+                    if len(parts) >= 2:
+                        # Extract relative path from slot_path
+                        file_path = parts[1].replace(" differ", "").replace(str(slot_path) + "/", "")
+                        files_changed.append(f"M {file_path}")
+                elif line.startswith("Only in "):
+                    # "Only in /path: filename"
+                    if str(slot_path) in line:
+                        # File only in slot = added
+                        filename = line.split(": ")[-1]
+                        dir_part = line.split(": ")[0].replace("Only in ", "").replace(str(slot_path), "").strip("/")
+                        rel_path = f"{dir_part}/{filename}".strip("/")
+                        files_changed.append(f"A {rel_path}")
+                    else:
+                        # File only in worktree = deleted from slot
+                        filename = line.split(": ")[-1]
+                        dir_part = (
+                            line.split(": ")[0].replace("Only in ", "").replace(str(temp_worktree), "").strip("/")
+                        )
+                        rel_path = f"{dir_part}/{filename}".strip("/")
+                        files_changed.append(f"D {rel_path}")
+
+            has_changes = len(files_changed) > 0
+
+            if not has_changes:
+                return {
+                    "has_changes": False,
+                    "summary": "No changes",
+                    "files_changed": [],
+                    "diff_text": "",
+                }
+
+            # Get actual diff text for changed files (limit to avoid huge output)
+            diff_text_cmd = ["diff", "-u"]
+            for pattern in exclude_patterns:
+                diff_text_cmd.extend(["--exclude", pattern])
+            diff_text_cmd.extend([str(temp_worktree), str(slot_path)])
+
+            diff_result = subprocess.run(diff_text_cmd, capture_output=True, text=True, timeout=30)
+            diff_text = diff_result.stdout
+
+            summary = f"{len(files_changed)} file(s) changed"
+
+            return {
+                "has_changes": True,
+                "summary": summary,
+                "files_changed": [f.split(" ", 1)[1] for f in files_changed],  # Remove status prefix
+                "diff_text": diff_text,
+            }
+
+        finally:
+            # Clean up temp worktree
+            try:
+                self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
+            except GoldfishError:
+                pass
+            if temp_worktree.exists():
+                shutil.rmtree(temp_worktree, ignore_errors=True)
+
     def get_head_sha_from_branch(self, branch: str) -> str:
         """Get HEAD SHA from a branch (without needing a worktree).
 
