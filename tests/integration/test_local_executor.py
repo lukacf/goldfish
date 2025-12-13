@@ -96,6 +96,114 @@ class TestContainerLaunch:
             args = mock_popen.call_args[0][0]
             assert any("GOLDFISH_STAGE_CONFIG" in str(arg) for arg in args)
 
+    def test_launch_container_preserves_user_config_values(self, temp_dir):
+        """Should preserve user config values (freeze_backbone, epochs) in GOLDFISH_STAGE_CONFIG.
+
+        Regression test for bug where user config values from configs/{stage}.yaml
+        were not being passed to the container - only stage/inputs/outputs were set.
+        """
+        import json
+
+        # Setup - user config values that should be preserved
+        executor = LocalExecutor()
+        stage_config = {
+            "stage": "train_film",
+            "inputs": {"tokens": {"location": "/mnt/inputs/tokens"}},
+            "outputs": {"model": {"type": "directory"}},
+            # User config values that MUST be preserved
+            "freeze_backbone": False,
+            "epochs": 20,
+            "lr": 3e-4,
+            "wandb_project": "my-project",
+        }
+
+        # Mock subprocess
+        with patch("subprocess.Popen") as mock_popen:
+            mock_process = MagicMock()
+            mock_process.pid = 12345
+            mock_popen.return_value = mock_process
+
+            # Execute
+            executor.launch_container(
+                image_tag="goldfish-test_ws-v1",
+                stage_run_id="stage-abc123",
+                entrypoint_script="#!/bin/bash",
+                stage_config=stage_config,
+                work_dir=temp_dir,
+            )
+
+            # Extract GOLDFISH_STAGE_CONFIG from docker args
+            args = mock_popen.call_args[0][0]
+            config_json = None
+            for i, arg in enumerate(args):
+                if arg == "-e" and i + 1 < len(args) and "GOLDFISH_STAGE_CONFIG=" in args[i + 1]:
+                    config_json = args[i + 1].split("=", 1)[1]
+                    break
+
+            assert config_json is not None, "GOLDFISH_STAGE_CONFIG not found in docker args"
+            parsed_config = json.loads(config_json)
+
+            # Verify user config values are preserved
+            assert parsed_config["freeze_backbone"] is False, "freeze_backbone should be False"
+            assert parsed_config["epochs"] == 20, "epochs should be 20"
+            assert parsed_config["lr"] == 3e-4, "lr should be preserved"
+            assert parsed_config["wandb_project"] == "my-project", "wandb_project should be preserved"
+            # Also verify standard fields are present
+            assert parsed_config["stage"] == "train_film"
+            assert "inputs" in parsed_config
+            assert "outputs" in parsed_config
+
+    def test_launch_container_sets_environment_vars_from_config(self, temp_dir):
+        """Should set user-defined environment variables from config.environment section.
+
+        Regression test for WANDB_API_KEY and similar env vars that need to be
+        set directly as Docker env vars (not just in the JSON config).
+        """
+        # Setup - stage config with environment section
+        executor = LocalExecutor()
+        stage_config = {
+            "stage": "train_film",
+            "inputs": {},
+            "outputs": {},
+            "environment": {
+                "WANDB_API_KEY": "fake-key-for-testing",
+                "CUSTOM_VAR": "custom-value",
+            },
+        }
+
+        # Mock subprocess
+        with patch("subprocess.Popen") as mock_popen:
+            mock_process = MagicMock()
+            mock_process.pid = 12345
+            mock_popen.return_value = mock_process
+
+            # Execute
+            executor.launch_container(
+                image_tag="goldfish-test_ws-v1",
+                stage_run_id="stage-abc123",
+                entrypoint_script="#!/bin/bash",
+                stage_config=stage_config,
+                work_dir=temp_dir,
+            )
+
+            # Extract all -e flags from docker args
+            args = mock_popen.call_args[0][0]
+            env_vars = {}
+            for i, arg in enumerate(args):
+                if arg == "-e" and i + 1 < len(args):
+                    env_val = args[i + 1]
+                    if "=" in env_val:
+                        name, value = env_val.split("=", 1)
+                        env_vars[name] = value
+
+            # Verify environment vars are set directly as Docker env vars
+            assert "WANDB_API_KEY" in env_vars, "WANDB_API_KEY should be set as Docker env var"
+            assert env_vars["WANDB_API_KEY"] == "fake-key-for-testing"
+            assert "CUSTOM_VAR" in env_vars, "CUSTOM_VAR should be set as Docker env var"
+            assert env_vars["CUSTOM_VAR"] == "custom-value"
+            # Also verify GOLDFISH_STAGE_CONFIG is still set
+            assert "GOLDFISH_STAGE_CONFIG" in env_vars
+
 
 class TestContainerMonitoring:
     """Test monitoring running containers."""

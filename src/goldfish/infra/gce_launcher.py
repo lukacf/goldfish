@@ -117,6 +117,14 @@ class GCELauncher:
             "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
         }
 
+        # Add user-defined environment variables from config
+        # This allows configs to specify env vars like WANDB_API_KEY
+        if "environment" in stage_config and isinstance(stage_config["environment"], dict):
+            for env_name, env_value in stage_config["environment"].items():
+                # SECURITY: Validate env var name (alphanumeric + underscore only)
+                if env_name.replace("_", "").isalnum():
+                    env_map[env_name] = str(env_value)
+
         # Build input staging commands
         # Transform gs://bucket/path to /mnt/gcs/path (symlinks on host)
         pre_run_cmds = [
