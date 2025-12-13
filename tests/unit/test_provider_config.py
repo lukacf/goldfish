@@ -1,7 +1,5 @@
 """Unit tests for provider configuration and backward compatibility."""
 
-import pytest
-from pydantic import ValidationError
 
 from goldfish.config import GoldfishConfig, JobsConfig
 

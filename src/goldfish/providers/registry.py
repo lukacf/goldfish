@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Type
+from typing import Any
 
 from goldfish.errors import GoldfishError
 from goldfish.providers.base import ExecutionProvider, StorageProvider
@@ -17,12 +17,12 @@ class ExecutionProviderRegistry:
 
     def __init__(self) -> None:
         """Initialize empty registry."""
-        self._providers: dict[str, Type[ExecutionProvider]] = {}
+        self._providers: dict[str, type[ExecutionProvider]] = {}
 
     def register(
         self,
         name: str,
-        provider_class: Type[ExecutionProvider],
+        provider_class: type[ExecutionProvider],
     ) -> None:
         """Register an execution provider.
 
@@ -95,12 +95,12 @@ class StorageProviderRegistry:
 
     def __init__(self) -> None:
         """Initialize empty registry."""
-        self._providers: dict[str, Type[StorageProvider]] = {}
+        self._providers: dict[str, type[StorageProvider]] = {}
 
     def register(
         self,
         name: str,
-        provider_class: Type[StorageProvider],
+        provider_class: type[StorageProvider],
     ) -> None:
         """Register a storage provider.
 

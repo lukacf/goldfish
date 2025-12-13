@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from goldfish.errors import GoldfishError
 from goldfish.providers.base import StorageLocation, StorageProvider
+
+logger = logging.getLogger(__name__)
 
 
 class GCSStorageProvider(StorageProvider):
@@ -29,15 +32,49 @@ class GCSStorageProvider(StorageProvider):
         """
         super().__init__(config)
 
+        # Validate config is dict
+        if not isinstance(config, dict):
+            raise GoldfishError(f"GCS provider config must be dict, got {type(config).__name__}")
+
+        # Validate and extract required bucket
         self.bucket = config.get("bucket")
         if not self.bucket:
             raise GoldfishError("GCS provider requires 'bucket' configuration")
+        if not isinstance(self.bucket, str):
+            raise GoldfishError(f"GCS provider 'bucket' must be string, got {type(self.bucket).__name__}")
 
-        self.sources_prefix = config.get("sources_prefix", "sources/").rstrip("/")
-        self.artifacts_prefix = config.get("artifacts_prefix", "artifacts/").rstrip("/")
-        self.snapshots_prefix = config.get("snapshots_prefix", "snapshots/").rstrip("/")
-        self.datasets_prefix = config.get("datasets_prefix", "datasets/").rstrip("/")
+        # Extract and validate optional string fields
+        self.sources_prefix = config.get("sources_prefix", "sources/")
+        if not isinstance(self.sources_prefix, str):
+            raise GoldfishError(
+                f"GCS provider 'sources_prefix' must be string, got {type(self.sources_prefix).__name__}"
+            )
+        self.sources_prefix = self.sources_prefix.rstrip("/")
+
+        self.artifacts_prefix = config.get("artifacts_prefix", "artifacts/")
+        if not isinstance(self.artifacts_prefix, str):
+            raise GoldfishError(
+                f"GCS provider 'artifacts_prefix' must be string, got {type(self.artifacts_prefix).__name__}"
+            )
+        self.artifacts_prefix = self.artifacts_prefix.rstrip("/")
+
+        self.snapshots_prefix = config.get("snapshots_prefix", "snapshots/")
+        if not isinstance(self.snapshots_prefix, str):
+            raise GoldfishError(
+                f"GCS provider 'snapshots_prefix' must be string, got {type(self.snapshots_prefix).__name__}"
+            )
+        self.snapshots_prefix = self.snapshots_prefix.rstrip("/")
+
+        self.datasets_prefix = config.get("datasets_prefix", "datasets/")
+        if not isinstance(self.datasets_prefix, str):
+            raise GoldfishError(
+                f"GCS provider 'datasets_prefix' must be string, got {type(self.datasets_prefix).__name__}"
+            )
+        self.datasets_prefix = self.datasets_prefix.rstrip("/")
+
         self.project_id = config.get("project_id")
+        if self.project_id is not None and not isinstance(self.project_id, str):
+            raise GoldfishError(f"GCS provider 'project_id' must be string, got {type(self.project_id).__name__}")
 
     def _normalize_remote_path(self, remote_path: str) -> str:
         """Convert remote_path to full gs:// URI if needed.
@@ -174,8 +211,13 @@ class GCSStorageProvider(StorageProvider):
             )
             return result.returncode == 0
 
-        except FileNotFoundError:
-            # gsutil not installed
+        except FileNotFoundError as e:
+            # gsutil not installed - log warning and return False
+            logger.warning(f"gsutil not found when checking existence of {gcs_uri}: {e}")
+            return False
+        except (OSError, PermissionError) as e:
+            # Permission or system error
+            logger.error(f"Error checking existence of {gcs_uri}: {e}")
             return False
 
     def get_size(self, remote_path: str) -> int | None:
@@ -205,7 +247,14 @@ class GCSStorageProvider(StorageProvider):
 
             return None
 
-        except (FileNotFoundError, ValueError):
+        except FileNotFoundError as e:
+            logger.warning(f"gsutil not found when getting size of {gcs_uri}: {e}")
+            return None
+        except ValueError as e:
+            logger.error(f"Failed to parse size from gsutil output for {gcs_uri}: {e}")
+            return None
+        except (OSError, PermissionError) as e:
+            logger.error(f"Error getting size of {gcs_uri}: {e}")
             return None
 
     def presign(self, remote_path: str, expiration_seconds: int = 3600) -> str | None:
@@ -239,7 +288,11 @@ class GCSStorageProvider(StorageProvider):
 
             return None
 
-        except FileNotFoundError:
+        except FileNotFoundError as e:
+            logger.warning(f"gsutil not found when generating presigned URL for {gcs_uri}: {e}")
+            return None
+        except (OSError, PermissionError) as e:
+            logger.error(f"Error generating presigned URL for {gcs_uri}: {e}")
             return None
 
     def get_hyperlink(self, remote_path: str) -> str | None:

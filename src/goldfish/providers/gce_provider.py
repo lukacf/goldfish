@@ -33,19 +33,50 @@ class GCEExecutionProvider(ExecutionProvider):
         """
         super().__init__(config)
 
-        # Extract GCE configuration
-        self.project_id = config.get("project_id")
-        self.zone = config.get("zone", "us-central1-a")
-        self.zones = config.get("zones", [self.zone])
-        self.bucket = config.get("bucket")
-        self.artifact_registry = config.get("artifact_registry")
-        self.gpu_preference = config.get("gpu_preference", ["h100", "a100", "none"])
-        self.resources = config.get("resources", [])
-        self.service_account = config.get("service_account")
+        # Validate config is dict
+        if not isinstance(config, dict):
+            raise GoldfishError(f"GCE provider config must be dict, got {type(config).__name__}")
 
-        # Validate required config
+        # Extract and validate GCE configuration
+        self.bucket = config.get("bucket")
         if not self.bucket:
             raise GoldfishError("GCE provider requires 'bucket' configuration")
+        if not isinstance(self.bucket, str):
+            raise GoldfishError(f"GCE provider 'bucket' must be string, got {type(self.bucket).__name__}")
+
+        self.project_id = config.get("project_id")
+        if self.project_id is not None and not isinstance(self.project_id, str):
+            raise GoldfishError(f"GCE provider 'project_id' must be string, got {type(self.project_id).__name__}")
+
+        self.zone = config.get("zone", "us-central1-a")
+        if not isinstance(self.zone, str):
+            raise GoldfishError(f"GCE provider 'zone' must be string, got {type(self.zone).__name__}")
+
+        self.zones = config.get("zones", [self.zone])
+        if not isinstance(self.zones, list):
+            raise GoldfishError(f"GCE provider 'zones' must be list, got {type(self.zones).__name__}")
+
+        self.artifact_registry = config.get("artifact_registry")
+        if self.artifact_registry is not None and not isinstance(self.artifact_registry, str):
+            raise GoldfishError(
+                f"GCE provider 'artifact_registry' must be string, got {type(self.artifact_registry).__name__}"
+            )
+
+        self.gpu_preference = config.get("gpu_preference", ["h100", "a100", "none"])
+        if not isinstance(self.gpu_preference, list):
+            raise GoldfishError(
+                f"GCE provider 'gpu_preference' must be list, got {type(self.gpu_preference).__name__}"
+            )
+
+        self.resources = config.get("resources", [])
+        if not isinstance(self.resources, list):
+            raise GoldfishError(f"GCE provider 'resources' must be list, got {type(self.resources).__name__}")
+
+        self.service_account = config.get("service_account")
+        if self.service_account is not None and not isinstance(self.service_account, str):
+            raise GoldfishError(
+                f"GCE provider 'service_account' must be string, got {type(self.service_account).__name__}"
+            )
 
         # Initialize GCE launcher
         self.gce_launcher = GCELauncher(
@@ -70,7 +101,7 @@ class GCEExecutionProvider(ExecutionProvider):
         """Build Docker image and push to Artifact Registry if configured.
 
         Args:
-            image_tag: Local image tag
+            image_tag: Local image tag (format: goldfish-{workspace}-{version})
             dockerfile_path: Path to Dockerfile (unused, we generate)
             context_path: Workspace directory path
             base_image: Optional base image override
@@ -78,13 +109,19 @@ class GCEExecutionProvider(ExecutionProvider):
         Returns:
             Image tag (with registry prefix if pushed)
         """
-        # Extract workspace name and version from image_tag
-        # Format: goldfish-{workspace}-{version}
-        parts = image_tag.replace("goldfish-", "").rsplit("-", 1)
-        if len(parts) != 2:
-            raise GoldfishError(f"Invalid image tag format: {image_tag}")
+        import re
 
-        workspace_name, version = parts
+        # Parse image tag using regex for robustness
+        # Format: goldfish-{workspace}-{version}
+        # Workspace can contain hyphens, version is everything after last hyphen
+        match = re.match(r"^goldfish-(.+?)-([^-]+)$", image_tag)
+        if not match:
+            raise GoldfishError(
+                f"Invalid image tag format: {image_tag}. Expected 'goldfish-{{workspace}}-{{version}}'"
+            )
+
+        workspace_name = match.group(1)
+        version = match.group(2)
 
         # Build image locally
         local_tag = self.docker_builder.build_image(
@@ -100,11 +137,16 @@ class GCEExecutionProvider(ExecutionProvider):
             remote_tag = f"{self.artifact_registry}/{workspace_name}:{version}"
 
             # Tag for registry
-            subprocess.run(
-                ["docker", "tag", local_tag, remote_tag],
-                check=True,
-                capture_output=True,
-            )
+            try:
+                subprocess.run(
+                    ["docker", "tag", local_tag, remote_tag],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as e:
+                stderr = e.stderr if e.stderr else "Unknown error"
+                raise GoldfishError(f"Failed to tag image for registry: {stderr}") from e
 
             # Push to registry
             try:
@@ -112,10 +154,12 @@ class GCEExecutionProvider(ExecutionProvider):
                     ["docker", "push", remote_tag],
                     check=True,
                     capture_output=True,
+                    text=True,
                 )
                 return remote_tag
             except subprocess.CalledProcessError as e:
-                raise GoldfishError(f"Failed to push image to registry: {e.stderr.decode()}") from e
+                stderr = e.stderr if e.stderr else "Unknown error"
+                raise GoldfishError(f"Failed to push image to registry: {stderr}") from e
 
         return local_tag
 
@@ -243,7 +287,7 @@ class GCEExecutionProvider(ExecutionProvider):
         Returns:
             Log output
         """
-        return self.gce_launcher.get_logs(instance_id, tail=tail)
+        return self.gce_launcher.get_instance_logs(instance_id, tail_lines=tail)
 
     def cancel(self, instance_id: str) -> bool:
         """Cancel (delete) a GCE instance.
@@ -254,7 +298,8 @@ class GCEExecutionProvider(ExecutionProvider):
         Returns:
             True if cancelled
         """
-        return self.gce_launcher.delete_instance(instance_id)
+        self.gce_launcher.delete_instance(instance_id)
+        return True
 
     def supports_volumes(self) -> bool:
         """GCE supports hyperdisk volumes.

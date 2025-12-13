@@ -1,11 +1,10 @@
 """Integration tests for provider system with core components."""
 
-from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from goldfish.config import GCSConfig, GCEConfig, GoldfishConfig, JobsConfig
+from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
 from goldfish.datasets.registry import DatasetRegistry
 from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.providers.base import (

@@ -50,7 +50,7 @@ class LocalExecutionProvider(ExecutionProvider):
         """Build Docker image locally.
 
         Args:
-            image_tag: Local image tag
+            image_tag: Local image tag (format: goldfish-{workspace}-{version})
             dockerfile_path: Path to Dockerfile (unused, we generate)
             context_path: Workspace directory path
             base_image: Optional base image override
@@ -58,13 +58,19 @@ class LocalExecutionProvider(ExecutionProvider):
         Returns:
             Local image tag
         """
-        # Extract workspace name and version from image_tag
-        # Format: goldfish-{workspace}-{version}
-        parts = image_tag.replace("goldfish-", "").rsplit("-", 1)
-        if len(parts) != 2:
-            raise GoldfishError(f"Invalid image tag format: {image_tag}")
+        import re
 
-        workspace_name, version = parts
+        # Parse image tag using regex for robustness
+        # Format: goldfish-{workspace}-{version}
+        # Workspace can contain hyphens, version is everything after last hyphen
+        match = re.match(r"^goldfish-(.+?)-([^-]+)$", image_tag)
+        if not match:
+            raise GoldfishError(
+                f"Invalid image tag format: {image_tag}. Expected 'goldfish-{{workspace}}-{{version}}'"
+            )
+
+        workspace_name = match.group(1)
+        version = match.group(2)
 
         # Build image locally
         return self.docker_builder.build_image(
@@ -154,8 +160,24 @@ class LocalExecutionProvider(ExecutionProvider):
         # Get exit code if container has exited
         exit_code = None
         if status == "exited":
-            exit_code = self.local_executor.get_container_exit_code(instance_id)
-            if exit_code != 0:
+            # Get exit code from docker inspect
+            try:
+                import json
+
+                result = subprocess.run(
+                    ["docker", "inspect", instance_id],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    inspect_data = json.loads(result.stdout)
+                    if inspect_data:
+                        exit_code = inspect_data[0]["State"].get("ExitCode", 1)
+                        if exit_code != 0:
+                            state = "failed"
+            except Exception:
+                # If we can't get exit code, assume failure for exited containers
                 state = "failed"
 
         return ExecutionStatus(
@@ -175,7 +197,8 @@ class LocalExecutionProvider(ExecutionProvider):
         Returns:
             Log output
         """
-        return self.local_executor.get_container_logs(instance_id, tail=tail)
+        tail_lines = tail if tail is not None else 200
+        return self.local_executor.get_container_logs(instance_id, tail_lines=tail_lines)
 
     def cancel(self, instance_id: str) -> bool:
         """Stop and remove container.
@@ -186,7 +209,8 @@ class LocalExecutionProvider(ExecutionProvider):
         Returns:
             True if cancelled
         """
-        return self.local_executor.stop_container(instance_id)
+        self.local_executor.stop_container(instance_id)
+        return True
 
 
 class LocalStorageProvider(StorageProvider):
@@ -206,14 +230,37 @@ class LocalStorageProvider(StorageProvider):
         """
         super().__init__(config)
 
+        # Validate config is dict
+        if not isinstance(config, dict):
+            raise GoldfishError(f"Local storage provider config must be dict, got {type(config).__name__}")
+
+        # Validate and extract base_path
         base_path = config.get("base_path")
         if not base_path:
             raise GoldfishError("Local storage provider requires 'base_path' configuration")
+        if not isinstance(base_path, str):
+            raise GoldfishError(f"Local storage provider 'base_path' must be string, got {type(base_path).__name__}")
 
         self.base_path = Path(base_path)
+
+        # Validate and extract prefix fields
         self.datasets_prefix = config.get("datasets_prefix", "datasets")
+        if not isinstance(self.datasets_prefix, str):
+            raise GoldfishError(
+                f"Local storage provider 'datasets_prefix' must be string, got {type(self.datasets_prefix).__name__}"
+            )
+
         self.artifacts_prefix = config.get("artifacts_prefix", "artifacts")
+        if not isinstance(self.artifacts_prefix, str):
+            raise GoldfishError(
+                f"Local storage provider 'artifacts_prefix' must be string, got {type(self.artifacts_prefix).__name__}"
+            )
+
         self.snapshots_prefix = config.get("snapshots_prefix", "snapshots")
+        if not isinstance(self.snapshots_prefix, str):
+            raise GoldfishError(
+                f"Local storage provider 'snapshots_prefix' must be string, got {type(self.snapshots_prefix).__name__}"
+            )
 
         # Create base directories
         self.base_path.mkdir(parents=True, exist_ok=True)
@@ -235,7 +282,8 @@ class LocalStorageProvider(StorageProvider):
             return Path(remote_path[7:])
 
         # Treat as dataset name
-        return self.base_path / self.datasets_prefix / remote_path
+        result_path: Path = self.base_path / self.datasets_prefix / remote_path
+        return result_path
 
     def upload(
         self,
@@ -261,10 +309,10 @@ class LocalStorageProvider(StorageProvider):
 
         try:
             if local_path.is_dir():
-                # Copy directory
+                # Copy directory (dirs_exist_ok prevents race condition)
                 if dest_path.exists():
                     shutil.rmtree(dest_path)
-                shutil.copytree(local_path, dest_path)
+                shutil.copytree(local_path, dest_path, dirs_exist_ok=True)
             else:
                 # Copy file
                 shutil.copy2(local_path, dest_path)
@@ -387,9 +435,10 @@ class LocalStorageProvider(StorageProvider):
 
         try:
             if source_path.is_dir():
+                # dirs_exist_ok prevents race condition
                 if snapshot_path.exists():
                     shutil.rmtree(snapshot_path)
-                shutil.copytree(source_path, snapshot_path)
+                shutil.copytree(source_path, snapshot_path, dirs_exist_ok=True)
             else:
                 shutil.copy2(source_path, snapshot_path)
 
