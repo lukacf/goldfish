@@ -16,7 +16,7 @@ from goldfish.db.types import (
     SourceRow,
     StageVersionRow,
 )
-from goldfish.models import JobStatus
+from goldfish.models import JobStatus, StageRunStatus
 
 # Load schema from file
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -1195,9 +1195,9 @@ class Database:
                 """
                 UPDATE stage_runs
                 SET outcome = ?
-                WHERE id = ? AND status = 'completed'
+                WHERE id = ? AND status = ?
                 """,
-                (outcome, stage_run_id),
+                (outcome, stage_run_id, StageRunStatus.COMPLETED),
             )
             return result.rowcount > 0
 
@@ -1922,11 +1922,11 @@ class Database:
             row = conn.execute(
                 """
                 SELECT * FROM stage_runs
-                WHERE workspace_name = ? AND stage_name = ? AND status = 'completed'
+                WHERE workspace_name = ? AND stage_name = ? AND status = ?
                 ORDER BY started_at DESC
                 LIMIT 1
                 """,
-                (workspace, stage_name),
+                (workspace, stage_name, StageRunStatus.COMPLETED),
             ).fetchone()
             return dict(row) if row else None
 
