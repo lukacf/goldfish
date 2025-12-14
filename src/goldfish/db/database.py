@@ -16,7 +16,7 @@ from goldfish.db.types import (
     SourceRow,
     StageVersionRow,
 )
-from goldfish.models import JobStatus, StageRunStatus
+from goldfish.models import JobStatus, PipelineStatus, StageRunStatus
 
 # Load schema from file
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -1115,7 +1115,7 @@ class Database:
                 (id, job_id, pipeline_run_id, workspace_name, pipeline_name, version, stage_name, status,
                  started_at, profile, hints_json, config_json, inputs_json, backend_type, backend_handle,
                  attempt_num)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stage_run_id,
@@ -1125,6 +1125,7 @@ class Database:
                     pipeline_name,
                     version,
                     stage_name,
+                    StageRunStatus.PENDING,
                     timestamp,
                     profile,
                     hints_json,
@@ -1223,8 +1224,8 @@ class Database:
                 stage_name,
                 attempt_num,
                 COUNT(*) as run_count,
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,
-                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as completed_count,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as failed_count,
                 SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) as success_count,
                 SUM(CASE WHEN outcome = 'bad_results' THEN 1 ELSE 0 END) as bad_results_count,
                 MIN(version) as first_version,
@@ -1234,7 +1235,7 @@ class Database:
             FROM stage_runs
             WHERE workspace_name = ?
         """
-        params: list = [workspace_name]
+        params: list = [StageRunStatus.COMPLETED, StageRunStatus.FAILED, workspace_name]
 
         if stage_name:
             query += " AND stage_name = ?"
@@ -1480,10 +1481,10 @@ class Database:
                 JOIN pipeline_runs p ON p.id = q.pipeline_run_id
                 WHERE q.pipeline_run_id = ?
                 AND q.stage_run_id IS NULL
-                AND q.status IN ('pending', 'running')
+                AND q.status IN (?, ?)
                 ORDER BY q.id
                 """,
-                (pipeline_run_id,),
+                (pipeline_run_id, PipelineStatus.PENDING, PipelineStatus.RUNNING),
             ).fetchall()
             return [dict(row) for row in rows]
 
