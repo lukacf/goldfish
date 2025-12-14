@@ -585,6 +585,8 @@ class GoldfishDaemon:
             return
 
         # === Check 1: DB says 'running' but instance is gone ===
+        # IMPORTANT: Add grace period - don't check runs started less than 20 minutes ago
+        # H100/GPU instance allocation can take 10+ minutes due to capacity constraints
         with self._db._conn() as conn:
             rows = conn.execute(
                 """
@@ -593,6 +595,7 @@ class GoldfishDaemon:
                 WHERE status = 'running'
                 AND backend_type = 'gce'
                 AND backend_handle IS NOT NULL
+                AND started_at < datetime('now', '-20 minutes')
                 """
             ).fetchall()
 
