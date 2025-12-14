@@ -39,7 +39,7 @@ from goldfish.jobs.pipeline_executor import PipelineExecutor
 from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.jobs.tracker import JobTracker
 from goldfish.logging import setup_logging
-from goldfish.models import StageRunStatus
+from goldfish.models import PipelineStatus, StageRunStatus
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.state.state_md import StateManager
 from goldfish.workspace.manager import WorkspaceManager
@@ -433,10 +433,11 @@ class GoldfishDaemon:
                        pr.config_override, pr.inputs_override
                 FROM pipeline_runs pr
                 JOIN pipeline_stage_queue psq ON psq.pipeline_run_id = pr.id
-                WHERE pr.status IN ('pending', 'running')
-                AND psq.status IN ('pending', 'running')
+                WHERE pr.status IN (?, ?)
+                AND psq.status IN (?, ?)
                 LIMIT 10
-                """
+                """,
+                (PipelineStatus.PENDING, PipelineStatus.RUNNING, PipelineStatus.PENDING, PipelineStatus.RUNNING),
             ).fetchall()
 
         for row in rows:

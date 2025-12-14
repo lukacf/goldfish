@@ -49,6 +49,17 @@ class StageRunProgress(str, Enum):
     FINALIZING = "finalizing"  # Recording outputs, fetching logs
 
 
+class PipelineStatus(str, Enum):
+    """Status for pipeline_runs and pipeline_stage_queue tables."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"
+    SKIPPED = "skipped"  # Only for pipeline_stage_queue
+
+
 class SourceStatus(str, Enum):
     AVAILABLE = "available"
     PENDING = "pending"
