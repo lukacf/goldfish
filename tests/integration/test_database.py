@@ -8,6 +8,7 @@ import sqlite3
 import pytest
 
 from goldfish.db.database import Database
+from goldfish.models import PipelineStatus, StageRunStatus
 
 
 class TestTransactionManagement:
@@ -234,17 +235,17 @@ class TestPipelineRunStatus:
         assert result["pipeline_run_id"] == "prun-test123"
         assert result["workspace"] == "my_workspace"
         assert result["pipeline"] == "pipeline.yaml"
-        assert result["status"] == "running"
+        assert result["status"] == PipelineStatus.RUNNING
         assert result["started_at"] == "2024-01-01T12:00:00"
         assert result["completed_at"] is None
         assert result["error"] is None
         assert len(result["queue"]) == 3
         assert result["queue"][0]["stage_name"] == "preprocess"
-        assert result["queue"][0]["status"] == "completed"
+        assert result["queue"][0]["status"] == PipelineStatus.COMPLETED
         assert result["queue"][1]["stage_name"] == "train"
-        assert result["queue"][1]["status"] == "running"
+        assert result["queue"][1]["status"] == PipelineStatus.RUNNING
         assert result["queue"][2]["stage_name"] == "evaluate"
-        assert result["queue"][2]["status"] == "pending"
+        assert result["queue"][2]["status"] == PipelineStatus.PENDING
 
     def test_get_queued_stages_for_pipeline_returns_pending_entries(self, temp_dir):
         """Should return stages that are queued but not yet have stage_runs."""
@@ -283,9 +284,9 @@ class TestPipelineRunStatus:
         # Should only return entries without stage_run_id that are pending/running
         assert len(result) == 2
         assert result[0]["stage_name"] == "train"
-        assert result[0]["status"] == "pending"
+        assert result[0]["status"] == PipelineStatus.PENDING
         assert result[1]["stage_name"] == "evaluate"
-        assert result[1]["status"] == "pending"
+        assert result[1]["status"] == PipelineStatus.PENDING
 
     def test_get_queued_stages_for_pipeline_excludes_completed(self, temp_dir):
         """Should not return completed/failed/canceled entries without stage_run_id."""
@@ -414,7 +415,7 @@ class TestAttemptGrouping:
         db.create_stage_run("stage-2", "test_ws", "v2", "train")
 
         # Mark run 2 as success
-        db.update_stage_run_status("stage-2", "completed")
+        db.update_stage_run_status("stage-2", StageRunStatus.COMPLETED)
         db.update_run_outcome("stage-2", "success")
 
         # Run 3 should be in attempt 2
@@ -429,7 +430,7 @@ class TestAttemptGrouping:
         self._setup_workspace(db)
 
         db.create_stage_run("stage-1", "test_ws", "v1", "train")
-        db.update_stage_run_status("stage-1", "completed")
+        db.update_stage_run_status("stage-1", StageRunStatus.COMPLETED)
         db.update_run_outcome("stage-1", "bad_results")
 
         # Next run should still be attempt 1
@@ -475,7 +476,7 @@ class TestAttemptGrouping:
         self._setup_workspace(db)
 
         db.create_stage_run("stage-1", "test_ws", "v1", "train")
-        db.update_stage_run_status("stage-1", "completed")
+        db.update_stage_run_status("stage-1", StageRunStatus.COMPLETED)
 
         with pytest.raises(ValueError, match="Invalid outcome"):
             db.update_run_outcome("stage-1", "invalid_value")
@@ -487,13 +488,13 @@ class TestAttemptGrouping:
 
         # Attempt 1: 3 runs, 2 failed, 1 success
         db.create_stage_run("stage-1", "test_ws", "v1", "train")
-        db.update_stage_run_status("stage-1", "failed", error="crash")
+        db.update_stage_run_status("stage-1", StageRunStatus.FAILED, error="crash")
 
         db.create_stage_run("stage-2", "test_ws", "v2", "train")
-        db.update_stage_run_status("stage-2", "failed", error="crash")
+        db.update_stage_run_status("stage-2", StageRunStatus.FAILED, error="crash")
 
         db.create_stage_run("stage-3", "test_ws", "v3", "train")
-        db.update_stage_run_status("stage-3", "completed")
+        db.update_stage_run_status("stage-3", StageRunStatus.COMPLETED)
         db.update_run_outcome("stage-3", "success")
 
         # Attempt 2: 1 run, still open
