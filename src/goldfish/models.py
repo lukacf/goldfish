@@ -17,11 +17,36 @@ class DirtyState(str, Enum):
 
 
 class JobStatus(str, Enum):
+    """Legacy job status (run_job). Prefer StageRunStatus for new code."""
+
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
-    CANCELLED = "cancelled"
+    CANCELLED = "cancelled"  # Note: legacy spelling with double 'l'
+
+
+class StageRunStatus(str, Enum):
+    """Status values for stage_runs table.
+
+    Note: Progress is tracked separately in the 'progress' column.
+    Display format combines them as "status:progress" (e.g., "running:build").
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"  # American spelling (single 'l')
+
+
+class StageRunProgress(str, Enum):
+    """Progress values for stage_runs.progress column."""
+
+    BUILD = "build"  # Building Docker image
+    LAUNCH = "launch"  # Launching container/instance
+    RUNNING = "running"  # Executing stage code
+    FINALIZING = "finalizing"  # Recording outputs, fetching logs
 
 
 class SourceStatus(str, Enum):

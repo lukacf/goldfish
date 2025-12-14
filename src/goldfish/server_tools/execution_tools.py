@@ -18,6 +18,7 @@ from goldfish.models import (
     GetOutputsResponse,
     GetRunResponse,
     StageRunInfo,
+    StageRunStatus,
 )
 from goldfish.server import (
     _get_config,
@@ -286,11 +287,13 @@ def cancel(run_id: str, reason: str) -> dict:
     updated = 0
     with db._conn() as conn:
         updated = conn.execute(
-            "UPDATE stage_runs SET status='canceled', progress=NULL, completed_at=?, error=? WHERE id=? AND status='running'",
+            "UPDATE stage_runs SET status=?, progress=NULL, completed_at=?, error=? WHERE id=? AND status=?",
             (
+                StageRunStatus.CANCELED,
                 datetime.now(UTC).isoformat(),
                 f"Canceled: {reason}",
                 run_id,
+                StageRunStatus.RUNNING,
             ),
         ).rowcount
 
