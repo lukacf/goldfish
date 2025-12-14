@@ -190,8 +190,8 @@ class StageExecutor:
             # Emit phase progress: building image
             self.db.update_stage_run_status(
                 stage_run_id=stage_run_id,
-                status="running",
-                progress="build",
+                status=StageRunStatus.RUNNING,
+                progress=StageRunProgress.BUILD,
             )
             # 6. Build Docker image (use profile's base image)
             profile_name = stage_config.get("compute", {}).get("profile")
@@ -200,8 +200,8 @@ class StageExecutor:
             # Emit phase progress: launching container/instance
             self.db.update_stage_run_status(
                 stage_run_id=stage_run_id,
-                status="running",
-                progress="launch",
+                status=StageRunStatus.RUNNING,
+                progress=StageRunProgress.LAUNCH,
             )
             # 7. Launch container
             # Build input config with format info for goldfish.io
@@ -235,7 +235,7 @@ class StageExecutor:
             # Mark failed immediately with error and re-raise
             self.db.update_stage_run_status(
                 stage_run_id=stage_run_id,
-                status="failed",
+                status=StageRunStatus.FAILED,
                 completed_at=datetime.now(UTC).isoformat(),
                 error=str(e),
             )
@@ -250,10 +250,10 @@ class StageExecutor:
             stage=stage_name,
             stage_version=stage_version_id,
             stage_version_num=stage_version_num,
-            status="running",
+            status=StageRunStatus.RUNNING,
             started_at=datetime.now(UTC),
             log_uri=str(self.dev_repo / ".goldfish" / "runs" / stage_run_id / "logs" / "output.log"),
-            progress="launch",
+            progress=StageRunProgress.LAUNCH,
             profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
             hints=stage_config.get("hints"),
             config=stage_config,
@@ -321,7 +321,7 @@ class StageExecutor:
                 # Find completed run with the signal
                 source_run = None
                 for run in stage_runs:
-                    if run["status"] == "completed":
+                    if run["status"] == StageRunStatus.COMPLETED:
                         source_run = run
                         break
 
@@ -966,7 +966,7 @@ echo "Stage completed successfully"
             bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
             gcs_base = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/outputs"
 
-        if status == "completed":
+        if status == StageRunStatus.COMPLETED:
             try:
                 self._record_output_signals(stage_run_id, workspace, stage_name_from_db, gcs_base=gcs_base)
             except Exception as e:
@@ -974,10 +974,10 @@ echo "Stage completed successfully"
                 error_msg = f"Output recording failed: {e}"
                 self.db.update_stage_run_status(
                     stage_run_id=stage_run_id,
-                    status="failed",
+                    status=StageRunStatus.FAILED,
                     completed_at=datetime.now(UTC).isoformat(),
                     error=error_msg,
-                    progress="finalizing",
+                    progress=StageRunProgress.FINALIZING,
                 )
                 raise
 
@@ -1010,8 +1010,8 @@ echo "Stage completed successfully"
             status=status,
             completed_at=datetime.now(UTC).isoformat(),
             log_uri=log_uri,
-            error=(logs[-STAGE_LOG_TAIL_FOR_FINALIZE:] if (status == "failed" and logs) else None),
-            progress="finalizing",
+            error=(logs[-STAGE_LOG_TAIL_FOR_FINALIZE:] if (status == StageRunStatus.FAILED and logs) else None),
+            progress=StageRunProgress.FINALIZING,
         )
 
     def wait_for_completion(self, stage_run_id: str, poll_interval: int = 5, timeout: int = 3600) -> str:
@@ -1025,7 +1025,7 @@ echo "Stage completed successfully"
             timeout: Maximum seconds to wait (default 3600 = 1 hour)
 
         Returns:
-            Final status: "completed" or "failed"
+            Final status: StageRunStatus.COMPLETED or FAILED
 
         Raises:
             GoldfishError: If timeout exceeded or container not found
@@ -1044,18 +1044,20 @@ echo "Stage completed successfully"
             if backend == "local":
                 status = self.local_executor.get_container_status(stage_run_id)
 
-                if status == "running":
+                if status == StageRunStatus.RUNNING:
                     # Still running, update status in db
-                    self.db.update_stage_run_status(stage_run_id=stage_run_id, status="running", progress="running")
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id, status=StageRunStatus.RUNNING, progress=StageRunProgress.RUNNING
+                    )
                     interval = self._poll_interval(int(elapsed))
                     time.sleep(interval)
                     continue
 
-                elif status in ("completed", "failed"):
+                elif status in (StageRunStatus.COMPLETED, StageRunStatus.FAILED):
                     self.db.update_stage_run_status(
                         stage_run_id=stage_run_id,
-                        status="running",
-                        progress="finalizing",
+                        status=StageRunStatus.RUNNING,
+                        progress=StageRunProgress.FINALIZING,
                     )
                     self._finalize_stage_run(stage_run_id, backend, status)
                     return status
@@ -1070,18 +1072,20 @@ echo "Stage completed successfully"
             elif backend == "gce":
                 status = self.gce_launcher.get_instance_status(stage_run_id)
 
-                if status == "running":
+                if status == StageRunStatus.RUNNING:
                     # Still running, update status in db
-                    self.db.update_stage_run_status(stage_run_id=stage_run_id, status="running", progress="running")
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id, status=StageRunStatus.RUNNING, progress=StageRunProgress.RUNNING
+                    )
                     interval = self._poll_interval(int(elapsed))
                     time.sleep(interval)
                     continue
 
-                elif status in ("completed", "failed"):
+                elif status in (StageRunStatus.COMPLETED, StageRunStatus.FAILED):
                     self.db.update_stage_run_status(
                         stage_run_id=stage_run_id,
-                        status="running",
-                        progress="finalizing",
+                        status=StageRunStatus.RUNNING,
+                        progress=StageRunProgress.FINALIZING,
                     )
                     self._finalize_stage_run(stage_run_id, backend, status)
                     return status

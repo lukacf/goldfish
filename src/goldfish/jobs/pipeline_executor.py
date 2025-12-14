@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.models import PipelineStatus, StageRunInfo
+from goldfish.models import PipelineStatus, StageRunInfo, StageRunStatus
 from goldfish.pipeline.manager import PipelineManager
 
 # Lease timeout for claimed stages (seconds) - if a stage is claimed but not launched
@@ -265,7 +265,7 @@ class PipelineExecutor:
                 if input_def.from_stage:
                     # Need a completed run of the upstream stage
                     stage_runs = self.db.list_stage_runs(workspace_name=workspace, stage_name=input_def.from_stage)
-                    has_completed = any(r["status"] == "completed" for r in stage_runs)
+                    has_completed = any(r["status"] == StageRunStatus.COMPLETED for r in stage_runs)
                     if not has_completed:
                         raise GoldfishError(
                             f"Stage '{stage.name}' requires input '{input_name}' from stage "

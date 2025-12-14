@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from goldfish.errors import GoldfishError
+from goldfish.models import StageRunStatus
 
 
 class LocalExecutor:
@@ -111,7 +112,7 @@ class LocalExecutor:
             container_id: Container identifier
 
         Returns:
-            Status: "running", "completed", "failed", or "not_found"
+            Status: StageRunStatus value or "not_found"
         """
         try:
             result = subprocess.run(["docker", "inspect", container_id], capture_output=True, text=True, check=False)
@@ -131,10 +132,10 @@ class LocalExecutor:
             status = state["Status"]
 
             if status == "running":
-                return "running"
+                return StageRunStatus.RUNNING
             elif status == "exited":
                 exit_code = state.get("ExitCode", 1)
-                return "completed" if exit_code == 0 else "failed"
+                return StageRunStatus.COMPLETED if exit_code == 0 else StageRunStatus.FAILED
             else:
                 return str(status)
 
