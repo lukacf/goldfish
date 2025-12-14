@@ -20,6 +20,7 @@ from typing import Any
 from goldfish.errors import GoldfishError
 from goldfish.infra.resource_launcher import ResourceLauncher, cleanup_disk, run_gcloud
 from goldfish.infra.startup_builder import build_startup_script
+from goldfish.models import StageRunStatus
 
 logger = logging.getLogger(__name__)
 
@@ -540,21 +541,21 @@ class GCELauncher:
             instance_name: Instance identifier
 
         Returns:
-            Goldfish status: "running", "completed", "failed"
+            Goldfish status: StageRunStatus.RUNNING, COMPLETED, or FAILED
         """
         # Map GCE status to Goldfish status
         if status in ("PROVISIONING", "STAGING", "RUNNING"):
-            return "running"
+            return StageRunStatus.RUNNING
         elif status == "TERMINATED":
             # Check exit code in GCS if available
             if self.bucket:
                 exit_code = self._get_exit_code(instance_name)
-                return "completed" if exit_code == 0 else "failed"
-            return "completed"
+                return StageRunStatus.COMPLETED if exit_code == 0 else StageRunStatus.FAILED
+            return StageRunStatus.COMPLETED
         elif status in ("STOPPING", "SUSPENDING", "SUSPENDED"):
-            return "running"
+            return StageRunStatus.RUNNING
         else:
-            return "failed"
+            return StageRunStatus.FAILED
 
     def _find_instance_zone(self, instance_name: str) -> str | None:
         """Find which zone an instance is in.
@@ -812,7 +813,7 @@ class GCELauncher:
             timeout_sec: Maximum seconds to wait
 
         Returns:
-            Final status: "completed" or "failed"
+            Final status: StageRunStatus.COMPLETED or FAILED
 
         Raises:
             GoldfishError: If timeout exceeded
@@ -826,7 +827,7 @@ class GCELauncher:
             if status == "not_found":
                 raise GoldfishError(f"Instance {instance_name} not found")
 
-            if status in ("completed", "failed"):
+            if status in (StageRunStatus.COMPLETED, StageRunStatus.FAILED):
                 return status
 
             time.sleep(10)  # Poll every 10 seconds
