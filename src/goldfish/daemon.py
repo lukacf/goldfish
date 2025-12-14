@@ -39,6 +39,7 @@ from goldfish.jobs.pipeline_executor import PipelineExecutor
 from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.jobs.tracker import JobTracker
 from goldfish.logging import setup_logging
+from goldfish.models import StageRunStatus
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.state.state_md import StateManager
 from goldfish.workspace.manager import WorkspaceManager
@@ -592,11 +593,12 @@ class GoldfishDaemon:
                 """
                 SELECT id, backend_handle, workspace_name, stage_name
                 FROM stage_runs
-                WHERE status = 'running'
+                WHERE status = ?
                 AND backend_type = 'gce'
                 AND backend_handle IS NOT NULL
                 AND started_at < datetime('now', '-20 minutes')
-                """
+                """,
+                (StageRunStatus.RUNNING,),
             ).fetchall()
 
         if rows:
@@ -624,12 +626,12 @@ class GoldfishDaemon:
                         conn.execute(
                             """
                             UPDATE stage_runs
-                            SET status = 'failed',
+                            SET status = ?,
                                 error = 'Instance disappeared (orphan cleanup)',
                                 completed_at = datetime('now')
-                            WHERE id = ? AND status = 'running'
+                            WHERE id = ? AND status = ?
                             """,
-                            (stage_run_id,),
+                            (StageRunStatus.FAILED, stage_run_id, StageRunStatus.RUNNING),
                         )
                     logger.info(
                         "Marked orphaned stage run %s as failed (workspace=%s, stage=%s)",
@@ -646,17 +648,17 @@ class GoldfishDaemon:
             return
 
         # Get all GCE runs with terminal status that might have orphaned instances
-        # (status column stores base values like 'canceled', 'completed', 'failed' - no suffixes)
         with self._db._conn() as conn:
             terminal_rows = conn.execute(
                 """
                 SELECT id, backend_handle, status
                 FROM stage_runs
-                WHERE status IN ('canceled', 'completed', 'failed')
+                WHERE status IN (?, ?, ?)
                 AND backend_type = 'gce'
                 AND backend_handle IS NOT NULL
                 AND completed_at > datetime('now', '-24 hours')
-                """
+                """,
+                (StageRunStatus.CANCELED, StageRunStatus.COMPLETED, StageRunStatus.FAILED),
             ).fetchall()
 
         for row in terminal_rows:
