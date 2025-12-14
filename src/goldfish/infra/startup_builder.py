@@ -21,6 +21,63 @@ GCSFUSE_RETRY_SLEEP_SEC = 2  # Seconds to sleep between gcsfuse retries
 DEFAULT_SHM_SIZE = "16g"  # Default Docker shared memory size
 
 
+def reboot_cleanup_section(bucket_mount: str, gcsfuse: bool = True) -> str:
+    """Generate cleanup for stale state from previous boot (reboot-safe).
+
+    When a preemptible instance is preempted and reboots, there may be stale state:
+    - Docker containers still registered (but not running)
+    - gcsfuse mount point still present (possibly stale)
+    - Lock files or PID files from previous run
+
+    This cleanup ensures the startup script can run successfully after a reboot.
+
+    Args:
+        bucket_mount: gcsfuse mount point to clean up
+        gcsfuse: Whether gcsfuse is enabled (only clean up mount if True)
+
+    Returns:
+        Shell script fragment with cleanup commands
+    """
+    # Build mount cleanup section only if gcsfuse is enabled
+    mount_detection = ""
+    mount_cleanup = ""
+    if gcsfuse:
+        mount_detection = f"""
+if mountpoint -q {bucket_mount} 2>/dev/null; then
+    echo "REBOOT DETECTED: Found stale mount at {bucket_mount}"
+    REBOOT_DETECTED=1
+fi"""
+        mount_cleanup = f"""
+    # Unmount stale mount
+    fusermount -u {bucket_mount} 2>/dev/null || true
+    umount -f {bucket_mount} 2>/dev/null || true"""
+
+    return f"""
+# === REBOOT CLEANUP (handles stale state from previous boot) ===
+# Detect if this is a reboot (vs fresh boot) by checking for stale state
+REBOOT_DETECTED=0
+if docker ps -aq 2>/dev/null | grep -q .; then
+    echo "REBOOT DETECTED: Found stale Docker containers"
+    REBOOT_DETECTED=1
+fi{mount_detection}
+
+if [[ "$REBOOT_DETECTED" == "1" ]]; then
+    echo "=== CLEANING UP STALE STATE FROM PREVIOUS BOOT ==="
+    log_stage "reboot_cleanup_begin" || true
+
+    # Kill and remove all Docker containers (from previous run)
+    docker kill $(docker ps -q) 2>/dev/null || true
+    docker rm -f $(docker ps -aq) 2>/dev/null || true
+{mount_cleanup}
+    # Clean up any stale lock/pid files
+    rm -f /tmp/goldfish_*.lock /tmp/goldfish_*.pid 2>/dev/null || true
+
+    log_stage "reboot_cleanup_done" || true
+    echo "=== REBOOT CLEANUP COMPLETE ==="
+fi
+"""
+
+
 def self_deletion_section() -> str:
     """Generate self-deletion function and trap.
 
@@ -450,6 +507,8 @@ def build_startup_script(
         # Self-deletion trap - MUST be early to catch failures in apt-get, driver install, etc.
         self_deletion_section(),
         'log_stage "startup_begin"',
+        # Reboot cleanup - handles stale state if instance rebooted after preemption
+        reboot_cleanup_section(bucket_mount, gcsfuse=gcsfuse),
     ]
 
     # Add watchdog if max_runtime specified
