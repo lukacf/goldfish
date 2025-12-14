@@ -646,12 +646,13 @@ class GoldfishDaemon:
             return
 
         # Get all GCE runs with terminal status that might have orphaned instances
+        # Note: status can have progress suffix like 'canceled:running', 'failed:launch'
         with self._db._conn() as conn:
             terminal_rows = conn.execute(
                 """
                 SELECT id, backend_handle, status
                 FROM stage_runs
-                WHERE status IN ('canceled', 'completed', 'failed')
+                WHERE (status LIKE 'canceled%' OR status LIKE 'completed%' OR status LIKE 'failed%')
                 AND backend_type = 'gce'
                 AND backend_handle IS NOT NULL
                 AND completed_at > datetime('now', '-24 hours')
