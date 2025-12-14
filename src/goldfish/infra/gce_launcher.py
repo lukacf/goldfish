@@ -10,6 +10,7 @@ Provides:
 """
 
 import json
+import logging
 import subprocess
 import time
 from datetime import UTC
@@ -19,6 +20,8 @@ from typing import Any
 from goldfish.errors import GoldfishError
 from goldfish.infra.resource_launcher import ResourceLauncher, cleanup_disk, run_gcloud
 from goldfish.infra.startup_builder import build_startup_script
+
+logger = logging.getLogger(__name__)
 
 # Configuration constants for hyperdisk
 HYPERDISK_PROVISIONED_IOPS = 80000  # IOPS for hyperdisk-balanced
@@ -768,11 +771,13 @@ class GCELauncher:
             instance_name: Instance identifier
         """
         instance_name = self._sanitize_name(instance_name)
+        logger.info("delete_instance called for %s (project=%s)", instance_name, self.project_id)
 
         # Find which zone the instance is in
         zone = self._find_instance_zone(instance_name)
         if not zone:
             # Instance not found - already deleted or never existed
+            logger.warning("delete_instance: instance %s not found (may already be deleted)", instance_name)
             return
 
         cmd = [
@@ -788,6 +793,7 @@ class GCELauncher:
             cmd.append(f"--project={self.project_id}")
 
         run_gcloud(cmd, check=False)  # Don't fail if already deleted
+        logger.info("delete_instance: deleted %s in zone %s", instance_name, zone)
 
     def wait_for_termination(self, instance_name: str, timeout_sec: int = 3600) -> str:
         """Wait for instance to terminate.
