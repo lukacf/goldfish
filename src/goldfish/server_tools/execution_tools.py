@@ -493,7 +493,7 @@ def mark_outcome(
     if not run:
         return {"success": False, "error": f"Run not found: {run_id}"}
 
-    if run["status"] != "completed":
+    if run["status"] != StageRunStatus.COMPLETED:
         return {
             "success": False,
             "error": f"Can only mark outcome for completed runs. Current status: {run['status']}",

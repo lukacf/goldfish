@@ -230,7 +230,7 @@ class RunJobResponse(BaseModel):
     experiment_dir: str
     artifact_uri: str | None = None
     log_uri: str | None = None
-    initial_status: str = "pending"
+    initial_status: str = JobStatus.PENDING
     state_md: str | None = None
 
 
