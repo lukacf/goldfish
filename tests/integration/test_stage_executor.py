@@ -8,7 +8,7 @@ import pytest
 
 from goldfish.errors import GoldfishError
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.models import PipelineDef, SignalDef, StageDef
+from goldfish.models import PipelineDef, SignalDef, StageDef, StageRunStatus
 
 
 class TestInputResolution:
@@ -64,7 +64,7 @@ class TestInputResolution:
         test_db.create_stage_run(
             stage_run_id=stage_run_id, workspace_name="test_workspace", version="v1", stage_name="preprocess"
         )
-        test_db.update_stage_run_status(stage_run_id, "completed")
+        test_db.update_stage_run_status(stage_run_id, StageRunStatus.COMPLETED)
         test_db.add_signal(
             stage_run_id=stage_run_id,
             signal_name="features",
@@ -289,7 +289,7 @@ class TestStageRunRecords:
         assert record["workspace_name"] == "test_workspace"
         assert record["version"] == "v1"
         assert record["stage_name"] == "preprocess"
-        assert record["status"] == "pending"
+        assert record["status"] == StageRunStatus.PENDING
         assert json.loads(record["config_json"]) == config_override
         assert record["stage_version_id"] == stage_version_id
 
@@ -345,7 +345,7 @@ class TestStageExecution:
         # Verify
         assert result.workspace == "test_workspace"
         assert result.stage == "preprocess"
-        assert result.status == "running"
+        assert result.status == StageRunStatus.RUNNING
         assert result.version == "v1"
 
         # Verify Docker image was built
@@ -657,7 +657,7 @@ class TestLineageTracking:
             stage_name="preprocess",
         )
         test_db.update_stage_run_version(upstream_run_id, upstream_version_id)
-        test_db.update_stage_run_status(upstream_run_id, "completed")
+        test_db.update_stage_run_status(upstream_run_id, StageRunStatus.COMPLETED)
 
         # Record output signal from upstream stage
         test_db.add_signal(
