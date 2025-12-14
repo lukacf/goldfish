@@ -19,7 +19,7 @@ from goldfish.infra.docker_builder import DockerBuilder
 from goldfish.infra.gce_launcher import GCELauncher
 from goldfish.infra.local_executor import LocalExecutor
 from goldfish.infra.profiles import ProfileResolver
-from goldfish.models import PipelineDef, StageDef, StageRunInfo
+from goldfish.models import PipelineDef, StageDef, StageRunInfo, StageRunProgress, StageRunStatus
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.utils import parse_optional_datetime
 from goldfish.utils.config_hash import compute_config_hash
@@ -942,11 +942,12 @@ echo "Stage completed successfully"
 
     def _finalize_stage_run(self, stage_run_id: str, backend: str, status: str) -> None:
         """Handle terminal status: record outputs, fetch logs, update status."""
-        # CAS guard against double-finalize
+        # CAS guard against double-finalize (only finalize if still in non-terminal state)
+        terminal_statuses = (StageRunStatus.COMPLETED, StageRunStatus.FAILED, StageRunStatus.CANCELED)
         with self.db._conn() as conn:
             updated = conn.execute(
-                "UPDATE stage_runs SET status=?, completed_at=? WHERE id=? AND status NOT IN ('completed','failed','canceled')",
-                (status, datetime.now(UTC).isoformat(), stage_run_id),
+                "UPDATE stage_runs SET status=?, completed_at=? WHERE id=? AND status NOT IN (?, ?, ?)",
+                (status, datetime.now(UTC).isoformat(), stage_run_id, *terminal_statuses),
             ).rowcount
         if updated == 0:
             return
@@ -1115,43 +1116,44 @@ echo "Stage completed successfully"
     def refresh_status_once(self, stage_run_id: str) -> str | None:
         """Single backend check to advance status/logs/outputs without blocking."""
         backend = self.config.jobs.backend
+        terminal_statuses = (StageRunStatus.COMPLETED, StageRunStatus.FAILED, StageRunStatus.CANCELED)
 
         if backend == "local":
             status = self.local_executor.get_container_status(stage_run_id)
-            if status == "running":
-                # CAS: only update if still running
+            if status == StageRunStatus.RUNNING:
+                # CAS: only update if not in terminal state
                 with self.db._conn() as conn:
                     conn.execute(
-                        "UPDATE stage_runs SET status='running', progress='running' WHERE id=? AND status!='completed' AND status!='failed' AND status!='canceled'",
-                        (stage_run_id,),
+                        "UPDATE stage_runs SET status=?, progress=? WHERE id=? AND status NOT IN (?, ?, ?)",
+                        (StageRunStatus.RUNNING, StageRunProgress.RUNNING, stage_run_id, *terminal_statuses),
                     )
-            elif status in ("completed", "failed"):
+            elif status in (StageRunStatus.COMPLETED, StageRunStatus.FAILED):
                 # Guard against double-finalize by only doing it if not terminal
                 current = self.db.get_stage_run(stage_run_id)
-                if current and current.get("status") not in ("completed", "failed", "canceled"):
+                if current and current.get("status") not in terminal_statuses:
                     self.db.update_stage_run_status(
                         stage_run_id=stage_run_id,
-                        status="running",
-                        progress="finalizing",
+                        status=StageRunStatus.RUNNING,
+                        progress=StageRunProgress.FINALIZING,
                     )
                     self._finalize_stage_run(stage_run_id, backend, status)
             return status
 
         if backend == "gce":
             status = self.gce_launcher.get_instance_status(stage_run_id)
-            if status == "running":
+            if status == StageRunStatus.RUNNING:
                 with self.db._conn() as conn:
                     conn.execute(
-                        "UPDATE stage_runs SET status='running', progress='running' WHERE id=? AND status!='completed' AND status!='failed' AND status!='canceled'",
-                        (stage_run_id,),
+                        "UPDATE stage_runs SET status=?, progress=? WHERE id=? AND status NOT IN (?, ?, ?)",
+                        (StageRunStatus.RUNNING, StageRunProgress.RUNNING, stage_run_id, *terminal_statuses),
                     )
-            elif status in ("completed", "failed"):
+            elif status in (StageRunStatus.COMPLETED, StageRunStatus.FAILED):
                 current = self.db.get_stage_run(stage_run_id)
-                if current and current.get("status") not in ("completed", "failed", "canceled"):
+                if current and current.get("status") not in terminal_statuses:
                     self.db.update_stage_run_status(
                         stage_run_id=stage_run_id,
-                        status="running",
-                        progress="finalizing",
+                        status=StageRunStatus.RUNNING,
+                        progress=StageRunProgress.FINALIZING,
                     )
                     self._finalize_stage_run(stage_run_id, backend, status)
             return status
