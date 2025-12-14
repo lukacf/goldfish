@@ -532,6 +532,17 @@ class GoldfishDaemon:
         if not self.config:
             return
 
+        # Get GCE project ID - CRITICAL: must match where instances are created
+        if not self.config.gce:
+            logger.debug("No GCE config, skipping orphan check")
+            return
+
+        try:
+            project_id = self.config.gce.effective_project_id
+        except ValueError:
+            logger.debug("No GCE project_id configured, skipping orphan check")
+            return
+
         # Get list of ALL GCE stage instances (any status) in one call
         # We need to know status to avoid killing instances that are still booting
         try:
@@ -541,6 +552,7 @@ class GoldfishDaemon:
                     "compute",
                     "instances",
                     "list",
+                    f"--project={project_id}",
                     "--filter=name~^stage-",
                     "--format=value(name,zone,status)",
                 ],
@@ -667,6 +679,7 @@ class GoldfishDaemon:
                             "instances",
                             "delete",
                             instance_name,
+                            f"--project={project_id}",
                             f"--zone={zone}",
                             "--quiet",
                         ],
