@@ -611,9 +611,10 @@ class GCELauncher:
             instance_name: Instance identifier
 
         Returns:
-            Exit code (0 if not found or error)
+            Exit code, or 1 if not found (missing file = crash before writing)
         """
         if not self.bucket:
+            # No bucket configured - assume success for local-like behavior
             return 0
 
         try:
@@ -629,7 +630,13 @@ class GCELauncher:
             )
             return int(result.stdout.strip() or "0")
         except Exception:
-            return 0
+            # Missing exit_code.txt means script crashed before writing it
+            # This is a failure, not success
+            logger.warning(
+                "exit_code.txt not found for %s - treating as failure (script may have crashed)",
+                instance_name,
+            )
+            return 1
 
     def get_instance_logs(
         self,
