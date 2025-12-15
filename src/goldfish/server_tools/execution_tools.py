@@ -53,7 +53,6 @@ def run(
     inputs_override: dict | None = None,
     reason: str | dict | None = None,
     wait: bool = False,
-    skip_review: bool = False,
     dry_run: bool = False,
 ) -> dict:
     """Run pipeline stages.
@@ -79,7 +78,6 @@ def run(
                     "optimal_result": "Best case outcome"
                 }
         wait: False (default) returns immediately; True blocks until completion
-        skip_review: Skip pre-run review (if enabled in config)
         dry_run: If True, validate everything without launching. Returns what would
                  run and any validation errors found.
 
@@ -87,7 +85,6 @@ def run(
         Dict with:
         - runs: List of stage run info (run_id, workspace, version, stage, status)
         - pipeline_run_id: If running multiple stages
-        - review: Review decision (if review was performed)
         If dry_run=True:
         - valid: Whether pipeline would run successfully
         - stages_to_run: List of stages that would execute
@@ -149,63 +146,7 @@ def run(
             inputs_override=inputs_override or {},
         )
 
-    # Pre-run review (if enabled)
-    review_result = None
-    if config.pre_run_review.enabled and not skip_review:
-        from goldfish.pre_run_review import create_reviewer_from_config
-
-        # Get workspace path and diff
-        workspace_path = workspace_manager.get_workspace_path(workspace_name)
-        diff_output = ""
-
-        # Get git diff if workspace is mounted
-        # Find which slot has this workspace mounted
-        slot = None
-        for slot_info in workspace_manager.get_all_slots():
-            if slot_info.workspace == workspace_name and slot_info.state.value == "mounted":
-                slot = slot_info.slot
-                break
-        if slot:
-            try:
-                import subprocess
-
-                slot_path = workspace_manager.get_slot_path(slot)
-                diff_result = subprocess.run(
-                    ["git", "diff", "HEAD"],
-                    cwd=slot_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                diff_output = diff_result.stdout
-            except Exception as e:
-                logger.warning(f"Failed to get diff for review: {e}")
-
-        # Skip review if no changes and configured to do so
-        if config.pre_run_review.skip_on_no_changes and not diff_output.strip():
-            review_result = {"skipped": True, "reason": "no uncommitted changes"}
-        else:
-            # Perform review
-            reviewer = create_reviewer_from_config(config.pre_run_review.model_dump())
-            decision = reviewer.review_run(
-                workspace_path=workspace_path,
-                diff_output=diff_output,
-                run_reason=run_reason,
-                stage_names=stages or ["all"],
-                pipeline_name=pipeline,
-            )
-
-            review_result = decision.model_dump()
-
-            # Block run if not approved and require_approval is True
-            if not decision.approved and config.pre_run_review.require_approval:
-                return {
-                    "success": False,
-                    "error": "Run blocked by pre-run review",
-                    "review": review_result,
-                }
-
-    # Unified execution through run_stages
+    # Execute through run_stages
     result: dict[str, Any] = pipeline_executor.run_stages(
         workspace=workspace_name,
         stages=stages if stages else None,
@@ -216,10 +157,6 @@ def run(
         reason_structured=run_reason,
         async_mode=not wait,
     )
-
-    # Add review result to response if review was performed
-    if review_result:
-        result["review"] = review_result
 
     return result
 
