@@ -18,6 +18,7 @@ from goldfish.models import (
     GetOutputsResponse,
     GetRunResponse,
     StageRunInfo,
+    StageRunStatus,
 )
 from goldfish.server import (
     _get_config,
@@ -51,6 +52,7 @@ def run(
     inputs_override: dict | None = None,
     reason: str | None = None,
     wait: bool = False,
+    dry_run: bool = False,
 ) -> dict:
     """Run pipeline stages.
 
@@ -66,16 +68,24 @@ def run(
         inputs_override: Override input sources for debugging
         reason: Why running (min 15 chars)
         wait: False (default) returns immediately; True blocks until completion
+        dry_run: If True, validate everything without launching. Returns what would
+                 run and any validation errors found.
 
     Returns:
         Dict with:
         - runs: List of stage run info (run_id, workspace, version, stage, status)
         - pipeline_run_id: If running multiple stages
+        If dry_run=True:
+        - valid: Whether pipeline would run successfully
+        - stages_to_run: List of stages that would execute
+        - validation_errors: List of any issues found
+        - warnings: Non-fatal issues
 
     Examples:
         run("w1")                           # Run all stages
         run("w1", stages=["train"])         # Run single stage
         run("w1", stages=["preprocess", "train", "evaluate"])  # Run specific stages
+        run("w1", dry_run=True)             # Validate without launching
     """
     config = _get_config()
     workspace_manager = _get_workspace_manager()
@@ -89,6 +99,21 @@ def run(
     workspace_name = workspace_manager.get_workspace_for_slot(workspace)
     if not workspace_name:
         workspace_name = workspace
+
+    # Dry run mode: validate without launching
+    if dry_run:
+        from goldfish.pipeline.validator import validate_pipeline_run
+
+        workspace_path = workspace_manager.get_workspace_path(workspace_name)
+        db = _get_db()
+        return validate_pipeline_run(
+            workspace_name=workspace_name,
+            workspace_path=workspace_path,
+            db=db,
+            stages=stages,
+            pipeline_name=pipeline,
+            inputs_override=inputs_override or {},
+        )
 
     # Unified execution through run_stages
     result: dict[str, Any] = pipeline_executor.run_stages(
@@ -258,14 +283,17 @@ def cancel(run_id: str, reason: str) -> dict:
     handle = row.get("backend_handle") or run_id
 
     # Attempt state change atomically: only if still running
+    # Clear progress field to avoid stale "canceled:running" display
     updated = 0
     with db._conn() as conn:
         updated = conn.execute(
-            "UPDATE stage_runs SET status='canceled', completed_at=?, error=? WHERE id=? AND status='running'",
+            "UPDATE stage_runs SET status=?, progress=NULL, completed_at=?, error=? WHERE id=? AND status=?",
             (
+                StageRunStatus.CANCELED,
                 datetime.now(UTC).isoformat(),
                 f"Canceled: {reason}",
                 run_id,
+                StageRunStatus.RUNNING,
             ),
         ).rowcount
 
@@ -277,14 +305,17 @@ def cancel(run_id: str, reason: str) -> dict:
         ).model_dump(mode="json")
         return fail_result
 
-    # Best-effort backend stop
+    # Best-effort backend cleanup
+    # For GCE: use delete_instance() to fully terminate (stop just pauses)
+    # For local: stop_container() is correct since containers auto-remove (--rm)
     try:
         if backend == "local":
             _get_stage_executor().local_executor.stop_container(handle)
         elif backend == "gce":
-            _get_stage_executor().gce_launcher.stop_instance(handle)
-    except Exception:
-        pass
+            _get_stage_executor().gce_launcher.delete_instance(handle)
+    except Exception as e:
+        # Log error but don't fail the cancel - DB state is already updated
+        logger.warning(f"Failed to cleanup backend for {run_id} ({backend}:{handle}): {e}")
 
     success_result: dict[str, Any] = CancelRunResponse(success=True, previous_status=row.get("status")).model_dump(
         mode="json"
@@ -358,11 +389,17 @@ def list_runs(
             err = r["error"].split("\n")[0][:50]
             error_snippet = err + "..." if len(r["error"]) > 50 else err
 
+        # Include attempt and outcome for context
+        attempt_info = f"#{r['attempt_num']}" if r.get("attempt_num") else None
+        outcome = r.get("outcome")  # success, bad_results, or None
+
         compact_runs.append(
             {
                 "run_id": r.get("id") or r.get("stage_run_id"),
                 "stage": r["stage_name"],
+                "attempt": attempt_info,
                 "status": status_str,
+                "outcome": outcome,
                 "started": r.get("started_at", "")[:19] if r.get("started_at") else None,  # Trim to datetime
                 "error": error_snippet,
             }
@@ -371,12 +408,20 @@ def list_runs(
     # Adjust total to include queued stages
     total_with_queued = total + len(queued_stages)
 
-    return {
+    result: dict = {
         "runs": compact_runs,
         "total_count": total_with_queued,
         "has_more": offset + len(rows) < total,
         "hint": "Use get_run(run_id) for full details including logs and complete error messages",
     }
+
+    # Add attempt summary when filtering by workspace (provides context without noise)
+    if workspace and offset == 0:
+        attempts = db.list_attempts(workspace, stage_name=stage, limit=10)
+        if attempts:
+            result["attempt_summary"] = attempts
+
+    return result
 
 
 @mcp.tool()
@@ -415,3 +460,54 @@ def get_pipeline_status(pipeline_run_id: str) -> dict:
     if not result:
         raise GoldfishError(f"Pipeline run not found: {pipeline_run_id}")
     return result
+
+
+@mcp.tool()
+def mark_outcome(
+    run_id: str,
+    outcome: str,
+) -> dict:
+    """Mark the outcome of a completed run.
+
+    Use this to indicate whether a run produced good results or not.
+    Marking 'success' closes the current attempt and starts a new one
+    for subsequent runs.
+
+    Args:
+        run_id: Stage run ID (e.g., "stage-abc123")
+        outcome: 'success' (good results) or 'bad_results' (ran but produced garbage)
+
+    Returns:
+        Dict with success status and updated run info
+    """
+    db = _get_db()
+
+    if outcome not in ("success", "bad_results"):
+        return {
+            "success": False,
+            "error": f"Invalid outcome '{outcome}'. Must be 'success' or 'bad_results'",
+        }
+
+    # Check run exists and is completed
+    run = db.get_stage_run(run_id)
+    if not run:
+        return {"success": False, "error": f"Run not found: {run_id}"}
+
+    if run["status"] != StageRunStatus.COMPLETED:
+        return {
+            "success": False,
+            "error": f"Can only mark outcome for completed runs. Current status: {run['status']}",
+        }
+
+    updated = db.update_run_outcome(run_id, outcome)
+    if not updated:
+        return {"success": False, "error": "Failed to update outcome"}
+
+    return {
+        "success": True,
+        "run_id": run_id,
+        "outcome": outcome,
+        "message": "Attempt closed - next run will start a new attempt"
+        if outcome == "success"
+        else "Run marked as bad_results - still in current attempt",
+    }

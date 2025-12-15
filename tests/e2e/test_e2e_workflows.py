@@ -357,7 +357,7 @@ class TestDiffWorkflow:
     """Test diff functionality in workflows."""
 
     def test_diff_shows_uncommitted_changes(self, e2e_setup):
-        """Diff should show uncommitted changes."""
+        """Diff should show uncommitted changes since last version."""
         manager = e2e_setup["manager"]
         project_root = e2e_setup["project_root"]
 
@@ -370,18 +370,19 @@ class TestDiffWorkflow:
         # Make changes without checkpointing
         (slot_path / "code.py").write_text("# Modified code significantly")
 
-        # Get diff
-        diff_result = manager.diff(slot="w1")
+        # Get diff - compares against last version (or initial mount if no versions)
+        diff_result = manager.diff("w1")
 
         assert diff_result.has_changes is True
         assert "code.py" in diff_result.files_changed
         assert len(diff_result.diff_text) > 0
+        assert diff_result.left == "w1"  # Left side is the slot
 
         # Cleanup - hibernate auto-checkpoints dirty changes
         manager.hibernate(slot="w1", reason="Done with diff test")
 
     def test_diff_empty_after_checkpoint(self, e2e_setup):
-        """Diff should be empty after checkpoint."""
+        """Diff should be empty after save_version (checkpoint)."""
         manager = e2e_setup["manager"]
         project_root = e2e_setup["project_root"]
 
@@ -391,15 +392,17 @@ class TestDiffWorkflow:
 
         slot_path = project_root / "workspaces" / "w1"
 
-        # Make changes and checkpoint
+        # Make changes and save_version (checkpoint)
         (slot_path / "new.py").write_text("# New file")
-        manager.checkpoint(slot="w1", message="Add new file to codebase")
+        manager.save_version(slot="w1", message="Add new file to codebase")
 
-        # Diff should be empty
-        diff_result = manager.diff(slot="w1")
+        # Diff should be empty - comparing against the version we just created
+        diff_result = manager.diff("w1")
 
         assert diff_result.has_changes is False
         assert len(diff_result.files_changed) == 0
+        assert diff_result.left == "w1"
+        assert "diff-clean@v1" in diff_result.right  # Comparing against version
 
         # Cleanup
         manager.hibernate(slot="w1", reason="Done with clean diff test")

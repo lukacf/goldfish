@@ -325,4 +325,57 @@ def build_base_images(
     return {"success": True, "images": images, "version": BASE_IMAGE_VERSION}
 
 
+@mcp.tool()
+def validate_config(workspace: str | None = None) -> dict:
+    """Validate configuration files for typos and errors.
+
+    Validates goldfish.yaml and workspace pipeline/config files.
+    Catches unknown fields, suggests corrections for typos, and checks YAML syntax.
+
+    Args:
+        workspace: Optional workspace name or slot to validate pipeline and stage configs.
+                  If omitted, only validates goldfish.yaml.
+
+    Returns:
+        dict with:
+        - valid: bool - True if all validations pass
+        - errors: list - Critical issues that must be fixed
+        - warnings: list - Non-critical issues (suggestions)
+        - files_checked: list - Which files were validated
+    """
+    from goldfish.config_validation import validate_project_config
+    from goldfish.server import _get_project_root
+
+    project_root = _get_project_root()
+    workspace_path = None
+    workspace_name: str | None = workspace
+
+    # Resolve workspace if specified
+    if workspace:
+        workspace_manager = _get_workspace_manager()
+
+        # Resolve slot to workspace name
+        resolved_name = workspace_manager.get_workspace_for_slot(workspace)
+        if resolved_name:
+            workspace_name = resolved_name
+
+        # workspace_name is guaranteed to be str here (either original or resolved)
+        assert workspace_name is not None
+        try:
+            workspace_path = workspace_manager.get_workspace_path(workspace_name)
+        except Exception as e:
+            return {
+                "valid": False,
+                "errors": [f"Workspace '{workspace}': {e}"],
+                "warnings": [],
+                "files_checked": [],
+            }
+
+    return validate_project_config(
+        project_root=project_root,
+        workspace_path=workspace_path,
+        workspace_name=workspace_name,
+    )
+
+
 # ============== LINEAGE TOOLS ==============

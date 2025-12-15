@@ -17,11 +17,47 @@ class DirtyState(str, Enum):
 
 
 class JobStatus(str, Enum):
+    """Legacy job status (run_job). Prefer StageRunStatus for new code."""
+
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
-    CANCELLED = "cancelled"
+    CANCELLED = "cancelled"  # Note: legacy spelling with double 'l'
+
+
+class StageRunStatus(str, Enum):
+    """Status values for stage_runs table.
+
+    Note: Progress is tracked separately in the 'progress' column.
+    Display format combines them as "status:progress" (e.g., "running:build").
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"  # American spelling (single 'l')
+
+
+class StageRunProgress(str, Enum):
+    """Progress values for stage_runs.progress column."""
+
+    BUILD = "build"  # Building Docker image
+    LAUNCH = "launch"  # Launching container/instance
+    RUNNING = "running"  # Executing stage code
+    FINALIZING = "finalizing"  # Recording outputs, fetching logs
+
+
+class PipelineStatus(str, Enum):
+    """Status for pipeline_runs and pipeline_stage_queue tables."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"
+    SKIPPED = "skipped"  # Only for pipeline_stage_queue
 
 
 class SourceStatus(str, Enum):
@@ -194,7 +230,7 @@ class RunJobResponse(BaseModel):
     experiment_dir: str
     artifact_uri: str | None = None
     log_uri: str | None = None
-    initial_status: str = "pending"
+    initial_status: str = JobStatus.PENDING
     state_md: str | None = None
 
 
@@ -273,11 +309,15 @@ class LogThoughtResponse(BaseModel):
 class DiffResponse(BaseModel):
     """Response from diff() tool."""
 
-    slot: str  # Slot that was diffed
-    has_changes: bool  # Whether there are uncommitted changes
+    has_changes: bool  # Whether there are differences
     summary: str  # Human-readable summary (e.g., "2 files changed, 10 insertions(+)")
     files_changed: list[str]  # List of changed file paths
     diff_text: str = ""  # Optional full diff output
+    # What was compared
+    left: str  # Left side of comparison (e.g., "w1", "baseline@v2")
+    right: str  # Right side of comparison (e.g., "v3", "experiment@v1")
+    left_sha: str | None = None  # Git SHA of left side (if applicable)
+    right_sha: str | None = None  # Git SHA of right side (if applicable)
 
 
 class RollbackResponse(BaseModel):
