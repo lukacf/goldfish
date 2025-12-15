@@ -23,14 +23,6 @@ class AuditConfig(BaseModel):
     min_reason_length: int = 15
 
 
-class PreRunReviewConfig(BaseModel):
-    """Pre-run review configuration."""
-
-    enabled: bool = False  # Disabled by default
-    require_approval: bool = True  # Block runs on no-go if enabled
-    skip_on_no_changes: bool = True  # Skip review if no uncommitted changes
-
-
 class JobsConfig(BaseModel):
     """Job execution configuration."""
 
@@ -168,7 +160,6 @@ class GoldfishConfig(BaseModel):
     slots: list[str] = Field(default_factory=lambda: ["w1", "w2", "w3"])
     state_md: StateMdConfig = Field(default_factory=StateMdConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
-    pre_run_review: PreRunReviewConfig = Field(default_factory=PreRunReviewConfig)
     jobs: JobsConfig = Field(default_factory=JobsConfig)
     gcs: GCSConfig | None = None
     gce: GCEConfig | None = None
