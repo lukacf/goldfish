@@ -170,14 +170,29 @@ class WorkspaceManager:
         if workspace is None:
             return SlotInfo(slot=slot, state=SlotState.EMPTY)
 
-        # Check dirty state by comparing file hashes
-        # For copy-based mounting, we always consider it potentially dirty
-        # since we can't easily compare without syncing
-        dirty = DirtyState.DIRTY
-
         # Get last checkpoint from the workspace (use list_snapshots to get from branch)
         snapshots = self.git.list_snapshots(workspace)
         last_checkpoint = snapshots[0] if snapshots else None
+
+        # Determine compare SHA for dirty check:
+        # - If versions exist, compare against latest version
+        # - Otherwise compare against mounted_sha (initial state)
+        compare_sha = None
+        latest_version = self.db.get_latest_version(workspace)
+        if latest_version:
+            compare_sha = latest_version["git_sha"]
+        else:
+            compare_sha = metadata.get("mounted_sha")
+
+        # Check dirty state by comparing files against compare_sha
+        dirty = DirtyState.DIRTY  # Default to dirty if comparison fails
+        if compare_sha:
+            try:
+                is_dirty = self.git.is_slot_dirty(slot_path, workspace, compare_sha)
+                dirty = DirtyState.DIRTY if is_dirty else DirtyState.CLEAN
+            except Exception:
+                # On error, assume dirty to be safe
+                dirty = DirtyState.DIRTY
 
         return SlotInfo(
             slot=slot,

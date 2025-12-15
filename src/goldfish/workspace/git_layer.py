@@ -664,6 +664,71 @@ class GitLayer:
             if temp_worktree.exists():
                 shutil.rmtree(temp_worktree, ignore_errors=True)
 
+    def is_slot_dirty(self, slot_path: Path, workspace: str, compare_sha: str) -> bool:
+        """Check if slot has changes compared to a git SHA.
+
+        Lightweight version of diff_slot_against_sha that only returns bool.
+        Uses diff -rq for quick comparison without computing full diff text.
+
+        Args:
+            slot_path: Path to the slot directory
+            workspace: Workspace name (for temp worktree naming)
+            compare_sha: The SHA to compare against
+
+        Returns:
+            True if slot has changes, False if clean
+        """
+        # Create temp worktree at compare_sha
+        temp_worktree = self.dev_repo / ".goldfish" / "tmp-dirty" / workspace
+        temp_worktree.parent.mkdir(parents=True, exist_ok=True)
+
+        # Clean up any existing temp worktree
+        if temp_worktree.exists():
+            try:
+                self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
+            except GoldfishError:
+                pass
+            if temp_worktree.exists():
+                shutil.rmtree(temp_worktree)
+
+        try:
+            # Create worktree at the compare SHA
+            self._run_git("worktree", "add", "--detach", str(temp_worktree), compare_sha)
+
+            # Exclude goldfish metadata and common artifacts
+            exclude_patterns = [
+                ".goldfish-mount",
+                "STATE.md",
+                ".git",
+                "__pycache__",
+                "*.pyc",
+                ".pytest_cache",
+            ]
+
+            # Quick diff - just check if any files differ
+            diff_cmd = ["diff", "-rq"]
+            for pattern in exclude_patterns:
+                diff_cmd.extend(["--exclude", pattern])
+            diff_cmd.extend([str(temp_worktree), str(slot_path)])
+
+            result = subprocess.run(diff_cmd, capture_output=True, text=True, timeout=30)
+
+            # diff returns 0 if identical, 1 if differences
+            return result.returncode != 0
+
+        except Exception:
+            # On any error, assume dirty to be safe
+            return True
+
+        finally:
+            # Clean up temp worktree
+            try:
+                self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
+            except GoldfishError:
+                pass
+            if temp_worktree.exists():
+                shutil.rmtree(temp_worktree, ignore_errors=True)
+
     def get_head_sha_from_branch(self, branch: str) -> str:
         """Get HEAD SHA from a branch (without needing a worktree).
 
