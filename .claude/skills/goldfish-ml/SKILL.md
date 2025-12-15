@@ -141,14 +141,16 @@ Stage modules follow a consistent pattern:
 
 ```python
 # modules/train.py
-from goldfish.io import load_input, save_output
+from goldfish.io import load_input, save_output, heartbeat
 
 def main():
     # Load inputs (from /mnt/inputs/)
     features = load_input("features")  # Returns numpy array
 
-    # Training logic
-    model = train_model(features)
+    # Training logic with heartbeat for long-running jobs
+    for epoch in range(epochs):
+        heartbeat(f"Training epoch {epoch}")  # Signal "I'm alive"
+        train_epoch(model, features)
 
     # Save outputs (to /mnt/outputs/)
     save_output("model", model_dir)
@@ -156,6 +158,8 @@ def main():
 if __name__ == "__main__":
     main()
 ```
+
+**Heartbeat API**: Call `heartbeat()` periodically in long-running computations to prevent the job from being terminated due to inactivity. See `references/stage_authoring.md` for details.
 
 ### 4. Monitoring Runs
 

@@ -39,6 +39,7 @@ from goldfish.jobs.pipeline_executor import PipelineExecutor
 from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.jobs.tracker import JobTracker
 from goldfish.logging import setup_logging
+from goldfish.models import PipelineStatus, StageRunStatus
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.state.state_md import StateManager
 from goldfish.workspace.manager import WorkspaceManager
@@ -257,6 +258,9 @@ class DaemonRequestHandler(BaseHTTPRequestHandler):
 class GoldfishDaemon:
     """The persistent Goldfish server daemon."""
 
+    # How often to check for orphaned GCE instances (seconds)
+    INSTANCE_MONITOR_INTERVAL = 60
+
     def __init__(self, project_root: Path):
         self.project_root = project_root.resolve()
         self.start_time = time.time()
@@ -264,6 +268,7 @@ class GoldfishDaemon:
         self.tools: dict[str, Any] = {}
         self.context: ServerContext | None = None
         self.worker_thread: threading.Thread | None = None
+        self.instance_monitor_thread: threading.Thread | None = None
         self.http_server: ThreadedUnixHTTPServer | None = None
 
         # Paths
@@ -428,10 +433,11 @@ class GoldfishDaemon:
                        pr.config_override, pr.inputs_override
                 FROM pipeline_runs pr
                 JOIN pipeline_stage_queue psq ON psq.pipeline_run_id = pr.id
-                WHERE pr.status IN ('pending', 'running')
-                AND psq.status IN ('pending', 'running')
+                WHERE pr.status IN (?, ?)
+                AND psq.status IN (?, ?)
                 LIMIT 10
-                """
+                """,
+                (PipelineStatus.PENDING, PipelineStatus.RUNNING, PipelineStatus.PENDING, PipelineStatus.RUNNING),
             ).fetchall()
 
         for row in rows:
@@ -453,6 +459,15 @@ class GoldfishDaemon:
                     logger.info("Pipeline %s completed", pipeline_run_id)
                     continue
 
+                # Log queue state for debugging stalls
+                logger.debug(
+                    "Pipeline %s [%s]: pending=%d, running=%d",
+                    pipeline_run_id,
+                    workspace,
+                    pending,
+                    running,
+                )
+
                 # Process one round of the queue
                 launched = self._pipeline_executor._process_pipeline_queue_once(
                     pipeline_run_id=pipeline_run_id,
@@ -469,8 +484,274 @@ class GoldfishDaemon:
                         len(launched),
                         ", ".join(s.stage for s in launched),
                     )
+                elif pending > 0 and running == 0:
+                    # Nothing launched but stages are pending - they must be waiting on deps
+                    logger.debug(
+                        "Pipeline %s: %d stage(s) waiting (deps not ready or blocked)",
+                        pipeline_run_id,
+                        pending,
+                    )
             except Exception as e:
                 logger.exception("Error processing pipeline %s: %s", pipeline_run_id, e)
+
+    def start_instance_monitor(self) -> None:
+        """Start the GCE instance monitor thread (Cost Protection Layer 3).
+
+        This thread periodically checks for orphaned GCE instances and cleans them up.
+        It catches instances that slipped through the startup script's self-deletion.
+        """
+
+        def monitor_loop() -> None:
+            logger.info("Instance monitor thread starting")
+
+            # Wait a bit before first check to let things settle
+            self.shutdown_event.wait(timeout=30)
+
+            while not self.shutdown_event.is_set():
+                try:
+                    self._check_orphaned_instances()
+                except Exception as e:
+                    logger.exception("Instance monitor error: %s", e)
+
+                self.shutdown_event.wait(timeout=self.INSTANCE_MONITOR_INTERVAL)
+
+            logger.info("Instance monitor thread stopped")
+
+        self.instance_monitor_thread = threading.Thread(target=monitor_loop, daemon=True, name="instance-monitor")
+        self.instance_monitor_thread.start()
+
+    def _check_if_preempted(self, instance_name: str, project_id: str) -> bool:
+        """Check if a GCE instance was preempted.
+
+        Queries the compute operations API to see if there's a preemption event
+        for this instance in the last 24 hours.
+
+        Args:
+            instance_name: The GCE instance name (e.g., stage-abc123)
+            project_id: The GCP project ID
+
+        Returns:
+            True if the instance was preempted, False otherwise
+        """
+        import subprocess
+
+        try:
+            # Query operations for preemption events targeting this instance
+            result = subprocess.run(
+                [
+                    "gcloud",
+                    "compute",
+                    "operations",
+                    "list",
+                    f"--project={project_id}",
+                    f"--filter=operationType=compute.instances.preempted AND targetLink~{instance_name}",
+                    "--limit=1",
+                    "--format=value(name)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            # If we got any output, there was a preemption event
+            return bool(result.stdout.strip())
+        except Exception as e:
+            logger.debug("Failed to check preemption status for %s: %s", instance_name, e)
+            return False
+
+    def _check_orphaned_instances(self) -> None:
+        """Check for and clean up orphaned GCE instances.
+
+        Two-way orphan detection:
+        1. DB says 'running' but instance gone → mark run as failed
+        2. Instance running but DB says terminal (canceled/completed/failed) → delete instance
+
+        This catches both directions of inconsistency.
+        """
+        import subprocess
+
+        if not self.config:
+            return
+
+        # Get GCE project ID - CRITICAL: must match where instances are created
+        if not self.config.gce:
+            logger.debug("No GCE config, skipping orphan check")
+            return
+
+        try:
+            project_id = self.config.gce.effective_project_id
+        except ValueError:
+            logger.debug("No GCE project_id configured, skipping orphan check")
+            return
+
+        # Get list of ALL GCE stage instances (any status) in one call
+        # We need to know status to avoid killing instances that are still booting
+        try:
+            result = subprocess.run(
+                [
+                    "gcloud",
+                    "compute",
+                    "instances",
+                    "list",
+                    f"--project={project_id}",
+                    "--filter=name~^stage-",
+                    "--format=value(name,zone,status)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            # Track all instances with their status
+            # alive_instances: instances that exist and are not terminated/stopped
+            # Key is instance name, value is (zone, status)
+            all_instances: dict[str, tuple[str, str]] = {}  # name -> (zone, status)
+            if result.stdout.strip():
+                for line in result.stdout.strip().split("\n"):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        name = parts[0]
+                        zone = parts[1].split("/")[-1]  # Extract zone from full path
+                        status = parts[2]
+                        all_instances[name] = (zone, status)
+
+            # Instances are "alive" if they're in any non-terminal state
+            # PROVISIONING, STAGING, RUNNING, STOPPING, SUSPENDING, SUSPENDED are all "alive"
+            # Only TERMINATED is truly dead
+            terminal_statuses = {"TERMINATED", "STOPPED"}
+            alive_instances = {
+                name: zone for name, (zone, status) in all_instances.items() if status not in terminal_statuses
+            }
+        except Exception as e:
+            logger.warning("Failed to list GCE instances: %s", e)
+            return
+
+        # === Check 1: DB says 'running' but instance is gone ===
+        # IMPORTANT: Add grace period - don't check runs started less than 20 minutes ago
+        # H100/GPU instance allocation can take 10+ minutes due to capacity constraints
+        with self._db._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, backend_handle, workspace_name, stage_name
+                FROM stage_runs
+                WHERE status = ?
+                AND backend_type = 'gce'
+                AND backend_handle IS NOT NULL
+                AND started_at < datetime('now', '-20 minutes')
+                """,
+                (StageRunStatus.RUNNING,),
+            ).fetchall()
+
+        if rows:
+            logger.debug("Checking %d running GCE stage runs", len(rows))
+
+        for row in rows:
+            stage_run_id = row["id"]
+            backend_handle = row["backend_handle"]
+            workspace = row["workspace_name"]
+            stage = row["stage_name"]
+
+            # Sanitize instance name (same logic as GCELauncher)
+            instance_name = backend_handle.replace("_", "-").lower()[:60]
+
+            if instance_name not in alive_instances:
+                # Check if the instance was preempted
+                was_preempted = self._check_if_preempted(instance_name, project_id)
+
+                if was_preempted:
+                    error_msg = "Instance preempted by GCE (spot/preemptible)"
+                    logger.warning(
+                        "Preempted stage run detected: %s (instance %s was preempted)",
+                        stage_run_id,
+                        instance_name,
+                    )
+                else:
+                    error_msg = "Instance disappeared (orphan cleanup)"
+                    logger.warning(
+                        "Orphaned stage run detected: %s (instance %s not running)",
+                        stage_run_id,
+                        instance_name,
+                    )
+
+                # Mark stage run as failed with appropriate error message
+                try:
+                    with self._db._conn() as conn:
+                        conn.execute(
+                            """
+                            UPDATE stage_runs
+                            SET status = ?,
+                                error = ?,
+                                completed_at = datetime('now')
+                            WHERE id = ? AND status = ?
+                            """,
+                            (StageRunStatus.FAILED, error_msg, stage_run_id, StageRunStatus.RUNNING),
+                        )
+                    logger.info(
+                        "Marked stage run %s as failed: %s (workspace=%s, stage=%s)",
+                        stage_run_id,
+                        error_msg,
+                        workspace,
+                        stage,
+                    )
+                except Exception as e:
+                    logger.exception("Failed to update stage run %s: %s", stage_run_id, e)
+
+        # === Check 2: Instance alive but DB says terminal (canceled/completed/failed) ===
+        # This catches cases where cancel() failed to delete the instance
+        if not alive_instances:
+            return
+
+        # Get all GCE runs with terminal status that might have orphaned instances
+        with self._db._conn() as conn:
+            terminal_rows = conn.execute(
+                """
+                SELECT id, backend_handle, status
+                FROM stage_runs
+                WHERE status IN (?, ?, ?)
+                AND backend_type = 'gce'
+                AND backend_handle IS NOT NULL
+                AND completed_at > datetime('now', '-24 hours')
+                """,
+                (StageRunStatus.CANCELED, StageRunStatus.COMPLETED, StageRunStatus.FAILED),
+            ).fetchall()
+
+        for row in terminal_rows:
+            stage_run_id = row["id"]
+            backend_handle = row["backend_handle"]
+            db_status = row["status"]
+
+            # Sanitize instance name (same logic as GCELauncher)
+            instance_name = backend_handle.replace("_", "-").lower()[:60]
+
+            if instance_name in alive_instances:
+                zone = alive_instances[instance_name]
+                logger.warning(
+                    "Orphaned instance detected: %s still running but DB status=%s, deleting...",
+                    instance_name,
+                    db_status,
+                )
+
+                try:
+                    subprocess.run(
+                        [
+                            "gcloud",
+                            "compute",
+                            "instances",
+                            "delete",
+                            instance_name,
+                            f"--project={project_id}",
+                            f"--zone={zone}",
+                            "--quiet",
+                        ],
+                        capture_output=True,
+                        timeout=60,
+                    )
+                    logger.info(
+                        "Deleted orphaned instance %s (run %s was %s)",
+                        instance_name,
+                        stage_run_id,
+                        db_status,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to delete orphaned instance %s: %s", instance_name, e)
 
     def start_http_server(self) -> None:
         """Start the HTTP server on Unix socket."""
@@ -503,6 +784,7 @@ class GoldfishDaemon:
         """Run the daemon main loop."""
         self.write_pid_file()
         self.start_worker()
+        self.start_instance_monitor()  # Cost Protection Layer 3
         self.start_http_server()
 
         # Set up signal handlers - shutdown from a different thread to avoid deadlock
@@ -547,6 +829,9 @@ class GoldfishDaemon:
 
         if self.worker_thread and self.worker_thread.is_alive():
             self.worker_thread.join(timeout=5.0)
+
+        if self.instance_monitor_thread and self.instance_monitor_thread.is_alive():
+            self.instance_monitor_thread.join(timeout=5.0)
 
         # Clean up PID file (socket cleanup handled by server_close)
         if self.pid_file and self.pid_file.exists():

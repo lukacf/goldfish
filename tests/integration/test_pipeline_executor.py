@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from goldfish.jobs.pipeline_executor import PipelineExecutor
-from goldfish.models import PipelineDef, StageDef, StageRunInfo
+from goldfish.models import PipelineDef, PipelineStatus, StageDef, StageRunInfo, StageRunStatus
 
 # Track all PipelineExecutors created during tests for cleanup
 _executors_to_shutdown: list[PipelineExecutor] = []
@@ -69,6 +69,7 @@ class DummyStageExecutor:
         config_override=None,
         inputs_override=None,
         reason: str | None = None,
+        reason_structured: dict | None = None,
         wait: bool = False,
     ) -> StageRunInfo:
         self._ensure_workspace_version(workspace)
@@ -89,7 +90,7 @@ class DummyStageExecutor:
             backend_handle=stage_run_id,
         )
         # mark running immediately
-        self.db.update_stage_run_status(stage_run_id, status="running")
+        self.db.update_stage_run_status(stage_run_id, status=StageRunStatus.RUNNING)
         self.call_kwargs.append(
             {
                 "workspace": workspace,
@@ -105,11 +106,11 @@ class DummyStageExecutor:
             stage=stage_name,
             pipeline=pipeline_name,
             pipeline_run_id=pipeline_run_id,
-            status="running",
+            status=StageRunStatus.RUNNING,
         )
 
     def refresh_status_once(self, stage_run_id: str):  # pragma: no cover - not used in tests
-        return "running"
+        return StageRunStatus.RUNNING
 
 
 class TestRunFullPipeline:
@@ -131,10 +132,22 @@ class TestRunFullPipeline:
         stage_executor = MagicMock()
         stage_executor.run_stage.side_effect = [
             StageRunInfo(
-                stage_run_id="stage-1", workspace="test_ws", version="v1", stage="preprocess", status="running"
+                stage_run_id="stage-1",
+                workspace="test_ws",
+                version="v1",
+                stage="preprocess",
+                status=StageRunStatus.RUNNING,
             ),
-            StageRunInfo(stage_run_id="stage-2", workspace="test_ws", version="v1", stage="tokenize", status="running"),
-            StageRunInfo(stage_run_id="stage-3", workspace="test_ws", version="v1", stage="train", status="running"),
+            StageRunInfo(
+                stage_run_id="stage-2",
+                workspace="test_ws",
+                version="v1",
+                stage="tokenize",
+                status=StageRunStatus.RUNNING,
+            ),
+            StageRunInfo(
+                stage_run_id="stage-3", workspace="test_ws", version="v1", stage="train", status=StageRunStatus.RUNNING
+            ),
         ]
 
         pipeline_manager = MagicMock()
@@ -164,7 +177,7 @@ class TestRunFullPipeline:
 
         stage_executor = MagicMock()
         stage_executor.run_stage.return_value = StageRunInfo(
-            stage_run_id="stage-1", workspace="test_ws", version="v1", stage="preprocess", status="running"
+            stage_run_id="stage-1", workspace="test_ws", version="v1", stage="preprocess", status=StageRunStatus.RUNNING
         )
 
         pipeline_manager = MagicMock()
@@ -208,8 +221,16 @@ class TestRunSpecificStages:
 
         stage_executor = MagicMock()
         stage_executor.run_stage.side_effect = [
-            StageRunInfo(stage_run_id="stage-1", workspace="test_ws", version="v1", stage="tokenize", status="running"),
-            StageRunInfo(stage_run_id="stage-2", workspace="test_ws", version="v1", stage="train", status="running"),
+            StageRunInfo(
+                stage_run_id="stage-1",
+                workspace="test_ws",
+                version="v1",
+                stage="tokenize",
+                status=StageRunStatus.RUNNING,
+            ),
+            StageRunInfo(
+                stage_run_id="stage-2", workspace="test_ws", version="v1", stage="train", status=StageRunStatus.RUNNING
+            ),
         ]
 
         pipeline_manager = MagicMock()
@@ -324,7 +345,7 @@ class TestAsyncQueueSemantics:
         first_stage_id = first_launched[0].stage_run_id
 
         # Mark first stage complete in DB to satisfy dependency
-        test_db.update_stage_run_status(first_stage_id, status="completed")
+        test_db.update_stage_run_status(first_stage_id, status=StageRunStatus.COMPLETED)
 
         # Process queue again - now second stage should be runnable
         second_launched = executor._process_pipeline_queue_once(
@@ -443,7 +464,7 @@ class TestAsyncQueueSemantics:
                 "SELECT status FROM pipeline_runs WHERE id=?",
                 (pipeline_run_id,),
             ).fetchone()
-        assert row["status"] == "failed"
+        assert row["status"] == PipelineStatus.FAILED
 
     def test_run_stage_wait_false_returns_immediately(self, test_db, monkeypatch):
         pipeline_def = PipelineDef(
@@ -475,7 +496,7 @@ class TestAsyncQueueSemantics:
         )
 
         assert len(launched) == 1
-        assert launched[0].status == "running"
+        assert launched[0].status == StageRunStatus.RUNNING
         # stage_executor.run_stage is invoked once with default wait=False (not supplied)
         assert len(executor.stage_executor.call_kwargs) == 1
         assert executor.stage_executor.call_kwargs[0]["wait"] is False
@@ -700,7 +721,7 @@ class TestStageLaunchErrorVisibility:
                 (prun_id,),
             ).fetchone()
 
-        assert row["status"] == "failed"
+        assert row["status"] == PipelineStatus.FAILED
         assert "Stage launch failed" in row["error"]
 
 

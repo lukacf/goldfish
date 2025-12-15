@@ -1,6 +1,8 @@
 """Unit tests for base image module."""
 
 from goldfish.infra.profiles import (
+    BASE_IMAGE_CPU,
+    BASE_IMAGE_GPU,
     FALLBACK_BASE_IMAGE,
     PUBLIC_BASE_IMAGE_CPU,
     PUBLIC_BASE_IMAGE_GPU,
@@ -22,13 +24,14 @@ class TestResolveBaseImage:
         assert "quay.io/jupyter" in result
 
     def test_public_gpu_image_used_directly(self) -> None:
-        """Public GPU image (Jupyter with CUDA) should be used as-is."""
+        """Public GPU image (NVIDIA NGC PyTorch) should be used as-is."""
         profile = {"base_image": PUBLIC_BASE_IMAGE_GPU}
 
         result = resolve_base_image(profile)
 
         assert result == PUBLIC_BASE_IMAGE_GPU
-        assert "cuda" in result
+        # NVIDIA NGC image has nvrtc for Flash Attention
+        assert "nvidia" in result
 
     def test_fallback_when_no_base_image(self) -> None:
         """Should fallback to python:3.11-slim when profile has no base_image."""
@@ -55,6 +58,25 @@ class TestResolveBaseImage:
         result = resolve_base_image(profile, None)
 
         assert result == FALLBACK_BASE_IMAGE
+
+    def test_gpu_short_name_without_registry_falls_back_to_public_gpu(self) -> None:
+        """GPU short name without registry should fallback to public GPU image (with nvrtc)."""
+        profile = {"base_image": BASE_IMAGE_GPU}
+
+        result = resolve_base_image(profile, None)
+
+        # Should fall back to NGC image which has nvrtc, not python:3.11-slim
+        assert result == PUBLIC_BASE_IMAGE_GPU
+        assert "nvidia" in result
+
+    def test_cpu_short_name_without_registry_falls_back_to_public_cpu(self) -> None:
+        """CPU short name without registry should fallback to public CPU image."""
+        profile = {"base_image": BASE_IMAGE_CPU}
+
+        result = resolve_base_image(profile, None)
+
+        assert result == PUBLIC_BASE_IMAGE_CPU
+        assert "jupyter" in result
 
 
 class TestGetBaseImageNames:
@@ -90,17 +112,17 @@ class TestProfilesHaveBaseImage:
 
         assert BUILTIN_PROFILES["cpu-large"]["base_image"] == PUBLIC_BASE_IMAGE_CPU
 
-    def test_h100_spot_has_public_image(self) -> None:
-        """h100-spot profile should use public GPU base image."""
+    def test_h100_spot_has_custom_gpu_image(self) -> None:
+        """h100-spot profile should use custom GPU base image (with nvrtc for Flash Attention)."""
         from goldfish.infra.profiles import BUILTIN_PROFILES
 
-        assert BUILTIN_PROFILES["h100-spot"]["base_image"] == PUBLIC_BASE_IMAGE_GPU
+        assert BUILTIN_PROFILES["h100-spot"]["base_image"] == BASE_IMAGE_GPU
 
-    def test_a100_spot_has_public_image(self) -> None:
-        """a100-spot profile should use public GPU base image."""
+    def test_a100_spot_has_custom_gpu_image(self) -> None:
+        """a100-spot profile should use custom GPU base image (with nvrtc for Flash Attention)."""
         from goldfish.infra.profiles import BUILTIN_PROFILES
 
-        assert BUILTIN_PROFILES["a100-spot"]["base_image"] == PUBLIC_BASE_IMAGE_GPU
+        assert BUILTIN_PROFILES["a100-spot"]["base_image"] == BASE_IMAGE_GPU
 
     def test_all_profiles_have_base_image(self) -> None:
         """All built-in profiles should have a base_image set."""
