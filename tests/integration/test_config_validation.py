@@ -43,6 +43,8 @@ def e2e_setup(temp_dir):
     (dev_repo / "code.py").write_text("# Initial code")
     run_git(["add", "."], dev_repo)
     run_git(["commit", "-m", "Initial commit"], dev_repo)
+    # Ensure branch is named 'main' (git default may vary by system/version)
+    run_git(["branch", "-M", "main"], dev_repo)
 
     # Create project structure
     project_root = temp_dir / "project"
