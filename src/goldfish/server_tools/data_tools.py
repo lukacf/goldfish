@@ -15,6 +15,7 @@ from goldfish.errors import (
 )
 from goldfish.models import (
     DeleteSourceResponse,
+    JobStatus,
     ListSourcesResponse,
     PromoteArtifactResponse,
     RegisterDatasetResponse,
@@ -329,7 +330,7 @@ def promote_artifact(job_id: str, output_name: str, source_name: str, reason: st
     if job is None:
         raise JobNotFoundError(f"Job not found: {job_id}")
 
-    if job["status"] != "completed":
+    if job["status"] != JobStatus.COMPLETED:
         raise GoldfishError(f"Job {job_id} has not completed (status: {job['status']})")
 
     if db.source_exists(source_name):
