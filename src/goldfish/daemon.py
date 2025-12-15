@@ -520,6 +520,44 @@ class GoldfishDaemon:
         self.instance_monitor_thread = threading.Thread(target=monitor_loop, daemon=True, name="instance-monitor")
         self.instance_monitor_thread.start()
 
+    def _check_if_preempted(self, instance_name: str, project_id: str) -> bool:
+        """Check if a GCE instance was preempted.
+
+        Queries the compute operations API to see if there's a preemption event
+        for this instance in the last 24 hours.
+
+        Args:
+            instance_name: The GCE instance name (e.g., stage-abc123)
+            project_id: The GCP project ID
+
+        Returns:
+            True if the instance was preempted, False otherwise
+        """
+        import subprocess
+
+        try:
+            # Query operations for preemption events targeting this instance
+            result = subprocess.run(
+                [
+                    "gcloud",
+                    "compute",
+                    "operations",
+                    "list",
+                    f"--project={project_id}",
+                    f"--filter=operationType=compute.instances.preempted AND targetLink~{instance_name}",
+                    "--limit=1",
+                    "--format=value(name)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            # If we got any output, there was a preemption event
+            return bool(result.stdout.strip())
+        except Exception as e:
+            logger.debug("Failed to check preemption status for %s: %s", instance_name, e)
+            return False
+
     def _check_orphaned_instances(self) -> None:
         """Check for and clean up orphaned GCE instances.
 
@@ -615,28 +653,41 @@ class GoldfishDaemon:
             instance_name = backend_handle.replace("_", "-").lower()[:60]
 
             if instance_name not in alive_instances:
-                logger.warning(
-                    "Orphaned stage run detected: %s (instance %s not running)",
-                    stage_run_id,
-                    instance_name,
-                )
+                # Check if the instance was preempted
+                was_preempted = self._check_if_preempted(instance_name, project_id)
 
-                # Mark stage run as failed
+                if was_preempted:
+                    error_msg = "Instance preempted by GCE (spot/preemptible)"
+                    logger.warning(
+                        "Preempted stage run detected: %s (instance %s was preempted)",
+                        stage_run_id,
+                        instance_name,
+                    )
+                else:
+                    error_msg = "Instance disappeared (orphan cleanup)"
+                    logger.warning(
+                        "Orphaned stage run detected: %s (instance %s not running)",
+                        stage_run_id,
+                        instance_name,
+                    )
+
+                # Mark stage run as failed with appropriate error message
                 try:
                     with self._db._conn() as conn:
                         conn.execute(
                             """
                             UPDATE stage_runs
                             SET status = ?,
-                                error = 'Instance disappeared (orphan cleanup)',
+                                error = ?,
                                 completed_at = datetime('now')
                             WHERE id = ? AND status = ?
                             """,
-                            (StageRunStatus.FAILED, stage_run_id, StageRunStatus.RUNNING),
+                            (StageRunStatus.FAILED, error_msg, stage_run_id, StageRunStatus.RUNNING),
                         )
                     logger.info(
-                        "Marked orphaned stage run %s as failed (workspace=%s, stage=%s)",
+                        "Marked stage run %s as failed: %s (workspace=%s, stage=%s)",
                         stage_run_id,
+                        error_msg,
                         workspace,
                         stage,
                     )
