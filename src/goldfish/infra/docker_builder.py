@@ -77,7 +77,12 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
         if is_nonroot_image:
             # Non-root images: use --chown for uid 1000 user
-            dockerfile += """# Install Goldfish IO library
+            # VERSION arg busts cache when workspace version changes
+            dockerfile += """# Cache-bust: version changes invalidate subsequent layers
+ARG VERSION
+RUN echo "Building version: ${VERSION}"
+
+# Install Goldfish IO library
 COPY --chown=1000:100 goldfish_io/ /app/goldfish_io/
 ENV PYTHONPATH="/app/goldfish_io:/app/modules:/app:${PYTHONPATH}"
 
@@ -89,7 +94,12 @@ COPY --chown=1000:100 configs/ /app/configs/
                 dockerfile += "COPY --chown=1000:100 loaders/ /app/loaders/\n"
         else:
             # Root images: no chown needed
-            dockerfile += """# Install Goldfish IO library
+            # VERSION arg busts cache when workspace version changes
+            dockerfile += """# Cache-bust: version changes invalidate subsequent layers
+ARG VERSION
+RUN echo "Building version: ${VERSION}"
+
+# Install Goldfish IO library
 COPY goldfish_io/ /app/goldfish_io/
 ENV PYTHONPATH="/app/goldfish_io:/app/modules:/app:${PYTHONPATH}"
 
@@ -179,6 +189,9 @@ CMD ["/bin/bash"]
             if backend == "gce":
                 build_cmd += ["--platform", "linux/amd64"]
             build_cmd += ["-t", image_tag]
+
+            # Pass version as build arg to bust cache on version change
+            build_cmd += ["--build-arg", f"VERSION={version}"]
 
             if not use_cache:
                 build_cmd.append("--no-cache")
