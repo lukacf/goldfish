@@ -150,7 +150,9 @@ class StateManager:
         if recent_runs:
             lines.append("## Recent Runs")
             for run in recent_runs:
-                status_emoji = "✓" if run.get("status") == "completed" else "⏳" if run.get("status") == "running" else "✗"
+                status_emoji = (
+                    "✓" if run.get("status") == "completed" else "⏳" if run.get("status") == "running" else "✗"
+                )
                 run_line = f"- {status_emoji} {run.get('stage_name', 'unknown')} ({run.get('status', 'unknown')})"
                 if run.get("started_at"):
                     run_line += f" - {run['started_at'][:16]}"
@@ -160,6 +162,7 @@ class StateManager:
                 reason_json = run.get("reason_json")
                 if reason_json:
                     import json
+
                     try:
                         reason_data = json.loads(reason_json) if isinstance(reason_json, str) else reason_json
                         if reason_data.get("description"):
