@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.models import RunReason, StageRunInfo
+from goldfish.models import PipelineStatus, RunReason, StageRunInfo, StageRunStatus
 from goldfish.pipeline.manager import PipelineManager
 
 # Lease timeout for claimed stages (seconds) - if a stage is claimed but not launched
@@ -52,14 +52,15 @@ class PipelineExecutor:
         """On startup, reschedule any pipelines that were mid-flight."""
         with self.db._conn() as conn:
             rows = conn.execute(
-                "SELECT id, workspace_name, pipeline_name, config_override, inputs_override FROM pipeline_runs WHERE status IN ('pending','running')"
+                "SELECT id, workspace_name, pipeline_name, config_override, inputs_override FROM pipeline_runs WHERE status IN (?, ?)",
+                (PipelineStatus.PENDING, PipelineStatus.RUNNING),
             ).fetchall()
             for row in rows:
                 prun = row["id"]
                 # If there are still pending/running stages, restart a worker
                 counts = conn.execute(
-                    "SELECT SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending, SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) AS running FROM pipeline_stage_queue WHERE pipeline_run_id=?",
-                    (prun,),
+                    "SELECT SUM(CASE WHEN status=? THEN 1 ELSE 0 END) AS pending, SUM(CASE WHEN status=? THEN 1 ELSE 0 END) AS running FROM pipeline_stage_queue WHERE pipeline_run_id=?",
+                    (PipelineStatus.PENDING, PipelineStatus.RUNNING, prun),
                 ).fetchone()
                 if (counts["pending"] or 0) > 0 or (counts["running"] or 0) > 0:
                     workspace = row["workspace_name"]
@@ -154,12 +155,9 @@ class PipelineExecutor:
         self._validate_inputs_resolvable(workspace, stages_to_execute, safe_inputs_override)
 
         # Convert reason_structured to dict if it's a RunReason object
-        reason_dict = None
+        reason_dict: dict | None = None
         if reason_structured:
-            if hasattr(reason_structured, "model_dump"):
-                reason_dict = reason_structured.model_dump()
-            else:
-                reason_dict = reason_structured
+            reason_dict = reason_structured.model_dump()
 
         if not async_mode:
             # Sequential blocking mode - run each stage and wait
@@ -189,12 +187,13 @@ class PipelineExecutor:
             conn.execute(
                 """
                 INSERT INTO pipeline_runs (id, workspace_name, pipeline_name, status, started_at, config_override, inputs_override)
-                VALUES (?, ?, ?, 'running', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pipeline_run_id,
                     workspace,
                     pipeline_name,
+                    PipelineStatus.RUNNING,
                     now,
                     json.dumps(safe_config_override) if safe_config_override else None,
                     json.dumps(safe_inputs_override) if safe_inputs_override else None,
@@ -212,9 +211,9 @@ class PipelineExecutor:
                 conn.execute(
                     """
                     INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, deps, status)
-                    VALUES (?, ?, ?, 'pending')
+                    VALUES (?, ?, ?, ?)
                     """,
-                    (pipeline_run_id, stage.name, json.dumps(deps)),
+                    (pipeline_run_id, stage.name, json.dumps(deps), PipelineStatus.PENDING),
                 )
 
                 prev = stage.name
@@ -274,7 +273,7 @@ class PipelineExecutor:
                 if input_def.from_stage:
                     # Need a completed run of the upstream stage
                     stage_runs = self.db.list_stage_runs(workspace_name=workspace, stage_name=input_def.from_stage)
-                    has_completed = any(r["status"] == "completed" for r in stage_runs)
+                    has_completed = any(r["status"] == StageRunStatus.COMPLETED for r in stage_runs)
                     if not has_completed:
                         raise GoldfishError(
                             f"Stage '{stage.name}' requires input '{input_name}' from stage "
@@ -317,12 +316,17 @@ class PipelineExecutor:
                     try:
                         with self.db._conn() as conn:
                             conn.execute(
-                                "UPDATE pipeline_stage_queue SET status='failed' WHERE pipeline_run_id=? AND status IN ('pending','running')",
-                                (pipeline_run_id,),
+                                "UPDATE pipeline_stage_queue SET status=? WHERE pipeline_run_id=? AND status IN (?, ?)",
+                                (
+                                    PipelineStatus.FAILED,
+                                    pipeline_run_id,
+                                    PipelineStatus.PENDING,
+                                    PipelineStatus.RUNNING,
+                                ),
                             )
                             conn.execute(
-                                "UPDATE pipeline_runs SET status='failed', error=? WHERE id=?",
-                                (f"Worker loop crashed: {e}", pipeline_run_id),
+                                "UPDATE pipeline_runs SET status=?, error=? WHERE id=?",
+                                (PipelineStatus.FAILED, f"Worker loop crashed: {e}", pipeline_run_id),
                             )
                     except Exception:
                         pass  # DB may be gone if executor was shutdown
@@ -333,12 +337,12 @@ class PipelineExecutor:
             if elapsed >= int(os.getenv("GOLDFISH_PIPELINE_MAX_ELAPSED_SECONDS", "86400")):
                 with self.db._conn() as conn:
                     conn.execute(
-                        "UPDATE pipeline_stage_queue SET status='failed' WHERE pipeline_run_id=? AND status IN ('pending','running')",
-                        (pipeline_run_id,),
+                        "UPDATE pipeline_stage_queue SET status=? WHERE pipeline_run_id=? AND status IN (?, ?)",
+                        (PipelineStatus.FAILED, pipeline_run_id, PipelineStatus.PENDING, PipelineStatus.RUNNING),
                     )
                     conn.execute(
-                        "UPDATE pipeline_runs SET status='failed', error=? WHERE id=?",
-                        ("Pipeline exceeded max elapsed time", pipeline_run_id),
+                        "UPDATE pipeline_runs SET status=?, error=? WHERE id=?",
+                        (PipelineStatus.FAILED, "Pipeline exceeded max elapsed time", pipeline_run_id),
                     )
                 break
             interval = self._poll_interval(int(elapsed))
@@ -347,16 +351,16 @@ class PipelineExecutor:
     def _pipeline_status(self, pipeline_run_id: str) -> dict:
         with self.db._conn() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) AS cnt, SUM(CASE WHEN status IN ('pending','running') THEN 1 ELSE 0 END) AS remaining FROM pipeline_stage_queue WHERE pipeline_run_id = ?",
-                (pipeline_run_id,),
+                "SELECT COUNT(*) AS cnt, SUM(CASE WHEN status IN (?, ?) THEN 1 ELSE 0 END) AS remaining FROM pipeline_stage_queue WHERE pipeline_run_id = ?",
+                (PipelineStatus.PENDING, PipelineStatus.RUNNING, pipeline_run_id),
             ).fetchone()
             return {"total": row["cnt"], "remaining": row["remaining"]}
 
     def _pipeline_queue_counts(self, pipeline_run_id: str) -> tuple[int, int]:
         with self.db._conn() as conn:
             row = conn.execute(
-                "SELECT SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending, SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) AS running FROM pipeline_stage_queue WHERE pipeline_run_id = ?",
-                (pipeline_run_id,),
+                "SELECT SUM(CASE WHEN status=? THEN 1 ELSE 0 END) AS pending, SUM(CASE WHEN status=? THEN 1 ELSE 0 END) AS running FROM pipeline_stage_queue WHERE pipeline_run_id = ?",
+                (PipelineStatus.PENDING, PipelineStatus.RUNNING, pipeline_run_id),
             ).fetchone()
             return (row["pending"] or 0, row["running"] or 0)
 
@@ -367,17 +371,23 @@ class PipelineExecutor:
             row = conn.execute(
                 """
                 SELECT
-                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
-                    SUM(CASE WHEN status='canceled' THEN 1 ELSE 0 END) AS canceled,
-                    SUM(CASE WHEN status='skipped' THEN 1 ELSE 0 END) AS skipped,
-                    SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed,
+                    SUM(CASE WHEN status=? THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN status=? THEN 1 ELSE 0 END) AS canceled,
+                    SUM(CASE WHEN status=? THEN 1 ELSE 0 END) AS skipped,
+                    SUM(CASE WHEN status=? THEN 1 ELSE 0 END) AS completed,
                     SUM(1) AS total
                 FROM pipeline_stage_queue WHERE pipeline_run_id = ?
                 """,
-                (pipeline_run_id,),
+                (
+                    PipelineStatus.FAILED,
+                    PipelineStatus.CANCELED,
+                    PipelineStatus.SKIPPED,
+                    PipelineStatus.COMPLETED,
+                    pipeline_run_id,
+                ),
             ).fetchone()
             failed_count = (row["failed"] or 0) + (row["canceled"] or 0) + (row["skipped"] or 0)
-            status = "completed" if failed_count == 0 else "failed"
+            status = PipelineStatus.COMPLETED if failed_count == 0 else PipelineStatus.FAILED
             conn.execute(
                 "UPDATE pipeline_runs SET status=?, completed_at=? WHERE id=?",
                 (status, datetime.now(UTC).isoformat(), pipeline_run_id),
@@ -423,8 +433,8 @@ class PipelineExecutor:
         with self.db._conn() as conn:
             # Update running items that have completed/failed/canceled in stage_runs
             running = conn.execute(
-                "SELECT id, stage_run_id FROM pipeline_stage_queue WHERE pipeline_run_id=? AND status='running' AND stage_run_id IS NOT NULL",
-                (pipeline_run_id,),
+                "SELECT id, stage_run_id FROM pipeline_stage_queue WHERE pipeline_run_id=? AND status=? AND stage_run_id IS NOT NULL",
+                (pipeline_run_id, PipelineStatus.RUNNING),
             ).fetchall()
             if running:
                 ids = [r["stage_run_id"] for r in running]
@@ -437,7 +447,7 @@ class PipelineExecutor:
                 status_map = {r["id"]: r["status"] for r in stage_rows}
                 for row in running:
                     sr_status = status_map.get(row["stage_run_id"])
-                    if sr_status in ("completed", "failed", "canceled"):
+                    if sr_status in (PipelineStatus.COMPLETED, PipelineStatus.FAILED, PipelineStatus.CANCELED):
                         conn.execute(
                             "UPDATE pipeline_stage_queue SET status=? WHERE id=?",
                             (sr_status, row["id"]),
@@ -449,16 +459,16 @@ class PipelineExecutor:
             stuck_rows = conn.execute(
                 """
                 SELECT id, stage_name FROM pipeline_stage_queue
-                WHERE pipeline_run_id = ? AND status = 'running'
+                WHERE pipeline_run_id = ? AND status = ?
                 AND stage_run_id IS NULL AND claimed_at < ?
                 """,
-                (pipeline_run_id, lease_cutoff),
+                (pipeline_run_id, PipelineStatus.RUNNING, lease_cutoff),
             ).fetchall()
             for stuck in stuck_rows:
                 # Reset to pending so it can be reclaimed
                 conn.execute(
-                    "UPDATE pipeline_stage_queue SET status='pending', claimed_at=NULL WHERE id=?",
-                    (stuck["id"],),
+                    "UPDATE pipeline_stage_queue SET status=?, claimed_at=NULL WHERE id=?",
+                    (PipelineStatus.PENDING, stuck["id"]),
                 )
                 self._logger.warning(
                     "Reset stuck stage %s (claimed but never launched) in pipeline %s",
@@ -477,9 +487,9 @@ class PipelineExecutor:
             rows = conn.execute(
                 """
                 SELECT * FROM pipeline_stage_queue
-                WHERE pipeline_run_id = ? AND status = 'pending' AND (claimed_at IS NULL)
+                WHERE pipeline_run_id = ? AND status = ? AND (claimed_at IS NULL)
                 """,
-                (pipeline_run_id,),
+                (pipeline_run_id, PipelineStatus.PENDING),
             ).fetchall()
 
             for row in rows:
@@ -491,8 +501,8 @@ class PipelineExecutor:
                     if missing_deps:
                         # Mark as skipped - deps don't exist
                         conn.execute(
-                            "UPDATE pipeline_stage_queue SET status='skipped', error=? WHERE id=?",
-                            (f"Missing dependencies: {missing_deps}", row["id"]),
+                            "UPDATE pipeline_stage_queue SET status=?, error=? WHERE id=?",
+                            (PipelineStatus.SKIPPED, f"Missing dependencies: {missing_deps}", row["id"]),
                         )
                         self._logger.error(
                             "Stage %s skipped - missing deps %s in pipeline %s",
@@ -506,11 +516,15 @@ class PipelineExecutor:
                     dep_statuses = [(d, stage_status_map.get(d)) for d in deps]
 
                     # If any dep failed/canceled/skipped, mark this stage as skipped (deadlock prevention)
-                    failed_deps = [d for d, s in dep_statuses if s in ("failed", "canceled", "skipped")]
+                    failed_deps = [
+                        d
+                        for d, s in dep_statuses
+                        if s in (PipelineStatus.FAILED, PipelineStatus.CANCELED, PipelineStatus.SKIPPED)
+                    ]
                     if failed_deps:
                         conn.execute(
-                            "UPDATE pipeline_stage_queue SET status='skipped', error=? WHERE id=?",
-                            (f"Upstream dependencies failed: {failed_deps}", row["id"]),
+                            "UPDATE pipeline_stage_queue SET status=?, error=? WHERE id=?",
+                            (PipelineStatus.SKIPPED, f"Upstream dependencies failed: {failed_deps}", row["id"]),
                         )
                         self._logger.info(
                             "Stage %s skipped due to failed deps %s in pipeline %s",
@@ -521,13 +535,19 @@ class PipelineExecutor:
                         continue
 
                     # If any dep not completed, wait
-                    if any(s != "completed" for _, s in dep_statuses):
+                    pending_deps = [(d, s) for d, s in dep_statuses if s != PipelineStatus.COMPLETED]
+                    if pending_deps:
+                        self._logger.debug(
+                            "Stage %s waiting on deps: %s",
+                            row["stage_name"],
+                            ", ".join(f"{d}({s})" for d, s in pending_deps),
+                        )
                         continue
 
                 # All deps completed (or no deps) - try to claim this row
                 updated = conn.execute(
-                    "UPDATE pipeline_stage_queue SET status='running', claimed_at=? WHERE id=? AND status='pending' AND (claimed_at IS NULL)",
-                    (now_iso, row["id"]),
+                    "UPDATE pipeline_stage_queue SET status=?, claimed_at=? WHERE id=? AND status=? AND (claimed_at IS NULL)",
+                    (PipelineStatus.RUNNING, now_iso, row["id"], PipelineStatus.PENDING),
                 ).rowcount
                 if updated == 0:
                     # Lost the race - another worker claimed it
@@ -578,8 +598,8 @@ class PipelineExecutor:
                 self._logger.error("Stage %s failed to launch: %s", stage_name, error_msg)
                 with self.db._conn() as conn:
                     conn.execute(
-                        "UPDATE pipeline_stage_queue SET status = 'failed', error = ? WHERE id = ?",
-                        (error_msg, queue_id),
+                        "UPDATE pipeline_stage_queue SET status = ?, error = ? WHERE id = ?",
+                        (PipelineStatus.FAILED, error_msg, queue_id),
                     )
 
         return launched

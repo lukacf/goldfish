@@ -170,14 +170,29 @@ class WorkspaceManager:
         if workspace is None:
             return SlotInfo(slot=slot, state=SlotState.EMPTY)
 
-        # Check dirty state by comparing file hashes
-        # For copy-based mounting, we always consider it potentially dirty
-        # since we can't easily compare without syncing
-        dirty = DirtyState.DIRTY
-
         # Get last checkpoint from the workspace (use list_snapshots to get from branch)
         snapshots = self.git.list_snapshots(workspace)
         last_checkpoint = snapshots[0] if snapshots else None
+
+        # Determine compare SHA for dirty check:
+        # - If versions exist, compare against latest version
+        # - Otherwise compare against mounted_sha (initial state)
+        compare_sha = None
+        latest_version = self.db.get_latest_version(workspace)
+        if latest_version:
+            compare_sha = latest_version["git_sha"]
+        else:
+            compare_sha = metadata.get("mounted_sha")
+
+        # Check dirty state by comparing files against compare_sha
+        dirty = DirtyState.DIRTY  # Default to dirty if comparison fails
+        if compare_sha:
+            try:
+                is_dirty = self.git.is_slot_dirty(slot_path, workspace, compare_sha)
+                dirty = DirtyState.DIRTY if is_dirty else DirtyState.CLEAN
+            except Exception:
+                # On error, assume dirty to be safe
+                dirty = DirtyState.DIRTY
 
         return SlotInfo(
             slot=slot,
@@ -824,50 +839,312 @@ class WorkspaceManager:
             return slot_info.workspace  # Will be None if slot is empty
         return None
 
-    def diff(self, slot: str) -> DiffResponse:
-        """Show changes in a slot since last checkpoint.
+    def _parse_diff_target(self, target: str) -> dict:
+        """Parse a diff target into its components.
 
         Args:
-            slot: Slot to diff
+            target: Can be:
+                - Slot: "w1", "w2", "w3"
+                - Version: "v1", "v2" (requires workspace context)
+                - Workspace@version: "baseline@v2", "experiment@v3"
 
         Returns:
-            DiffResponse with change summary and file list
+            Dict with keys: type ("slot", "version"), and relevant fields
         """
-        self._validate_slot(slot)
+        # Check if it's a slot
+        if target in self.config.slots:
+            slot_info = self._get_slot_state(target)
+            if slot_info.state == SlotState.EMPTY:
+                raise SlotEmptyError(f"Slot {target} is empty")
+            return {
+                "type": "slot",
+                "slot": target,
+                "workspace": slot_info.workspace,
+                "path": self._slot_path(target),
+            }
 
-        slot_info = self._get_slot_state(slot)
-        if slot_info.state == SlotState.EMPTY:
-            raise SlotEmptyError(f"Slot {slot} is empty")
+        # Check if it's workspace@version format
+        if "@" in target:
+            workspace, version = target.split("@", 1)
+            version_info = self.db.get_version(workspace, version)
+            if not version_info:
+                raise GoldfishError(f"Version '{version}' not found for workspace '{workspace}'")
+            return {
+                "type": "version",
+                "workspace": workspace,
+                "version": version,
+                "git_sha": version_info["git_sha"],
+            }
 
-        slot_path = self._slot_path(slot)
+        # Check if it's a bare version (v1, v2) - needs workspace context from caller
+        if target.startswith("v") and target[1:].isdigit():
+            return {
+                "type": "bare_version",
+                "version": target,
+            }
 
-        # Get diff output from git
-        has_changes = self.git.is_dirty(slot_path)
+        raise GoldfishError(
+            f"Invalid diff target: '{target}'. " f"Use slot (w1), version (v1), or workspace@version (baseline@v2)"
+        )
 
-        if not has_changes:
-            return DiffResponse(
-                slot=slot,
-                has_changes=False,
-                summary="No changes since last checkpoint",
-                files_changed=[],
-                diff_text="",
+    def diff(self, target: str, against: str | None = None) -> DiffResponse:
+        """Compare changes between targets.
+
+        Single argument: Compare slot against its last saved version.
+        Two arguments: Compare any two targets (slots, versions, workspace@version).
+
+        Args:
+            target: What to diff. Can be:
+                - Slot: "w1" (compares against last version if alone)
+                - Version: "v1" (needs workspace context or second arg)
+                - Workspace@version: "baseline@v2"
+            against: Optional second target to compare against.
+                If omitted and target is a slot, compares against last version.
+
+        Returns:
+            DiffResponse with change summary, files, and comparison details
+
+        Examples:
+            diff("w1")                    # Slot vs last version
+            diff("w1", "w2")              # Compare two slots
+            diff("v1", "v5")              # Compare two versions (same workspace)
+            diff("baseline@v1", "exp@v3") # Compare across workspaces
+        """
+        left = self._parse_diff_target(target)
+
+        # Single argument: slot vs last version
+        if against is None:
+            if left["type"] != "slot":
+                raise GoldfishError(
+                    "Single-argument diff requires a slot (w1, w2, w3). "
+                    "For versions, use diff('v1', 'v5') or diff('workspace@v1', 'workspace@v2')"
+                )
+            return self._diff_slot_against_last_version(left)
+
+        # Two arguments: compare the two targets
+        right = self._parse_diff_target(against)
+
+        # Handle bare versions by inferring workspace from other target
+        if left["type"] == "bare_version":
+            workspace = right.get("workspace")
+            if not workspace:
+                raise GoldfishError("Cannot determine workspace for version. Use workspace@version format.")
+            version_info = self.db.get_version(workspace, left["version"])
+            if not version_info:
+                raise GoldfishError(f"Version '{left['version']}' not found for workspace '{workspace}'")
+            left = {
+                "type": "version",
+                "workspace": workspace,
+                "version": left["version"],
+                "git_sha": version_info["git_sha"],
+            }
+
+        if right["type"] == "bare_version":
+            workspace = left.get("workspace")
+            if not workspace:
+                raise GoldfishError("Cannot determine workspace for version. Use workspace@version format.")
+            version_info = self.db.get_version(workspace, right["version"])
+            if not version_info:
+                raise GoldfishError(f"Version '{right['version']}' not found for workspace '{workspace}'")
+            right = {
+                "type": "version",
+                "workspace": workspace,
+                "version": right["version"],
+                "git_sha": version_info["git_sha"],
+            }
+
+        return self._diff_two_targets(left, right, target, against)
+
+    def _diff_slot_against_last_version(self, slot_target: dict) -> DiffResponse:
+        """Diff a slot against its workspace's last explicit version.
+
+        Explicit versions are those created by save_version/checkpoint, NOT by run().
+        This shows what changed since the user's last intentional save point.
+        """
+        slot = slot_target["slot"]
+        workspace = slot_target["workspace"]
+        slot_path = slot_target["path"]
+
+        if not workspace:
+            raise GoldfishError(f"Slot {slot} has no workspace mounted")
+
+        # Get last EXPLICIT version (checkpoint/manual, not run)
+        latest_version = self.db.get_latest_explicit_version(workspace)
+
+        # Fallback to any version if no explicit versions exist
+        if not latest_version:
+            latest_version = self.db.get_latest_version(workspace)
+
+        if not latest_version:
+            # No versions yet - compare against branch head (initial state)
+            metadata_file = slot_path / ".goldfish-mount"
+            if not metadata_file.exists():
+                raise GoldfishError(f"Slot {slot} is not a mounted workspace")
+            metadata = json.loads(metadata_file.read_text())
+            compare_sha = metadata.get("mounted_sha")
+            right_label = "initial mount"
+        else:
+            compare_sha = latest_version["git_sha"]
+            right_label = f"{workspace}@{latest_version['version']}"
+
+        if not compare_sha:
+            raise GoldfishError(f"No comparison base found for slot {slot}")
+
+        # Perform the diff
+        diff_result = self.git.diff_slot_against_sha(slot_path, workspace, compare_sha)
+
+        return self._build_diff_response(
+            diff_result=diff_result,
+            left_label=slot,
+            right_label=right_label,
+            left_sha=None,  # Slot is live, no SHA
+            right_sha=compare_sha[:8],
+        )
+
+    def _diff_two_targets(self, left: dict, right: dict, left_label: str, right_label: str) -> DiffResponse:
+        """Diff two parsed targets against each other."""
+        # Build labels for response
+        if left["type"] == "version":
+            left_display = f"{left['workspace']}@{left['version']}"
+            left_sha = left["git_sha"]
+        else:
+            left_display = left_label
+            left_sha = None
+
+        if right["type"] == "version":
+            right_display = f"{right['workspace']}@{right['version']}"
+            right_sha = right["git_sha"]
+        else:
+            right_display = right_label
+            right_sha = None
+
+        # Case 1: Both are slots - diff directories
+        if left["type"] == "slot" and right["type"] == "slot":
+            diff_result = self._diff_directories(left["path"], right["path"])
+            return self._build_diff_response(
+                diff_result=diff_result,
+                left_label=left_display,
+                right_label=right_display,
+                left_sha=None,
+                right_sha=None,
             )
 
-        # Get list of changed files
-        changed_files = self.git.get_changed_files(slot_path)
+        # Case 2: Slot vs version
+        if left["type"] == "slot" and right["type"] == "version":
+            diff_result = self.git.diff_slot_against_sha(left["path"], left["workspace"], right["git_sha"])
+            return self._build_diff_response(
+                diff_result=diff_result,
+                left_label=left_display,
+                right_label=right_display,
+                left_sha=None,
+                right_sha=right_sha[:8] if right_sha else None,
+            )
 
-        # Get diff statistics
-        diff_stats = self.git.get_diff_stats(slot_path)
+        # Case 3: Version vs slot
+        if left["type"] == "version" and right["type"] == "slot":
+            # Swap order for consistent diffing (slot against SHA)
+            diff_result = self.git.diff_slot_against_sha(right["path"], right["workspace"], left["git_sha"])
+            # Swap labels since we swapped the diff
+            return self._build_diff_response(
+                diff_result=diff_result,
+                left_label=right_display,  # Swapped
+                right_label=left_display,  # Swapped
+                left_sha=None,
+                right_sha=left_sha[:8] if left_sha else None,
+            )
 
-        # Get full diff text
-        diff_text = self.git.get_diff_text(slot_path)
+        # Case 4: Both are versions - diff git SHAs
+        if left["type"] == "version" and right["type"] == "version":
+            diff_result = self.git.diff_shas(left["git_sha"], right["git_sha"])
+            return self._build_diff_response(
+                diff_result=diff_result,
+                left_label=left_display,
+                right_label=right_display,
+                left_sha=left_sha[:8] if left_sha else None,
+                right_sha=right_sha[:8] if right_sha else None,
+            )
+
+        raise GoldfishError(f"Unsupported diff combination: {left['type']} vs {right['type']}")
+
+    def _diff_directories(self, dir1: Path, dir2: Path) -> dict:
+        """Diff two directories directly."""
+        import subprocess
+
+        exclude_patterns = [
+            ".goldfish-mount",
+            "STATE.md",
+            ".git",
+            "__pycache__",
+            "*.pyc",
+            ".pytest_cache",
+        ]
+
+        # Build diff command
+        diff_cmd = ["diff", "-rq"]
+        for pattern in exclude_patterns:
+            diff_cmd.extend(["--exclude", pattern])
+        diff_cmd.extend([str(dir1), str(dir2)])
+
+        result = subprocess.run(diff_cmd, capture_output=True, text=True, timeout=30)
+
+        # Parse diff output
+        files_changed = []
+        for line in result.stdout.strip().split("\n"):
+            if not line:
+                continue
+            if line.startswith("Files "):
+                # Extract relative path
+                parts = line.split(" and ")
+                if len(parts) >= 2:
+                    file_path = parts[1].replace(" differ", "").replace(str(dir2) + "/", "")
+                    files_changed.append(file_path)
+            elif line.startswith("Only in "):
+                filename = line.split(": ")[-1]
+                files_changed.append(filename)
+
+        has_changes = len(files_changed) > 0
+
+        # Get unified diff for details
+        diff_text = ""
+        if has_changes:
+            diff_text_cmd = ["diff", "-u"]
+            for pattern in exclude_patterns:
+                diff_text_cmd.extend(["--exclude", pattern])
+            diff_text_cmd.extend([str(dir1), str(dir2)])
+            diff_result = subprocess.run(diff_text_cmd, capture_output=True, text=True, timeout=30)
+            diff_text = diff_result.stdout
+
+        return {
+            "has_changes": has_changes,
+            "summary": f"{len(files_changed)} file(s) differ" if has_changes else "No differences",
+            "files_changed": files_changed,
+            "diff_text": diff_text,
+        }
+
+    def _build_diff_response(
+        self,
+        diff_result: dict,
+        left_label: str,
+        right_label: str,
+        left_sha: str | None,
+        right_sha: str | None,
+    ) -> DiffResponse:
+        """Build a DiffResponse from diff results."""
+        # Truncate diff text to avoid overwhelming output
+        diff_text = diff_result.get("diff_text", "")
+        max_diff_len = 5000
+        if len(diff_text) > max_diff_len:
+            diff_text = diff_text[:max_diff_len] + f"\n\n... [truncated, {len(diff_text)} chars total]"
 
         return DiffResponse(
-            slot=slot,
-            has_changes=True,
-            summary=diff_stats,
-            files_changed=changed_files,
+            has_changes=diff_result["has_changes"],
+            summary=diff_result.get("summary", "No changes") if diff_result["has_changes"] else "No changes",
+            files_changed=diff_result.get("files_changed", []),
             diff_text=diff_text,
+            left=left_label,
+            right=right_label,
+            left_sha=left_sha,
+            right_sha=right_sha,
         )
 
     def rollback(self, slot: str, version: str, reason: str) -> RollbackResponse:
