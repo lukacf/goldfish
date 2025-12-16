@@ -56,6 +56,7 @@ def run(
     reason: str | dict | None = None,
     wait: bool = False,
     dry_run: bool = False,
+    skip_review: bool = False,
 ) -> dict:
     """Run pipeline stages.
 
@@ -82,6 +83,8 @@ def run(
         wait: False (default) returns immediately; True blocks until completion
         dry_run: If True, validate everything without launching. Returns what would
                  run and any validation errors found.
+        skip_review: If True, skip the pre-run Claude review. Use when you've already
+                    addressed review feedback and want to proceed immediately.
 
     Returns:
         Dict with:
@@ -171,6 +174,7 @@ def run(
         reason=reason_str,
         reason_structured=run_reason,
         async_mode=not wait,
+        skip_review=skip_review,
     )
 
     return result
