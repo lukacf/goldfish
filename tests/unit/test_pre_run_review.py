@@ -540,6 +540,45 @@ class TestSecurityFeatures:
         content = reviewer._read_file_safe(binary_file, "default")
         assert "invalid UTF-8" in content
 
+    @pytest.mark.asyncio
+    async def test_total_context_size_enforced(self, tmp_path: Path) -> None:
+        """Total context size should be truncated to prevent API cost/token issues."""
+        from goldfish.pre_run_review import MAX_TOTAL_CONTEXT_SIZE
+
+        workspace_path = tmp_path / "workspace"
+        workspace_path.mkdir()
+        (workspace_path / "modules").mkdir()
+
+        # Create a large but valid file (under per-file limit, but will push total over)
+        large_content = "# " + "x" * 90_000  # 90KB per stage
+        for stage in ["stage1", "stage2", "stage3", "stage4", "stage5", "stage6"]:
+            (workspace_path / "modules" / f"{stage}.py").write_text(large_content)
+
+        (workspace_path / "pipeline.yaml").write_text("stages: []")
+
+        config = PreRunReviewConfig()
+        reviewer = PreRunReviewer(
+            config=config,
+            workspace_path=workspace_path,
+            dev_repo_path=tmp_path / "dev",
+        )
+
+        # Capture the prompt that would be sent
+        captured_prompt: list[str] = []
+
+        async def mock_claude(prompt: str) -> str:
+            captured_prompt.append(prompt)
+            return "## stage1\nNo issues found."
+
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch.object(reviewer, "_call_claude", mock_claude):
+                await reviewer.review(["stage1", "stage2", "stage3", "stage4", "stage5", "stage6"])
+
+        # Prompt should be truncated to MAX_TOTAL_CONTEXT_SIZE
+        assert len(captured_prompt) == 1
+        assert len(captured_prompt[0]) <= MAX_TOTAL_CONTEXT_SIZE
+        assert "truncated" in captured_prompt[0].lower()
+
 
 class TestParsingRobustness:
     """Tests for parsing robustness with various formats."""

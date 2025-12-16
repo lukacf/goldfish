@@ -1390,7 +1390,7 @@ echo "Stage completed successfully"
             pipeline_run_id=pipeline_run_id,
             pipeline_name=pipeline_name,
             reason=reason_structured,
-            backend_type="blocked",  # Special type indicating review blocked
+            backend_type=None,  # Not executed - blocked by review
         )
 
         # Update status to FAILED with error message

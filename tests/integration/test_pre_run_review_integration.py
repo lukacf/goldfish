@@ -194,8 +194,10 @@ class TestPreRunReviewWithRunReason:
             captured_prompt.append(prompt)
             return "## train\nNo issues found."
 
-        with patch.object(reviewer, "_call_claude", mock_claude):
-            await reviewer.review(["train"], reason=reason)
+        # Mock API key to bypass early return
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch.object(reviewer, "_call_claude", mock_claude):
+                await reviewer.review(["train"], reason=reason)
 
         # Verify reason was included in prompt
         assert len(captured_prompt) == 1
@@ -462,8 +464,10 @@ class TestReviewTimeoutHandling:
             await asyncio.sleep(100)
             return "Never reached"
 
-        with patch.object(reviewer, "_call_claude", slow_claude):
-            result = await reviewer.review(["train"])
+        # Mock API key to bypass early return
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch.object(reviewer, "_call_claude", slow_claude):
+                result = await reviewer.review(["train"])
 
         # Should approve due to timeout
         assert result.approved is True
@@ -490,8 +494,10 @@ class TestReviewTimeoutHandling:
         async def error_claude(prompt: str) -> str:
             raise RuntimeError("API connection failed")
 
-        with patch.object(reviewer, "_call_claude", error_claude):
-            result = await reviewer.review(["train"])
+        # Mock API key to bypass early return
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch.object(reviewer, "_call_claude", error_claude):
+                result = await reviewer.review(["train"])
 
         # Should approve due to error
         assert result.approved is True
@@ -538,8 +544,10 @@ diff --git a/modules/train.py b/modules/train.py
      return model
 """
 
-        with patch.object(reviewer, "_call_claude", mock_claude):
-            await reviewer.review(["train"], diff_text=diff_text)
+        # Mock API key to bypass early return
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch.object(reviewer, "_call_claude", mock_claude):
+                await reviewer.review(["train"], diff_text=diff_text)
 
         assert len(captured_prompt) == 1
         assert "lr = 0.01" in captured_prompt[0]
@@ -571,8 +579,10 @@ diff --git a/modules/train.py b/modules/train.py
             captured_prompt.append(prompt)
             return "## train\nNo issues found."
 
-        with patch.object(reviewer, "_call_claude", mock_claude):
-            await reviewer.review(["train"], diff_text="")
+        # Mock API key to bypass early return
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch.object(reviewer, "_call_claude", mock_claude):
+                await reviewer.review(["train"], diff_text="")
 
         assert "first run" in captured_prompt[0].lower() or "unavailable" in captured_prompt[0].lower()
 
@@ -617,8 +627,10 @@ WARNING: train.py:5 - consider using torch.compile
 ERROR: evaluate.py:10 - undefined variable 'metrics'
 """
 
-        with patch.object(reviewer, "_call_claude", mock_claude):
-            result = await reviewer.review(["preprocess", "train", "evaluate"])
+        # Mock API key to bypass early return
+        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+            with patch.object(reviewer, "_call_claude", mock_claude):
+                result = await reviewer.review(["preprocess", "train", "evaluate"])
 
         # Should have issues from multiple stages
         assert not result.approved
