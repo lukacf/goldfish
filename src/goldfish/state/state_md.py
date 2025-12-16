@@ -5,6 +5,7 @@ This is Claude's primary context recovery mechanism after compaction.
 
 import logging
 import os
+import re
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,42 @@ from goldfish.config import GoldfishConfig
 from goldfish.models import DirtyState, JobStatus, SlotInfo, SlotState
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_markdown(text: str, max_length: int = 200) -> str:
+    """Sanitize text for safe markdown rendering.
+
+    Prevents markdown injection attacks by:
+    - Escaping markdown structural characters
+    - Replacing newlines with spaces
+    - Truncating to max_length
+
+    Args:
+        text: User-provided text to sanitize
+        max_length: Maximum length before truncation
+
+    Returns:
+        Sanitized text safe for inline markdown rendering
+    """
+    if not text:
+        return ""
+
+    # Replace newlines with spaces to prevent multi-line injection
+    text = re.sub(r"[\r\n]+", " ", text)
+
+    # Escape markdown special characters that could create structure
+    # - # could create headers
+    # - [ ] could create links
+    # - * _ could create emphasis that breaks structure
+    text = text.replace("#", "\\#")
+    text = text.replace("[", "\\[")
+    text = text.replace("]", "\\]")
+
+    # Truncate to max length
+    if len(text) > max_length:
+        text = text[: max_length - 3] + "..."
+
+    return text
 
 
 class StateManager:
@@ -166,10 +203,13 @@ class StateManager:
                     try:
                         reason_data = json.loads(reason_json) if isinstance(reason_json, str) else reason_json
                         if reason_data.get("description"):
-                            lines.append(f"  └─ {reason_data['description']}")
+                            # Sanitize to prevent markdown injection
+                            desc = _sanitize_markdown(reason_data["description"])
+                            lines.append(f"  └─ {desc}")
                         if reason_data.get("hypothesis"):
-                            lines.append(f"  └─ Hypothesis: {reason_data['hypothesis']}")
-                    except (json.JSONDecodeError, KeyError):
+                            hyp = _sanitize_markdown(reason_data["hypothesis"])
+                            lines.append(f"  └─ Hypothesis: {hyp}")
+                    except (json.JSONDecodeError, KeyError, TypeError):
                         pass
             lines.append("")
 

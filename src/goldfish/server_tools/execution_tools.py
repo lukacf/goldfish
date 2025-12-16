@@ -8,6 +8,8 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import ValidationError
+
 from goldfish.errors import (
     GoldfishError,
     validate_reason,
@@ -116,7 +118,20 @@ def run(
                 reason_str = run_reason.to_summary()
                 # Validate minimum length of description
                 validate_reason(run_reason.description, config.audit.min_reason_length)
-            except Exception as e:
+            except ValidationError as e:
+                # Extract user-friendly error from Pydantic
+                errors = e.errors()
+                if errors:
+                    first = errors[0]
+                    field = ".".join(str(loc) for loc in first.get("loc", []))
+                    msg = first.get("msg", "validation error")
+                    raise GoldfishError(
+                        f"Invalid reason: {field} - {msg}. "
+                        f"Required: description (str, max 500). "
+                        f"Optional: hypothesis, approach (max 1000), min_result, goal (max 500)."
+                    ) from e
+                raise GoldfishError(f"Invalid structured reason: {e}") from e
+            except (ValueError, TypeError) as e:
                 raise GoldfishError(f"Invalid structured reason: {e}") from e
         elif isinstance(reason, str):
             # Simple string reason (backward compatibility)
