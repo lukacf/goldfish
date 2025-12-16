@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     outputs_json TEXT,                -- JSON map name -> details
     config_json TEXT,                 -- Effective config used
     inputs_json TEXT,                 -- Resolved inputs (URI + ref)
+    reason_json TEXT,                 -- Structured RunReason (description, hypothesis, approach, etc.)
     backend_type TEXT,                -- local | gce
     backend_handle TEXT,              -- container_id or instance_name for cancel/log lookup
     error TEXT,

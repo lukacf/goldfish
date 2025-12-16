@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.models import PipelineStatus, StageRunInfo, StageRunStatus
+from goldfish.models import PipelineStatus, RunReason, StageRunInfo, StageRunStatus
 from goldfish.pipeline.manager import PipelineManager
 
 # Lease timeout for claimed stages (seconds) - if a stage is claimed but not launched
@@ -87,7 +87,9 @@ class PipelineExecutor:
         config_override: dict | None = None,
         inputs_override: dict | None = None,
         reason: str | None = None,
+        reason_structured: RunReason | None = None,
         async_mode: bool = True,
+        skip_review: bool = False,
     ) -> dict:
         """
         Run pipeline stages - unified entry point for all stage execution.
@@ -98,8 +100,10 @@ class PipelineExecutor:
             pipeline_name: Pipeline file (None = pipeline.yaml)
             config_override: Per-stage config overrides {"stage_name": {"VAR": "val"}}
             inputs_override: Per-stage input overrides {"stage_name": {"input": "path"}}
-            reason: Why running
+            reason: Why running (string summary)
+            reason_structured: Structured RunReason object with hypothesis/approach/etc
             async_mode: True = queue-based async, False = sequential blocking
+            skip_review: If True, skip pre-run review
 
         Returns:
             Dict with pipeline_run_id and stage_runs list
@@ -152,6 +156,11 @@ class PipelineExecutor:
         # Validate all inputs can be resolved BEFORE queuing
         self._validate_inputs_resolvable(workspace, stages_to_execute, safe_inputs_override)
 
+        # Convert reason_structured to dict if it's a RunReason object
+        reason_dict: dict | None = None
+        if reason_structured:
+            reason_dict = reason_structured.model_dump()
+
         if not async_mode:
             # Sequential blocking mode - run each stage and wait
             runs: list[StageRunInfo] = []
@@ -166,7 +175,9 @@ class PipelineExecutor:
                     config_override=cfg,
                     inputs_override=inp,
                     reason=reason,
+                    reason_structured=reason_dict,
                     wait=True,
+                    skip_review=skip_review,
                 )
                 runs.append(sr)
             return {"stage_runs": [r.model_dump(mode="json") for r in runs], "pipeline_run_id": None}

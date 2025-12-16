@@ -1,9 +1,11 @@
 """Stage execution engine for Goldfish."""
 
+import asyncio
 import json
 import logging
 import os
 import time
+from collections.abc import Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,16 @@ from goldfish.infra.docker_builder import DockerBuilder
 from goldfish.infra.gce_launcher import GCELauncher
 from goldfish.infra.local_executor import LocalExecutor
 from goldfish.infra.profiles import ProfileResolver
-from goldfish.models import PipelineDef, StageDef, StageRunInfo, StageRunProgress, StageRunStatus
+from goldfish.models import (
+    PipelineDef,
+    ReviewSeverity,
+    RunReason,
+    RunReview,
+    StageDef,
+    StageRunInfo,
+    StageRunProgress,
+    StageRunStatus,
+)
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.utils import parse_optional_datetime
 from goldfish.utils.config_hash import compute_config_hash
@@ -111,8 +122,10 @@ class StageExecutor:
         config_override: dict | None = None,
         inputs_override: dict | None = None,
         reason: str | None = None,
+        reason_structured: dict | None = None,
         wait: bool = False,
         stage_run_id: str | None = None,
+        skip_review: bool = False,
     ) -> StageRunInfo:
         """Run a single pipeline stage.
 
@@ -123,19 +136,25 @@ class StageExecutor:
             pipeline_run_id: Parent pipeline run ID
             config_override: Override env vars from config
             inputs_override: Override input sources (for debugging)
-            reason: Why this stage is being run
+            reason: Why this stage is being run (string summary)
+            reason_structured: Structured RunReason dict (description, hypothesis, etc.)
             wait: Block until completion
             stage_run_id: Pre-created stage_run_id (from pipeline queue). If provided,
                          updates existing record; if None, creates new one.
+            skip_review: Skip pre-run review (default False)
 
         Flow:
             1. Auto-version workspace (git tag)
             2. Load pipeline and stage definition
-            3. Resolve input sources
-            4. Build Docker image
-            5. Generate entrypoint
-            6. Launch container
-            7. Monitor and track
+            3. Pre-run review (if enabled and not skipped)
+            4. Resolve input sources
+            5. Build Docker image
+            6. Generate entrypoint
+            7. Launch container
+            8. Monitor and track
+
+        Returns:
+            StageRunInfo with status and review (if review blocked the run)
         """
         # 1. Auto-version workspace (returns version and git SHA)
         version, git_sha = self._auto_version(workspace, stage_name, reason)
@@ -144,7 +163,32 @@ class StageExecutor:
         pipeline = self.pipeline_manager.get_pipeline(workspace, pipeline_name)
         stage = self._find_stage(pipeline, stage_name)
 
-        # 2b. Load stage config and apply override
+        # 3. Pre-run review (if enabled and not skipped)
+        review: RunReview | None = None
+        if self.config.pre_run_review.enabled and not skip_review:
+            review = self._perform_pre_run_review(
+                workspace=workspace,
+                stage_name=stage_name,
+                pipeline=pipeline,
+                reason_structured=reason_structured,
+                git_sha=git_sha,
+            )
+            if review and review.has_blocking_issues:
+                # Create failed stage run record with review
+                blocked_stage_run_id = stage_run_id or f"stage-{uuid4().hex[:8]}"
+                return self._create_blocked_stage_run(
+                    stage_run_id=blocked_stage_run_id,
+                    workspace=workspace,
+                    version=version,
+                    stage_name=stage_name,
+                    review=review,
+                    reason=reason,
+                    reason_structured=reason_structured,
+                    pipeline_run_id=pipeline_run_id,
+                    pipeline_name=pipeline_name,
+                )
+
+        # 3b. Load stage config and apply override
         stage_config = self._load_stage_config(workspace, stage_name) or {}
         if config_override:
             # shallow merge override
@@ -176,6 +220,7 @@ class StageExecutor:
                 input_sources=input_sources,
                 config_override=config_override,
                 reason=reason,
+                reason_structured=reason_structured,
                 pipeline_run_id=pipeline_run_id,
                 pipeline_name=pipeline_name,
                 profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
@@ -422,6 +467,7 @@ class StageExecutor:
         input_sources: dict[str, dict],
         config_override: dict | None,
         reason: str | None,
+        reason_structured: dict | None,
         pipeline_run_id: str | None,
         pipeline_name: str | None,
         profile: str | None,
@@ -438,6 +484,7 @@ class StageExecutor:
             pipeline_name=pipeline_name,
             config=config,
             inputs=inputs,
+            reason=reason_structured,
             profile=profile,
             hints=hints,
             backend_type=self.config.jobs.backend,
@@ -1156,3 +1203,223 @@ echo "Stage completed successfully"
             return status
 
         return None
+
+    # --- Pre-run Review Methods ---
+
+    def _perform_pre_run_review(
+        self,
+        workspace: str,
+        stage_name: str,
+        pipeline: PipelineDef,
+        reason_structured: dict | None,
+        git_sha: str,
+    ) -> RunReview | None:
+        """Perform pre-run review using Claude Agent SDK.
+
+        Args:
+            workspace: Workspace name
+            stage_name: Stage to review
+            pipeline: Pipeline definition (for context)
+            reason_structured: Structured RunReason dict
+            git_sha: Current git SHA for diff calculation
+
+        Returns:
+            RunReview with findings, or None if review couldn't be performed
+        """
+        from goldfish.pre_run_review import review_before_run
+
+        # Get workspace slot path
+        try:
+            slot_path = self.workspace_manager.get_workspace_path(workspace)
+        except GoldfishError:
+            logger.warning(f"Cannot review: workspace '{workspace}' not mounted")
+            return None
+
+        # Convert reason_structured dict to RunReason model
+        run_reason: RunReason | None = None
+        if reason_structured:
+            try:
+                run_reason = RunReason(**reason_structured)
+            except Exception as e:
+                logger.warning(f"Failed to parse reason_structured: {e}")
+
+        # Get diff from last successful run
+        diff_text = self._get_diff_from_last_success(workspace, stage_name, git_sha)
+
+        # Run the review (async -> sync bridge with event loop detection)
+        try:
+            review = self._run_async_review(
+                review_before_run(
+                    config=self.config.pre_run_review,
+                    workspace_path=slot_path,
+                    dev_repo_path=self.dev_repo,
+                    stages=[stage_name],  # Review the specific stage
+                    reason=run_reason,
+                    diff_text=diff_text,
+                    db=self.db,
+                )
+            )
+            # Log review result for visibility (not silent)
+            if review:
+                if review.approved:
+                    logger.info(f"Pre-run review passed for {stage_name}: {review.summary}")
+                else:
+                    logger.warning(f"Pre-run review blocked {stage_name}: {review.summary}")
+            return review
+        except (KeyboardInterrupt, SystemExit):
+            # Let cancellations propagate
+            raise
+        except Exception as e:
+            logger.error(f"Pre-run review failed for {stage_name}: {e}", exc_info=True)
+            return None
+
+    def _run_async_review(self, coro: Coroutine[Any, Any, RunReview]) -> RunReview:
+        """Run async review coroutine, handling existing event loops.
+
+        This bridges async review code to sync stage execution.
+
+        Design notes:
+        - Normal case: StageExecutor.run_stage() is called from sync context
+          (CLI or sync MCP server), so asyncio.run() works directly.
+        - Edge case: If called from within an async context (e.g., async MCP
+          server), we fall back to ThreadPoolExecutor which creates an isolated
+          event loop. This is safe because PreRunReviewer.review() is self-contained
+          (only does file I/O and HTTP calls, no shared async state).
+        - The thread-based fallback adds ~10ms overhead but avoids deadlocks.
+        """
+        try:
+            # Check if there's already a running event loop
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop - safe to use asyncio.run()
+            result: RunReview = asyncio.run(coro)
+            return result
+
+        # Already in an async context - run in isolated thread to avoid conflicts
+        # This is rare (only if MCP server is async) but handled safely
+        logger.debug("Running pre-run review in separate thread (async context detected)")
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, coro)
+            thread_result: RunReview = future.result(timeout=self.config.pre_run_review.timeout_seconds + 10)
+            return thread_result
+
+    def _get_diff_from_last_success(
+        self,
+        workspace: str,
+        stage_name: str,
+        current_sha: str,
+    ) -> str:
+        """Get diff from the last successful run of this stage.
+
+        Args:
+            workspace: Workspace name
+            stage_name: Stage name
+            current_sha: Current git SHA
+
+        Returns:
+            Diff text, or empty string if no previous run
+        """
+        # Find last successful run
+        last_run = self.db.get_latest_completed_stage_run(workspace, stage_name)
+        if not last_run:
+            return ""
+
+        last_version = last_run.get("version")
+        if not last_version:
+            return ""
+
+        # Get the git SHA for the last version
+        version_info = self.db.get_version(workspace, last_version)
+        if not version_info:
+            return ""
+
+        last_sha = version_info.get("git_sha")
+        if not last_sha or last_sha == current_sha:
+            return ""
+
+        # Get diff using git layer
+        try:
+            diff_result = self.workspace_manager.git.diff_shas(last_sha, current_sha)
+            diff_text: str = diff_result.get("diff_text", "")
+            return diff_text
+        except Exception as e:
+            logger.warning(f"Failed to get diff: {e}")
+            return ""
+
+    def _create_blocked_stage_run(
+        self,
+        stage_run_id: str,
+        workspace: str,
+        version: str,
+        stage_name: str,
+        review: RunReview,
+        reason: str | None,
+        reason_structured: dict | None,
+        pipeline_run_id: str | None,
+        pipeline_name: str | None,
+    ) -> StageRunInfo:
+        """Create a failed stage run record for a blocked review.
+
+        Args:
+            stage_run_id: Stage run ID
+            workspace: Workspace name
+            version: Workspace version
+            stage_name: Stage name
+            review: The blocking RunReview
+            reason: String reason
+            reason_structured: Structured RunReason dict
+            pipeline_run_id: Parent pipeline run ID
+            pipeline_name: Pipeline name
+
+        Returns:
+            StageRunInfo with failed status
+        """
+        now = datetime.now(UTC).isoformat()
+
+        # Build error message with review summary (not full review to keep it readable)
+        # Full review is available in the logs
+        error_msg = f"Pre-run review blocked: {review.summary}"
+        if review.error_count > 0:
+            error_details = []
+            for issue in review.issues:
+                if issue.severity == ReviewSeverity.ERROR:
+                    loc = f"{issue.file}:{issue.line}" if issue.file and issue.line else (issue.file or "")
+                    error_details.append(f"  - {loc}: {issue.message}" if loc else f"  - {issue.message}")
+            if error_details:
+                error_msg += "\n\nErrors:\n" + "\n".join(error_details[:5])  # Show first 5
+
+        # Use proper database method for consistency
+        self.db.create_stage_run(
+            stage_run_id=stage_run_id,
+            workspace_name=workspace,
+            version=version,
+            stage_name=stage_name,
+            pipeline_run_id=pipeline_run_id,
+            pipeline_name=pipeline_name,
+            reason=reason_structured,
+            backend_type=None,  # Not executed - blocked by review
+        )
+
+        # Update status to FAILED with error message
+        self.db.update_stage_run_status(
+            stage_run_id=stage_run_id,
+            status=StageRunStatus.FAILED,
+            error=error_msg,
+        )
+
+        logger.warning(f"Stage run {stage_run_id} blocked by pre-run review: {review.summary}")
+
+        return StageRunInfo(
+            stage_run_id=stage_run_id,
+            pipeline_run_id=pipeline_run_id,
+            workspace=workspace,
+            pipeline=pipeline_name,
+            version=version,
+            stage=stage_name,
+            status=StageRunStatus.FAILED,
+            started_at=parse_optional_datetime(now),
+            completed_at=parse_optional_datetime(now),
+            error=error_msg,
+        )
