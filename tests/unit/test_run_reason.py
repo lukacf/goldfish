@@ -15,8 +15,8 @@ class TestRunReasonValidation:
         assert reason.description == "Testing new architecture"
         assert reason.hypothesis is None
         assert reason.approach is None
-        assert reason.minimum_acceptable_result is None
-        assert reason.optimal_result is None
+        assert reason.min_result is None
+        assert reason.goal is None
 
     def test_with_all_fields(self) -> None:
         """Complete RunReason with all fields populated."""
@@ -24,14 +24,14 @@ class TestRunReasonValidation:
             description="Testing dropout change",
             hypothesis="Lower dropout will improve accuracy",
             approach="Changed dropout from 0.5 to 0.3",
-            minimum_acceptable_result="No worse than baseline",
-            optimal_result="2-3% accuracy improvement",
+            min_result="No worse than baseline",
+            goal="2-3% accuracy improvement",
         )
         assert reason.description == "Testing dropout change"
         assert reason.hypothesis == "Lower dropout will improve accuracy"
         assert reason.approach == "Changed dropout from 0.5 to 0.3"
-        assert reason.minimum_acceptable_result == "No worse than baseline"
-        assert reason.optimal_result == "2-3% accuracy improvement"
+        assert reason.min_result == "No worse than baseline"
+        assert reason.goal == "2-3% accuracy improvement"
 
     def test_requires_description(self) -> None:
         """Description is required - missing raises ValidationError."""
@@ -69,55 +69,21 @@ class TestRunReasonValidation:
         with pytest.raises(ValidationError):
             RunReason(description="test", approach="a" * 1001)
 
-    def test_minimum_acceptable_result_max_length(self) -> None:
-        """minimum_acceptable_result has max_length=500."""
-        reason = RunReason(description="test", minimum_acceptable_result="m" * 500)
-        assert len(reason.minimum_acceptable_result) == 500  # type: ignore[arg-type]
+    def test_min_result_max_length(self) -> None:
+        """min_result has max_length=500."""
+        reason = RunReason(description="test", min_result="m" * 500)
+        assert len(reason.min_result) == 500  # type: ignore[arg-type]
 
         with pytest.raises(ValidationError):
-            RunReason(description="test", minimum_acceptable_result="m" * 501)
+            RunReason(description="test", min_result="m" * 501)
 
-    def test_optimal_result_max_length(self) -> None:
-        """optimal_result has max_length=500."""
-        reason = RunReason(description="test", optimal_result="o" * 500)
-        assert len(reason.optimal_result) == 500  # type: ignore[arg-type]
+    def test_goal_max_length(self) -> None:
+        """goal has max_length=500."""
+        reason = RunReason(description="test", goal="g" * 500)
+        assert len(reason.goal) == 500  # type: ignore[arg-type]
 
         with pytest.raises(ValidationError):
-            RunReason(description="test", optimal_result="o" * 501)
-
-
-class TestRunReasonAliases:
-    """Tests for field aliases (backward compatibility)."""
-
-    def test_min_result_alias(self) -> None:
-        """min_result alias works for minimum_acceptable_result."""
-        reason = RunReason(description="test", min_result="baseline accuracy")
-        assert reason.minimum_acceptable_result == "baseline accuracy"
-
-    def test_goal_alias(self) -> None:
-        """goal alias works for optimal_result."""
-        reason = RunReason(description="test", goal="+5% accuracy")
-        assert reason.optimal_result == "+5% accuracy"
-
-    def test_original_names_still_work(self) -> None:
-        """Original verbose names still work (backward compat)."""
-        reason = RunReason(
-            description="test",
-            minimum_acceptable_result="min",
-            optimal_result="opt",
-        )
-        assert reason.minimum_acceptable_result == "min"
-        assert reason.optimal_result == "opt"
-
-    def test_serialization_uses_canonical_names(self) -> None:
-        """Serialization uses canonical (long) names for DB compatibility."""
-        reason = RunReason(description="test", min_result="min", goal="opt")
-        data = reason.model_dump()
-        # Should use canonical names, not aliases
-        assert "minimum_acceptable_result" in data
-        assert "optimal_result" in data
-        assert "min_result" not in data
-        assert "goal" not in data
+            RunReason(description="test", goal="g" * 501)
 
 
 class TestRunReasonToSummary:
@@ -142,8 +108,8 @@ class TestRunReasonToSummary:
             description="Test",
             hypothesis="Expect improvement",
             approach="Changed config",
-            minimum_acceptable_result="No regression",
-            optimal_result="+5%",
+            min_result="No regression",
+            goal="+5%",
         )
         summary = reason.to_summary()
         assert "Test" in summary
@@ -169,15 +135,15 @@ class TestRunReasonToMarkdown:
             description="Test",
             hypothesis="Expect X",
             approach="Do Y",
-            minimum_acceptable_result="At least Z",
-            optimal_result="Ideally W",
+            min_result="At least Z",
+            goal="Ideally W",
         )
         md = reason.to_markdown()
         assert "**Description:** Test" in md
         assert "**Hypothesis:** Expect X" in md
         assert "**Approach:** Do Y" in md
         assert "**Min Result:** At least Z" in md
-        assert "**Optimal Result:** Ideally W" in md
+        assert "**Goal:** Ideally W" in md
 
     def test_field_order(self) -> None:
         """Fields appear in logical order."""
@@ -185,8 +151,8 @@ class TestRunReasonToMarkdown:
             description="Test",
             hypothesis="H",
             approach="A",
-            minimum_acceptable_result="M",
-            optimal_result="O",
+            min_result="M",
+            goal="G",
         )
         md = reason.to_markdown()
         lines = md.split("\n")
@@ -194,7 +160,7 @@ class TestRunReasonToMarkdown:
         assert "Hypothesis" in lines[1]
         assert "Approach" in lines[2]
         assert "Min Result" in lines[3]
-        assert "Optimal Result" in lines[4]
+        assert "Goal" in lines[4]
 
 
 class TestRunReasonEdgeCases:
@@ -239,3 +205,16 @@ class TestRunReasonEdgeCases:
         )
         assert '"quoted"' in reason.description
         assert "\n" in reason.hypothesis  # type: ignore[operator]
+
+    def test_serialization_field_names(self) -> None:
+        """Serialization uses the canonical short field names."""
+        reason = RunReason(
+            description="test",
+            min_result="min",
+            goal="opt",
+        )
+        data = reason.model_dump()
+        assert "min_result" in data
+        assert "goal" in data
+        assert data["min_result"] == "min"
+        assert data["goal"] == "opt"
