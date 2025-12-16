@@ -35,6 +35,7 @@ Goldfish manages ML experiments through **six key abstractions**:
 - User workspace is plain files (no `.git`) - all versioning handled internally
 - Every `run()` creates a version BEFORE execution (100% provenance)
 - Signals connect stages with typed data flow
+- **Pre-run review**: Claude reviews your code before execution to catch bugs early
 
 ## Workflow Decision Tree
 
@@ -92,9 +93,43 @@ START: What task?
    **Note:** Stages automatically use pre-built images with common ML libraries
    (numpy, pandas, torch, scikit-learn, etc.). No setup required.
 
-4. Run the pipeline
-   run("w1")                   # All stages
-   run("w1", stages=["train"]) # Single stage
+4. Run the pipeline (with structured reason for experiment tracking)
+   run("w1", reason={
+       "description": "Baseline LSTM training",
+       "hypothesis": "LSTM should achieve 85%+ accuracy"
+   })
+
+   run("w1", stages=["train"], reason={
+       "description": "Testing larger batch size",
+       "hypothesis": "Batch size 64 will improve stability",
+       "approach": "Increased from 32 to 64",
+       "min_result": "Lower loss variance",
+       "goal": "Faster convergence with stable loss"
+   })
+```
+
+### Pre-Run Review (Automatic)
+
+Before executing any stage, Goldfish automatically reviews your code using Claude:
+
+```
+run("w1", stages=["train"])
+→ Pre-run review activates
+→ Reviews: pipeline.yaml, modules/train.py, configs/train.yaml
+→ Checks for: undefined variables, logic errors, missing imports
+→ Blocks run if ERRORs found, allows with WARNINGs
+
+Example review output:
+  ✗ BLOCKED: modules/train.py:12 - `learning_rate` undefined
+  ✗ BLOCKED: modules/train.py:15 - `metrics` never assigned
+  ⚠ WARNING: No validation split - training on full data
+```
+
+**Benefits:**
+- Catches bugs before wasting GPU time
+- Reviews use experiment context (diff, hypothesis, config)
+- Fails open (approves on timeout/error) to avoid blocking
+- Can be disabled: `pre_run_review.enabled: false` in goldfish.yaml
 ```
 
 ### 2. Pipeline Structure
@@ -220,7 +255,7 @@ get_run_provenance(stage_run_id="stage-abc123")
 
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
-| `run()` | Execute stages | workspace, stages, wait |
+| `run()` | Execute stages (with pre-run review) | workspace, stages, reason, wait |
 | `get_run()` | Run details | run_id |
 | `logs()` | Container logs | run_id, tail, since |
 | `cancel()` | Stop run | run_id, reason |
