@@ -107,12 +107,14 @@ goldfish/
 │   │   └── manager.py            # Pipeline CRUD
 │   │
 │   ├── jobs/                     # Execution engine
-│   │   ├── stage_executor.py     # Core stage execution (900 lines)
+│   │   ├── stage_executor.py     # Core stage execution (1400 lines)
 │   │   ├── pipeline_executor.py  # Pipeline orchestration
 │   │   ├── tracker.py            # Job status tracking
 │   │   ├── launcher.py           # Legacy job launcher
 │   │   ├── conversion.py         # Dict ↔ model conversion
 │   │   └── exporter.py           # Experiment export
+│   │
+│   ├── pre_run_review.py         # Pre-run code review (500 lines)
 │   │
 │   ├── infra/                    # Infrastructure layer
 │   │   ├── docker_builder.py     # Dockerfile generation + build
@@ -147,7 +149,7 @@ goldfish/
 │       ├── lineage_tools.py      # 3 lineage tools
 │       └── utility_tools.py      # 4 utility tools
 │
-├── tests/                        # Test suite (572 tests)
+├── tests/                        # Test suite (601 tests)
 │   ├── conftest.py               # Shared fixtures
 │   ├── unit/                     # Fast unit tests (<100ms each)
 │   ├── integration/              # Component tests (real DB/git)
@@ -391,6 +393,60 @@ BUILTIN_PROFILES = {
 ```
 
 Claude just writes `profile: "h100-spot"` in configs; Goldfish handles the rest.
+
+### 7. Pre-Run Review = Automatic Code Review
+
+**Location**: `pre_run_review.py` (497 lines)
+
+Before executing any stage, Goldfish reviews the code using Claude Agent SDK:
+
+```python
+# Integration in jobs/stage_executor.py:1240-1275
+def run_stage(self, workspace, stage_name, ...):
+    # After sync+version, before Docker build
+    review = self._perform_pre_run_review(...)
+    if not review.approved:
+        self._create_blocked_stage_run(...)  # Create FAILED stage run
+        return blocked_info
+
+    # Proceed with execution...
+```
+
+**Review context includes:**
+- `pipeline.yaml` - Workflow structure
+- `modules/{stage}.py` - Stage implementation
+- `configs/{stage}.yaml` - Configuration
+- Git diff from last successful run
+- RunReason (hypothesis, approach, goals)
+
+**Security measures** (`pre_run_review.py:270-310`):
+- Path traversal protection with symlink detection
+- File size limits (100KB/file, 500KB total context)
+- Safe filename validation (rejects `../`, `.hidden`)
+- API timeout with `asyncio.wait_for()`
+- Fails open on error (approves to avoid blocking)
+
+**Async/sync bridging** (`stage_executor.py:1276-1310`):
+```python
+def _run_async_review(self, coro: Coroutine[Any, Any, RunReview]):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)  # No loop - use asyncio.run()
+
+    # Already in async context - use ThreadPoolExecutor
+    # Safe because PreRunReviewer.review() is self-contained
+```
+
+**RunReason model** (`models.py:574-619`):
+- Structured experiment hypothesis tracking
+- All fields have max_length constraints (DoS protection)
+- Stored as JSON in `stage_runs.reason_json` column
+
+**Testing**:
+- 37 unit tests (security, parsing, timeout handling)
+- 14 integration tests (real files, executor integration)
+- Test coverage: 95%+
 
 ---
 
