@@ -46,6 +46,7 @@ The agent writes pure ML code. Goldfish handles versioning, execution, and state
 
 ## Key Features
 
+- **Pre-Run Review** — Claude reviews your code before execution to catch bugs early
 - **Pipeline Workflows** — Define ML workflows as YAML, run stages individually or end-to-end
 - **Workspace Isolation** — Each experiment is fully isolated; run multiple experiments in parallel
 - **Automatic Versioning** — Every run creates an immutable snapshot for reproducibility
@@ -57,7 +58,7 @@ The agent writes pure ML code. Goldfish handles versioning, execution, and state
 
 ## Core Concepts
 
-Goldfish has five core abstractions that work together:
+Goldfish has six core abstractions that work together:
 
 ### Workspaces = Isolated Experiments
 
@@ -158,6 +159,42 @@ The agent writes pure ML code. Goldfish handles containerization, input mounting
 | `file` | Single file | Configs, reports, small outputs |
 
 Goldfish tracks every signal — you always know exactly which data produced which results.
+
+### Pre-Run Review = Automatic Bug Detection
+
+Before executing any stage, Goldfish automatically reviews your code using Claude to catch errors before wasting compute time:
+
+```python
+run("w1", stages=["train"], reason={
+    "description": "Testing larger batch size",
+    "hypothesis": "Batch size 64 will improve convergence"
+})
+```
+
+**What gets reviewed:**
+- Pipeline structure and data flow
+- Stage modules (modules/train.py)
+- Configuration files (configs/train.yaml)
+- Changes since last run (git diff)
+
+**Example review output:**
+```
+✗ BLOCKED: modules/train.py:12 - `learning_rate` undefined
+✗ BLOCKED: modules/train.py:15 - `metrics` never assigned
+⚠ WARNING: No validation split - training on full data
+```
+
+The run is blocked if ERRORs are found. Warnings are logged but don't block execution.
+
+**Configuration:**
+```yaml
+# goldfish.yaml
+pre_run_review:
+  enabled: true              # Default: true
+  timeout_seconds: 60        # API timeout
+```
+
+Requires `ANTHROPIC_API_KEY` environment variable. Skips review if not set.
 
 ### How They Work Together
 
