@@ -1277,7 +1277,15 @@ echo "Stage completed successfully"
         """Run async review coroutine, handling existing event loops.
 
         This bridges async review code to sync stage execution.
-        Handles the case where we're already in an async context.
+
+        Design notes:
+        - Normal case: StageExecutor.run_stage() is called from sync context
+          (CLI or sync MCP server), so asyncio.run() works directly.
+        - Edge case: If called from within an async context (e.g., async MCP
+          server), we fall back to ThreadPoolExecutor which creates an isolated
+          event loop. This is safe because PreRunReviewer.review() is self-contained
+          (only does file I/O and HTTP calls, no shared async state).
+        - The thread-based fallback adds ~10ms overhead but avoids deadlocks.
         """
         try:
             # Check if there's already a running event loop
@@ -1287,8 +1295,9 @@ echo "Stage completed successfully"
             result: RunReview = asyncio.run(coro)
             return result
 
-        # Already in an async context - use nest_asyncio or run in thread
-        # For safety, run in a new thread to avoid event loop conflicts
+        # Already in an async context - run in isolated thread to avoid conflicts
+        # This is rare (only if MCP server is async) but handled safely
+        logger.debug("Running pre-run review in separate thread (async context detected)")
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
