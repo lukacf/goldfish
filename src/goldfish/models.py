@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from enum import Enum
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import BaseModel, Field
 
 
 class SlotState(str, Enum):
@@ -575,27 +575,20 @@ class RunReason(BaseModel):
     """Structured reason for running stages with experiment hypothesis and goals.
 
     All fields have max_length constraints to prevent DoS attacks.
-    The verbose field names have shorter aliases for convenience:
-    - minimum_acceptable_result -> min_result
-    - optimal_result -> goal
 
-    Both names work when creating a RunReason, but serialization uses the
-    canonical (longer) names for backward compatibility with existing data.
+    Fields:
+        description: What you're running (required, max 500 chars)
+        hypothesis: What you expect to happen (max 1000 chars)
+        approach: How you're testing it (max 1000 chars)
+        min_result: Minimum bar for success (max 500 chars)
+        goal: Best case outcome (max 500 chars)
     """
 
     description: str = Field(max_length=500)
     hypothesis: str | None = Field(default=None, max_length=1000)
     approach: str | None = Field(default=None, max_length=1000)
-    minimum_acceptable_result: str | None = Field(
-        default=None,
-        max_length=500,
-        validation_alias=AliasChoices("minimum_acceptable_result", "min_result"),
-    )
-    optimal_result: str | None = Field(
-        default=None,
-        max_length=500,
-        validation_alias=AliasChoices("optimal_result", "goal"),
-    )
+    min_result: str | None = Field(default=None, max_length=500)
+    goal: str | None = Field(default=None, max_length=500)
 
     def to_summary(self) -> str:
         """Convert to a single-line summary for display."""
@@ -611,8 +604,8 @@ class RunReason(BaseModel):
             lines.append(f"**Hypothesis:** {self.hypothesis}")
         if self.approach:
             lines.append(f"**Approach:** {self.approach}")
-        if self.minimum_acceptable_result:
-            lines.append(f"**Min Result:** {self.minimum_acceptable_result}")
-        if self.optimal_result:
-            lines.append(f"**Optimal Result:** {self.optimal_result}")
+        if self.min_result:
+            lines.append(f"**Min Result:** {self.min_result}")
+        if self.goal:
+            lines.append(f"**Goal:** {self.goal}")
         return "\n".join(lines)
