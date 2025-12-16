@@ -8,6 +8,8 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import ValidationError
+
 from goldfish.errors import (
     GoldfishError,
     validate_reason,
@@ -17,6 +19,7 @@ from goldfish.models import (
     CancelRunResponse,
     GetOutputsResponse,
     GetRunResponse,
+    RunReason,
     StageRunInfo,
     StageRunStatus,
 )
@@ -50,9 +53,10 @@ def run(
     pipeline: str | None = None,
     config_override: dict | None = None,
     inputs_override: dict | None = None,
-    reason: str | None = None,
+    reason: str | dict | None = None,
     wait: bool = False,
     dry_run: bool = False,
+    skip_review: bool = False,
 ) -> dict:
     """Run pipeline stages.
 
@@ -66,10 +70,21 @@ def run(
         config_override: Override config vars. For single stage: {"VAR": "value"}.
                         For multiple stages: {"stage_name": {"VAR": "value"}}
         inputs_override: Override input sources for debugging
-        reason: Why running (min 15 chars)
+        reason: Why running - can be:
+            - String (min 15 chars)
+            - Dict with structured fields:
+                {
+                    "description": "What you're running",
+                    "hypothesis": "What you expect to happen",
+                    "approach": "How you're testing it",
+                    "min_result": "Minimum bar for success",
+                    "goal": "Best case outcome"
+                }
         wait: False (default) returns immediately; True blocks until completion
         dry_run: If True, validate everything without launching. Returns what would
                  run and any validation errors found.
+        skip_review: If True, skip the pre-run Claude review. Use when you've already
+                    addressed review feedback and want to proceed immediately.
 
     Returns:
         Dict with:
@@ -85,6 +100,7 @@ def run(
         run("w1")                           # Run all stages
         run("w1", stages=["train"])         # Run single stage
         run("w1", stages=["preprocess", "train", "evaluate"])  # Run specific stages
+        run("w1", reason={"description": "Test new architecture", "hypothesis": "Will improve accuracy"})
         run("w1", dry_run=True)             # Validate without launching
     """
     config = _get_config()
@@ -92,8 +108,41 @@ def run(
     pipeline_executor = _get_pipeline_executor()
 
     validate_workspace_name(workspace)
+
+    # Parse reason into RunReason object
+    run_reason: RunReason | None = None
+    reason_str: str = "Run stages"
+
     if reason:
-        validate_reason(reason, config.audit.min_reason_length)
+        if isinstance(reason, dict):
+            # Structured reason
+            try:
+                run_reason = RunReason(**reason)
+                reason_str = run_reason.to_summary()
+                # Validate minimum length of description
+                validate_reason(run_reason.description, config.audit.min_reason_length)
+            except ValidationError as e:
+                # Extract user-friendly error from Pydantic
+                errors = e.errors()
+                if errors:
+                    first = errors[0]
+                    field = ".".join(str(loc) for loc in first.get("loc", []))
+                    msg = first.get("msg", "validation error")
+                    raise GoldfishError(
+                        f"Invalid reason: {field} - {msg}. "
+                        f"Required: description (str, max 500). "
+                        f"Optional: hypothesis, approach (max 1000), min_result, goal (max 500)."
+                    ) from e
+                raise GoldfishError(f"Invalid structured reason: {e}") from e
+            except (ValueError, TypeError) as e:
+                raise GoldfishError(f"Invalid structured reason: {e}") from e
+        elif isinstance(reason, str):
+            # Simple string reason (backward compatibility)
+            validate_reason(reason, config.audit.min_reason_length)
+            reason_str = reason
+            run_reason = RunReason(description=reason)
+        else:
+            raise GoldfishError("reason must be a string or dict")
 
     # Resolve workspace (could be slot like "w1")
     workspace_name = workspace_manager.get_workspace_for_slot(workspace)
@@ -115,16 +164,19 @@ def run(
             inputs_override=inputs_override or {},
         )
 
-    # Unified execution through run_stages
+    # Execute through run_stages
     result: dict[str, Any] = pipeline_executor.run_stages(
         workspace=workspace_name,
         stages=stages if stages else None,
         pipeline_name=pipeline,
         config_override=config_override or {},
         inputs_override=inputs_override or {},
-        reason=reason or "Run stages",
+        reason=reason_str,
+        reason_structured=run_reason,
         async_mode=not wait,
+        skip_review=skip_review,
     )
+
     return result
 
 

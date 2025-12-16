@@ -277,6 +277,7 @@ class TestStageRunRecords:
             input_sources=input_sources,
             config_override=config_override,
             reason="Testing larger batch size",
+            reason_structured=None,
             pipeline_run_id=None,
             pipeline_name=None,
             profile=None,
