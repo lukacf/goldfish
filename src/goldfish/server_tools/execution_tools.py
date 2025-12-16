@@ -70,14 +70,14 @@ def run(
                         For multiple stages: {"stage_name": {"VAR": "value"}}
         inputs_override: Override input sources for debugging
         reason: Why running - can be:
-            - String (min 15 chars) for backward compatibility
+            - String (min 15 chars)
             - Dict with structured fields:
                 {
-                    "description": "What's being run",
+                    "description": "What you're running",
                     "hypothesis": "What you expect to happen",
                     "approach": "How you're testing it",
-                    "minimum_acceptable_result": "Min bar for success",
-                    "optimal_result": "Best case outcome"
+                    "min_result": "Minimum bar for success",
+                    "goal": "Best case outcome"
                 }
         wait: False (default) returns immediately; True blocks until completion
         dry_run: If True, validate everything without launching. Returns what would
