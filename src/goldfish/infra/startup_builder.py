@@ -115,6 +115,53 @@ trap 'echo "SIGINT received"; exit 130' SIGINT
 """
 
 
+def upload_helper_section() -> str:
+    """Generate helper function for uploading logs with retry and verification.
+
+    Returns:
+        Shell script fragment with upload_logs_with_retry function
+    """
+    return """
+# === LOG UPLOAD HELPER (Ensures logs are uploaded before deletion) ===
+upload_logs_with_retry() {
+    local file=$1
+    local dest=$2
+    local max_attempts=3
+
+    # Skip if file doesn't exist or is empty
+    if [[ ! -f "$file" || ! -s "$file" ]]; then
+        echo "Skipping upload: $file (not found or empty)"
+        return 0
+    fi
+
+    for i in $(seq 1 $max_attempts); do
+        echo "Uploading $(basename $file) to GCS (attempt $i/$max_attempts)..."
+
+        # Upload with 60-second timeout
+        if timeout 60 gsutil cp "$file" "$dest" 2>&1; then
+            # Verify upload succeeded
+            if timeout 10 gsutil ls "$dest" &>/dev/null; then
+                echo "✓ Upload verified: $dest"
+                return 0
+            else
+                echo "✗ Upload succeeded but verification failed"
+            fi
+        else
+            echo "✗ Upload command failed"
+        fi
+
+        # Wait before retry (unless last attempt)
+        if [[ $i -lt $max_attempts ]]; then
+            sleep 2
+        fi
+    done
+
+    echo "✗ Failed to upload $file after $max_attempts attempts"
+    return 1
+}
+"""
+
+
 def watchdog_section(max_runtime_seconds: int) -> str:
     """Generate watchdog process that force-kills after timeout.
 
@@ -484,7 +531,10 @@ def build_startup_script(
     # Build GCS paths
     bucket_path = "/".join(part for part in [bucket_prefix.strip("/"), run_path.strip("/")] if part)
     stage_uri = f"gs://{bucket}/{bucket_path}/logs/stage_times.log"
-    log_file = f"{bucket_mount}/{bucket_path}/logs/train.log"
+    # Separate stdout and stderr for better error visibility
+    stdout_log = f"{bucket_mount}/{bucket_path}/logs/stdout.log"
+    stderr_log = f"{bucket_mount}/{bucket_path}/logs/stderr.log"
+    log_file = stdout_log  # Backward compat: log_file points to stdout
 
     # Export environment variables with proper shell escaping
     env_exports = []
@@ -506,6 +556,8 @@ def build_startup_script(
         stage_log_section(stage_uri),
         # Self-deletion trap - MUST be early to catch failures in apt-get, driver install, etc.
         self_deletion_section(),
+        # Log upload helper - retry and verify uploads before deletion
+        upload_helper_section(),
         'log_stage "startup_begin"',
         # Reboot cleanup - handles stale state if instance rebooted after preemption
         reboot_cleanup_section(bucket_mount, gcsfuse=gcsfuse),
@@ -575,23 +627,36 @@ def build_startup_script(
     if heartbeat_timeout_seconds is not None and heartbeat_timeout_seconds > 0:
         parts.append("start_supervisor")
 
+    # Define log file paths
+    parts.append(f'STDOUT_LOG="{stdout_log}"')
+    parts.append(f'STDERR_LOG="{stderr_log}"')
+    parts.append(f'EXIT_CODE_FILE="{bucket_mount}/{bucket_path}/logs/exit_code.txt"')
+
     parts.append('log_stage "docker_run_begin"')
-    parts.append(f'{{ "${{DOCKER_CMD[@]}}" | tee -a "{log_file}"; }}')
-    parts.append("EXIT_CODE=${PIPESTATUS[0]}")
+    # Capture stdout and stderr separately for better error visibility
+    # Use simple redirection: stderr to file, stdout to file + console
+    parts.append('"${DOCKER_CMD[@]}" > >(tee -a "$STDOUT_LOG") 2> >(tee -a "$STDERR_LOG")')
+    parts.append("EXIT_CODE=$?")
+    # Wait for background processes (tee) to finish - don't fail on tee errors
+    parts.append("wait || true")
     parts.append('log_stage "docker_run_end"')
 
     # Post-run commands
     for post_cmd in post_run_cmds:
         parts.append(post_cmd)
 
-    # Upload exit code and logs
-    parts.append(f'echo "$EXIT_CODE" > {bucket_mount}/{bucket_path}/logs/exit_code.txt || true')
-    parts.append(f'gsutil cp "{log_file}" gs://{bucket}/{bucket_path}/logs/train.log || true')
-    parts.append(
-        f"gsutil cp {bucket_mount}/{bucket_path}/logs/exit_code.txt gs://{bucket}/{bucket_path}/logs/exit_code.txt || true"
-    )
+    # Write exit code to file
+    parts.append('echo "$EXIT_CODE" > "$EXIT_CODE_FILE"')
+
+    # Upload logs with retry and verification (BLOCKING before exit)
+    parts.append('echo "Uploading logs to GCS with verification..."')
+    parts.append(f'upload_logs_with_retry "$STDOUT_LOG" gs://{bucket}/{bucket_path}/logs/stdout.log')
+    parts.append(f'upload_logs_with_retry "$STDERR_LOG" gs://{bucket}/{bucket_path}/logs/stderr.log')
+    parts.append(f'upload_logs_with_retry "$EXIT_CODE_FILE" gs://{bucket}/{bucket_path}/logs/exit_code.txt')
+    parts.append('echo "All logs uploaded successfully"')
 
     # Exit with docker exit code - the EXIT trap will handle self-deletion
+    # Logs are already uploaded and verified at this point
     parts.append('log_stage "cleanup_begin"')
     parts.append("exit $EXIT_CODE")
 
