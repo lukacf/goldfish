@@ -89,6 +89,7 @@ class PipelineExecutor:
         reason: str | None = None,
         reason_structured: RunReason | None = None,
         async_mode: bool = True,
+        skip_review: bool = False,
     ) -> dict:
         """
         Run pipeline stages - unified entry point for all stage execution.
@@ -102,6 +103,7 @@ class PipelineExecutor:
             reason: Why running (string summary)
             reason_structured: Structured RunReason object with hypothesis/approach/etc
             async_mode: True = queue-based async, False = sequential blocking
+            skip_review: If True, skip pre-run review
 
         Returns:
             Dict with pipeline_run_id and stage_runs list
@@ -175,6 +177,7 @@ class PipelineExecutor:
                     reason=reason,
                     reason_structured=reason_dict,
                     wait=True,
+                    skip_review=skip_review,
                 )
                 runs.append(sr)
             return {"stage_runs": [r.model_dump(mode="json") for r in runs], "pipeline_run_id": None}
