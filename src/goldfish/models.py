@@ -609,3 +609,54 @@ class RunReason(BaseModel):
         if self.goal:
             lines.append(f"**Goal:** {self.goal}")
         return "\n".join(lines)
+
+
+# --- Pre-Run Review Models ---
+
+
+class ReviewSeverity(str, Enum):
+    """Severity levels for review issues."""
+
+    ERROR = "error"  # Blocking issue - will fail
+    WARNING = "warning"  # Potential problem - may fail
+    NOTE = "note"  # Suggestion - won't fail
+
+
+class ReviewIssue(BaseModel):
+    """A single issue found during pre-run review."""
+
+    severity: ReviewSeverity
+    stage: str  # Which stage this applies to
+    message: str
+    file: str | None = None
+    line: int | None = None
+
+
+class RunReview(BaseModel):
+    """Result of pre-run review by Claude.
+
+    When has_blocking_issues is True, the run should be blocked
+    and recorded as failed with the review text in the error field.
+    """
+
+    approved: bool  # True if no blocking issues
+    issues: list[ReviewIssue] = Field(default_factory=list)
+    summary: str  # Brief summary for error field
+    full_review: str  # Complete review text from Claude
+    reviewed_stages: list[str] = Field(default_factory=list)
+    review_time_ms: int = 0
+
+    @property
+    def has_blocking_issues(self) -> bool:
+        """True if any issue has ERROR severity."""
+        return any(i.severity == ReviewSeverity.ERROR for i in self.issues)
+
+    @property
+    def error_count(self) -> int:
+        """Count of ERROR severity issues."""
+        return sum(1 for i in self.issues if i.severity == ReviewSeverity.ERROR)
+
+    @property
+    def warning_count(self) -> int:
+        """Count of WARNING severity issues."""
+        return sum(1 for i in self.issues if i.severity == ReviewSeverity.WARNING)
