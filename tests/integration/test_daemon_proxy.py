@@ -772,10 +772,10 @@ class TestPreemptionDetection:
         """_check_if_preempted returns True when gcloud finds preemption event."""
         daemon = GoldfishDaemon(Path("/tmp/fake"))
 
-        # Mock subprocess.run to return preemption event
+        # Mock subprocess.run to return targetLink with matching instance
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
-                stdout="operation-12345-preempted\n",
+                stdout="https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances/stage-abc123\n",
                 returncode=0,
             )
 
@@ -791,8 +791,10 @@ class TestPreemptionDetection:
             assert "operations" in cmd
             assert "list" in cmd
             assert "--project=my-project" in cmd
-            assert any("preempted" in arg.lower() for arg in cmd)
-            assert any("stage-abc123" in arg for arg in cmd)
+            # Check for time-bounded filter and limit
+            assert "--filter=operationType=compute.instances.preempted AND insertTime>-P7D" in cmd
+            assert "--limit=100" in cmd
+            assert "--format=value(targetLink)" in cmd
 
     def test_check_if_preempted_returns_false_when_not_preempted(self):
         """_check_if_preempted returns False when no preemption event found."""
@@ -847,6 +849,47 @@ class TestPreemptionDetection:
 
             result = daemon._check_if_preempted("stage-abc123", "my-project")
 
+            assert result is False
+
+    def test_check_if_preempted_parses_multiple_results(self):
+        """_check_if_preempted correctly parses targetLinks to find exact match."""
+        daemon = GoldfishDaemon(Path("/tmp/fake"))
+
+        # Mock subprocess.run to return multiple targetLinks
+        # Only the second one matches our instance
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                stdout=(
+                    "https://www.googleapis.com/compute/v1/projects/my-project/zones/us-west1-a/instances/other-instance\n"
+                    "https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances/stage-abc123\n"
+                    "https://www.googleapis.com/compute/v1/projects/my-project/zones/us-east1-b/instances/stage-abc123-v2\n"
+                ),
+                returncode=0,
+            )
+
+            result = daemon._check_if_preempted("stage-abc123", "my-project")
+
+            # Should find the exact match (second line)
+            assert result is True
+
+    def test_check_if_preempted_rejects_partial_matches(self):
+        """_check_if_preempted should not match partial instance names."""
+        daemon = GoldfishDaemon(Path("/tmp/fake"))
+
+        # Mock subprocess.run to return similar but non-matching instances
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                stdout=(
+                    "https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances/stage-abc\n"
+                    "https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances/stage-abc123-old\n"
+                    "https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances/my-stage-abc123\n"
+                ),
+                returncode=0,
+            )
+
+            result = daemon._check_if_preempted("stage-abc123", "my-project")
+
+            # None of these should match (they're all partial matches)
             assert result is False
 
 
