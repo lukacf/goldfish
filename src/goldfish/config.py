@@ -45,6 +45,17 @@ class GCSConfig(BaseModel):
     datasets_prefix: str = "datasets/"
 
 
+class PreRunReviewConfig(BaseModel):
+    """Pre-run review configuration using Claude Agent SDK."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    model: str = "claude-opus-4-5-20251101"
+    timeout_seconds: int = 60
+    max_turns: int = 5  # Max agent turns for exploring code
+
+
 class GCEConfig(BaseModel):
     """GCE (Google Compute Engine) configuration."""
 
@@ -118,6 +129,7 @@ def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
         "jobs": list(JobsConfig.model_fields.keys()),
         "gcs": list(GCSConfig.model_fields.keys()),
         "gce": list(GCEConfig.model_fields.keys()),
+        "pre_run_review": list(PreRunReviewConfig.model_fields.keys()),
     }
 
     top_level_fields = [
@@ -130,6 +142,7 @@ def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
         "jobs",
         "gcs",
         "gce",
+        "pre_run_review",
         "invariants",
     ]
 
@@ -163,6 +176,7 @@ class GoldfishConfig(BaseModel):
     jobs: JobsConfig = Field(default_factory=JobsConfig)
     gcs: GCSConfig | None = None
     gce: GCEConfig | None = None
+    pre_run_review: PreRunReviewConfig = Field(default_factory=PreRunReviewConfig)
     invariants: list[str] = Field(default_factory=list)
 
     @classmethod

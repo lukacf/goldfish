@@ -229,6 +229,22 @@ wheels = [
 ]
 
 [[package]]
+name = "claude-agent-sdk"
+version = "0.1.17"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "mcp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5c/e4/565dd62b0795427b4f6a0a8221948eef09545aaa44256af4b36a32e866b1/claude_agent_sdk-0.1.17.tar.gz", hash = "sha256:85d0818b7259b65ea0ee3103ae736f2b359243de81540ab1eee771d8cae0d8ac", size = 56157, upload-time = "2025-12-16T00:27:58.008Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ff/d8/c673cf7533d3489cf516dac078d0fda353d89fb5446973dc9252281ebaff/claude_agent_sdk-0.1.17-py3-none-macosx_11_0_arm64.whl", hash = "sha256:46fd904ce90a183414f979d359519cff347f52c1906d50f1e247551c786a3613", size = 51713924, upload-time = "2025-12-16T00:27:43.409Z" },
+    { url = "https://files.pythonhosted.org/packages/8f/cb/c556f499b0195b98ede53a6c4eb78957725a508335f6c20da25018fb0a4a/claude_agent_sdk-0.1.17-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:08c41656da3ec7930cb966b35df23da6f68fa0fc0a32c61e73d6450c40c0e17e", size = 65993911, upload-time = "2025-12-16T00:27:48.765Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/1f/84dce02915972f0bf0f482a948add4e1a7642c5730ad1106529445a00f1c/claude_agent_sdk-0.1.17-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:be5fe696e50829348b031106dc926bb459c94804a13584a52a483a35ebd1c388", size = 67691009, upload-time = "2025-12-16T00:27:52.1Z" },
+    { url = "https://files.pythonhosted.org/packages/65/d5/ea6fbf27da6bdafa8a1c6d7a778a0f8ced146260a5fc2c74ce606aa28993/claude_agent_sdk-0.1.17-py3-none-win_amd64.whl", hash = "sha256:f2f4e05785a42525cf8026f0bba69bce359b83a57856f0b7349cd311a0d644be", size = 69883013, upload-time = "2025-12-16T00:27:55.514Z" },
+]
+
+[[package]]
 name = "click"
 version = "8.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -528,9 +544,11 @@ name = "goldfish"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "claude-agent-sdk" },
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "pydantic" },
+    { name = "python-dotenv" },
     { name = "python-logging-loki" },
     { name = "pyyaml" },
 ]
@@ -558,6 +576,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "claude-agent-sdk", specifier = ">=0.1.0" },
     { name = "fastmcp", specifier = ">=0.1.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
@@ -575,6 +594,7 @@ requires-dist = [
     { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.11" },
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.1" },
     { name = "pytest-timeout", marker = "extra == 'test'", specifier = ">=2.1" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "python-logging-loki", specifier = ">=0.3.1" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.4" },

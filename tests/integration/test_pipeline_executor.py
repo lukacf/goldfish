@@ -69,7 +69,9 @@ class DummyStageExecutor:
         config_override=None,
         inputs_override=None,
         reason: str | None = None,
+        reason_structured: dict | None = None,
         wait: bool = False,
+        skip_review: bool = False,
     ) -> StageRunInfo:
         self._ensure_workspace_version(workspace)
         stage_run_id = f"stage-{len(self.calls) + 1}"
