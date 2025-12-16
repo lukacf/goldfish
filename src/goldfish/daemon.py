@@ -524,7 +524,7 @@ class GoldfishDaemon:
         """Check if a GCE instance was preempted.
 
         Queries the compute operations API to see if there's a preemption event
-        for this instance in the last 24 hours.
+        for this instance. Parses targetLink to find exact instance name match.
 
         Args:
             instance_name: The GCE instance name (e.g., stage-abc123)
@@ -536,7 +536,9 @@ class GoldfishDaemon:
         import subprocess
 
         try:
-            # Query operations for preemption events targeting this instance
+            # Query recent preemption operations, then parse to find exact match
+            # Use 7-day window (preemptions are recent events, no need to search older)
+            # Limit 100 is generous (typical projects have <10 spot instances)
             result = subprocess.run(
                 [
                     "gcloud",
@@ -544,16 +546,44 @@ class GoldfishDaemon:
                     "operations",
                     "list",
                     f"--project={project_id}",
-                    f"--filter=operationType=compute.instances.preempted AND targetLink~{instance_name}",
-                    "--limit=1",
-                    "--format=value(name)",
+                    "--filter=operationType=compute.instances.preempted AND insertTime>-P7D",
+                    "--limit=100",
+                    "--format=value(targetLink)",
                 ],
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
-            # If we got any output, there was a preemption event
-            return bool(result.stdout.strip())
+
+            # Parse targetLinks to find exact instance match
+            # targetLink format: .../projects/{project}/zones/{zone}/instances/{name}
+            target_links: list[str] = []
+            if result.stdout.strip():
+                # Filter out empty lines from gcloud output
+                target_links = [link for link in result.stdout.strip().split("\n") if link]
+                logger.debug(
+                    "Found %d preemption operations in last 7 days, checking for %s",
+                    len(target_links),
+                    instance_name,
+                )
+                # Pre-compute expected suffix for efficiency
+                expected_suffix = f"/instances/{instance_name}"
+                for target_link in target_links:
+                    # Check if targetLink ends with our instance name
+                    if target_link.endswith(expected_suffix):
+                        logger.info(
+                            "Confirmed preemption for %s (targetLink: %s)",
+                            instance_name,
+                            target_link,
+                        )
+                        return True
+
+            logger.debug(
+                "No preemption found for %s (checked %d operations)",
+                instance_name,
+                len(target_links),
+            )
+            return False
         except Exception as e:
             logger.debug("Failed to check preemption status for %s: %s", instance_name, e)
             return False
