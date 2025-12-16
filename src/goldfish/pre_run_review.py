@@ -174,6 +174,12 @@ class PreRunReviewer:
             stage_sections=stage_sections,
         )
 
+        # Enforce total context size limit
+        if len(prompt) > MAX_TOTAL_CONTEXT_SIZE:
+            logger.warning(f"Review context too large ({len(prompt)} bytes), truncating to {MAX_TOTAL_CONTEXT_SIZE}")
+            # Truncate with indication that content was cut
+            prompt = prompt[: MAX_TOTAL_CONTEXT_SIZE - 100] + "\n\n[... context truncated due to size limit ...]"
+
         # Call Claude Agent SDK with timeout
         try:
             review_text = await asyncio.wait_for(
