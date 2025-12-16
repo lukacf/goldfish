@@ -395,11 +395,13 @@ def test_get_instance_logs_from_gcs(mock_popen, launcher):
     assert "Training started" in logs
     assert "Epoch 1 complete" in logs
 
-    # Verify gsutil cat was called
-    cmd = mock_popen.call_args[0][0]
+    # Verify gsutil cat was called for stdout (new format)
+    # Check the first call (stdout), there may be a second call for stderr
+    first_call = mock_popen.call_args_list[0]
+    cmd = first_call[0][0]
     assert cmd[0] == "gsutil"
     assert "cat" in cmd
-    assert "gs://test-bucket/runs/test-instance/logs/train.log" in cmd
+    assert "gs://test-bucket/runs/test-instance/logs/stdout.log" in cmd
 
 
 @patch("goldfish.infra.gce_launcher.subprocess.Popen")
