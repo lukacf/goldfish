@@ -356,9 +356,12 @@ def test_build_startup_script_exit_code_upload():
         env_map={},
     )
 
-    assert "EXIT_CODE=${PIPESTATUS[0]}" in script
+    assert "EXIT_CODE=$?" in script
+    assert "wait" in script  # Wait for tee background processes
     assert "exit_code.txt" in script
     assert "gs://test-bucket/runs/test-run/logs/exit_code.txt" in script
+    assert "stdout.log" in script
+    assert "stderr.log" in script
 
 
 def test_build_startup_script_shutdown():
