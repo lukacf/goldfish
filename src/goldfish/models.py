@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class SlotState(str, Enum):
@@ -572,13 +572,30 @@ class CancelRunResponse(BaseModel):
 
 
 class RunReason(BaseModel):
-    """Structured reason for running stages with experiment hypothesis and goals."""
+    """Structured reason for running stages with experiment hypothesis and goals.
 
-    description: str  # Brief description of what's being run
-    hypothesis: str | None = None  # What you expect to happen
-    approach: str | None = None  # How you're implementing/testing the hypothesis
-    minimum_acceptable_result: str | None = None  # Minimum bar for success
-    optimal_result: str | None = None  # Best case outcome
+    All fields have max_length constraints to prevent DoS attacks.
+    The verbose field names have shorter aliases for convenience:
+    - minimum_acceptable_result -> min_result
+    - optimal_result -> goal
+
+    Both names work when creating a RunReason, but serialization uses the
+    canonical (longer) names for backward compatibility with existing data.
+    """
+
+    description: str = Field(max_length=500)
+    hypothesis: str | None = Field(default=None, max_length=1000)
+    approach: str | None = Field(default=None, max_length=1000)
+    minimum_acceptable_result: str | None = Field(
+        default=None,
+        max_length=500,
+        validation_alias=AliasChoices("minimum_acceptable_result", "min_result"),
+    )
+    optimal_result: str | None = Field(
+        default=None,
+        max_length=500,
+        validation_alias=AliasChoices("optimal_result", "goal"),
+    )
 
     def to_summary(self) -> str:
         """Convert to a single-line summary for display."""
