@@ -58,7 +58,8 @@ MCP Client (Claude) ─── JSON-RPC ───▶ server.py
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `jobs/stage_executor.py` | 900 | **Core**: Stage execution + sync + provenance |
+| `jobs/stage_executor.py` | 1400 | **Core**: Stage execution + sync + provenance + review |
+| `pre_run_review.py` | 500 | Pre-run code review using Claude Agent SDK |
 | `db/database.py` | 1200 | All database operations |
 | `workspace/manager.py` | 400 | Workspace CRUD + copy-based mounting |
 | `workspace/git_layer.py` | 500 | Git ops + sync_slot_to_branch |
@@ -133,6 +134,57 @@ compute:
 Goldfish resolves to: `a3-highgpu-1g`, H100 GPU, spot pricing, multi-zone.
 
 Built-in: `cpu-small`, `cpu-large`, `h100-spot`, `h100-on-demand`, `a100-spot`, `a100-on-demand`
+
+### 7. Pre-Run Review = Automatic Bug Detection
+
+**Location**: `pre_run_review.py` (497 lines) - Integrated into `jobs/stage_executor.py`
+
+Before every `run()`, Claude reviews your code to catch errors early:
+
+```
+Review flow:
+1. Sync workspace → dev repo (commit for provenance)
+2. Build context: pipeline.yaml, modules/*.py, configs/*.yaml, git diff, RunReason
+3. Call Claude Agent SDK with read-only tools (Glob, Grep, Read)
+4. Parse ERROR/WARNING/NOTE from response
+5. Block if ERRORs found, approve if warnings only
+```
+
+**Security** (`pre_run_review.py:270-310`):
+- Path traversal protection (symlinks blocked)
+- File size limits (100KB/file, 500KB total)
+- API timeout (configurable, default 60s)
+- Safe filename validation (no `../`, `.hidden`)
+- Fails open on error (approves to avoid blocking)
+
+**Configuration** (`config.py:48-56`):
+```python
+class PreRunReviewConfig:
+    enabled: bool = True
+    model: str = "claude-opus-4-5..."
+    timeout_seconds: int = 60
+    max_turns: int = 5  # Agent exploration budget
+```
+
+**RunReason Model** (`models.py:574-619`):
+```python
+class RunReason(BaseModel):
+    description: str              # Required, max 500 chars
+    hypothesis: str | None        # Optional, max 1000 chars
+    approach: str | None          # Optional, max 1000 chars
+    min_result: str | None        # Optional, max 500 chars
+    goal: str | None              # Optional, max 500 chars
+```
+
+**Integration** (`stage_executor.py:1240-1275`):
+- Called before Docker build
+- Uses `_run_async_review()` for sync/async bridging
+- Creates FAILED stage run if blocked
+- Logs review results at INFO/WARNING level
+
+**Testing**:
+- 37 unit tests in `tests/unit/test_pre_run_review.py`
+- 14 integration tests in `tests/integration/test_pre_run_review_integration.py`
 
 ---
 

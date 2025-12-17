@@ -699,3 +699,99 @@ def validate_artifact_uri(artifact_uri: str) -> None:
     # Check for path traversal (just ".." - gs:// contains // which is fine)
     if ".." in artifact_uri:
         raise InvalidArtifactUriError(artifact_uri, "cannot contain path traversal")
+
+
+# ============== CONFIG FIELD SUGGESTIONS ==============
+
+
+def _levenshtein_distance(s1: str, s2: str) -> int:
+    """Calculate Levenshtein distance between two strings.
+
+    Used for suggesting similar field names on typos.
+    """
+    if len(s1) < len(s2):
+        return _levenshtein_distance(s2, s1)
+
+    if len(s2) == 0:
+        return len(s1)
+
+    previous_row = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            # Cost is 0 if characters match, 1 otherwise
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+
+    return previous_row[-1]
+
+
+def suggest_similar_field(unknown_field: str, valid_fields: list[str], max_distance: int = 3) -> str | None:
+    """Suggest a similar field name for a typo.
+
+    Args:
+        unknown_field: The unknown/invalid field name
+        valid_fields: List of valid field names
+        max_distance: Maximum Levenshtein distance to consider a match
+
+    Returns:
+        The most similar valid field name, or None if no good match
+    """
+    if not valid_fields:
+        return None
+
+    best_match = None
+    best_distance = max_distance + 1
+
+    for valid_field in valid_fields:
+        distance = _levenshtein_distance(unknown_field.lower(), valid_field.lower())
+        if distance < best_distance:
+            best_distance = distance
+            best_match = valid_field
+
+    # Only return if within threshold
+    if best_distance <= max_distance:
+        return best_match
+    return None
+
+
+def format_unknown_field_error(
+    unknown_field: str,
+    valid_fields: list[str],
+    suggested_field: str | None = None,
+    context: str = "",
+) -> str:
+    """Format a helpful error message for unknown field.
+
+    Args:
+        unknown_field: The unknown field name
+        valid_fields: List of valid field names
+        suggested_field: Pre-computed suggestion (or None to auto-suggest)
+        context: Additional context (e.g., "in gce section")
+
+    Returns:
+        Formatted error message with suggestion and valid fields
+    """
+    if suggested_field is None:
+        suggested_field = suggest_similar_field(unknown_field, valid_fields)
+
+    parts = [f"Unknown field '{unknown_field}'"]
+
+    if context:
+        parts[0] += f" {context}"
+
+    if suggested_field:
+        parts.append(f"Did you mean '{suggested_field}'?")
+
+    # List some valid fields (not all if there are many)
+    if valid_fields:
+        if len(valid_fields) <= 8:
+            fields_str = ", ".join(sorted(valid_fields))
+        else:
+            fields_str = ", ".join(sorted(valid_fields)[:8]) + ", ..."
+        parts.append(f"Valid fields: {fields_str}")
+
+    return " ".join(parts)

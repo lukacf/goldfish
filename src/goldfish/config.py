@@ -3,11 +3,13 @@
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StateMdConfig(BaseModel):
     """STATE.md configuration."""
+
+    model_config = ConfigDict(extra="forbid")
 
     path: str = "STATE.md"
     max_recent_actions: int = 15
@@ -16,11 +18,15 @@ class StateMdConfig(BaseModel):
 class AuditConfig(BaseModel):
     """Audit trail configuration."""
 
+    model_config = ConfigDict(extra="forbid")
+
     min_reason_length: int = 15
 
 
 class JobsConfig(BaseModel):
     """Job execution configuration."""
+
+    model_config = ConfigDict(extra="forbid")
 
     backend: str = "gce"
     infra_path: str | None = None  # Path to infra scripts (e.g., "../goldfish/infra")
@@ -30,6 +36,8 @@ class JobsConfig(BaseModel):
 class GCSConfig(BaseModel):
     """GCS storage configuration."""
 
+    model_config = ConfigDict(extra="forbid")
+
     bucket: str
     sources_prefix: str = "sources/"
     artifacts_prefix: str = "artifacts/"
@@ -37,8 +45,21 @@ class GCSConfig(BaseModel):
     datasets_prefix: str = "datasets/"
 
 
+class PreRunReviewConfig(BaseModel):
+    """Pre-run review configuration using Claude Agent SDK."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    model: str = "claude-opus-4-5-20251101"
+    timeout_seconds: int = 60
+    max_turns: int = 5  # Max agent turns for exploring code
+
+
 class GCEConfig(BaseModel):
     """GCE (Google Compute Engine) configuration."""
+
+    model_config = ConfigDict(extra="forbid")
 
     # Project ID - accepts both "project_id" and "project" for convenience
     project_id: str | None = Field(default=None)
@@ -90,8 +111,61 @@ class GCEConfig(BaseModel):
         return self.profile_overrides or self.profiles
 
 
+def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
+    """Get valid field names for a given error location path.
+
+    Args:
+        loc: Location tuple from Pydantic error, e.g., ('gce', 'projeect')
+            For top-level errors: ('projeect_name',)
+            For nested errors: ('gce', 'projeect')
+
+    Returns:
+        List of valid field names for that section
+    """
+    # Map section names to their valid fields
+    field_maps = {
+        "state_md": list(StateMdConfig.model_fields.keys()),
+        "audit": list(AuditConfig.model_fields.keys()),
+        "jobs": list(JobsConfig.model_fields.keys()),
+        "gcs": list(GCSConfig.model_fields.keys()),
+        "gce": list(GCEConfig.model_fields.keys()),
+        "pre_run_review": list(PreRunReviewConfig.model_fields.keys()),
+    }
+
+    top_level_fields = [
+        "project_name",
+        "dev_repo_path",
+        "workspaces_dir",
+        "slots",
+        "state_md",
+        "audit",
+        "jobs",
+        "gcs",
+        "gce",
+        "pre_run_review",
+        "invariants",
+    ]
+
+    if not loc:
+        return top_level_fields
+
+    # If only one element, it's a top-level field error
+    if len(loc) == 1:
+        return top_level_fields
+
+    # Check if first element is a known section (for nested errors)
+    first = str(loc[0])
+    if first in field_maps:
+        return field_maps[first]
+
+    # Default to top-level fields
+    return top_level_fields
+
+
 class GoldfishConfig(BaseModel):
     """Main Goldfish configuration."""
+
+    model_config = ConfigDict(extra="forbid")
 
     project_name: str
     dev_repo_path: str  # Relative path to the -dev repo
@@ -102,6 +176,7 @@ class GoldfishConfig(BaseModel):
     jobs: JobsConfig = Field(default_factory=JobsConfig)
     gcs: GCSConfig | None = None
     gce: GCEConfig | None = None
+    pre_run_review: PreRunReviewConfig = Field(default_factory=PreRunReviewConfig)
     invariants: list[str] = Field(default_factory=list)
 
     @classmethod
@@ -140,12 +215,23 @@ class GoldfishConfig(BaseModel):
         try:
             return cls(**data)
         except ValidationError as e:
-            # Extract the most useful error info without leaking internal details
+            # Extract the most useful error info with suggestions for typos
+            from goldfish.validation import format_unknown_field_error
+
             errors = e.errors()
             if errors:
                 first_error = errors[0]
+                error_type = first_error.get("type", "")
                 field = ".".join(str(loc) for loc in first_error.get("loc", []))
                 msg = first_error.get("msg", "validation error")
+
+                # Handle extra_forbidden (unknown field) with suggestions
+                if error_type == "extra_forbidden":
+                    # Get valid fields for the context
+                    valid_fields = _get_valid_fields_for_path(first_error.get("loc", []))
+                    error_msg = format_unknown_field_error(field, valid_fields)
+                    raise GoldfishError(f"Invalid configuration: {error_msg}") from e
+
                 raise GoldfishError(f"Invalid configuration: {field} - {msg}") from e
             raise GoldfishError("Invalid configuration: validation failed") from e
 

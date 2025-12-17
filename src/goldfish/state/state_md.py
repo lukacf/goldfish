@@ -5,6 +5,7 @@ This is Claude's primary context recovery mechanism after compaction.
 
 import logging
 import os
+import re
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +15,42 @@ from goldfish.config import GoldfishConfig
 from goldfish.models import DirtyState, JobStatus, SlotInfo, SlotState
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_markdown(text: str, max_length: int = 200) -> str:
+    """Sanitize text for safe markdown rendering.
+
+    Prevents markdown injection attacks by:
+    - Escaping markdown structural characters
+    - Replacing newlines with spaces
+    - Truncating to max_length
+
+    Args:
+        text: User-provided text to sanitize
+        max_length: Maximum length before truncation
+
+    Returns:
+        Sanitized text safe for inline markdown rendering
+    """
+    if not text:
+        return ""
+
+    # Replace newlines with spaces to prevent multi-line injection
+    text = re.sub(r"[\r\n]+", " ", text)
+
+    # Escape markdown special characters that could create structure
+    # - # could create headers
+    # - [ ] could create links
+    # - * _ could create emphasis that breaks structure
+    text = text.replace("#", "\\#")
+    text = text.replace("[", "\\[")
+    text = text.replace("]", "\\]")
+
+    # Truncate to max length
+    if len(text) > max_length:
+        text = text[: max_length - 3] + "..."
+
+    return text
 
 
 class StateManager:
@@ -76,6 +113,7 @@ class StateManager:
         slots: list[SlotInfo],
         jobs: list[dict[str, Any]],
         source_count: int = 0,
+        recent_runs: list[dict[str, Any]] | None = None,
     ) -> str:
         """Generate complete STATE.md content and write to file."""
         lines = [f"# {self.config.project_name}", ""]
@@ -143,6 +181,36 @@ class StateManager:
         if source_count > 0:
             lines.append("## Data Sources")
             lines.append(f"- {source_count} sources registered (use list_sources() to see)")
+            lines.append("")
+
+        # Recent Runs with structured reasons
+        if recent_runs:
+            lines.append("## Recent Runs")
+            for run in recent_runs:
+                status_emoji = (
+                    "✓" if run.get("status") == "completed" else "⏳" if run.get("status") == "running" else "✗"
+                )
+                run_line = f"- {status_emoji} {run.get('stage_name', 'unknown')} ({run.get('status', 'unknown')})"
+                if run.get("started_at"):
+                    run_line += f" - {run['started_at'][:16]}"
+                lines.append(run_line)
+
+                # Show structured reason if present
+                reason_json = run.get("reason_json")
+                if reason_json:
+                    import json
+
+                    try:
+                        reason_data = json.loads(reason_json) if isinstance(reason_json, str) else reason_json
+                        if reason_data.get("description"):
+                            # Sanitize to prevent markdown injection
+                            desc = _sanitize_markdown(reason_data["description"])
+                            lines.append(f"  └─ {desc}")
+                        if reason_data.get("hypothesis"):
+                            hyp = _sanitize_markdown(reason_data["hypothesis"])
+                            lines.append(f"  └─ Hypothesis: {hyp}")
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        pass
             lines.append("")
 
         # Recent Actions
