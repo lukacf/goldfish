@@ -204,8 +204,15 @@ class GCELauncher:
 
         # Build output staging commands (run after Docker)
         outputs_gcs_path = f"gs://{bucket_name}/{run_path}/outputs"
+        # Upload outputs with retry and verification (large files like 327MB tokens.npz)
+        # Use rsync instead of cp for better reliability with large files
         post_run_cmds = [
-            f'gsutil -m cp -r /mnt/outputs/* "{outputs_gcs_path}/" || true',
+            'echo "Uploading outputs to GCS..."',
+            f"for i in {{1..3}}; do "
+            f'if timeout 600 gsutil -m rsync -r /mnt/outputs/ "{outputs_gcs_path}/"; then '
+            f'echo "✓ Outputs uploaded successfully"; break; '
+            f'else echo "✗ Output upload attempt $i failed"; '
+            f"[ $i -lt 3 ] && sleep 5; fi; done",
         ]
 
         # Extract cost protection settings from stage config (with safe defaults)
@@ -697,27 +704,69 @@ class GCELauncher:
         instance_name = self._sanitize_name(instance_name)
         since_dt = _parse_dt(since) if since else None
 
-        # Try GCS first
+        # Try GCS first - fetch both stdout and stderr
         if self.bucket:
             try:
+                # Try new format (stdout.log + stderr.log)
+                stdout_path = f"{self.bucket}/runs/{instance_name}/logs/stdout.log"
+                stderr_path = f"{self.bucket}/runs/{instance_name}/logs/stderr.log"
+
+                # Fetch stdout
                 proc = subprocess.Popen(
-                    [
-                        "gsutil",
-                        "cat",
-                        f"{self.bucket}/runs/{instance_name}/logs/train.log",
-                    ],
+                    ["gsutil", "cat", stdout_path],
                     stdout=subprocess.PIPE,
                     text=True,
                 )
-                if not proc.stdout:
-                    raise RuntimeError("No stdout from gsutil cat")
-                with proc.stdout:
-                    output = _collect(proc.stdout, since_dt)
-                proc.wait()
-                if proc.returncode == 0:
-                    return output
+                try:
+                    if not proc.stdout:
+                        raise RuntimeError("No stdout from gsutil cat")
+                    with proc.stdout:
+                        stdout_output = _collect(proc.stdout, since_dt)
+                finally:
+                    proc.wait()  # Always clean up process
+
+                # Fetch stderr (may not exist for older runs)
+                stderr_output = ""
+                try:
+                    proc2 = subprocess.Popen(
+                        ["gsutil", "cat", stderr_path],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                    )
+                    try:
+                        if proc2.stdout:
+                            with proc2.stdout:
+                                stderr_output = _collect(proc2.stdout, since_dt)
+                    finally:
+                        proc2.wait()  # Always clean up
+                except Exception:
+                    pass  # stderr.log may not exist
+
+                # Combine stdout and stderr
+                if stderr_output:
+                    return stdout_output + "\n\n=== STDERR ===\n" + stderr_output
+                return stdout_output
+
             except Exception:
-                pass
+                # Fall back to legacy train.log format
+                try:
+                    proc = subprocess.Popen(
+                        ["gsutil", "cat", f"{self.bucket}/runs/{instance_name}/logs/train.log"],
+                        stdout=subprocess.PIPE,
+                        text=True,
+                    )
+                    try:
+                        if not proc.stdout:
+                            raise RuntimeError("No stdout from gsutil cat")
+                        with proc.stdout:
+                            output = _collect(proc.stdout, since_dt)
+                    finally:
+                        proc.wait()  # Always clean up
+                    if proc.returncode == 0:
+                        return output
+                except Exception:
+                    pass
 
         # Fall back to serial console - find correct zone first
         zone = self._find_instance_zone(instance_name)
