@@ -10,6 +10,7 @@ Provides:
 """
 
 import json
+import logging
 import subprocess
 import time
 from datetime import UTC
@@ -19,10 +20,18 @@ from typing import Any
 from goldfish.errors import GoldfishError
 from goldfish.infra.resource_launcher import ResourceLauncher, cleanup_disk, run_gcloud
 from goldfish.infra.startup_builder import build_startup_script
+from goldfish.models import StageRunStatus
+
+logger = logging.getLogger(__name__)
 
 # Configuration constants for hyperdisk
 HYPERDISK_PROVISIONED_IOPS = 80000  # IOPS for hyperdisk-balanced
 HYPERDISK_PROVISIONED_THROUGHPUT = 2400  # MB/s for hyperdisk-balanced
+
+# Cost protection defaults - ALWAYS enforced unless explicitly overridden
+# These prevent runaway instances from burning money
+DEFAULT_MAX_RUNTIME_SECONDS = 6 * 3600  # 6 hours - hard limit, instance self-deletes
+DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 600  # 10 minutes - if job uses heartbeat()
 
 
 class GCELauncher:
@@ -112,6 +121,14 @@ class GCELauncher:
             "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
         }
 
+        # Add user-defined environment variables from config
+        # This allows configs to specify env vars like WANDB_API_KEY
+        if "environment" in stage_config and isinstance(stage_config["environment"], dict):
+            for env_name, env_value in stage_config["environment"].items():
+                # SECURITY: Validate env var name (alphanumeric + underscore only)
+                if env_name.replace("_", "").isalnum():
+                    env_map[env_name] = str(env_value)
+
         # Build input staging commands
         # Transform gs://bucket/path to /mnt/gcs/path (symlinks on host)
         pre_run_cmds = [
@@ -187,11 +204,23 @@ class GCELauncher:
 
         # Build output staging commands (run after Docker)
         outputs_gcs_path = f"gs://{bucket_name}/{run_path}/outputs"
+        # Upload outputs with retry and verification (large files like 327MB tokens.npz)
+        # Use rsync instead of cp for better reliability with large files
         post_run_cmds = [
-            f'gsutil -m cp -r /mnt/outputs/* "{outputs_gcs_path}/" || true',
+            'echo "Uploading outputs to GCS..."',
+            f"for i in {{1..3}}; do "
+            f'if timeout 600 gsutil -m rsync -r /mnt/outputs/ "{outputs_gcs_path}/"; then '
+            f'echo "✓ Outputs uploaded successfully"; break; '
+            f'else echo "✗ Output upload attempt $i failed"; '
+            f"[ $i -lt 3 ] && sleep 5; fi; done",
         ]
 
-        # Build startup script with proper orchestration
+        # Extract cost protection settings from stage config (with safe defaults)
+        compute_config = stage_config.get("compute", {})
+        max_runtime = compute_config.get("max_runtime_seconds", DEFAULT_MAX_RUNTIME_SECONDS)
+        heartbeat_timeout = compute_config.get("heartbeat_timeout_seconds")  # None = no supervisor
+
+        # Build startup script with proper orchestration and cost protection
         startup_script = build_startup_script(
             bucket=bucket_name,
             bucket_prefix="",
@@ -209,6 +238,9 @@ class GCELauncher:
             gcsfuse=True,
             pre_run_cmds=pre_run_cmds,
             post_run_cmds=post_run_cmds,
+            # Cost protection - ALWAYS set max_runtime to prevent runaway instances
+            max_runtime_seconds=max_runtime,
+            heartbeat_timeout_seconds=heartbeat_timeout,
         )
 
         if use_capacity_search and self.resources:
@@ -516,21 +548,21 @@ class GCELauncher:
             instance_name: Instance identifier
 
         Returns:
-            Goldfish status: "running", "completed", "failed"
+            Goldfish status: StageRunStatus.RUNNING, COMPLETED, or FAILED
         """
         # Map GCE status to Goldfish status
         if status in ("PROVISIONING", "STAGING", "RUNNING"):
-            return "running"
+            return StageRunStatus.RUNNING
         elif status == "TERMINATED":
             # Check exit code in GCS if available
             if self.bucket:
                 exit_code = self._get_exit_code(instance_name)
-                return "completed" if exit_code == 0 else "failed"
-            return "completed"
+                return StageRunStatus.COMPLETED if exit_code == 0 else StageRunStatus.FAILED
+            return StageRunStatus.COMPLETED
         elif status in ("STOPPING", "SUSPENDING", "SUSPENDED"):
-            return "running"
+            return StageRunStatus.RUNNING
         else:
-            return "failed"
+            return StageRunStatus.FAILED
 
     def _find_instance_zone(self, instance_name: str) -> str | None:
         """Find which zone an instance is in.
@@ -587,9 +619,10 @@ class GCELauncher:
             instance_name: Instance identifier
 
         Returns:
-            Exit code (0 if not found or error)
+            Exit code, or 1 if not found (missing file = crash before writing)
         """
         if not self.bucket:
+            # No bucket configured - assume success for local-like behavior
             return 0
 
         try:
@@ -605,7 +638,13 @@ class GCELauncher:
             )
             return int(result.stdout.strip() or "0")
         except Exception:
-            return 0
+            # Missing exit_code.txt means script crashed before writing it
+            # This is a failure, not success
+            logger.warning(
+                "exit_code.txt not found for %s - treating as failure (script may have crashed)",
+                instance_name,
+            )
+            return 1
 
     def get_instance_logs(
         self,
@@ -665,27 +704,69 @@ class GCELauncher:
         instance_name = self._sanitize_name(instance_name)
         since_dt = _parse_dt(since) if since else None
 
-        # Try GCS first
+        # Try GCS first - fetch both stdout and stderr
         if self.bucket:
             try:
+                # Try new format (stdout.log + stderr.log)
+                stdout_path = f"{self.bucket}/runs/{instance_name}/logs/stdout.log"
+                stderr_path = f"{self.bucket}/runs/{instance_name}/logs/stderr.log"
+
+                # Fetch stdout
                 proc = subprocess.Popen(
-                    [
-                        "gsutil",
-                        "cat",
-                        f"{self.bucket}/runs/{instance_name}/logs/train.log",
-                    ],
+                    ["gsutil", "cat", stdout_path],
                     stdout=subprocess.PIPE,
                     text=True,
                 )
-                if not proc.stdout:
-                    raise RuntimeError("No stdout from gsutil cat")
-                with proc.stdout:
-                    output = _collect(proc.stdout, since_dt)
-                proc.wait()
-                if proc.returncode == 0:
-                    return output
+                try:
+                    if not proc.stdout:
+                        raise RuntimeError("No stdout from gsutil cat")
+                    with proc.stdout:
+                        stdout_output = _collect(proc.stdout, since_dt)
+                finally:
+                    proc.wait()  # Always clean up process
+
+                # Fetch stderr (may not exist for older runs)
+                stderr_output = ""
+                try:
+                    proc2 = subprocess.Popen(
+                        ["gsutil", "cat", stderr_path],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                    )
+                    try:
+                        if proc2.stdout:
+                            with proc2.stdout:
+                                stderr_output = _collect(proc2.stdout, since_dt)
+                    finally:
+                        proc2.wait()  # Always clean up
+                except Exception:
+                    pass  # stderr.log may not exist
+
+                # Combine stdout and stderr
+                if stderr_output:
+                    return stdout_output + "\n\n=== STDERR ===\n" + stderr_output
+                return stdout_output
+
             except Exception:
-                pass
+                # Fall back to legacy train.log format
+                try:
+                    proc = subprocess.Popen(
+                        ["gsutil", "cat", f"{self.bucket}/runs/{instance_name}/logs/train.log"],
+                        stdout=subprocess.PIPE,
+                        text=True,
+                    )
+                    try:
+                        if not proc.stdout:
+                            raise RuntimeError("No stdout from gsutil cat")
+                        with proc.stdout:
+                            output = _collect(proc.stdout, since_dt)
+                    finally:
+                        proc.wait()  # Always clean up
+                    if proc.returncode == 0:
+                        return output
+                except Exception:
+                    pass
 
         # Fall back to serial console - find correct zone first
         zone = self._find_instance_zone(instance_name)
@@ -747,11 +828,13 @@ class GCELauncher:
             instance_name: Instance identifier
         """
         instance_name = self._sanitize_name(instance_name)
+        logger.info("delete_instance called for %s (project=%s)", instance_name, self.project_id)
 
         # Find which zone the instance is in
         zone = self._find_instance_zone(instance_name)
         if not zone:
             # Instance not found - already deleted or never existed
+            logger.warning("delete_instance: instance %s not found (may already be deleted)", instance_name)
             return
 
         cmd = [
@@ -767,6 +850,7 @@ class GCELauncher:
             cmd.append(f"--project={self.project_id}")
 
         run_gcloud(cmd, check=False)  # Don't fail if already deleted
+        logger.info("delete_instance: deleted %s in zone %s", instance_name, zone)
 
     def wait_for_termination(self, instance_name: str, timeout_sec: int = 3600) -> str:
         """Wait for instance to terminate.
@@ -778,7 +862,7 @@ class GCELauncher:
             timeout_sec: Maximum seconds to wait
 
         Returns:
-            Final status: "completed" or "failed"
+            Final status: StageRunStatus.COMPLETED or FAILED
 
         Raises:
             GoldfishError: If timeout exceeded
@@ -792,7 +876,7 @@ class GCELauncher:
             if status == "not_found":
                 raise GoldfishError(f"Instance {instance_name} not found")
 
-            if status in ("completed", "failed"):
+            if status in (StageRunStatus.COMPLETED, StageRunStatus.FAILED):
                 return status
 
             time.sleep(10)  # Poll every 10 seconds

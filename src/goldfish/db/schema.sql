@@ -171,9 +171,12 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     outputs_json TEXT,                -- JSON map name -> details
     config_json TEXT,                 -- Effective config used
     inputs_json TEXT,                 -- Resolved inputs (URI + ref)
+    reason_json TEXT,                 -- Structured RunReason (description, hypothesis, approach, etc.)
     backend_type TEXT,                -- local | gce
     backend_handle TEXT,              -- container_id or instance_name for cancel/log lookup
     error TEXT,
+    outcome TEXT,                     -- NULL (unset), 'success', 'bad_results' - semantic result quality
+    attempt_num INTEGER,              -- Groups consecutive runs; increments after outcome='success'
     FOREIGN KEY (workspace_name, version) REFERENCES workspace_versions(workspace_name, version),
     FOREIGN KEY (stage_version_id) REFERENCES stage_versions(id)
 );
@@ -184,6 +187,8 @@ CREATE INDEX IF NOT EXISTS idx_stage_runs_started ON stage_runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_stage_runs_job ON stage_runs(job_id);
 CREATE INDEX IF NOT EXISTS idx_stage_runs_pipeline_run ON stage_runs(pipeline_run_id);
 CREATE INDEX IF NOT EXISTS idx_stage_runs_ws_stage_status ON stage_runs(workspace_name, stage_name, status);
+CREATE INDEX IF NOT EXISTS idx_stage_runs_ws_stage_attempt ON stage_runs(workspace_name, stage_name, attempt_num);
+CREATE INDEX IF NOT EXISTS idx_stage_runs_outcome ON stage_runs(outcome);
 
 -- Pipeline runs (group stages for one pipeline invocation)
 CREATE TABLE IF NOT EXISTS pipeline_runs (

@@ -17,11 +17,47 @@ class DirtyState(str, Enum):
 
 
 class JobStatus(str, Enum):
+    """Legacy job status (run_job). Prefer StageRunStatus for new code."""
+
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
-    CANCELLED = "cancelled"
+    CANCELLED = "cancelled"  # Note: legacy spelling with double 'l'
+
+
+class StageRunStatus(str, Enum):
+    """Status values for stage_runs table.
+
+    Note: Progress is tracked separately in the 'progress' column.
+    Display format combines them as "status:progress" (e.g., "running:build").
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"  # American spelling (single 'l')
+
+
+class StageRunProgress(str, Enum):
+    """Progress values for stage_runs.progress column."""
+
+    BUILD = "build"  # Building Docker image
+    LAUNCH = "launch"  # Launching container/instance
+    RUNNING = "running"  # Executing stage code
+    FINALIZING = "finalizing"  # Recording outputs, fetching logs
+
+
+class PipelineStatus(str, Enum):
+    """Status for pipeline_runs and pipeline_stage_queue tables."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"
+    SKIPPED = "skipped"  # Only for pipeline_stage_queue
 
 
 class SourceStatus(str, Enum):
@@ -194,7 +230,7 @@ class RunJobResponse(BaseModel):
     experiment_dir: str
     artifact_uri: str | None = None
     log_uri: str | None = None
-    initial_status: str = "pending"
+    initial_status: str = JobStatus.PENDING
     state_md: str | None = None
 
 
@@ -273,11 +309,15 @@ class LogThoughtResponse(BaseModel):
 class DiffResponse(BaseModel):
     """Response from diff() tool."""
 
-    slot: str  # Slot that was diffed
-    has_changes: bool  # Whether there are uncommitted changes
+    has_changes: bool  # Whether there are differences
     summary: str  # Human-readable summary (e.g., "2 files changed, 10 insertions(+)")
     files_changed: list[str]  # List of changed file paths
     diff_text: str = ""  # Optional full diff output
+    # What was compared
+    left: str  # Left side of comparison (e.g., "w1", "baseline@v2")
+    right: str  # Right side of comparison (e.g., "v3", "experiment@v1")
+    left_sha: str | None = None  # Git SHA of left side (if applicable)
+    right_sha: str | None = None  # Git SHA of right side (if applicable)
 
 
 class RollbackResponse(BaseModel):
@@ -526,3 +566,97 @@ class CancelRunResponse(BaseModel):
     success: bool
     previous_status: str | None = None
     error: str | None = None
+
+
+# --- Run Reason Structure ---
+
+
+class RunReason(BaseModel):
+    """Structured reason for running stages with experiment hypothesis and goals.
+
+    All fields have max_length constraints to prevent DoS attacks.
+
+    Fields:
+        description: What you're running (required, max 500 chars)
+        hypothesis: What you expect to happen (max 1000 chars)
+        approach: How you're testing it (max 1000 chars)
+        min_result: Minimum bar for success (max 500 chars)
+        goal: Best case outcome (max 500 chars)
+    """
+
+    description: str = Field(max_length=500)
+    hypothesis: str | None = Field(default=None, max_length=1000)
+    approach: str | None = Field(default=None, max_length=1000)
+    min_result: str | None = Field(default=None, max_length=500)
+    goal: str | None = Field(default=None, max_length=500)
+
+    def to_summary(self) -> str:
+        """Convert to a single-line summary for display."""
+        parts = [self.description]
+        if self.hypothesis:
+            parts.append(f"H: {self.hypothesis}")
+        return " | ".join(parts)
+
+    def to_markdown(self) -> str:
+        """Convert to markdown format for STATE.md."""
+        lines = [f"**Description:** {self.description}"]
+        if self.hypothesis:
+            lines.append(f"**Hypothesis:** {self.hypothesis}")
+        if self.approach:
+            lines.append(f"**Approach:** {self.approach}")
+        if self.min_result:
+            lines.append(f"**Min Result:** {self.min_result}")
+        if self.goal:
+            lines.append(f"**Goal:** {self.goal}")
+        return "\n".join(lines)
+
+
+# --- Pre-Run Review Models ---
+
+
+class ReviewSeverity(str, Enum):
+    """Severity levels for review issues."""
+
+    ERROR = "error"  # Blocking issue - will fail
+    WARNING = "warning"  # Potential problem - may fail
+    NOTE = "note"  # Suggestion - won't fail
+
+
+class ReviewIssue(BaseModel):
+    """A single issue found during pre-run review."""
+
+    severity: ReviewSeverity
+    stage: str  # Which stage this applies to
+    message: str
+    file: str | None = None
+    line: int | None = None
+
+
+class RunReview(BaseModel):
+    """Result of pre-run review by Claude.
+
+    When has_blocking_issues is True, the run should be blocked
+    and recorded as failed with the review text in the error field.
+    """
+
+    approved: bool  # True if no blocking issues
+    issues: list[ReviewIssue] = Field(default_factory=list)
+    summary: str  # Brief summary for error field
+    full_review: str  # Complete review text from Claude
+    reviewed_stages: list[str] = Field(default_factory=list)
+    review_time_ms: int = 0
+
+    @property
+    def has_blocking_issues(self) -> bool:
+        """True if any issue has ERROR severity."""
+        return any(i.severity == ReviewSeverity.ERROR for i in self.issues)
+
+    @property
+    def error_count(self) -> int:
+        """Count of ERROR severity issues."""
+        return sum(1 for i in self.issues if i.severity == ReviewSeverity.ERROR)
+
+    @property
+    def warning_count(self) -> int:
+        """Count of WARNING severity issues."""
+        return sum(1 for i in self.issues if i.severity == ReviewSeverity.WARNING)
