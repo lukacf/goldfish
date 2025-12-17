@@ -634,9 +634,10 @@ def build_startup_script(
 
     parts.append('log_stage "docker_run_begin"')
     # Capture stdout and stderr separately for better error visibility
-    # Run Docker and capture exit code, don't wait for background processes yet
+    # Run Docker in background to avoid waiting for watchdog
     parts.append('"${DOCKER_CMD[@]}" > >(tee -a "$STDOUT_LOG") 2> >(tee -a "$STDERR_LOG") & DOCKER_PID=$!')
-    parts.append("wait $DOCKER_PID || true")  # Wait only for Docker, not watchdog
+    # Wait for Docker and capture its exit code (no || true - we need real exit code)
+    parts.append("wait $DOCKER_PID")
     parts.append("EXIT_CODE=$?")
     # Give tee processes a moment to flush (they close when Docker exits)
     parts.append("sleep 1")
@@ -651,10 +652,16 @@ def build_startup_script(
 
     # Upload logs with retry and verification (BLOCKING before exit)
     parts.append('echo "Uploading logs to GCS with verification..."')
-    parts.append(f'upload_logs_with_retry "$STDOUT_LOG" gs://{bucket}/{bucket_path}/logs/stdout.log')
-    parts.append(f'upload_logs_with_retry "$STDERR_LOG" gs://{bucket}/{bucket_path}/logs/stderr.log')
-    parts.append(f'upload_logs_with_retry "$EXIT_CODE_FILE" gs://{bucket}/{bucket_path}/logs/exit_code.txt')
-    parts.append('echo "All logs uploaded successfully"')
+    parts.append(
+        f'upload_logs_with_retry "$STDOUT_LOG" gs://{bucket}/{bucket_path}/logs/stdout.log || echo "WARNING: stdout upload failed"'
+    )
+    parts.append(
+        f'upload_logs_with_retry "$STDERR_LOG" gs://{bucket}/{bucket_path}/logs/stderr.log || echo "WARNING: stderr upload failed"'
+    )
+    parts.append(
+        f'upload_logs_with_retry "$EXIT_CODE_FILE" gs://{bucket}/{bucket_path}/logs/exit_code.txt || echo "WARNING: exit_code upload failed"'
+    )
+    parts.append('echo "Log upload attempts completed (instance will delete regardless for cost protection)"')
 
     # Exit with docker exit code - the EXIT trap will handle self-deletion
     # Logs are already uploaded and verified at this point
