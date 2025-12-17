@@ -634,11 +634,12 @@ def build_startup_script(
 
     parts.append('log_stage "docker_run_begin"')
     # Capture stdout and stderr separately for better error visibility
-    # Use simple redirection: stderr to file, stdout to file + console
-    parts.append('"${DOCKER_CMD[@]}" > >(tee -a "$STDOUT_LOG") 2> >(tee -a "$STDERR_LOG")')
+    # Run Docker and capture exit code, don't wait for background processes yet
+    parts.append('"${DOCKER_CMD[@]}" > >(tee -a "$STDOUT_LOG") 2> >(tee -a "$STDERR_LOG") & DOCKER_PID=$!')
+    parts.append("wait $DOCKER_PID || true")  # Wait only for Docker, not watchdog
     parts.append("EXIT_CODE=$?")
-    # Wait for background processes (tee) to finish - don't fail on tee errors
-    parts.append("wait || true")
+    # Give tee processes a moment to flush (they close when Docker exits)
+    parts.append("sleep 1")
     parts.append('log_stage "docker_run_end"')
 
     # Post-run commands
