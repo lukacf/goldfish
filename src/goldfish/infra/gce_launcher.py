@@ -717,11 +717,13 @@ class GCELauncher:
                     stdout=subprocess.PIPE,
                     text=True,
                 )
-                if not proc.stdout:
-                    raise RuntimeError("No stdout from gsutil cat")
-                with proc.stdout:
-                    stdout_output = _collect(proc.stdout, since_dt)
-                proc.wait()
+                try:
+                    if not proc.stdout:
+                        raise RuntimeError("No stdout from gsutil cat")
+                    with proc.stdout:
+                        stdout_output = _collect(proc.stdout, since_dt)
+                finally:
+                    proc.wait()  # Always clean up process
 
                 # Fetch stderr (may not exist for older runs)
                 stderr_output = ""
@@ -732,10 +734,12 @@ class GCELauncher:
                         stderr=subprocess.DEVNULL,
                         text=True,
                     )
-                    if proc2.stdout:
-                        with proc2.stdout:
-                            stderr_output = _collect(proc2.stdout, since_dt)
-                        proc2.wait()
+                    try:
+                        if proc2.stdout:
+                            with proc2.stdout:
+                                stderr_output = _collect(proc2.stdout, since_dt)
+                    finally:
+                        proc2.wait()  # Always clean up
                 except Exception:
                     pass  # stderr.log may not exist
 
@@ -752,11 +756,13 @@ class GCELauncher:
                         stdout=subprocess.PIPE,
                         text=True,
                     )
-                    if not proc.stdout:
-                        raise RuntimeError("No stdout from gsutil cat")
-                    with proc.stdout:
-                        output = _collect(proc.stdout, since_dt)
-                    proc.wait()
+                    try:
+                        if not proc.stdout:
+                            raise RuntimeError("No stdout from gsutil cat")
+                        with proc.stdout:
+                            output = _collect(proc.stdout, since_dt)
+                    finally:
+                        proc.wait()  # Always clean up
                     if proc.returncode == 0:
                         return output
                 except Exception:
