@@ -274,26 +274,30 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
                 server = self.server  # type: ignore[attr-defined]
                 projects: list[ProjectInfo] = server.projects  # type: ignore[attr-defined]
 
-                self._send_json({
-                    "projects": [
-                        {
-                            "id": p.url_id,
-                            "name": p.name,
-                            "root": str(p.project_root),
-                        }
-                        for p in projects
-                    ]
-                })
+                self._send_json(
+                    {
+                        "projects": [
+                            {
+                                "id": p.url_id,
+                                "name": p.name,
+                                "root": str(p.project_root),
+                            }
+                            for p in projects
+                        ]
+                    }
+                )
                 return
 
             # Health check
             elif path == "/api/health":
-                self._send_json({
-                    "status": "healthy",
-                    "version": WEB_SERVER_VERSION,
-                    "pid": os.getpid(),
-                    "projects_count": len(self.server.projects),  # type: ignore[attr-defined]
-                })
+                self._send_json(
+                    {
+                        "status": "healthy",
+                        "version": WEB_SERVER_VERSION,
+                        "pid": os.getpid(),
+                        "projects_count": len(self.server.projects),  # type: ignore[attr-defined]
+                    }
+                )
                 return
 
             # Project-specific routes: /project/<id>/...
@@ -683,23 +687,32 @@ class GoldfishWebServer:
                 return
             except OSError as e:
                 if attempt == max_retries - 1:
-                    raise RuntimeError(f"Failed to bind to any port in range {self.port}-{self.port + max_retries}") from e
+                    raise RuntimeError(
+                        f"Failed to bind to any port in range {self.port}-{self.port + max_retries}"
+                    ) from e
                 logger.debug("Port %d in use, trying next port", port)
                 continue
 
     def run(self) -> None:
         """Run the web server main loop."""
+        # Check if another server is already running (singleton enforcement)
+        running, existing_pid, existing_port = is_web_server_running()
+        if running:
+            raise RuntimeError(f"Another web server is already running (pid={existing_pid}, port={existing_port})")
+
         self.write_pid_file()
         self.start_http_server()
         self.write_port_file()  # Write after we know the actual port
 
-        # Set up signal handlers
-        def handle_shutdown(signum: int, frame: Any) -> None:
-            logger.info("Received signal %d, shutting down...", signum)
-            threading.Thread(target=self.shutdown, daemon=True).start()
+        # Set up signal handlers (only works in main thread)
+        if threading.current_thread() is threading.main_thread():
 
-        signal.signal(signal.SIGTERM, handle_shutdown)
-        signal.signal(signal.SIGINT, handle_shutdown)
+            def handle_shutdown(signum: int, frame: Any) -> None:
+                logger.info("Received signal %d, shutting down...", signum)
+                threading.Thread(target=self.shutdown, daemon=True).start()
+
+            signal.signal(signal.SIGTERM, handle_shutdown)
+            signal.signal(signal.SIGINT, handle_shutdown)
 
         logger.info("Web server running (pid=%d, port=%d, projects=%d)", os.getpid(), self.port, len(self.projects))
 
