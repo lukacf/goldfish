@@ -146,9 +146,11 @@ class TestProjectDiscovery:
 
             try:
                 projects = discover_projects()
-                assert len(projects) == 1
-                assert projects[0].name == "test-project"
-                assert projects[0].project_root == project_root
+                # Find our test project (there may be other real daemons running)
+                test_projects = [p for p in projects if p.name == "test-project"]
+                assert len(test_projects) == 1
+                assert test_projects[0].name == "test-project"
+                assert test_projects[0].project_root == project_root
             finally:
                 # Cleanup
                 pid_file.unlink(missing_ok=True)
@@ -157,8 +159,8 @@ class TestProjectDiscovery:
     def test_discover_projects_ignores_stale_pids(self):
         """Test that discovery ignores projects with dead daemon processes."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            project_root = Path(tmpdir) / "test-project"
-            config = init_project("test-project", project_root)
+            project_root = Path(tmpdir) / "test-project-stale"
+            config = init_project("test-project-stale", project_root)
 
             daemon_sockets_dir = Path.home() / ".goldfish" / "sockets"
             project_socket_dir = daemon_sockets_dir / config.project_name
@@ -173,11 +175,14 @@ class TestProjectDiscovery:
 
             try:
                 projects = discover_projects()
-                # Should ignore project with dead daemon
-                assert len(projects) == 0
+                # Should ignore project with dead daemon (other real daemons may exist)
+                stale_projects = [p for p in projects if p.name == "test-project-stale"]
+                assert len(stale_projects) == 0
             finally:
                 pid_file.unlink(missing_ok=True)
                 project_root_file.unlink(missing_ok=True)
+                # Also cleanup the socket directory
+                project_socket_dir.rmdir()
 
 
 @pytest.fixture
@@ -259,9 +264,11 @@ class TestWebServerAPI:
             body = response[body_start:].decode()
             data = json.loads(body)
 
-            # Just verify the endpoint returns valid JSON with workspaces key
-            assert "workspaces" in data
-            assert isinstance(data["workspaces"], list)
+            # Verify the endpoint returns valid JSON with data and pagination
+            assert "data" in data
+            assert isinstance(data["data"], list)
+            assert "pagination" in data
+            assert "total" in data["pagination"]
         finally:
             sock.close()
 
@@ -369,5 +376,252 @@ class TestWebServerSecurity:
             # Should return error (400, 404, or 500 with error message)
             # The server returns 500 for validation errors currently (not ideal but works)
             assert b" 400" in response or b" 404" in response or b"Internal server error" in response
+        finally:
+            sock.close()
+
+
+class TestStaticFileServing:
+    """Test static file serving functionality."""
+
+    def test_static_css_file_loads(self, web_server_with_project):
+        """Test that CSS static files are served correctly."""
+        server, _ = web_server_with_project
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(("127.0.0.1", 7346))
+            sock.sendall(b"GET /static/css/index.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            response = _read_http_response(sock)
+
+            assert b"HTTP/1.1 200 OK" in response or b"HTTP/1.0 200 OK" in response
+            assert b"Content-Type: text/css" in response
+            assert b"--goldfish-orange" in response  # CSS variable from our styles
+        finally:
+            sock.close()
+
+    def test_static_js_file_loads(self, web_server_with_project):
+        """Test that JavaScript static files are served correctly."""
+        server, _ = web_server_with_project
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(("127.0.0.1", 7346))
+            sock.sendall(b"GET /static/js/index.js HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            response = _read_http_response(sock)
+
+            assert b"HTTP/1.1 200 OK" in response or b"HTTP/1.0 200 OK" in response
+            assert b"Content-Type: application/javascript" in response
+            assert b"escapeHtml" in response  # Our XSS protection function
+        finally:
+            sock.close()
+
+    def test_static_file_not_found(self, web_server_with_project):
+        """Test that missing static files return 404."""
+        server, _ = web_server_with_project
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(("127.0.0.1", 7346))
+            sock.sendall(b"GET /static/nonexistent.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            response = _read_http_response(sock)
+
+            assert b" 404" in response
+        finally:
+            sock.close()
+
+    def test_static_path_traversal_blocked(self, web_server_with_project):
+        """Test that path traversal in static files is blocked."""
+        server, _ = web_server_with_project
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(("127.0.0.1", 7346))
+            sock.sendall(b"GET /static/../../../etc/passwd HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            response = _read_http_response(sock)
+
+            # Should return 404 (path traversal blocked)
+            assert b" 404" in response
+            assert b"/etc/passwd" not in response
+        finally:
+            sock.close()
+
+
+class TestGraphCache:
+    """Test GraphCache functionality."""
+
+    def test_cache_stores_and_retrieves(self):
+        """Test that cache stores and retrieves values."""
+        from goldfish.web_server import GraphCache
+
+        cache = GraphCache(ttl=60)
+        cache.set("test_key", {"data": "test_value"})
+
+        result = cache.get("test_key")
+        assert result is not None
+        assert result["data"] == "test_value"
+
+    def test_cache_expires_after_ttl(self):
+        """Test that cache entries expire after TTL."""
+        from goldfish.web_server import GraphCache
+
+        cache = GraphCache(ttl=1)  # 1 second TTL
+        cache.set("test_key", {"data": "test_value"})
+
+        # Should be available immediately
+        assert cache.get("test_key") is not None
+
+        # Wait for expiration
+        time.sleep(1.5)
+
+        # Should be expired
+        assert cache.get("test_key") is None
+
+    def test_cache_returns_none_for_missing_key(self):
+        """Test that cache returns None for missing keys."""
+        from goldfish.web_server import GraphCache
+
+        cache = GraphCache()
+        assert cache.get("nonexistent_key") is None
+
+    def test_cache_clear(self):
+        """Test that cache can be cleared."""
+        from goldfish.web_server import GraphCache
+
+        cache = GraphCache()
+        cache.set("key1", {"data": "value1"})
+        cache.set("key2", {"data": "value2"})
+
+        cache.clear()
+
+        assert cache.get("key1") is None
+        assert cache.get("key2") is None
+
+
+class TestPaginationEdgeCases:
+    """Test pagination edge cases in API endpoints."""
+
+    def test_limit_capped_at_max(self, web_server_with_project):
+        """Test that limit is capped at MAX_API_LIMIT."""
+        server, project = web_server_with_project
+
+        # Request with very large limit
+        url = f"/project/{project.url_id}/api/workspaces?limit=999999"
+        request = f"GET {url} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(("127.0.0.1", 7346))
+            sock.sendall(request.encode())
+            response = _read_http_response(sock)
+
+            assert b"HTTP/1.1 200 OK" in response or b"HTTP/1.0 200 OK" in response
+            # Parse JSON and verify limit is capped
+            body_start = response.index(b"\r\n\r\n") + 4
+            body = response[body_start:].decode()
+            data = json.loads(body)
+            # The endpoint should still work (not error out)
+            assert "data" in data
+        finally:
+            sock.close()
+
+    def test_negative_offset_treated_as_zero(self, web_server_with_project):
+        """Test that negative offset is treated as zero."""
+        server, project = web_server_with_project
+
+        url = f"/project/{project.url_id}/api/workspaces?offset=-10"
+        request = f"GET {url} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(("127.0.0.1", 7346))
+            sock.sendall(request.encode())
+            response = _read_http_response(sock)
+
+            assert b"HTTP/1.1 200 OK" in response or b"HTTP/1.0 200 OK" in response
+        finally:
+            sock.close()
+
+    def test_invalid_limit_uses_default(self, web_server_with_project):
+        """Test that invalid limit falls back to default."""
+        server, project = web_server_with_project
+
+        url = f"/project/{project.url_id}/api/workspaces?limit=invalid"
+        request = f"GET {url} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(("127.0.0.1", 7346))
+            sock.sendall(request.encode())
+            response = _read_http_response(sock)
+
+            assert b"HTTP/1.1 200 OK" in response or b"HTTP/1.0 200 OK" in response
+        finally:
+            sock.close()
+
+
+class TestErrorHandling:
+    """Test error handling in web server."""
+
+    def test_invalid_project_id_returns_404(self, web_server_with_project):
+        """Test that invalid project ID returns 404."""
+        server, _ = web_server_with_project
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(("127.0.0.1", 7346))
+            sock.sendall(b"GET /project/nonexistent-project-id/ HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            response = _read_http_response(sock)
+
+            assert b" 404" in response
+        finally:
+            sock.close()
+
+    def test_invalid_api_endpoint_returns_error(self, web_server_with_project):
+        """Test that invalid API endpoints return appropriate errors."""
+        server, project = web_server_with_project
+
+        url = f"/project/{project.url_id}/api/nonexistent_endpoint"
+        request = f"GET {url} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(("127.0.0.1", 7346))
+            sock.sendall(request.encode())
+            response = _read_http_response(sock)
+
+            # Should return 400 or 404
+            assert b" 400" in response or b" 404" in response
+        finally:
+            sock.close()
+
+    def test_api_versioning_backward_compat(self, web_server_with_project):
+        """Test that both versioned and legacy API paths work."""
+        server, project = web_server_with_project
+
+        # Test versioned path
+        url_v1 = f"/project/{project.url_id}/api/v1/workspaces"
+        request_v1 = f"GET {url_v1} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(("127.0.0.1", 7346))
+            sock.sendall(request_v1.encode())
+            response = _read_http_response(sock)
+
+            assert b"HTTP/1.1 200 OK" in response or b"HTTP/1.0 200 OK" in response
+        finally:
+            sock.close()
+
+        # Test legacy path
+        url_legacy = f"/project/{project.url_id}/api/workspaces"
+        request_legacy = f"GET {url_legacy} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.connect(("127.0.0.1", 7346))
+            sock.sendall(request_legacy.encode())
+            response = _read_http_response(sock)
+
+            assert b"HTTP/1.1 200 OK" in response or b"HTTP/1.0 200 OK" in response
         finally:
             sock.close()

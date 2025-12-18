@@ -194,12 +194,50 @@ class WorkspaceManager:
                 # On error, assume dirty to be safe
                 dirty = DirtyState.DIRTY
 
+        # Get lineage information
+        versions = self.db.list_versions(workspace)
+        current_version = versions[0]["version"] if versions else None
+        version_count = len(versions)
+
+        # Get workspace lineage (parent info)
+        lineage = self.db.get_workspace_lineage(workspace)
+        parent_workspace = lineage.get("parent_workspace") if lineage else None
+        parent_version = lineage.get("parent_version") if lineage else None
+
+        # Get recent version history (last 5)
+        version_history = (
+            [
+                {
+                    "version": v["version"],
+                    "git_sha": v["git_sha"][:8] if v["git_sha"] else None,
+                    "created_by": v["created_by"],
+                }
+                for v in versions[:5]
+            ]
+            if versions
+            else None
+        )
+
+        # Get branches (child workspaces)
+        branches_raw = self.db.get_workspace_branches(workspace)
+        branches = (
+            [{"workspace": b["workspace_name"], "branched_at": b["parent_version"]} for b in branches_raw]
+            if branches_raw
+            else None
+        )
+
         return SlotInfo(
             slot=slot,
             state=SlotState.MOUNTED,
             workspace=workspace,
             dirty=dirty,
             last_checkpoint=last_checkpoint,
+            current_version=current_version,
+            version_count=version_count,
+            parent_workspace=parent_workspace,
+            parent_version=parent_version,
+            version_history=version_history,
+            branches=branches,
         )
 
     def get_all_slots(self) -> list[SlotInfo]:
