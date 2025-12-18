@@ -800,7 +800,7 @@ class GoldfishDaemon:
         logger.info("HTTP server listening on %s", self.socket_path)
 
     def write_pid_file(self) -> None:
-        """Write PID file atomically."""
+        """Write PID file and project_root file atomically."""
         if self.pid_file:
             logger.debug("Writing PID file: %s (pid=%d)", self.pid_file, os.getpid())
             # Write to temp file first, then rename (atomic on POSIX)
@@ -810,12 +810,55 @@ class GoldfishDaemon:
             atexit.register(lambda: self.pid_file.unlink(missing_ok=True) if self.pid_file else None)
             logger.debug("PID file written successfully")
 
+            # Write project_root file for web server discovery
+            project_root_file = self.pid_file.parent / "project_root"
+            temp_root_file = project_root_file.with_suffix(".tmp")
+            temp_root_file.write_text(str(self.project_root))
+            temp_root_file.rename(project_root_file)
+            atexit.register(lambda: project_root_file.unlink(missing_ok=True))
+            logger.debug("Project root file written for web server discovery")
+
+    def _maybe_start_web_server(self) -> None:
+        """Auto-start the web visualization server.
+
+        Starts automatically unless GOLDFISH_NO_WEB=1 is set.
+        Skips if web server is already running.
+        """
+        # Check if auto-start is disabled
+        no_web = os.environ.get("GOLDFISH_NO_WEB", "").lower() in ("1", "true", "yes")
+        if no_web:
+            logger.debug("Web server auto-start disabled via GOLDFISH_NO_WEB")
+            return
+
+        try:
+            # Import here to avoid circular dependency
+            from goldfish.web_server import is_web_server_running, spawn_web_server
+
+            # Check if web server is already running
+            running, pid, port = is_web_server_running()
+            if running:
+                logger.info("Web server already running (pid=%d, port=%d)", pid, port)
+                return
+
+            # Spawn web server
+            logger.info("Auto-starting web visualization server...")
+            pid = spawn_web_server(open_browser=False)  # Don't open browser on daemon start
+            logger.info("Web server started (pid=%d)", pid)
+            logger.info("Visit http://127.0.0.1:7342 to view provenance")
+
+        except Exception as e:
+            # Don't fail daemon startup if web server fails
+            logger.warning("Failed to auto-start web server: %s", e)
+
     def run(self) -> None:
         """Run the daemon main loop."""
         self.write_pid_file()
         self.start_worker()
         self.start_instance_monitor()  # Cost Protection Layer 3
         self.start_http_server()
+
+        # Optionally auto-start web server for visualization
+        self._maybe_start_web_server()
 
         # Set up signal handlers - shutdown from a different thread to avoid deadlock
         def handle_shutdown(signum: int, frame: Any) -> None:

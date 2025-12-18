@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Goldfish Projects</title>
+    <link rel="stylesheet" href="/static/css/index.css">
+</head>
+<body>
+    <a href="#main-content" class="skip-link">Skip to main content</a>
+    <header role="banner">
+        <div class="logo" aria-hidden="true">&#x1F420;</div>
+        <h1><span class="accent">Goldfish</span> Projects</h1>
+        <p class="subtitle">Select a project to explore its provenance</p>
+    </header>
+
+    <main id="main-content" role="main" aria-label="Project list">
+        <div id="projects-container" role="region" aria-live="polite" aria-busy="true">
+            <div class="loading" role="status" aria-label="Loading projects">Loading projects...</div>
+        </div>
+    </main>
+
+    <script src="/static/js/index.js"></script>
+</body>
+</html>
