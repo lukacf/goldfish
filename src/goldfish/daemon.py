@@ -819,17 +819,15 @@ class GoldfishDaemon:
             logger.debug("Project root file written for web server discovery")
 
     def _maybe_start_web_server(self) -> None:
-        """Optionally auto-start the web visualization server.
+        """Auto-start the web visualization server.
 
-        Checks if:
-        1. GOLDFISH_AUTO_START_WEB environment variable is set
-        2. Web server is not already running
-
-        If both conditions are met, spawns the web server.
+        Starts automatically unless GOLDFISH_NO_WEB=1 is set.
+        Skips if web server is already running.
         """
-        # Check if auto-start is enabled
-        auto_start = os.environ.get("GOLDFISH_AUTO_START_WEB", "").lower() in ("1", "true", "yes")
-        if not auto_start:
+        # Check if auto-start is disabled
+        no_web = os.environ.get("GOLDFISH_NO_WEB", "").lower() in ("1", "true", "yes")
+        if no_web:
+            logger.debug("Web server auto-start disabled via GOLDFISH_NO_WEB")
             return
 
         try:

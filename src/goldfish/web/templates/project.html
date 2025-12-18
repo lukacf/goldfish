@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{project_name}} - Goldfish Provenance</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link rel="stylesheet" href="/static/css/project.css">
+</head>
+<body>
+    <a href="#main-content" class="skip-link">Skip to main content</a>
+    <header role="banner">
+        <div class="header-content">
+            <div class="logo">
+                <div class="logo-icon" aria-hidden="true">&#x1F420;</div>
+                <div>
+                    <h1><span class="logo-accent">Goldfish</span> Provenance</h1>
+                    <nav class="breadcrumb" aria-label="Breadcrumb">
+                        <a href="/">All Projects</a> &#x203A; <span aria-current="page">{{project_name}}</span>
+                    </nav>
+                </div>
+            </div>
+            <nav aria-label="Main navigation" role="navigation">
+                <button class="active" onclick="showView('workspaces')" aria-pressed="true">Workspaces</button>
+                <button onclick="showView('runs')" aria-pressed="false">Runs</button>
+                <button onclick="showView('stages')" aria-pressed="false">Stages</button>
+                <button onclick="showView('graph')" aria-pressed="false">Graph</button>
+            </nav>
+        </div>
+    </header>
+
+    <main id="main-content" role="main">
+        <!-- Workspaces View -->
+        <div id="view-workspaces" role="region" aria-label="Workspaces">
+            <h2 class="view-title">Workspaces</h2>
+            <div class="search-box">
+                <span class="search-icon" aria-hidden="true">&#x1F50D;</span>
+                <input type="text" id="workspace-search" class="search-input" placeholder="Search workspaces by name or description..." oninput="filterWorkspaces()" aria-label="Search workspaces">
+            </div>
+            <div class="filter-tags" id="workspace-filters" role="group" aria-label="Filter workspaces">
+                <button class="filter-tag active" data-filter="all" onclick="setWorkspaceFilter('all')" aria-pressed="true">All</button>
+                <button class="filter-tag" data-filter="mounted" onclick="setWorkspaceFilter('mounted')" aria-pressed="false">Mounted</button>
+                <button class="filter-tag" data-filter="hibernating" onclick="setWorkspaceFilter('hibernating')" aria-pressed="false">Hibernating</button>
+            </div>
+            <div id="workspaces-container" class="workspace-grid" role="list" aria-live="polite" aria-busy="true">
+                <div class="loading" role="status">
+                    <div class="spinner" aria-hidden="true"></div>
+                    <span>Loading workspaces...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Runs View -->
+        <div id="view-runs" class="hidden" role="region" aria-label="Runs">
+            <h2 class="view-title">Recent Runs</h2>
+            <div class="search-box">
+                <span class="search-icon" aria-hidden="true">&#x1F50D;</span>
+                <input type="text" id="runs-search" class="search-input" placeholder="Search runs by workspace, stage, or pipeline..." oninput="filterRuns()" aria-label="Search runs">
+            </div>
+            <div class="filter-tags" id="run-filters" role="group" aria-label="Filter runs by status">
+                <button class="filter-tag active" data-filter="all" onclick="setRunFilter('all')" aria-pressed="true">All</button>
+                <button class="filter-tag" data-filter="running" onclick="setRunFilter('running')" aria-pressed="false">Running</button>
+                <button class="filter-tag" data-filter="completed" onclick="setRunFilter('completed')" aria-pressed="false">Completed</button>
+                <button class="filter-tag" data-filter="failed" onclick="setRunFilter('failed')" aria-pressed="false">Failed</button>
+            </div>
+            <div class="tabs" role="tablist" aria-label="Run types">
+                <button class="tab active" onclick="showRunsTab('stage')" role="tab" aria-selected="true" id="tab-stage" aria-controls="tab-stage-runs">Stage Runs</button>
+                <button class="tab" onclick="showRunsTab('pipeline')" role="tab" aria-selected="false" id="tab-pipeline" aria-controls="tab-pipeline-runs">Pipeline Runs</button>
+            </div>
+            <div id="tab-stage-runs" class="tab-content active" role="tabpanel" aria-labelledby="tab-stage">
+                <div id="stage-runs-container" role="list" aria-live="polite" aria-busy="true">
+                    <div class="loading" role="status">
+                        <div class="spinner" aria-hidden="true"></div>
+                        <span>Loading stage runs...</span>
+                    </div>
+                </div>
+            </div>
+            <div id="tab-pipeline-runs" class="tab-content" role="tabpanel" aria-labelledby="tab-pipeline">
+                <div id="pipeline-runs-container" role="list" aria-live="polite" aria-busy="true">
+                    <div class="loading" role="status">
+                        <div class="spinner" aria-hidden="true"></div>
+                        <span>Loading pipeline runs...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stages View -->
+        <div id="view-stages" class="hidden" role="region" aria-label="Stage Versions">
+            <div class="graph-header">
+                <h2 class="view-title">Stage Versions</h2>
+                <div class="graph-view-toggle">
+                    <button id="btn-stages-timeline" class="toggle-btn active" onclick="setStagesMode('timeline')">Timeline</button>
+                    <button id="btn-stages-cards" class="toggle-btn" onclick="setStagesMode('cards')">Cards</button>
+                </div>
+            </div>
+            <div id="stages-container-timeline">
+                <svg id="stages-svg"></svg>
+            </div>
+            <div id="stages-container-cards" class="hidden">
+                <div id="stages-cards-grid"></div>
+            </div>
+        </div>
+
+        <!-- Graph View -->
+        <div id="view-graph" class="hidden">
+            <div class="graph-header">
+                <h2 class="view-title">Version Lineage</h2>
+                <div class="graph-view-toggle">
+                    <button id="btn-timeline-view" class="toggle-btn active" onclick="setGraphMode('timeline')">Timeline</button>
+                    <button id="btn-cards-view" class="toggle-btn" onclick="setGraphMode('cards')">Cards</button>
+                </div>
+            </div>
+            <div class="graph-controls">
+                <button class="graph-control-btn" onclick="resetGraphZoom()">Reset Zoom</button>
+                <button class="graph-control-btn" onclick="centerGraph()">Center</button>
+            </div>
+            <!-- Timeline View (SVG) -->
+            <div id="graph-container-timeline">
+                <svg id="graph-svg"></svg>
+            </div>
+            <!-- Cards View -->
+            <div id="graph-container-cards" class="hidden">
+                <div id="cards-grid"></div>
+            </div>
+            <!-- Version Detail Panel (for cards view) -->
+            <div id="version-detail-panel" class="hidden">
+                <div class="detail-panel-header">
+                    <h3 id="detail-panel-title">Versions</h3>
+                    <button class="detail-panel-close" onclick="closeDetailPanel()">&times;</button>
+                </div>
+                <div id="detail-panel-content"></div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Detail Modal -->
+    <div id="detail-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-hidden="true">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title" id="modal-title">Details</h2>
+                <button class="modal-close" onclick="closeModal()" aria-label="Close dialog">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body">
+                <div class="loading" role="status">
+                    <div class="spinner" aria-hidden="true"></div>
+                    <span>Loading...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration injected by server
+        const PROJECT_ID = '{{project_url_id}}';
+    </script>
+    <script src="/static/js/project.js"></script>
+</body>
+</html>
