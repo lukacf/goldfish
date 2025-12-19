@@ -1,6 +1,6 @@
 ---
 name: goldfish-ml
-description: This skill should be used when working with Goldfish ML, an MCP server for AI-driven machine learning experimentation. Use this skill when the user asks to create workspaces, run ML pipelines, manage datasets, track experiment lineage, or conduct any ML experimentation workflow. Goldfish provides 39 MCP tools for workspace management, pipeline execution, data management, and provenance tracking.
+description: This skill should be used when working with Goldfish ML, an MCP server for AI-driven machine learning experimentation. Use this skill when the user asks to create workspaces, run ML pipelines, manage datasets, track experiment lineage, or conduct any ML experimentation workflow. Goldfish provides 47 MCP tools for workspace management, pipeline execution, data management, version management, and provenance tracking.
 ---
 
 # Goldfish ML
@@ -234,6 +234,52 @@ get_run_provenance(stage_run_id="stage-abc123")
 → workspace, version, git SHA, config, inputs, outputs
 ```
 
+### 6. Version Tags & Pruning
+
+ML experiments generate many versions, most of which are failed attempts. Tags and pruning help manage this:
+
+**Tags** mark significant versions with memorable names:
+```
+# Mark a milestone (can be applied retroactively to any version)
+tag_version(workspace="lstm_baseline", version="v24", tag_name="baseline-working")
+tag_version(workspace="lstm_baseline", version="v47", tag_name="best-model")
+
+# List all tags for a workspace
+list_tags(workspace="lstm_baseline")
+→ [{"version": "v24", "tag_name": "baseline-working"}, {"version": "v47", "tag_name": "best-model"}]
+
+# Remove a tag
+untag_version(workspace="lstm_baseline", tag_name="baseline-working")
+```
+
+**Pruning** hides noise versions while preserving audit trail:
+```
+# Prune a single version (fails if tagged - tags are protected)
+prune_version(workspace="lstm_baseline", version="v5", reason="Failed experiment with wrong hyperparameters")
+
+# Prune a range of failed experiments
+prune_versions(workspace="lstm_baseline", from_version="v1", to_version="v23",
+               reason="All early experiments before baseline was established")
+
+# Prune everything before a tagged milestone
+prune_before_tag(workspace="lstm_baseline", tag_name="baseline-working",
+                 reason="Pruning all experiments before working baseline")
+
+# Restore pruned versions if needed
+unprune_version(workspace="lstm_baseline", version="v5")
+unprune_versions(workspace="lstm_baseline", from_version="v1", to_version="v10")
+
+# Check pruning status
+get_pruned_count(workspace="lstm_baseline")
+→ {"count": 35}  # 35 versions hidden
+```
+
+**Key behaviors:**
+- Tagged versions are **protected** and cannot be pruned
+- Pruned versions don't appear in `list_versions()`, `status()`, or STATE.md
+- Version numbering continues unaffected (v1...v50 pruned, next is still v51)
+- Pruning is **reversible** via unprune
+
 ## Tool Reference
 
 ### Workspace Management
@@ -255,12 +301,26 @@ get_run_provenance(stage_run_id="stage-abc123")
 
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
-| `run()` | Execute stages (with pre-run review) | workspace, stages, reason, wait |
+| `run()` | Execute stages (with pre-run review) | workspace, stages, reason (required dict), wait |
 | `get_run()` | Run details | run_id |
 | `logs()` | Container logs | run_id, tail, since |
 | `cancel()` | Stop run | run_id, reason |
 | `list_runs()` | Query runs | workspace, stage, status |
 | `get_outputs()` | Run outputs | run_id |
+
+### Version Management (Tags & Pruning)
+
+| Tool | Purpose | Key Parameters |
+|------|---------|----------------|
+| `tag_version()` | Name a version | workspace, version, tag_name |
+| `untag_version()` | Remove tag | workspace, tag_name |
+| `list_tags()` | All workspace tags | workspace |
+| `prune_version()` | Hide single version | workspace, version, reason |
+| `prune_versions()` | Hide version range | workspace, from/to_version, reason |
+| `prune_before_tag()` | Prune before milestone | workspace, tag_name, reason |
+| `unprune_version()` | Restore single version | workspace, version |
+| `unprune_versions()` | Restore version range | workspace, from/to_version |
+| `get_pruned_count()` | Count hidden versions | workspace |
 
 ### Data Management
 
@@ -320,18 +380,36 @@ For `compute.profile` in stage configs:
 
 ## Common Patterns
 
-### Pattern: Iterative Experimentation
+### Pattern: Iterative Experimentation with Tags
 
 ```
 1. create_workspace("exp_v1", "Baseline LSTM")
 2. mount("w1", "exp_v1")
-3. Edit code, run, analyze
-4. save_version("w1", "Working baseline")  # Creates v1
-5. Edit more, run
-6. hibernate("w1", "Completed baseline")
+3. Edit code, run, analyze          # Creates v1, v2, v3... (many failures)
+4. Finally working!
+5. tag_version("exp_v1", "v24", "baseline-working")  # Mark milestone
+6. Continue experimenting           # Creates v25, v26... (more failures)
+7. tag_version("exp_v1", "v47", "best-model")        # Mark best result
+8. prune_before_tag("exp_v1", "baseline-working", reason="Cleanup early failures")
+9. hibernate("w1", "Completed baseline")
 
-# Later: branch for variation
-7. create_workspace("exp_v2", "Add attention", fork_from="exp_v1")
+# Workspace now shows: v24 "baseline-working", v47 "best-model" (23 pruned)
+```
+
+### Pattern: Managing Experiment Clutter
+
+```
+# After many failed experiments, mark what matters
+tag_version("my_exp", "v15", "first-working")
+tag_version("my_exp", "v42", "best-accuracy")
+tag_version("my_exp", "v50", "final-submission")
+
+# Prune all the noise (cannot prune tagged versions)
+prune_versions("my_exp", "v1", "v14", reason="All failures before first working version")
+prune_versions("my_exp", "v16", "v41", reason="Iterations between first working and best")
+prune_versions("my_exp", "v43", "v49", reason="Final polish attempts")
+
+# Result: Only v15, v42, v50 visible; full history preserved if needed
 ```
 
 ### Pattern: Debug Failed Run
@@ -386,12 +464,15 @@ status()  # Recover orientation: slots, jobs, STATE.md
 ## Best Practices
 
 1. **Always provide clear goals** when creating workspaces
-2. **Checkpoint frequently** with descriptive messages
-3. **Use descriptive stage names** that reflect the operation
-4. **Register datasets** before referencing in pipelines
-5. **Check status()** after context recovery
-6. **Use log_thought()** to document decisions
-7. **Monitor long runs** with logs() and list_runs()
+2. **Save versions frequently** with descriptive messages
+3. **Tag significant milestones** (e.g., "first-working", "best-model", "submitted")
+4. **Prune failed experiments** to reduce clutter after reaching milestones
+5. **Use descriptive stage names** that reflect the operation
+6. **Register datasets** before referencing in pipelines
+7. **Check status()** after context recovery
+8. **Use log_thought()** to document decisions
+9. **Monitor long runs** with logs() and list_runs()
+10. **Provide structured reasons** for runs with hypothesis and approach
 
 ## Resources
 

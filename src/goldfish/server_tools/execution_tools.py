@@ -53,7 +53,7 @@ def run(
     pipeline: str | None = None,
     config_override: dict | None = None,
     inputs_override: dict | None = None,
-    reason: str | dict | None = None,
+    reason: dict | None = None,
     wait: bool = False,
     dry_run: bool = False,
     skip_review: bool = False,
@@ -70,16 +70,14 @@ def run(
         config_override: Override config vars. For single stage: {"VAR": "value"}.
                         For multiple stages: {"stage_name": {"VAR": "value"}}
         inputs_override: Override input sources for debugging
-        reason: Why running - can be:
-            - String (min 15 chars)
-            - Dict with structured fields:
-                {
-                    "description": "What you're running",
-                    "hypothesis": "What you expect to happen",
-                    "approach": "How you're testing it",
-                    "min_result": "Minimum bar for success",
-                    "goal": "Best case outcome"
-                }
+        reason: Why running - REQUIRED structured dict with fields:
+            {
+                "description": "What you're running",  # Required, max 500 chars
+                "hypothesis": "What you expect to happen",  # Optional, max 1000 chars
+                "approach": "How you're testing it",  # Optional, max 1000 chars
+                "min_result": "Minimum bar for success",  # Optional, max 500 chars
+                "goal": "Best case outcome"  # Optional, max 500 chars
+            }
         wait: False (default) returns immediately; True blocks until completion
         dry_run: If True, validate everything without launching. Returns what would
                  run and any validation errors found.
@@ -97,11 +95,10 @@ def run(
         - warnings: Non-fatal issues
 
     Examples:
-        run("w1")                           # Run all stages
-        run("w1", stages=["train"])         # Run single stage
-        run("w1", stages=["preprocess", "train", "evaluate"])  # Run specific stages
-        run("w1", reason={"description": "Test new architecture", "hypothesis": "Will improve accuracy"})
-        run("w1", dry_run=True)             # Validate without launching
+        run("w1", reason={"description": "Initial training run"})
+        run("w1", stages=["train"], reason={"description": "Test new architecture", "hypothesis": "Will improve accuracy"})
+        run("w1", stages=["preprocess", "train"], reason={"description": "Full pipeline", "approach": "Using augmented data"})
+        run("w1", dry_run=True, reason={"description": "Validate config"})
     """
     config = _get_config()
     workspace_manager = _get_workspace_manager()
@@ -109,40 +106,39 @@ def run(
 
     validate_workspace_name(workspace)
 
-    # Parse reason into RunReason object
-    run_reason: RunReason | None = None
-    reason_str: str = "Run stages"
+    # Parse reason into RunReason object - REQUIRED for documenting experiments
+    if not reason:
+        raise GoldfishError(
+            "reason is required. Provide a structured dict with at least 'description'. "
+            "Example: reason={'description': 'What you're running', 'hypothesis': 'What you expect'}"
+        )
 
-    if reason:
-        if isinstance(reason, dict):
-            # Structured reason
-            try:
-                run_reason = RunReason(**reason)
-                reason_str = run_reason.to_summary()
-                # Validate minimum length of description
-                validate_reason(run_reason.description, config.audit.min_reason_length)
-            except ValidationError as e:
-                # Extract user-friendly error from Pydantic
-                errors = e.errors()
-                if errors:
-                    first = errors[0]
-                    field = ".".join(str(loc) for loc in first.get("loc", []))
-                    msg = first.get("msg", "validation error")
-                    raise GoldfishError(
-                        f"Invalid reason: {field} - {msg}. "
-                        f"Required: description (str, max 500). "
-                        f"Optional: hypothesis, approach (max 1000), min_result, goal (max 500)."
-                    ) from e
-                raise GoldfishError(f"Invalid structured reason: {e}") from e
-            except (ValueError, TypeError) as e:
-                raise GoldfishError(f"Invalid structured reason: {e}") from e
-        elif isinstance(reason, str):
-            # Simple string reason (backward compatibility)
-            validate_reason(reason, config.audit.min_reason_length)
-            reason_str = reason
-            run_reason = RunReason(description=reason)
-        else:
-            raise GoldfishError("reason must be a string or dict")
+    if not isinstance(reason, dict):
+        raise GoldfishError(
+            "reason must be a dict with structured fields. "
+            "Example: reason={'description': 'What you're running', 'hypothesis': 'What you expect'}"
+        )
+
+    try:
+        run_reason = RunReason(**reason)
+        reason_str = run_reason.to_summary()
+        # Validate minimum length of description
+        validate_reason(run_reason.description, config.audit.min_reason_length)
+    except ValidationError as e:
+        # Extract user-friendly error from Pydantic
+        errors = e.errors()
+        if errors:
+            first = errors[0]
+            field = ".".join(str(loc) for loc in first.get("loc", []))
+            msg = first.get("msg", "validation error")
+            raise GoldfishError(
+                f"Invalid reason: {field} - {msg}. "
+                f"Required: description (str, max 500). "
+                f"Optional: hypothesis, approach (max 1000), min_result, goal (max 500)."
+            ) from e
+        raise GoldfishError(f"Invalid structured reason: {e}") from e
+    except (ValueError, TypeError) as e:
+        raise GoldfishError(f"Invalid structured reason: {e}") from e
 
     # Resolve workspace (could be slot like "w1")
     workspace_name = workspace_manager.get_workspace_for_slot(workspace)
