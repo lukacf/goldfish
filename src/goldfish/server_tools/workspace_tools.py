@@ -346,6 +346,371 @@ def rollback(slot: str, version: str, reason: str) -> RollbackResponse:
     return workspace_manager.rollback(slot, version, reason)
 
 
+# ============== VERSION TAG TOOLS ==============
+
+
+@mcp.tool()
+def tag_version(workspace: str, version: str, tag_name: str) -> dict:
+    """Tag a version with a memorable name.
+
+    Tags allow marking significant versions (e.g., "baseline-working", "best-model").
+    Tags can be applied retroactively to any existing version.
+
+    Args:
+        workspace: Workspace name
+        version: Version to tag (e.g., "v1", "v2")
+        tag_name: Name for the tag (e.g., "baseline-working")
+
+    Returns:
+        Dict with tag info including workspace_name, version, tag_name, created_at
+    """
+    logger.info("tag_version() called", extra={"workspace": workspace, "version": version, "tag_name": tag_name})
+
+    db = _get_db()
+    state_manager = _get_state_manager()
+
+    validate_workspace_name(workspace)
+    validate_version(version)
+
+    try:
+        result = db.create_tag(workspace, version, tag_name)
+
+        # Log to audit
+        db.log_audit(
+            operation="tag_version",
+            workspace=workspace,
+            reason=f"Tagged {version} as '{tag_name}'",
+            details={"version": version, "tag_name": tag_name},
+        )
+
+        state_manager.add_action(f"Tagged {version} as '{tag_name}'")
+
+        logger.info("tag_version() succeeded", extra={"workspace": workspace, "version": version, "tag_name": tag_name})
+        return result
+    except Exception as e:
+        logger.error(
+            "tag_version() failed",
+            extra={"workspace": workspace, "version": version, "tag_name": tag_name, "error": str(e)},
+        )
+        raise
+
+
+@mcp.tool()
+def untag_version(workspace: str, tag_name: str) -> dict:
+    """Remove a tag from a version.
+
+    Args:
+        workspace: Workspace name
+        tag_name: Name of the tag to remove
+
+    Returns:
+        Dict with success status
+    """
+    logger.info("untag_version() called", extra={"workspace": workspace, "tag_name": tag_name})
+
+    db = _get_db()
+    state_manager = _get_state_manager()
+
+    validate_workspace_name(workspace)
+
+    try:
+        db.delete_tag(workspace, tag_name)
+
+        # Log to audit
+        db.log_audit(
+            operation="untag_version",
+            workspace=workspace,
+            reason=f"Removed tag '{tag_name}'",
+            details={"tag_name": tag_name},
+        )
+
+        state_manager.add_action(f"Removed tag '{tag_name}'")
+
+        logger.info("untag_version() succeeded", extra={"workspace": workspace, "tag_name": tag_name})
+        return {"success": True, "tag_name": tag_name}
+    except Exception as e:
+        logger.error("untag_version() failed", extra={"workspace": workspace, "tag_name": tag_name, "error": str(e)})
+        raise
+
+
+@mcp.tool()
+def list_tags(workspace: str) -> list[dict]:
+    """List all tags for a workspace.
+
+    Args:
+        workspace: Workspace name
+
+    Returns:
+        List of tag dicts with workspace_name, version, tag_name, created_at
+    """
+    db = _get_db()
+
+    validate_workspace_name(workspace)
+
+    return db.list_tags(workspace)
+
+
+# ============== VERSION PRUNING TOOLS ==============
+
+
+@mcp.tool()
+def prune_version(workspace: str, version: str, reason: str) -> dict:
+    """Prune a single version (soft delete).
+
+    Pruned versions are hidden from list_versions() but can be restored.
+    Tagged versions cannot be pruned (they are protected).
+
+    Args:
+        workspace: Workspace name
+        version: Version to prune (e.g., "v2")
+        reason: Why pruning this version (min 15 chars)
+
+    Returns:
+        Dict with pruned version info
+    """
+    logger.info("prune_version() called", extra={"workspace": workspace, "version": version})
+
+    config = _get_config()
+    db = _get_db()
+    state_manager = _get_state_manager()
+
+    validate_workspace_name(workspace)
+    validate_version(version)
+    validate_reason(reason, config.audit.min_reason_length)
+
+    try:
+        result = db.prune_version(workspace, version, reason)
+
+        # Log to audit
+        db.log_audit(
+            operation="prune_version",
+            workspace=workspace,
+            reason=reason,
+            details={"version": version},
+        )
+
+        state_manager.add_action(f"Pruned version {version}")
+
+        logger.info("prune_version() succeeded", extra={"workspace": workspace, "version": version})
+        return result
+    except Exception as e:
+        logger.error("prune_version() failed", extra={"workspace": workspace, "version": version, "error": str(e)})
+        raise
+
+
+@mcp.tool()
+def prune_versions(workspace: str, from_version: str, to_version: str, reason: str) -> dict:
+    """Prune a range of versions (inclusive).
+
+    Tagged versions within the range are skipped (not pruned).
+
+    Args:
+        workspace: Workspace name
+        from_version: Start version (e.g., "v3")
+        to_version: End version (e.g., "v7")
+        reason: Why pruning this range (min 15 chars)
+
+    Returns:
+        Dict with pruned_count and skipped_tagged count
+    """
+    logger.info("prune_versions() called", extra={"workspace": workspace, "from": from_version, "to": to_version})
+
+    config = _get_config()
+    db = _get_db()
+    state_manager = _get_state_manager()
+
+    validate_workspace_name(workspace)
+    validate_version(from_version)
+    validate_version(to_version)
+    validate_reason(reason, config.audit.min_reason_length)
+
+    try:
+        result = db.prune_versions(workspace, from_version, to_version, reason)
+
+        # Log to audit
+        db.log_audit(
+            operation="prune_versions",
+            workspace=workspace,
+            reason=reason,
+            details={
+                "from_version": from_version,
+                "to_version": to_version,
+                "pruned_count": result["pruned_count"],
+            },
+        )
+
+        state_manager.add_action(f"Pruned {result['pruned_count']} versions ({from_version}-{to_version})")
+
+        logger.info(
+            "prune_versions() succeeded",
+            extra={"workspace": workspace, "pruned_count": result["pruned_count"]},
+        )
+        return result
+    except Exception as e:
+        logger.error(
+            "prune_versions() failed",
+            extra={"workspace": workspace, "from": from_version, "to": to_version, "error": str(e)},
+        )
+        raise
+
+
+@mcp.tool()
+def prune_before_tag(workspace: str, tag_name: str, reason: str) -> dict:
+    """Prune all versions before a tagged milestone.
+
+    The tagged version itself is NOT pruned. Other tagged versions
+    before the milestone are also protected (not pruned).
+
+    Args:
+        workspace: Workspace name
+        tag_name: Tag marking the milestone (e.g., "first-working")
+        reason: Why pruning versions before this milestone (min 15 chars)
+
+    Returns:
+        Dict with pruned_count
+    """
+    logger.info("prune_before_tag() called", extra={"workspace": workspace, "tag_name": tag_name})
+
+    config = _get_config()
+    db = _get_db()
+    state_manager = _get_state_manager()
+
+    validate_workspace_name(workspace)
+    validate_reason(reason, config.audit.min_reason_length)
+
+    try:
+        result = db.prune_before_tag(workspace, tag_name, reason)
+
+        # Log to audit
+        db.log_audit(
+            operation="prune_before_tag",
+            workspace=workspace,
+            reason=reason,
+            details={"tag_name": tag_name, "pruned_count": result["pruned_count"]},
+        )
+
+        state_manager.add_action(f"Pruned {result['pruned_count']} versions before '{tag_name}'")
+
+        logger.info(
+            "prune_before_tag() succeeded",
+            extra={"workspace": workspace, "pruned_count": result["pruned_count"]},
+        )
+        return result
+    except Exception as e:
+        logger.error("prune_before_tag() failed", extra={"workspace": workspace, "tag_name": tag_name, "error": str(e)})
+        raise
+
+
+@mcp.tool()
+def unprune_version(workspace: str, version: str) -> dict:
+    """Restore a pruned version.
+
+    Makes a previously pruned version visible again.
+
+    Args:
+        workspace: Workspace name
+        version: Version to restore (e.g., "v3")
+
+    Returns:
+        Dict with restored version info
+    """
+    logger.info("unprune_version() called", extra={"workspace": workspace, "version": version})
+
+    db = _get_db()
+    state_manager = _get_state_manager()
+
+    validate_workspace_name(workspace)
+    validate_version(version)
+
+    try:
+        result = db.unprune_version(workspace, version)
+
+        # Log to audit
+        db.log_audit(
+            operation="unprune_version",
+            workspace=workspace,
+            reason=f"Restored pruned version {version}",
+            details={"version": version},
+        )
+
+        state_manager.add_action(f"Restored version {version}")
+
+        logger.info("unprune_version() succeeded", extra={"workspace": workspace, "version": version})
+        return result
+    except Exception as e:
+        logger.error("unprune_version() failed", extra={"workspace": workspace, "version": version, "error": str(e)})
+        raise
+
+
+@mcp.tool()
+def unprune_versions(workspace: str, from_version: str, to_version: str) -> dict:
+    """Restore a range of pruned versions.
+
+    Args:
+        workspace: Workspace name
+        from_version: Start version (e.g., "v4")
+        to_version: End version (e.g., "v6")
+
+    Returns:
+        Dict with unpruned_count
+    """
+    logger.info("unprune_versions() called", extra={"workspace": workspace, "from": from_version, "to": to_version})
+
+    db = _get_db()
+    state_manager = _get_state_manager()
+
+    validate_workspace_name(workspace)
+    validate_version(from_version)
+    validate_version(to_version)
+
+    try:
+        result = db.unprune_versions(workspace, from_version, to_version)
+
+        # Log to audit
+        db.log_audit(
+            operation="unprune_versions",
+            workspace=workspace,
+            reason=f"Restored pruned versions {from_version}-{to_version}",
+            details={
+                "from_version": from_version,
+                "to_version": to_version,
+                "unpruned_count": result["unpruned_count"],
+            },
+        )
+
+        state_manager.add_action(f"Restored {result['unpruned_count']} versions ({from_version}-{to_version})")
+
+        logger.info(
+            "unprune_versions() succeeded",
+            extra={"workspace": workspace, "unpruned_count": result["unpruned_count"]},
+        )
+        return result
+    except Exception as e:
+        logger.error(
+            "unprune_versions() failed",
+            extra={"workspace": workspace, "from": from_version, "to": to_version, "error": str(e)},
+        )
+        raise
+
+
+@mcp.tool()
+def get_pruned_count(workspace: str) -> dict:
+    """Get the count of pruned versions in a workspace.
+
+    Args:
+        workspace: Workspace name
+
+    Returns:
+        Dict with workspace and pruned_count
+    """
+    db = _get_db()
+
+    validate_workspace_name(workspace)
+
+    count = db.get_pruned_count(workspace)
+    return {"workspace": workspace, "pruned_count": count}
+
+
 @mcp.tool()
 def list_snapshots(workspace: str, limit: int = 50, offset: int = 0) -> ListSnapshotsResponse:
     """[DEPRECATED] List snapshots for a workspace with pagination.
