@@ -1167,24 +1167,3 @@ main {
         flex-wrap: wrap;
     }
 }
-
-/* Version Tags and Pruning */
-.pruned-badge {
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    opacity: 0.8;
-}
-
-.version-item.tagged {
-    background: rgba(255, 215, 0, 0.05);
-}
-
-.version-tag {
-    font-size: 0.85rem;
-}
-
-.pruned-notice {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
