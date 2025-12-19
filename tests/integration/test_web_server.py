@@ -20,7 +20,6 @@ from goldfish.web_server import (
     GoldfishWebServer,
     ProjectInfo,
     discover_projects,
-    get_web_lock_file,
     get_web_pid_file,
     get_web_port_file,
     is_web_server_running,
@@ -282,7 +281,6 @@ class TestWebServerLifecycle:
         # Ensure no server is running - force cleanup of stale state
         get_web_pid_file().unlink(missing_ok=True)
         get_web_port_file().unlink(missing_ok=True)
-        get_web_lock_file().unlink(missing_ok=True)
         if is_web_server_running()[0]:
             stop_web_server(timeout=5)
             time.sleep(0.5)
@@ -290,20 +288,12 @@ class TestWebServerLifecycle:
         # Spawn server
         pid = spawn_web_server(port=7347, open_browser=False)
         assert pid > 0
-
-        # Wait for server to start with retry (up to 10 seconds)
-        running = False
-        server_pid = None
-        port = None
-        for _ in range(20):
-            time.sleep(0.5)
-            running, server_pid, port = is_web_server_running()
-            if running:
-                break
+        time.sleep(2)  # Give it time to start and initialize
 
         try:
             # Verify it's running
-            assert running, "Web server failed to start within 10 seconds"
+            running, server_pid, port = is_web_server_running()
+            assert running
             assert server_pid == pid
             assert port == 7347
 

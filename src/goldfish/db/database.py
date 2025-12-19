@@ -107,10 +107,6 @@ class Database:
                 ("source_stage_run_id", "TEXT"),  # Upstream stage run
                 ("source_stage_version_id", "INTEGER"),  # Upstream stage version
             ],
-            "workspace_versions": [
-                ("pruned_at", "TEXT"),  # When version was pruned
-                ("prune_reason", "TEXT"),  # Why version was pruned
-            ],
         }
 
         with self._conn() as conn:
@@ -179,18 +175,6 @@ class Database:
                     ON stage_versions(workspace_name, stage_name, git_sha, config_hash);
                 CREATE INDEX IF NOT EXISTS idx_stage_versions_workspace_stage
                     ON stage_versions(workspace_name, stage_name);
-
-                -- Version tags (user-defined names for significant versions)
-                CREATE TABLE IF NOT EXISTS workspace_version_tags (
-                    workspace_name TEXT NOT NULL,
-                    version TEXT NOT NULL,
-                    tag_name TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (workspace_name, tag_name),
-                    FOREIGN KEY (workspace_name, version) REFERENCES workspace_versions(workspace_name, version)
-                );
-                CREATE INDEX IF NOT EXISTS idx_version_tags_version
-                    ON workspace_version_tags(workspace_name, version);
                 """
             )
             # Bump schema version
@@ -1004,53 +988,40 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
-    def list_versions(self, workspace_name: str, include_pruned: bool = False) -> list[dict]:
+    def list_versions(self, workspace_name: str) -> list[dict]:
         """List all versions for a workspace.
 
         Args:
             workspace_name: Workspace name
-            include_pruned: If True, include pruned versions in the list
 
         Returns:
             List of version dicts, ordered by creation time
         """
         with self._conn() as conn:
-            if include_pruned:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM workspace_versions
-                    WHERE workspace_name = ?
-                    ORDER BY created_at ASC
-                    """,
-                    (workspace_name,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM workspace_versions
-                    WHERE workspace_name = ?
-                    AND pruned_at IS NULL
-                    ORDER BY created_at ASC
-                    """,
-                    (workspace_name,),
-                ).fetchall()
+            rows = conn.execute(
+                """
+                SELECT * FROM workspace_versions
+                WHERE workspace_name = ?
+                ORDER BY created_at ASC
+                """,
+                (workspace_name,),
+            ).fetchall()
             return [dict(row) for row in rows]
 
     def get_latest_version(self, workspace_name: str) -> dict | None:
-        """Get the most recent non-pruned version for a workspace.
+        """Get the most recent version for a workspace.
 
         Args:
             workspace_name: Workspace name
 
         Returns:
-            Latest non-pruned version dict or None if no versions
+            Latest version dict or None if no versions
         """
         with self._conn() as conn:
             row = conn.execute(
                 """
                 SELECT * FROM workspace_versions
                 WHERE workspace_name = ?
-                AND pruned_at IS NULL
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
@@ -1086,559 +1057,14 @@ class Database:
     def get_next_version_number(self, workspace_name: str) -> str:
         """Get the next version number for a workspace.
 
-        Includes pruned versions in the count to ensure version numbers
-        are never reused (v1, v2, ... v50 pruned, next is v51 not v1).
-
         Args:
             workspace_name: Workspace name
 
         Returns:
             Next version string (e.g., "v1", "v2")
         """
-        # Include pruned versions to ensure continuous numbering
-        versions = self.list_versions(workspace_name, include_pruned=True)
+        versions = self.list_versions(workspace_name)
         return f"v{len(versions) + 1}"
-
-    # --- Version tag operations ---
-
-    def create_tag(self, workspace_name: str, version: str, tag_name: str) -> dict:
-        """Create a tag for a version.
-
-        Tags can be applied retroactively to any existing version.
-
-        Args:
-            workspace_name: Workspace name
-            version: Version to tag (e.g., "v1", "v2")
-            tag_name: Name for the tag (e.g., "baseline-working")
-
-        Returns:
-            Dict with tag info
-
-        Raises:
-            GoldfishError: If version doesn't exist or tag already exists
-        """
-        from goldfish.errors import GoldfishError
-
-        timestamp = datetime.now(UTC).isoformat()
-
-        with self._conn() as conn:
-            # Check version exists in this workspace
-            version_row = conn.execute(
-                """
-                SELECT * FROM workspace_versions
-                WHERE workspace_name = ? AND version = ?
-                """,
-                (workspace_name, version),
-            ).fetchone()
-
-            if not version_row:
-                raise GoldfishError(
-                    f"Version '{version}' not found in workspace '{workspace_name}'",
-                    details={"workspace": workspace_name, "version": version},
-                )
-
-            # Check tag doesn't already exist
-            existing_tag = conn.execute(
-                """
-                SELECT * FROM workspace_version_tags
-                WHERE workspace_name = ? AND tag_name = ?
-                """,
-                (workspace_name, tag_name),
-            ).fetchone()
-
-            if existing_tag:
-                raise GoldfishError(
-                    f"Tag '{tag_name}' already exists in workspace '{workspace_name}'",
-                    details={"workspace": workspace_name, "tag_name": tag_name},
-                )
-
-            # Create the tag
-            conn.execute(
-                """
-                INSERT INTO workspace_version_tags
-                (workspace_name, version, tag_name, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (workspace_name, version, tag_name, timestamp),
-            )
-
-            return {
-                "workspace_name": workspace_name,
-                "version": version,
-                "tag_name": tag_name,
-                "created_at": timestamp,
-            }
-
-    def delete_tag(self, workspace_name: str, tag_name: str) -> None:
-        """Delete a tag.
-
-        Args:
-            workspace_name: Workspace name
-            tag_name: Name of the tag to delete
-
-        Raises:
-            GoldfishError: If tag doesn't exist
-        """
-        from goldfish.errors import GoldfishError
-
-        with self._conn() as conn:
-            # Check tag exists
-            existing = conn.execute(
-                """
-                SELECT * FROM workspace_version_tags
-                WHERE workspace_name = ? AND tag_name = ?
-                """,
-                (workspace_name, tag_name),
-            ).fetchone()
-
-            if not existing:
-                raise GoldfishError(
-                    f"Tag '{tag_name}' not found in workspace '{workspace_name}'",
-                    details={"workspace": workspace_name, "tag_name": tag_name},
-                )
-
-            conn.execute(
-                """
-                DELETE FROM workspace_version_tags
-                WHERE workspace_name = ? AND tag_name = ?
-                """,
-                (workspace_name, tag_name),
-            )
-
-    def list_tags(self, workspace_name: str) -> list[dict]:
-        """List all tags for a workspace.
-
-        Args:
-            workspace_name: Workspace name
-
-        Returns:
-            List of tag dicts, ordered by creation time
-        """
-        with self._conn() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM workspace_version_tags
-                WHERE workspace_name = ?
-                ORDER BY created_at ASC
-                """,
-                (workspace_name,),
-            ).fetchall()
-            return [dict(row) for row in rows]
-
-    def get_version_tags(self, workspace_name: str, version: str) -> list[dict]:
-        """Get all tags for a specific version.
-
-        Args:
-            workspace_name: Workspace name
-            version: Version to get tags for
-
-        Returns:
-            List of tag dicts for this version
-        """
-        with self._conn() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM workspace_version_tags
-                WHERE workspace_name = ? AND version = ?
-                ORDER BY created_at ASC
-                """,
-                (workspace_name, version),
-            ).fetchall()
-            return [dict(row) for row in rows]
-
-    # --- Version pruning operations ---
-
-    def is_version_tagged(self, workspace_name: str, version: str) -> bool:
-        """Check if a version has any tags (and thus is protected from pruning).
-
-        Args:
-            workspace_name: Workspace name
-            version: Version to check
-
-        Returns:
-            True if version has at least one tag
-        """
-        with self._conn() as conn:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) as count FROM workspace_version_tags
-                WHERE workspace_name = ? AND version = ?
-                """,
-                (workspace_name, version),
-            ).fetchone()
-            count: int = row["count"]
-            return count > 0
-
-    def prune_version(self, workspace_name: str, version: str, reason: str) -> dict:
-        """Prune a version (soft delete).
-
-        Pruned versions are hidden from list_versions() by default but
-        can still be accessed with include_pruned=True.
-
-        Args:
-            workspace_name: Workspace name
-            version: Version to prune
-            reason: Why pruning (min 15 chars)
-
-        Returns:
-            Dict with pruned version info
-
-        Raises:
-            GoldfishError: If version doesn't exist or is tagged (protected)
-        """
-        from goldfish.errors import GoldfishError
-
-        timestamp = datetime.now(UTC).isoformat()
-
-        with self._conn() as conn:
-            # Check version exists
-            version_row = conn.execute(
-                """
-                SELECT * FROM workspace_versions
-                WHERE workspace_name = ? AND version = ?
-                """,
-                (workspace_name, version),
-            ).fetchone()
-
-            if not version_row:
-                raise GoldfishError(
-                    f"Version '{version}' not found in workspace '{workspace_name}'",
-                    details={"workspace": workspace_name, "version": version},
-                )
-
-            # Check if already pruned
-            if version_row["pruned_at"] is not None:
-                raise GoldfishError(
-                    f"Version '{version}' is already pruned",
-                    details={"workspace": workspace_name, "version": version},
-                )
-
-            # Check if tagged (protected)
-            tag_count = conn.execute(
-                """
-                SELECT COUNT(*) as count FROM workspace_version_tags
-                WHERE workspace_name = ? AND version = ?
-                """,
-                (workspace_name, version),
-            ).fetchone()["count"]
-
-            if tag_count > 0:
-                raise GoldfishError(
-                    f"Cannot prune tagged version '{version}'. Remove the tag first.",
-                    details={"workspace": workspace_name, "version": version},
-                )
-
-            # Prune the version
-            conn.execute(
-                """
-                UPDATE workspace_versions
-                SET pruned_at = ?, prune_reason = ?
-                WHERE workspace_name = ? AND version = ?
-                """,
-                (timestamp, reason, workspace_name, version),
-            )
-
-            return {
-                "workspace_name": workspace_name,
-                "version": version,
-                "pruned_at": timestamp,
-                "prune_reason": reason,
-            }
-
-    def prune_versions(self, workspace_name: str, from_version: str, to_version: str, reason: str) -> dict:
-        """Prune a range of versions (inclusive).
-
-        Tagged versions within the range are skipped (not pruned).
-
-        Args:
-            workspace_name: Workspace name
-            from_version: Start version (e.g., "v3")
-            to_version: End version (e.g., "v7")
-            reason: Why pruning
-
-        Returns:
-            Dict with pruned_count and skipped_tagged count
-        """
-        from goldfish.errors import GoldfishError
-
-        timestamp = datetime.now(UTC).isoformat()
-
-        # Extract version numbers
-        try:
-            from_num = int(from_version.lstrip("v"))
-            to_num = int(to_version.lstrip("v"))
-        except ValueError as e:
-            raise GoldfishError(f"Invalid version format: {from_version} or {to_version}") from e
-
-        pruned_count = 0
-        skipped_tagged = 0
-
-        with self._conn() as conn:
-            # Get all versions in range
-            rows = conn.execute(
-                """
-                SELECT version FROM workspace_versions
-                WHERE workspace_name = ?
-                AND pruned_at IS NULL
-                """,
-                (workspace_name,),
-            ).fetchall()
-
-            for row in rows:
-                version = row["version"]
-                try:
-                    version_num = int(version.lstrip("v"))
-                except ValueError:
-                    continue
-
-                if from_num <= version_num <= to_num:
-                    # Check if tagged
-                    tag_count = conn.execute(
-                        """
-                        SELECT COUNT(*) as count FROM workspace_version_tags
-                        WHERE workspace_name = ? AND version = ?
-                        """,
-                        (workspace_name, version),
-                    ).fetchone()["count"]
-
-                    if tag_count > 0:
-                        skipped_tagged += 1
-                        continue
-
-                    # Prune this version
-                    conn.execute(
-                        """
-                        UPDATE workspace_versions
-                        SET pruned_at = ?, prune_reason = ?
-                        WHERE workspace_name = ? AND version = ?
-                        """,
-                        (timestamp, reason, workspace_name, version),
-                    )
-                    pruned_count += 1
-
-        return {
-            "workspace_name": workspace_name,
-            "from_version": from_version,
-            "to_version": to_version,
-            "pruned_count": pruned_count,
-            "skipped_tagged": skipped_tagged,
-        }
-
-    def prune_before_tag(self, workspace_name: str, tag_name: str, reason: str) -> dict:
-        """Prune all versions before a tagged milestone.
-
-        The tagged version itself is NOT pruned.
-
-        Args:
-            workspace_name: Workspace name
-            tag_name: Tag marking the milestone
-            reason: Why pruning
-
-        Returns:
-            Dict with pruned_count
-        """
-        from goldfish.errors import GoldfishError
-
-        timestamp = datetime.now(UTC).isoformat()
-
-        with self._conn() as conn:
-            # Get the tagged version
-            tag_row = conn.execute(
-                """
-                SELECT version FROM workspace_version_tags
-                WHERE workspace_name = ? AND tag_name = ?
-                """,
-                (workspace_name, tag_name),
-            ).fetchone()
-
-            if not tag_row:
-                raise GoldfishError(
-                    f"Tag '{tag_name}' not found in workspace '{workspace_name}'",
-                    details={"workspace": workspace_name, "tag_name": tag_name},
-                )
-
-            tagged_version = tag_row["version"]
-            try:
-                tagged_num = int(tagged_version.lstrip("v"))
-            except ValueError as e:
-                raise GoldfishError(f"Invalid tagged version format: {tagged_version}") from e
-
-            # Prune all versions before the tagged one (skip other tagged versions)
-            pruned_count = 0
-            rows = conn.execute(
-                """
-                SELECT version FROM workspace_versions
-                WHERE workspace_name = ?
-                AND pruned_at IS NULL
-                """,
-                (workspace_name,),
-            ).fetchall()
-
-            for row in rows:
-                version = row["version"]
-                try:
-                    version_num = int(version.lstrip("v"))
-                except ValueError:
-                    continue
-
-                if version_num < tagged_num:
-                    # Check if this version is also tagged
-                    tag_count = conn.execute(
-                        """
-                        SELECT COUNT(*) as count FROM workspace_version_tags
-                        WHERE workspace_name = ? AND version = ?
-                        """,
-                        (workspace_name, version),
-                    ).fetchone()["count"]
-
-                    if tag_count > 0:
-                        continue  # Skip tagged versions
-
-                    # Prune this version
-                    conn.execute(
-                        """
-                        UPDATE workspace_versions
-                        SET pruned_at = ?, prune_reason = ?
-                        WHERE workspace_name = ? AND version = ?
-                        """,
-                        (timestamp, reason, workspace_name, version),
-                    )
-                    pruned_count += 1
-
-        return {
-            "workspace_name": workspace_name,
-            "tag_name": tag_name,
-            "pruned_count": pruned_count,
-        }
-
-    def unprune_version(self, workspace_name: str, version: str) -> dict:
-        """Restore a pruned version.
-
-        Args:
-            workspace_name: Workspace name
-            version: Version to restore
-
-        Returns:
-            Dict with restored version info
-        """
-        from goldfish.errors import GoldfishError
-
-        with self._conn() as conn:
-            # Check version exists and is pruned
-            version_row = conn.execute(
-                """
-                SELECT * FROM workspace_versions
-                WHERE workspace_name = ? AND version = ?
-                """,
-                (workspace_name, version),
-            ).fetchone()
-
-            if not version_row:
-                raise GoldfishError(
-                    f"Version '{version}' not found in workspace '{workspace_name}'",
-                    details={"workspace": workspace_name, "version": version},
-                )
-
-            if version_row["pruned_at"] is None:
-                raise GoldfishError(
-                    f"Version '{version}' is not pruned",
-                    details={"workspace": workspace_name, "version": version},
-                )
-
-            # Restore the version
-            conn.execute(
-                """
-                UPDATE workspace_versions
-                SET pruned_at = NULL, prune_reason = NULL
-                WHERE workspace_name = ? AND version = ?
-                """,
-                (workspace_name, version),
-            )
-
-            return {
-                "workspace_name": workspace_name,
-                "version": version,
-                "restored": True,
-            }
-
-    def unprune_versions(self, workspace_name: str, from_version: str, to_version: str) -> dict:
-        """Restore a range of pruned versions.
-
-        Args:
-            workspace_name: Workspace name
-            from_version: Start version (e.g., "v4")
-            to_version: End version (e.g., "v6")
-
-        Returns:
-            Dict with unpruned_count
-        """
-        from goldfish.errors import GoldfishError
-
-        # Extract version numbers
-        try:
-            from_num = int(from_version.lstrip("v"))
-            to_num = int(to_version.lstrip("v"))
-        except ValueError as e:
-            raise GoldfishError(f"Invalid version format: {from_version} or {to_version}") from e
-
-        unpruned_count = 0
-
-        with self._conn() as conn:
-            # Get all pruned versions in range
-            rows = conn.execute(
-                """
-                SELECT version FROM workspace_versions
-                WHERE workspace_name = ?
-                AND pruned_at IS NOT NULL
-                """,
-                (workspace_name,),
-            ).fetchall()
-
-            for row in rows:
-                version = row["version"]
-                try:
-                    version_num = int(version.lstrip("v"))
-                except ValueError:
-                    continue
-
-                if from_num <= version_num <= to_num:
-                    conn.execute(
-                        """
-                        UPDATE workspace_versions
-                        SET pruned_at = NULL, prune_reason = NULL
-                        WHERE workspace_name = ? AND version = ?
-                        """,
-                        (workspace_name, version),
-                    )
-                    unpruned_count += 1
-
-        return {
-            "workspace_name": workspace_name,
-            "from_version": from_version,
-            "to_version": to_version,
-            "unpruned_count": unpruned_count,
-        }
-
-    def get_pruned_count(self, workspace_name: str) -> int:
-        """Get the count of pruned versions in a workspace.
-
-        Args:
-            workspace_name: Workspace name
-
-        Returns:
-            Number of pruned versions
-        """
-        with self._conn() as conn:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) as count FROM workspace_versions
-                WHERE workspace_name = ?
-                AND pruned_at IS NOT NULL
-                """,
-                (workspace_name,),
-            ).fetchone()
-            count: int = row["count"]
-            return count
 
     # --- Stage run operations ---
 
