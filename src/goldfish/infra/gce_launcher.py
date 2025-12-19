@@ -67,6 +67,19 @@ class GCELauncher:
         self.zones = zones or [zone]  # Default to list containing just default_zone
         self.gpu_preference = gpu_preference or ["h100", "a100", "none"]
 
+    @property
+    def bucket_uri(self) -> str | None:
+        """Return bucket as a gs:// URI.
+
+        The bucket may be stored with or without the gs:// prefix.
+        This property normalizes it for use with gsutil commands.
+        """
+        if not self.bucket:
+            return None
+        if self.bucket.startswith("gs://"):
+            return self.bucket
+        return f"gs://{self.bucket}"
+
     def launch_instance(
         self,
         image_tag: str,
@@ -612,39 +625,107 @@ class GCELauncher:
             return zone or None
         return None
 
-    def _get_exit_code(self, instance_name: str) -> int:
-        """Get exit code from GCS.
+    def _get_exit_code(self, instance_name: str, max_attempts: int = 5, retry_delay: float = 2.0) -> int:
+        """Get exit code from GCS with retry logic.
+
+        Uses retries to handle GCS eventual consistency and temporary failures.
+        The instance uploads exit_code.txt before self-deleting, but there can be
+        a race condition where the daemon checks before GCS is synced.
 
         Args:
             instance_name: Instance identifier
+            max_attempts: Number of retry attempts (default 5)
+            retry_delay: Seconds between retries (default 2.0)
 
         Returns:
-            Exit code, or 1 if not found (missing file = crash before writing)
+            Exit code, or 1 if not found after all retries (missing file = crash)
         """
-        if not self.bucket:
+        import time
+
+        if not self.bucket_uri:
             # No bucket configured - assume success for local-like behavior
             return 0
 
-        try:
-            result = subprocess.run(
-                [
-                    "gsutil",
-                    "cat",
-                    f"{self.bucket}/runs/{instance_name}/logs/exit_code.txt",
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            return int(result.stdout.strip() or "0")
-        except Exception:
-            # Missing exit_code.txt means script crashed before writing it
-            # This is a failure, not success
-            logger.warning(
-                "exit_code.txt not found for %s - treating as failure (script may have crashed)",
-                instance_name,
-            )
-            return 1
+        gcs_path = f"{self.bucket_uri}/runs/{instance_name}/logs/exit_code.txt"
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = subprocess.run(
+                    ["gsutil", "cat", gcs_path],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=30,  # Prevent hanging
+                )
+                exit_code = int(result.stdout.strip() or "0")
+                if attempt > 1:
+                    logger.info(
+                        "exit_code.txt retrieved for %s on attempt %d (exit_code=%d)",
+                        instance_name,
+                        attempt,
+                        exit_code,
+                    )
+                return exit_code
+            except subprocess.TimeoutExpired as e:
+                last_error = e
+                logger.warning(
+                    "gsutil timeout for %s (attempt %d/%d)",
+                    instance_name,
+                    attempt,
+                    max_attempts,
+                )
+            except subprocess.CalledProcessError as e:
+                last_error = e
+                # Check if it's a "not found" error vs other errors
+                stderr = (e.stderr or "").lower()
+                if "no urls matched" in stderr or "commandexception" in stderr:
+                    logger.debug(
+                        "exit_code.txt not found for %s (attempt %d/%d, may be uploading)",
+                        instance_name,
+                        attempt,
+                        max_attempts,
+                    )
+                else:
+                    logger.warning(
+                        "gsutil error for %s (attempt %d/%d): %s",
+                        instance_name,
+                        attempt,
+                        max_attempts,
+                        e.stderr,
+                    )
+            except ValueError as e:
+                # Invalid content in exit_code.txt (not an integer)
+                last_error = e
+                logger.error(
+                    "Invalid exit_code.txt content for %s: %s",
+                    instance_name,
+                    e,
+                )
+                return 1  # Treat invalid content as failure, no retry
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Unexpected error reading exit_code.txt for %s (attempt %d/%d): %s",
+                    instance_name,
+                    attempt,
+                    max_attempts,
+                    e,
+                )
+
+            # Wait before retry (except on last attempt)
+            if attempt < max_attempts:
+                time.sleep(retry_delay)
+
+        # All retries exhausted - file genuinely missing (script crashed before writing)
+        logger.warning(
+            "exit_code.txt not found for %s after %d attempts - treating as failure "
+            "(script may have crashed before writing exit code). Last error: %s",
+            instance_name,
+            max_attempts,
+            last_error,
+        )
+        return 1
 
     def get_instance_logs(
         self,
@@ -705,11 +786,11 @@ class GCELauncher:
         since_dt = _parse_dt(since) if since else None
 
         # Try GCS first - fetch both stdout and stderr
-        if self.bucket:
+        if self.bucket_uri:
             try:
                 # Try new format (stdout.log + stderr.log)
-                stdout_path = f"{self.bucket}/runs/{instance_name}/logs/stdout.log"
-                stderr_path = f"{self.bucket}/runs/{instance_name}/logs/stderr.log"
+                stdout_path = f"{self.bucket_uri}/runs/{instance_name}/logs/stdout.log"
+                stderr_path = f"{self.bucket_uri}/runs/{instance_name}/logs/stderr.log"
 
                 # Fetch stdout
                 proc = subprocess.Popen(
@@ -752,7 +833,7 @@ class GCELauncher:
                 # Fall back to legacy train.log format
                 try:
                     proc = subprocess.Popen(
-                        ["gsutil", "cat", f"{self.bucket}/runs/{instance_name}/logs/train.log"],
+                        ["gsutil", "cat", f"{self.bucket_uri}/runs/{instance_name}/logs/train.log"],
                         stdout=subprocess.PIPE,
                         text=True,
                     )
