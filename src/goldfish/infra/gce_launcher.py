@@ -232,6 +232,8 @@ class GCELauncher:
         compute_config = stage_config.get("compute", {})
         max_runtime = compute_config.get("max_runtime_seconds", DEFAULT_MAX_RUNTIME_SECONDS)
         heartbeat_timeout = compute_config.get("heartbeat_timeout_seconds")  # None = no supervisor
+        # Log sync interval for real-time log visibility (default 30s, configurable)
+        log_sync_interval = compute_config.get("log_sync_interval", 30)
 
         # Build startup script with proper orchestration and cost protection
         startup_script = build_startup_script(
@@ -254,6 +256,8 @@ class GCELauncher:
             # Cost protection - ALWAYS set max_runtime to prevent runaway instances
             max_runtime_seconds=max_runtime,
             heartbeat_timeout_seconds=heartbeat_timeout,
+            # Real-time log visibility - sync logs to GCS every N seconds
+            log_sync_interval=log_sync_interval,
         )
 
         if use_capacity_search and self.resources:
@@ -732,6 +736,7 @@ class GCELauncher:
         instance_name: str,
         tail_lines: int | None = None,
         since: str | None = None,
+        retry_on_empty: bool = False,
     ) -> str:
         """Retrieve logs from GCE instance.
 
@@ -739,6 +744,10 @@ class GCELauncher:
 
         Args:
             instance_name: Instance identifier
+            tail_lines: Number of lines from end to return
+            since: Only return logs after this ISO timestamp
+            retry_on_empty: If True, retry once after delay if logs are empty
+                           (handles GCS eventual consistency)
 
         Returns:
             Instance logs as string
@@ -785,32 +794,51 @@ class GCELauncher:
         instance_name = self._sanitize_name(instance_name)
         since_dt = _parse_dt(since) if since else None
 
-        # Try GCS first - fetch both stdout and stderr
-        if self.bucket_uri:
+        def _fetch_gcs_logs() -> str | None:
+            """Fetch logs from GCS, return None if not available."""
+            if not self.bucket_uri:
+                logger.debug("_fetch_gcs_logs: no bucket_uri configured")
+                return None
+
             try:
                 # Try new format (stdout.log + stderr.log)
                 stdout_path = f"{self.bucket_uri}/runs/{instance_name}/logs/stdout.log"
                 stderr_path = f"{self.bucket_uri}/runs/{instance_name}/logs/stderr.log"
+                logger.debug("Fetching logs from %s", stdout_path)
 
-                # Fetch stdout
+                # Fetch stdout using gcloud storage (faster than gsutil)
                 proc = subprocess.Popen(
-                    ["gsutil", "cat", stdout_path],
+                    ["gcloud", "storage", "cat", stdout_path],
                     stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
                 )
                 try:
                     if not proc.stdout:
-                        raise RuntimeError("No stdout from gsutil cat")
+                        raise RuntimeError("No stdout from gcloud storage cat")
                     with proc.stdout:
                         stdout_output = _collect(proc.stdout, since_dt)
                 finally:
                     proc.wait()  # Always clean up process
 
+                # Check return code - if gcloud failed, try legacy format
+                if proc.returncode != 0:
+                    stderr_msg = proc.stderr.read() if proc.stderr else ""
+                    logger.debug(
+                        "gcloud storage cat failed for %s (rc=%d): %s",
+                        stdout_path,
+                        proc.returncode,
+                        stderr_msg.strip(),
+                    )
+                    raise RuntimeError(f"gcloud storage cat failed: {stderr_msg}")
+
+                logger.debug("Fetched %d bytes from stdout.log", len(stdout_output))
+
                 # Fetch stderr (may not exist for older runs)
                 stderr_output = ""
                 try:
                     proc2 = subprocess.Popen(
-                        ["gsutil", "cat", stderr_path],
+                        ["gcloud", "storage", "cat", stderr_path],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.DEVNULL,
                         text=True,
@@ -829,17 +857,18 @@ class GCELauncher:
                     return stdout_output + "\n\n=== STDERR ===\n" + stderr_output
                 return stdout_output
 
-            except Exception:
-                # Fall back to legacy train.log format
+            except Exception as e:
+                logger.debug("_fetch_gcs_logs failed for new format: %s", e)
+                # Try legacy train.log format
                 try:
                     proc = subprocess.Popen(
-                        ["gsutil", "cat", f"{self.bucket_uri}/runs/{instance_name}/logs/train.log"],
+                        ["gcloud", "storage", "cat", f"{self.bucket_uri}/runs/{instance_name}/logs/train.log"],
                         stdout=subprocess.PIPE,
                         text=True,
                     )
                     try:
                         if not proc.stdout:
-                            raise RuntimeError("No stdout from gsutil cat")
+                            raise RuntimeError("No stdout from gcloud storage cat")
                         with proc.stdout:
                             output = _collect(proc.stdout, since_dt)
                     finally:
@@ -848,6 +877,18 @@ class GCELauncher:
                         return output
                 except Exception:
                     pass
+                return None
+
+        # Try GCS first - with optional retry on empty
+        result = _fetch_gcs_logs()
+
+        # Retry once if result is empty and retry_on_empty is enabled
+        if retry_on_empty and (result is None or result == ""):
+            time.sleep(5)  # Wait for GCS eventual consistency
+            result = _fetch_gcs_logs()
+
+        if result is not None:
+            return result
 
         # Fall back to serial console - find correct zone first
         zone = self._find_instance_zone(instance_name)
@@ -867,8 +908,8 @@ class GCELauncher:
             if self.project_id:
                 cmd.append(f"--project={self.project_id}")
 
-            result = run_gcloud(cmd, check=False)
-            return _collect(result.stdout.splitlines(keepends=True), since_dt)
+            gcloud_result = run_gcloud(cmd, check=False)
+            return _collect(gcloud_result.stdout.splitlines(keepends=True), since_dt)
         except Exception as e:
             return f"Failed to retrieve logs: {e}"
 
