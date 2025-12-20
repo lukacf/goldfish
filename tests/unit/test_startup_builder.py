@@ -8,6 +8,7 @@ from goldfish.infra.startup_builder import (
     docker_run_section,
     gcsfuse_section,
     gpu_driver_section,
+    log_syncer_section,
     stage_log_section,
 )
 
@@ -418,3 +419,153 @@ def test_build_startup_script_with_cmd():
 
     # The cmd should appear after the image in the DOCKER_CMD array
     assert "test-image:latest /entrypoint.sh" in script
+
+
+# =============================================================================
+# Log Syncer Tests - Real-time log streaming to GCS
+# =============================================================================
+
+
+class TestLogSyncer:
+    """Tests for log_syncer_section - periodic log upload to GCS."""
+
+    def test_log_syncer_section_generates_background_process(self):
+        """Log syncer should create bash function that runs in background."""
+        script = log_syncer_section(bucket="test-bucket", bucket_path="runs/test-run")
+
+        # Should define start_log_syncer function
+        assert "start_log_syncer()" in script or "start_log_syncer ()" in script
+
+        # Should run in background with &
+        assert "&" in script
+
+        # Should track PID for cleanup
+        assert "LOG_SYNCER_PID" in script
+
+    def test_log_syncer_uses_correct_gcs_paths(self):
+        """Log syncer should upload to correct gs://bucket/path/logs/ location."""
+        script = log_syncer_section(bucket="my-bucket", bucket_path="runs/stage-abc123")
+
+        # Should upload stdout and stderr to GCS
+        assert "gs://my-bucket/runs/stage-abc123/logs/stdout.log" in script
+        assert "gs://my-bucket/runs/stage-abc123/logs/stderr.log" in script
+
+        # Should use gcloud storage cp for uploads
+        assert "gcloud storage cp" in script
+
+    def test_log_syncer_respects_sync_interval(self):
+        """Log syncer should sleep for configured interval between syncs."""
+        script = log_syncer_section(bucket="test-bucket", bucket_path="runs/test", sync_interval=60)
+
+        # Should have the configured sleep interval
+        assert "sleep 60" in script or "LOG_SYNC_INTERVAL=60" in script
+
+    def test_log_syncer_default_interval(self):
+        """Log syncer should use 30 second default interval."""
+        script = log_syncer_section(bucket="test-bucket", bucket_path="runs/test")
+
+        # Default should be 30 seconds
+        assert "30" in script
+
+    def test_log_syncer_loops_while_docker_running(self):
+        """Log syncer should continue until Docker process exits."""
+        script = log_syncer_section(bucket="test-bucket", bucket_path="runs/test")
+
+        # Should check if Docker is still running
+        assert "DOCKER_PID" in script
+        assert "kill -0" in script or "while" in script
+
+    def test_log_syncer_final_sync_after_docker_exits(self):
+        """Log syncer should do final sync after Docker exits."""
+        script = log_syncer_section(bucket="test-bucket", bucket_path="runs/test")
+
+        # Should have final upload after loop (uploads happen at least twice in script)
+        # This ensures final logs are captured even if they came after last periodic sync
+        stdout_count = script.count("stdout.log")
+        stderr_count = script.count("stderr.log")
+
+        # At least 2 occurrences: in loop + final sync
+        assert stdout_count >= 2, "Should sync stdout both in loop and after"
+        assert stderr_count >= 2, "Should sync stderr both in loop and after"
+
+    def test_log_syncer_uses_local_tmp_paths(self):
+        """Log syncer should read from local /tmp/ paths."""
+        script = log_syncer_section(bucket="test-bucket", bucket_path="runs/test")
+
+        # Should reference local temp paths
+        assert "/tmp/stdout.log" in script or "LOCAL_STDOUT" in script
+        assert "/tmp/stderr.log" in script or "LOCAL_STDERR" in script
+
+    def test_log_syncer_ignores_upload_errors(self):
+        """Log syncer should not fail if gsutil cp fails."""
+        script = log_syncer_section(bucket="test-bucket", bucket_path="runs/test")
+
+        # Should have || true or 2>/dev/null to ignore errors
+        assert "|| true" in script or "2>/dev/null" in script
+
+
+class TestBuildStartupScriptWithLogSyncer:
+    """Tests for build_startup_script with log syncer integration."""
+
+    def test_build_startup_script_uses_local_log_paths(self):
+        """Startup script should write Docker output to /tmp/ not gcsfuse."""
+        script = build_startup_script(
+            bucket="test-bucket",
+            bucket_prefix="",
+            run_path="runs/test",
+            image="test-image",
+            entrypoint="/bin/bash",
+            env_map={},
+            log_sync_interval=30,
+        )
+
+        # Docker stdout/stderr should go to local /tmp/ paths
+        assert 'STDOUT_LOG="/tmp/stdout.log"' in script or "LOCAL_STDOUT" in script
+        # Should NOT write directly to gcsfuse mount for streaming
+        # (gcsfuse mount is /mnt/gcs/... which doesn't work for real-time)
+
+    def test_build_startup_script_starts_log_syncer(self):
+        """Startup script should start log syncer after Docker begins."""
+        script = build_startup_script(
+            bucket="test-bucket",
+            bucket_prefix="",
+            run_path="runs/test",
+            image="test-image",
+            entrypoint="/bin/bash",
+            env_map={},
+            log_sync_interval=30,
+        )
+
+        # Should call start_log_syncer
+        assert "start_log_syncer" in script
+
+        # Log syncer should start AFTER Docker run begins
+        # Find where DOCKER_PID is ASSIGNED (with $!), not just referenced
+        docker_run_idx = script.find("DOCKER_PID=$!")
+
+        # Find where start_log_syncer is CALLED (as a command, not in function definition)
+        # The function definition has "start_log_syncer()" but the call has "start_log_syncer\n"
+        import re
+
+        calls = list(re.finditer(r"^start_log_syncer$", script, re.MULTILINE))
+        assert len(calls) > 0, "start_log_syncer should be called"
+        syncer_call_idx = calls[0].start()
+
+        # Docker PID must be set before syncer starts (syncer needs it)
+        assert docker_run_idx > 0, "DOCKER_PID should be set"
+        assert docker_run_idx < syncer_call_idx, "DOCKER_PID must be set before syncer starts"
+
+    def test_build_startup_script_custom_sync_interval(self):
+        """Startup script should respect custom log_sync_interval."""
+        script = build_startup_script(
+            bucket="test-bucket",
+            bucket_prefix="",
+            run_path="runs/test",
+            image="test-image",
+            entrypoint="/bin/bash",
+            env_map={},
+            log_sync_interval=10,
+        )
+
+        # Should have the custom interval
+        assert "10" in script

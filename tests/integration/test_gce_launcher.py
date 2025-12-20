@@ -384,24 +384,34 @@ def test_get_instance_logs_from_gcs(mock_popen, launcher):
     """Test log retrieval from GCS."""
     import io
 
-    proc = Mock()
-    proc.stdout = io.StringIO("Training started\nEpoch 1 complete\n")
-    proc.wait = Mock(return_value=0)
-    proc.returncode = 0
-    mock_popen.return_value = proc
+    # Mock for stdout fetch
+    proc_stdout = Mock()
+    proc_stdout.stdout = io.StringIO("Training started\nEpoch 1 complete\n")
+    proc_stdout.stderr = io.StringIO("")
+    proc_stdout.wait = Mock(return_value=0)
+    proc_stdout.returncode = 0
+
+    # Mock for stderr fetch
+    proc_stderr = Mock()
+    proc_stderr.stdout = io.StringIO("")
+    proc_stderr.wait = Mock(return_value=0)
+    proc_stderr.returncode = 0
+
+    mock_popen.side_effect = [proc_stdout, proc_stderr]
 
     logs = launcher.get_instance_logs("test-instance")
 
     assert "Training started" in logs
     assert "Epoch 1 complete" in logs
 
-    # Verify gsutil cat was called for stdout (new format)
+    # Verify gcloud storage cat was called for stdout (new format)
     # Check the first call (stdout), there may be a second call for stderr
     first_call = mock_popen.call_args_list[0]
     cmd = first_call[0][0]
-    assert cmd[0] == "gsutil"
-    assert "cat" in cmd
-    assert "gs://test-bucket/runs/test-instance/logs/stdout.log" in cmd
+    assert cmd[0] == "gcloud"
+    assert cmd[1] == "storage"
+    assert cmd[2] == "cat"
+    assert cmd[3] == "gs://test-bucket/runs/test-instance/logs/stdout.log"
 
 
 @patch("goldfish.infra.gce_launcher.subprocess.Popen")
