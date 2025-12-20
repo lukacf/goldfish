@@ -486,6 +486,55 @@ log_stage() {{
 """
 
 
+def log_syncer_section(bucket: str, bucket_path: str, sync_interval: int = 30) -> str:
+    """Generate background log syncer that periodically uploads logs to GCS.
+
+    GCSFuse streaming writes don't finalize objects until the file is closed,
+    making logs invisible during execution. This syncer copies logs from local
+    /tmp/ to GCS periodically, enabling real-time log viewing.
+
+    Args:
+        bucket: GCS bucket name (without gs:// prefix)
+        bucket_path: Path within bucket for this run
+        sync_interval: Seconds between syncs (default 30)
+
+    Returns:
+        Shell script fragment with start_log_syncer function
+    """
+    gcs_stdout = f"gs://{bucket}/{bucket_path}/logs/stdout.log"
+    gcs_stderr = f"gs://{bucket}/{bucket_path}/logs/stderr.log"
+
+    return f"""
+# === LOG SYNCER (Real-time log visibility) ===
+# Background process that periodically uploads logs from /tmp/ to GCS
+# This works around gcsfuse streaming writes not finalizing until close()
+LOCAL_STDOUT=/tmp/stdout.log
+LOCAL_STDERR=/tmp/stderr.log
+LOG_SYNC_INTERVAL={sync_interval}
+
+start_log_syncer() {{
+    (
+        # Wait for Docker to start and create initial logs
+        sleep 5
+
+        # Sync logs periodically while Docker is running
+        while kill -0 $DOCKER_PID 2>/dev/null; do
+            sleep $LOG_SYNC_INTERVAL
+            gcloud storage cp "$LOCAL_STDOUT" {gcs_stdout} --quiet 2>/dev/null || true
+            gcloud storage cp "$LOCAL_STDERR" {gcs_stderr} --quiet 2>/dev/null || true
+        done
+
+        # Final sync after Docker exits to capture last logs
+        sleep 2
+        gcloud storage cp "$LOCAL_STDOUT" {gcs_stdout} --quiet 2>/dev/null || true
+        gcloud storage cp "$LOCAL_STDERR" {gcs_stderr} --quiet 2>/dev/null || true
+    ) &
+    LOG_SYNCER_PID=$!
+    echo "Log syncer started (PID=$LOG_SYNCER_PID, interval={sync_interval}s)"
+}}
+"""
+
+
 def build_startup_script(
     *,
     bucket: str,
@@ -504,6 +553,7 @@ def build_startup_script(
     cmd: str = "",
     max_runtime_seconds: int | None = None,
     heartbeat_timeout_seconds: int | None = None,
+    log_sync_interval: int | None = None,
 ) -> str:
     """Build complete startup script for GCE instance.
 
@@ -524,6 +574,7 @@ def build_startup_script(
         cmd: Command/script to pass to entrypoint (e.g., "/entrypoint.sh")
         max_runtime_seconds: Maximum runtime before watchdog kills instance (None=no limit)
         heartbeat_timeout_seconds: Heartbeat timeout for supervisor (None=no supervisor)
+        log_sync_interval: Seconds between log syncs to GCS (None=use gcsfuse, >0=use syncer)
 
     Returns:
         Complete startup script as string
@@ -531,9 +582,18 @@ def build_startup_script(
     # Build GCS paths
     bucket_path = "/".join(part for part in [bucket_prefix.strip("/"), run_path.strip("/")] if part)
     stage_uri = f"gs://{bucket}/{bucket_path}/logs/stage_times.log"
-    # Separate stdout and stderr for better error visibility
-    stdout_log = f"{bucket_mount}/{bucket_path}/logs/stdout.log"
-    stderr_log = f"{bucket_mount}/{bucket_path}/logs/stderr.log"
+
+    # Determine log paths based on sync mode
+    # When log_sync_interval is set, use local /tmp/ paths and periodic sync
+    # This works around gcsfuse streaming writes not finalizing until close()
+    use_log_syncer = log_sync_interval is not None and log_sync_interval > 0
+    if use_log_syncer:
+        stdout_log = "/tmp/stdout.log"
+        stderr_log = "/tmp/stderr.log"
+    else:
+        # Legacy: write directly to gcsfuse mount (only visible after container exits)
+        stdout_log = f"{bucket_mount}/{bucket_path}/logs/stdout.log"
+        stderr_log = f"{bucket_mount}/{bucket_path}/logs/stderr.log"
     log_file = stdout_log  # Backward compat: log_file points to stdout
 
     # Export environment variables with proper shell escaping
@@ -571,6 +631,10 @@ def build_startup_script(
     gcs_log_path = f"gs://{bucket}/{bucket_path}/logs"
     if heartbeat_timeout_seconds is not None and heartbeat_timeout_seconds > 0:
         parts.append(supervisor_section(heartbeat_timeout_seconds, gcs_log_path))
+
+    # Add log syncer for real-time log visibility
+    if use_log_syncer and log_sync_interval is not None:
+        parts.append(log_syncer_section(bucket, bucket_path, log_sync_interval))
 
     parts.extend(
         [
@@ -636,6 +700,11 @@ def build_startup_script(
     # Capture stdout and stderr separately for better error visibility
     # Run Docker in background to avoid waiting for watchdog
     parts.append('"${DOCKER_CMD[@]}" > >(tee -a "$STDOUT_LOG") 2> >(tee -a "$STDERR_LOG") & DOCKER_PID=$!')
+
+    # Start log syncer after Docker begins (needs DOCKER_PID)
+    if use_log_syncer:
+        parts.append("start_log_syncer")
+
     # Wait for Docker and capture its exit code (no || true - we need real exit code)
     parts.append("wait $DOCKER_PID")
     parts.append("EXIT_CODE=$?")
