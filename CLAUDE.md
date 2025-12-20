@@ -20,6 +20,37 @@ make install-hooks     # REQUIRED: installs pre-commit hooks
 
 ---
 
+## TDD: Test-Driven Development
+
+**This codebase uses TDD. Write tests BEFORE implementation.**
+
+```
+RED    → Write failing test that defines expected behavior
+GREEN  → Write minimal code to make test pass
+REFACTOR → Clean up while keeping tests green
+```
+
+**Why TDD matters for LLMs:**
+- Tests encode intent unambiguously—no guessing what "done" means
+- Failing tests provide immediate feedback on implementation correctness
+- Test-first prevents over-engineering (you only build what's tested)
+- Regression safety: refactoring is safe when tests pass
+
+**Workflow:**
+1. Understand the requirement
+2. Write test(s) in `tests/unit/` or `tests/integration/`
+3. Run `make test` → confirm RED (test fails)
+4. Implement the feature
+5. Run `make test` → confirm GREEN (test passes)
+6. Run `make lint` → fix any issues
+7. Refactor if needed, keeping tests green
+
+**Test naming:** `test_<what>_<condition>_<expected>` e.g., `test_get_logs_when_file_missing_returns_none`
+
+**No exceptions:** Even "quick fixes" get tests first. The test documents the bug and prevents regression.
+
+---
+
 ## What is Goldfish?
 
 An MCP server enabling Claude Code to conduct ML experiments by managing:
