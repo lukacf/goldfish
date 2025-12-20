@@ -214,11 +214,12 @@ class TestGetInstanceLogs:
 
             # Verify the path includes gs:// prefix
             call_args = mock_popen.call_args_list[0][0][0]
-            assert call_args[0] == "gsutil"
-            assert call_args[1] == "cat"
+            assert call_args[0] == "gcloud"
+            assert call_args[1] == "storage"
+            assert call_args[2] == "cat"
             # CRITICAL: Must have gs:// prefix
-            assert call_args[2].startswith("gs://"), f"GCS path missing gs:// prefix: {call_args[2]}"
-            assert call_args[2] == "gs://mlm-artifacts-bucket/runs/stage-abc123/logs/stdout.log"
+            assert call_args[3].startswith("gs://"), f"GCS path missing gs:// prefix: {call_args[3]}"
+            assert call_args[3] == "gs://mlm-artifacts-bucket/runs/stage-abc123/logs/stdout.log"
 
     def test_get_instance_logs_bucket_with_prefix_no_double(self, launcher):
         """Should not double gs:// prefix when bucket already has it."""
@@ -241,8 +242,8 @@ class TestGetInstanceLogs:
 
             call_args = mock_popen.call_args_list[0][0][0]
             # Should NOT have gs://gs://
-            assert "gs://gs://" not in call_args[2], f"Double gs:// prefix detected: {call_args[2]}"
-            assert call_args[2] == "gs://already-prefixed/runs/stage-abc123/logs/stdout.log"
+            assert "gs://gs://" not in call_args[3], f"Double gs:// prefix detected: {call_args[3]}"
+            assert call_args[3] == "gs://already-prefixed/runs/stage-abc123/logs/stdout.log"
 
 
 class TestMapGceStatusIntegration:
@@ -301,3 +302,182 @@ class TestMapGceStatusIntegration:
 
             status = launcher._map_gce_status("TERMINATED", "stage-xyz")
             assert status == StageRunStatus.FAILED
+
+
+class TestGetInstanceLogsRetry:
+    """Tests for get_instance_logs retry_on_empty feature.
+
+    When logs are empty during a running job, retry once after a delay
+    to handle GCS eventual consistency.
+    """
+
+    @pytest.fixture
+    def launcher(self):
+        """Create a GCE launcher with mocked config."""
+        with patch("goldfish.infra.gce_launcher.GCELauncher.__init__", lambda x, y: None):
+            launcher = GCELauncher(MagicMock())
+            launcher.bucket = "test-bucket"
+            launcher.project_id = "test-project"
+            launcher.default_zone = "us-central1-a"
+            launcher.zones = ["us-central1-a"]
+            return launcher
+
+    def test_get_instance_logs_retry_on_empty_retries_once(self, launcher):
+        """Should retry once after delay if logs are empty and retry_on_empty=True."""
+        with (
+            patch("subprocess.Popen") as mock_popen,
+            patch.object(launcher, "_sanitize_name", return_value="stage-abc"),
+            patch.object(launcher, "_find_instance_zone", return_value=None),
+            patch("goldfish.infra.gce_launcher.time.sleep") as mock_sleep,
+        ):
+
+            def make_empty_proc():
+                """Create a mock process that returns empty output."""
+                proc = MagicMock()
+                proc.stdout = MagicMock()
+                proc.stdout.__enter__ = MagicMock(return_value=proc.stdout)
+                proc.stdout.__exit__ = MagicMock(return_value=False)
+                proc.stdout.__iter__ = MagicMock(return_value=iter([]))
+                proc.wait = MagicMock(return_value=0)
+                proc.returncode = 0
+                return proc
+
+            def make_proc_with_logs():
+                """Create a mock process that returns logs."""
+                proc = MagicMock()
+                proc.stdout = MagicMock()
+                proc.stdout.__enter__ = MagicMock(return_value=proc.stdout)
+                proc.stdout.__exit__ = MagicMock(return_value=False)
+                proc.stdout.__iter__ = MagicMock(return_value=iter(["log line 1\n", "log line 2\n"]))
+                proc.wait = MagicMock(return_value=0)
+                proc.returncode = 0
+                return proc
+
+            # First _fetch_gcs_logs: 2 calls (stdout.log + stderr.log) - both empty
+            # Second _fetch_gcs_logs (retry): 2 calls - stdout has logs
+            mock_popen.side_effect = [
+                make_empty_proc(),  # First fetch: stdout.log (empty)
+                make_empty_proc(),  # First fetch: stderr.log (empty)
+                make_proc_with_logs(),  # Retry: stdout.log (has logs)
+                make_empty_proc(),  # Retry: stderr.log (empty)
+            ]
+
+            result = launcher.get_instance_logs("stage-abc", retry_on_empty=True)
+
+            # Should have retried (sleep called)
+            mock_sleep.assert_called()
+
+            # Should return logs from second attempt
+            assert "log line 1" in result
+            assert "log line 2" in result
+
+    def test_get_instance_logs_no_retry_when_content_found(self, launcher):
+        """Should not retry if logs have content."""
+        with (
+            patch("subprocess.Popen") as mock_popen,
+            patch.object(launcher, "_sanitize_name", return_value="stage-abc"),
+            patch.object(launcher, "_find_instance_zone", return_value=None),
+            patch("goldfish.infra.gce_launcher.time.sleep") as mock_sleep,
+        ):
+
+            def make_proc_with_logs():
+                proc = MagicMock()
+                proc.stdout = MagicMock()
+                proc.stdout.__enter__ = MagicMock(return_value=proc.stdout)
+                proc.stdout.__exit__ = MagicMock(return_value=False)
+                proc.stdout.__iter__ = MagicMock(return_value=iter(["log content\n"]))
+                proc.wait = MagicMock(return_value=0)
+                proc.returncode = 0
+                return proc
+
+            def make_empty_proc():
+                proc = MagicMock()
+                proc.stdout = MagicMock()
+                proc.stdout.__enter__ = MagicMock(return_value=proc.stdout)
+                proc.stdout.__exit__ = MagicMock(return_value=False)
+                proc.stdout.__iter__ = MagicMock(return_value=iter([]))
+                proc.wait = MagicMock(return_value=0)
+                proc.returncode = 0
+                return proc
+
+            # Only 2 calls needed: stdout.log + stderr.log (no retry)
+            mock_popen.side_effect = [
+                make_proc_with_logs(),  # stdout.log has content
+                make_empty_proc(),  # stderr.log empty
+            ]
+
+            result = launcher.get_instance_logs("stage-abc", retry_on_empty=True)
+
+            # Should NOT have retried (no sleep)
+            mock_sleep.assert_not_called()
+
+            # Should return logs
+            assert "log content" in result
+
+    def test_get_instance_logs_no_retry_by_default(self, launcher):
+        """retry_on_empty should default to False for backward compatibility."""
+        with (
+            patch("subprocess.Popen") as mock_popen,
+            patch.object(launcher, "_sanitize_name", return_value="stage-abc"),
+            patch.object(launcher, "_find_instance_zone", return_value=None),
+            patch("goldfish.infra.gce_launcher.time.sleep") as mock_sleep,
+        ):
+
+            def make_empty_proc():
+                proc = MagicMock()
+                proc.stdout = MagicMock()
+                proc.stdout.__enter__ = MagicMock(return_value=proc.stdout)
+                proc.stdout.__exit__ = MagicMock(return_value=False)
+                proc.stdout.__iter__ = MagicMock(return_value=iter([]))
+                proc.wait = MagicMock(return_value=0)
+                proc.returncode = 0
+                return proc
+
+            # 2 calls: stdout.log + stderr.log (both empty, no retry)
+            mock_popen.side_effect = [
+                make_empty_proc(),
+                make_empty_proc(),
+            ]
+
+            # Call without retry_on_empty (defaults to False)
+            result = launcher.get_instance_logs("stage-abc")
+
+            # Should NOT retry
+            mock_sleep.assert_not_called()
+
+            # Should return empty string
+            assert result == "" or result is None
+
+    def test_get_instance_logs_retry_delay(self, launcher):
+        """Retry should wait appropriate time before retrying."""
+        with (
+            patch("subprocess.Popen") as mock_popen,
+            patch.object(launcher, "_sanitize_name", return_value="stage-abc"),
+            patch.object(launcher, "_find_instance_zone", return_value=None),
+            patch("goldfish.infra.gce_launcher.time.sleep") as mock_sleep,
+        ):
+
+            def make_empty_proc():
+                proc = MagicMock()
+                proc.stdout = MagicMock()
+                proc.stdout.__enter__ = MagicMock(return_value=proc.stdout)
+                proc.stdout.__exit__ = MagicMock(return_value=False)
+                proc.stdout.__iter__ = MagicMock(return_value=iter([]))
+                proc.wait = MagicMock(return_value=0)
+                proc.returncode = 0
+                return proc
+
+            # 4 calls: first fetch (2 empty) + retry (2 empty)
+            mock_popen.side_effect = [
+                make_empty_proc(),  # First fetch: stdout.log
+                make_empty_proc(),  # First fetch: stderr.log
+                make_empty_proc(),  # Retry: stdout.log
+                make_empty_proc(),  # Retry: stderr.log
+            ]
+
+            launcher.get_instance_logs("stage-abc", retry_on_empty=True)
+
+            # Should wait ~5 seconds before retry
+            if mock_sleep.called:
+                delay = mock_sleep.call_args[0][0]
+                assert 3 <= delay <= 10, f"Retry delay should be 3-10 seconds, got {delay}"
