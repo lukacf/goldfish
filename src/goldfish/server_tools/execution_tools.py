@@ -41,6 +41,31 @@ logger = logging.getLogger("goldfish.server")
 # Maximum lines that can be requested from logs (prevents memory exhaustion)
 _MAX_TAIL_LINES = 10000
 
+# Cursor tracking for follow mode - maps run_id to (cursor_position, last_access_time)
+# Used to return only new logs since the last call
+# Cursors are cleaned up after 1 hour of inactivity to prevent memory leaks
+_log_cursors: dict[str, tuple[int, float]] = {}
+_CURSOR_TTL_SECONDS = 3600  # 1 hour
+_MAX_CURSORS = 1000  # Maximum number of cursors to keep
+
+
+def _cleanup_stale_cursors() -> None:
+    """Remove cursors that haven't been accessed in over TTL seconds."""
+    import time
+
+    now = time.time()
+    stale_keys = [
+        run_id for run_id, (_, last_access) in _log_cursors.items() if now - last_access > _CURSOR_TTL_SECONDS
+    ]
+    for key in stale_keys:
+        del _log_cursors[key]
+
+    # If still over max, remove oldest entries
+    if len(_log_cursors) > _MAX_CURSORS:
+        sorted_by_access = sorted(_log_cursors.items(), key=lambda x: x[1][1])
+        for key, _ in sorted_by_access[: len(_log_cursors) - _MAX_CURSORS]:
+            del _log_cursors[key]
+
 
 def _stage_run_row_to_info(row: dict) -> StageRunInfo:
     return stage_run_dict_to_info(row)
@@ -209,16 +234,18 @@ def get_run(run_id: str) -> dict:
 
 
 @mcp.tool()
-def logs(run_id: str, tail: int = 200, since: str | None = None) -> dict:
+def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = False) -> dict:
     """Get logs from a run.
 
     Args:
         run_id: The run ID (e.g., "stage-abc123")
         tail: Number of lines from end (default 200, max 10000)
         since: Only show logs after this ISO timestamp
+        follow: If True, return only NEW logs since the last call (cursor-based)
 
     Returns:
         Dict with run_id, status, logs, log_uri
+        If follow=True, also includes cursor_position and has_new_content
     """
     if tail < 1 or tail > _MAX_TAIL_LINES:
         raise GoldfishError(f"tail must be 1-{_MAX_TAIL_LINES}")
@@ -303,6 +330,61 @@ def logs(run_id: str, tail: int = 200, since: str | None = None) -> dict:
                 log_content = "Logs not available"
         except Exception as e:
             log_content = f"[Error fetching logs: {e}]"
+
+    # Handle follow mode - return only new content since last cursor position
+    if follow:
+        import time
+
+        # Periodically clean up stale cursors to prevent memory leaks
+        _cleanup_stale_cursors()
+
+        status = row.get("status")
+        terminal_states = {
+            StageRunStatus.COMPLETED,
+            StageRunStatus.FAILED,
+            StageRunStatus.CANCELED,
+        }
+
+        # Get current cursor position (0 if first call)
+        cursor_entry = _log_cursors.get(run_id)
+        prev_cursor = cursor_entry[0] if cursor_entry else 0
+
+        # Calculate new content
+        full_content = log_content or ""
+        content_len = len(full_content)
+
+        if prev_cursor == 0:
+            # First call: return last `tail` lines
+            lines = full_content.split("\n")
+            # Keep last `tail` lines (accounting for trailing newline)
+            if lines and lines[-1] == "":
+                lines = lines[:-1]
+            if len(lines) > tail:
+                lines = lines[-tail:]
+            new_content = "\n".join(lines)
+            if new_content and full_content.endswith("\n"):
+                new_content += "\n"
+        else:
+            # Subsequent call: return only content after cursor
+            new_content = full_content[prev_cursor:] if prev_cursor < content_len else ""
+
+        has_new_content = len(new_content) > 0
+
+        # Update cursor to end of current content with current timestamp
+        _log_cursors[run_id] = (content_len, time.time())
+
+        # Clean up cursor when run reaches terminal state
+        if status in terminal_states:
+            _log_cursors.pop(run_id, None)
+
+        return {
+            "run_id": run_id,
+            "status": status,
+            "logs": new_content,
+            "log_uri": log_uri,
+            "cursor_position": content_len,
+            "has_new_content": has_new_content,
+        }
 
     return {
         "run_id": run_id,
