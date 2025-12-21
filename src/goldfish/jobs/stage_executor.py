@@ -284,6 +284,7 @@ class StageExecutor:
                 input_configs,
                 output_configs,
                 user_config=stage_config,
+                git_sha=git_sha,
             )
         except Exception as e:
             # Mark failed immediately with error and re-raise
@@ -887,6 +888,7 @@ class StageExecutor:
         input_configs: dict | None = None,
         output_configs: dict | None = None,
         user_config: dict | None = None,
+        git_sha: str | None = None,
     ):
         """Launch Docker container (local) or GCE instance."""
         backend = self.config.jobs.backend
@@ -897,6 +899,40 @@ class StageExecutor:
         stage_config["stage"] = stage_name
         stage_config["inputs"] = input_configs or inputs
         stage_config["outputs"] = output_configs or {}
+
+        # Build Goldfish environment variables for metrics and provenance
+        goldfish_env = {
+            "GOLDFISH_PROJECT_NAME": self.config.project_name,
+            "GOLDFISH_WORKSPACE": workspace,
+            "GOLDFISH_STAGE": stage_name,
+            "GOLDFISH_RUN_ID": stage_run_id,
+            "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
+            "GOLDFISH_CONFIG": json.dumps(stage_config),
+        }
+
+        # Add git SHA if available
+        if git_sha:
+            goldfish_env["GOLDFISH_GIT_SHA"] = git_sha
+
+        # Add metrics backend config if configured
+        if self.config.metrics.backend:
+            goldfish_env["GOLDFISH_METRICS_BACKEND"] = self.config.metrics.backend
+
+            # Add W&B-specific config if backend is wandb
+            if self.config.metrics.backend == "wandb" and self.config.metrics.wandb:
+                wandb_config = self.config.metrics.wandb
+                if wandb_config.get("project"):
+                    goldfish_env["GOLDFISH_WANDB_PROJECT"] = wandb_config["project"]
+                if wandb_config.get("group"):
+                    goldfish_env["GOLDFISH_WANDB_GROUP"] = wandb_config["group"]
+                if wandb_config.get("entity"):
+                    goldfish_env["GOLDFISH_WANDB_ENTITY"] = wandb_config["entity"]
+
+        # Passthrough WANDB_API_KEY from host environment if set
+        import os
+
+        if "WANDB_API_KEY" in os.environ:
+            goldfish_env["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
 
         if backend == "local":
             # Create work directory for this run
@@ -929,6 +965,7 @@ echo "Stage completed successfully"
                 work_dir=run_dir,
                 inputs_dir=inputs_dir,
                 outputs_dir=outputs_dir,
+                goldfish_env=goldfish_env,
             )
 
         elif backend == "gce":
@@ -976,6 +1013,7 @@ echo "Stage completed successfully"
                 gpu_count=gpu_count,
                 zones=zones,
                 use_capacity_search=use_capacity_search,
+                goldfish_env=goldfish_env,
             )
         else:
             raise GoldfishError(f"Backend {backend} not supported for launch")

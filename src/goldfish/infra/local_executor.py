@@ -20,6 +20,7 @@ class LocalExecutor:
         work_dir: Path,
         inputs_dir: Path | None = None,
         outputs_dir: Path | None = None,
+        goldfish_env: dict[str, str] | None = None,
     ) -> str:
         """Launch Docker container for stage run.
 
@@ -31,6 +32,7 @@ class LocalExecutor:
             work_dir: Working directory for container files
             inputs_dir: Directory to mount as /mnt/inputs
             outputs_dir: Directory to mount as /mnt/outputs
+            goldfish_env: Goldfish environment variables (metrics, provenance, etc.)
 
         Returns:
             Container ID (same as stage_run_id)
@@ -71,6 +73,14 @@ class LocalExecutor:
         # Set environment variable with stage config
         stage_config_json = json.dumps(stage_config)
         docker_cmd.extend(["-e", f"GOLDFISH_STAGE_CONFIG={stage_config_json}"])
+
+        # Set Goldfish environment variables (metrics, provenance, etc.)
+        if goldfish_env:
+            for env_name, env_value in goldfish_env.items():
+                # SECURITY: Validate env var name (alphanumeric + underscore only)
+                if not env_name.replace("_", "").isalnum():
+                    continue
+                docker_cmd.extend(["-e", f"{env_name}={env_value}"])
 
         # Set user-defined environment variables from config
         # This allows configs to specify env vars like WANDB_API_KEY
