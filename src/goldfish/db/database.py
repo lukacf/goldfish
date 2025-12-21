@@ -9,10 +9,13 @@ from pathlib import Path
 from typing import Any, cast
 
 from goldfish.db.types import (
+    ArtifactRow,
     AuditRow,
     JobInputWithSource,
     JobRow,
     LineageRow,
+    MetricRow,
+    MetricsSummaryRow,
     SourceRow,
     StageVersionRow,
 )
@@ -2073,3 +2076,146 @@ class Database:
                 node["inputs"][signal_name] = input_info
 
             return node
+
+    # =========================================================================
+    # Metrics CRUD
+    # =========================================================================
+
+    def insert_metric(
+        self,
+        stage_run_id: str,
+        name: str,
+        value: float,
+        step: int | None = None,
+        timestamp: str | None = None,
+    ) -> None:
+        """Insert a metric data point."""
+        from datetime import UTC, datetime
+
+        if timestamp is None:
+            timestamp = datetime.now(UTC).isoformat()
+
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO run_metrics (stage_run_id, name, value, step, timestamp)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (stage_run_id, name, value, step, timestamp),
+            )
+
+    def upsert_metric_summary(
+        self,
+        stage_run_id: str,
+        name: str,
+        value: float,
+    ) -> None:
+        """Update or insert a metric summary (min, max, last, count)."""
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO run_metrics_summary (stage_run_id, name, min_value, max_value, last_value, count)
+                VALUES (?, ?, ?, ?, ?, 1)
+                ON CONFLICT(stage_run_id, name) DO UPDATE SET
+                    min_value = MIN(min_value, excluded.min_value),
+                    max_value = MAX(max_value, excluded.max_value),
+                    last_value = excluded.last_value,
+                    count = count + 1
+                """,
+                (stage_run_id, name, value, value, value),
+            )
+
+    def get_run_metrics(
+        self,
+        stage_run_id: str,
+        metric_name: str | None = None,
+    ) -> list[MetricRow]:
+        """Get metrics for a stage run, optionally filtered by metric name."""
+        from goldfish.db.types import MetricRow
+
+        with self._conn() as conn:
+            if metric_name:
+                rows = conn.execute(
+                    """
+                    SELECT id, stage_run_id, name, value, step, timestamp
+                    FROM run_metrics
+                    WHERE stage_run_id = ? AND name = ?
+                    ORDER BY timestamp ASC
+                    """,
+                    (stage_run_id, metric_name),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, stage_run_id, name, value, step, timestamp
+                    FROM run_metrics
+                    WHERE stage_run_id = ?
+                    ORDER BY timestamp ASC
+                    """,
+                    (stage_run_id,),
+                ).fetchall()
+
+            return [cast(MetricRow, dict(row)) for row in rows]
+
+    def get_metrics_summary(
+        self,
+        stage_run_id: str,
+    ) -> list[MetricsSummaryRow]:
+        """Get aggregated metrics summary for a stage run."""
+        from goldfish.db.types import MetricsSummaryRow
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT stage_run_id, name, min_value, max_value, last_value, count
+                FROM run_metrics_summary
+                WHERE stage_run_id = ?
+                ORDER BY name ASC
+                """,
+                (stage_run_id,),
+            ).fetchall()
+
+            return [cast(MetricsSummaryRow, dict(row)) for row in rows]
+
+    def insert_artifact(
+        self,
+        stage_run_id: str,
+        name: str,
+        path: str,
+        backend_url: str | None = None,
+        created_at: str | None = None,
+    ) -> None:
+        """Insert an artifact record."""
+        from datetime import UTC, datetime
+
+        if created_at is None:
+            created_at = datetime.now(UTC).isoformat()
+
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO run_artifacts (stage_run_id, name, path, backend_url, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (stage_run_id, name, path, backend_url, created_at),
+            )
+
+    def get_run_artifacts(
+        self,
+        stage_run_id: str,
+    ) -> list[ArtifactRow]:
+        """Get artifacts for a stage run."""
+        from goldfish.db.types import ArtifactRow
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, stage_run_id, name, path, backend_url, created_at
+                FROM run_artifacts
+                WHERE stage_run_id = ?
+                ORDER BY created_at ASC
+                """,
+                (stage_run_id,),
+            ).fetchall()
+
+            return [cast(ArtifactRow, dict(row)) for row in rows]
