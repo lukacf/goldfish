@@ -16,9 +16,13 @@ from goldfish.errors import (
 )
 from goldfish.jobs.conversion import stage_run_dict_to_info
 from goldfish.models import (
+    ArtifactInfo,
     CancelRunResponse,
     GetOutputsResponse,
+    GetRunMetricsResponse,
     GetRunResponse,
+    MetricInfo,
+    MetricSummary,
     RunReason,
     StageRunInfo,
     StageRunStatus,
@@ -574,6 +578,81 @@ def get_outputs(run_id: str) -> dict:
         raise GoldfishError(f"Run not found: {run_id}")
     outputs = json.loads(row["outputs_json"]) if row.get("outputs_json") else []
     result: dict[str, Any] = GetOutputsResponse(stage_run_id=run_id, outputs=outputs).model_dump(mode="json")
+    return result
+
+
+@mcp.tool()
+def get_run_metrics(run_id: str) -> dict:
+    """Get metrics and artifacts from a stage run.
+
+    Returns metrics logged during stage execution, summary statistics,
+    and artifacts. Useful for analyzing run performance and results.
+
+    Args:
+        run_id: The stage run ID (e.g., "stage-abc123")
+
+    Returns:
+        Dict with:
+        - metrics: List of individual metric data points
+        - summary: Summary statistics (min, max, last, count) per metric
+        - artifacts: List of artifacts logged during execution
+
+    Examples:
+        # Get all metrics from a training run
+        metrics = get_run_metrics("stage-abc123")
+        print(f"Loss: {[m for m in metrics['metrics'] if m['name'] == 'loss']}")
+        print(f"Summary: {metrics['summary']}")
+    """
+    db = _get_db()
+
+    # Verify run exists
+    row = db.get_stage_run(run_id)
+    if not row:
+        raise GoldfishError(f"Run not found: {run_id}")
+
+    # Get metrics
+    metric_rows = db.get_run_metrics(run_id)
+    metrics = [
+        MetricInfo(
+            name=m["name"],
+            value=m["value"],
+            step=m["step"],
+            timestamp=m["timestamp"],
+        )
+        for m in metric_rows
+    ]
+
+    # Get summary
+    summary_rows = db.get_metrics_summary(run_id)
+    summaries = [
+        MetricSummary(
+            name=s["name"],
+            min_value=s["min_value"],
+            max_value=s["max_value"],
+            last_value=s["last_value"],
+            count=s["count"],
+        )
+        for s in summary_rows
+    ]
+
+    # Get artifacts
+    artifact_rows = db.get_run_artifacts(run_id)
+    artifacts = [
+        ArtifactInfo(
+            name=a["name"],
+            path=a["path"],
+            backend_url=a["backend_url"],
+            created_at=a["created_at"],
+        )
+        for a in artifact_rows
+    ]
+
+    result: dict[str, Any] = GetRunMetricsResponse(
+        stage_run_id=run_id,
+        metrics=metrics,
+        summary=summaries,
+        artifacts=artifacts,
+    ).model_dump(mode="json")
     return result
 
 
