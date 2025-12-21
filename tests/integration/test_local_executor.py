@@ -204,6 +204,66 @@ class TestContainerLaunch:
             # Also verify GOLDFISH_STAGE_CONFIG is still set
             assert "GOLDFISH_STAGE_CONFIG" in env_vars
 
+    def test_launch_container_sets_goldfish_env_vars(self, temp_dir):
+        """Should set Goldfish environment variables for metrics and provenance."""
+        # Setup
+        executor = LocalExecutor()
+        stage_config = {"stage": "train", "inputs": {}, "outputs": {}}
+
+        # Goldfish environment variables (metrics, provenance, etc.)
+        goldfish_env = {
+            "GOLDFISH_PROJECT_NAME": "my-ml-project",
+            "GOLDFISH_WORKSPACE": "baseline_lstm",
+            "GOLDFISH_STAGE": "train",
+            "GOLDFISH_RUN_ID": "stage-abc123",
+            "GOLDFISH_GIT_SHA": "abc123def456",
+            "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
+            "GOLDFISH_METRICS_BACKEND": "wandb",
+            "GOLDFISH_WANDB_PROJECT": "my-wandb-project",
+            "GOLDFISH_WANDB_GROUP": "baseline_lstm",
+            "GOLDFISH_WANDB_ENTITY": "my-team",
+            "WANDB_API_KEY": "fake-wandb-key",
+        }
+
+        # Mock subprocess
+        with patch("subprocess.Popen") as mock_popen:
+            mock_process = MagicMock()
+            mock_process.pid = 12345
+            mock_popen.return_value = mock_process
+
+            # Execute
+            executor.launch_container(
+                image_tag="goldfish-test_ws-v1",
+                stage_run_id="stage-abc123",
+                entrypoint_script="#!/bin/bash",
+                stage_config=stage_config,
+                work_dir=temp_dir,
+                goldfish_env=goldfish_env,
+            )
+
+            # Extract all -e flags from docker args
+            args = mock_popen.call_args[0][0]
+            env_vars = {}
+            for i, arg in enumerate(args):
+                if arg == "-e" and i + 1 < len(args):
+                    env_val = args[i + 1]
+                    if "=" in env_val:
+                        name, value = env_val.split("=", 1)
+                        env_vars[name] = value
+
+            # Verify all Goldfish env vars are set
+            assert env_vars["GOLDFISH_PROJECT_NAME"] == "my-ml-project"
+            assert env_vars["GOLDFISH_WORKSPACE"] == "baseline_lstm"
+            assert env_vars["GOLDFISH_STAGE"] == "train"
+            assert env_vars["GOLDFISH_RUN_ID"] == "stage-abc123"
+            assert env_vars["GOLDFISH_GIT_SHA"] == "abc123def456"
+            assert env_vars["GOLDFISH_OUTPUTS_DIR"] == "/mnt/outputs"
+            assert env_vars["GOLDFISH_METRICS_BACKEND"] == "wandb"
+            assert env_vars["GOLDFISH_WANDB_PROJECT"] == "my-wandb-project"
+            assert env_vars["GOLDFISH_WANDB_GROUP"] == "baseline_lstm"
+            assert env_vars["GOLDFISH_WANDB_ENTITY"] == "my-team"
+            assert env_vars["WANDB_API_KEY"] == "fake-wandb-key"
+
 
 class TestContainerMonitoring:
     """Test monitoring running containers."""
