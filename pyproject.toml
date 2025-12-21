@@ -34,6 +34,9 @@ dev = [
     "mypy>=1.10",
     "pre-commit>=3.5",
 ]
+wandb = [
+    "wandb>=0.16.0",
+]
 
 [project.scripts]
 goldfish = "goldfish.__main__:main"

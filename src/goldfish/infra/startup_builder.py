@@ -493,6 +493,12 @@ def log_syncer_section(bucket: str, bucket_path: str, sync_interval: int = 30) -
     making logs invisible during execution. This syncer copies logs from local
     /tmp/ to GCS periodically, enabling real-time log viewing.
 
+    Files synced:
+    - stdout.log: Container stdout
+    - stderr.log: Container stderr
+    - metrics.jsonl: Goldfish metrics (from /mnt/outputs/.goldfish/)
+    - artifacts.json: Goldfish artifacts (from /mnt/outputs/.goldfish/)
+
     Args:
         bucket: GCS bucket name (without gs:// prefix)
         bucket_path: Path within bucket for this run
@@ -503,13 +509,17 @@ def log_syncer_section(bucket: str, bucket_path: str, sync_interval: int = 30) -
     """
     gcs_stdout = f"gs://{bucket}/{bucket_path}/logs/stdout.log"
     gcs_stderr = f"gs://{bucket}/{bucket_path}/logs/stderr.log"
+    gcs_metrics = f"gs://{bucket}/{bucket_path}/logs/metrics.jsonl"
+    gcs_artifacts = f"gs://{bucket}/{bucket_path}/logs/artifacts.json"
 
     return f"""
 # === LOG SYNCER (Real-time log visibility) ===
-# Background process that periodically uploads logs from /tmp/ to GCS
+# Background process that periodically uploads logs and metrics from /tmp/ to GCS
 # This works around gcsfuse streaming writes not finalizing until close()
 LOCAL_STDOUT=/tmp/stdout.log
 LOCAL_STDERR=/tmp/stderr.log
+LOCAL_METRICS=/mnt/outputs/.goldfish/metrics.jsonl
+LOCAL_ARTIFACTS=/mnt/outputs/.goldfish/artifacts.json
 LOG_SYNC_INTERVAL={sync_interval}
 
 start_log_syncer() {{
@@ -520,14 +530,34 @@ start_log_syncer() {{
         # Sync logs periodically while Docker is running
         while kill -0 $DOCKER_PID 2>/dev/null; do
             sleep $LOG_SYNC_INTERVAL
+
+            # Sync stdout/stderr
             gcloud storage cp "$LOCAL_STDOUT" {gcs_stdout} --quiet 2>/dev/null || true
             gcloud storage cp "$LOCAL_STDERR" {gcs_stderr} --quiet 2>/dev/null || true
+
+            # Sync metrics.jsonl if it exists (not all stages use metrics)
+            if [[ -f "$LOCAL_METRICS" ]]; then
+                gcloud storage cp "$LOCAL_METRICS" {gcs_metrics} --quiet 2>/dev/null || true
+            fi
+
+            # Sync artifacts.json if it exists
+            if [[ -f "$LOCAL_ARTIFACTS" ]]; then
+                gcloud storage cp "$LOCAL_ARTIFACTS" {gcs_artifacts} --quiet 2>/dev/null || true
+            fi
         done
 
         # Final sync after Docker exits to capture last logs
         sleep 2
         gcloud storage cp "$LOCAL_STDOUT" {gcs_stdout} --quiet 2>/dev/null || true
         gcloud storage cp "$LOCAL_STDERR" {gcs_stderr} --quiet 2>/dev/null || true
+
+        # Final sync of metrics/artifacts
+        if [[ -f "$LOCAL_METRICS" ]]; then
+            gcloud storage cp "$LOCAL_METRICS" {gcs_metrics} --quiet 2>/dev/null || true
+        fi
+        if [[ -f "$LOCAL_ARTIFACTS" ]]; then
+            gcloud storage cp "$LOCAL_ARTIFACTS" {gcs_artifacts} --quiet 2>/dev/null || true
+        fi
     ) &
     LOG_SYNCER_PID=$!
     echo "Log syncer started (PID=$LOG_SYNCER_PID, interval={sync_interval}s)"

@@ -94,6 +94,7 @@ class GCELauncher:
         gpu_count: int = 0,
         zones: list[str] | None = None,
         use_capacity_search: bool = True,
+        goldfish_env: dict[str, str] | None = None,
     ) -> str:
         """Launch GCE instance for stage run.
 
@@ -110,6 +111,7 @@ class GCELauncher:
             gpu_count: Number of GPUs
             zones: List of zones to search (None = use default)
             use_capacity_search: Use ResourceLauncher for capacity search
+            goldfish_env: Goldfish environment variables (metrics, provenance, etc.)
 
         Returns:
             Instance name
@@ -133,6 +135,13 @@ class GCELauncher:
             "GOLDFISH_INPUTS_DIR": "/mnt/inputs",
             "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
         }
+
+        # Add Goldfish environment variables (metrics, provenance, etc.)
+        if goldfish_env:
+            for env_name, env_value in goldfish_env.items():
+                # SECURITY: Validate env var name (alphanumeric + underscore only)
+                if env_name.replace("_", "").isalnum():
+                    env_map[env_name] = str(env_value)
 
         # Add user-defined environment variables from config
         # This allows configs to specify env vars like WANDB_API_KEY

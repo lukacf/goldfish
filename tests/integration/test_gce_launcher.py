@@ -98,6 +98,66 @@ def test_launch_with_capacity_search(mock_build_startup, mock_resource_launcher_
     assert call_kwargs["bucket"] == "test-bucket"
     assert call_kwargs["run_path"] == "runs/test-run-123"
     assert call_kwargs["image"] == "test-image:latest"
+
+
+@patch("goldfish.infra.gce_launcher.ResourceLauncher")
+@patch("goldfish.infra.gce_launcher.build_startup_script")
+def test_launch_with_goldfish_env_vars(mock_build_startup, mock_resource_launcher_class, launcher):
+    """Test launch_instance passes Goldfish environment variables."""
+    # Mock startup script builder
+    mock_build_startup.return_value = "#!/bin/bash\necho startup"
+
+    # Mock ResourceLauncher
+    mock_launcher = MagicMock()
+    mock_result = Mock(instance_name="test-instance")
+    mock_launcher.launch.return_value = mock_result
+    mock_resource_launcher_class.return_value = mock_launcher
+
+    # Goldfish environment variables for metrics and provenance
+    goldfish_env = {
+        "GOLDFISH_PROJECT_NAME": "my-ml-project",
+        "GOLDFISH_WORKSPACE": "baseline_lstm",
+        "GOLDFISH_STAGE": "train",
+        "GOLDFISH_RUN_ID": "stage-abc123",
+        "GOLDFISH_GIT_SHA": "abc123def456",
+        "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
+        "GOLDFISH_METRICS_BACKEND": "wandb",
+        "GOLDFISH_WANDB_PROJECT": "my-wandb-project",
+        "GOLDFISH_WANDB_GROUP": "baseline_lstm",
+        "GOLDFISH_WANDB_ENTITY": "my-team",
+        "WANDB_API_KEY": "fake-wandb-key",
+    }
+
+    # Launch with goldfish_env
+    result = launcher.launch_instance(
+        image_tag="test-image:latest",
+        stage_run_id="test-run-123",
+        entrypoint_script="#!/bin/bash\necho test",
+        stage_config={"inputs": {}, "outputs": {}},
+        work_dir=Path("/tmp/work"),
+        goldfish_env=goldfish_env,
+        use_capacity_search=True,
+    )
+
+    assert result == "test-instance"
+
+    # Verify env_map includes goldfish_env variables
+    mock_build_startup.assert_called_once()
+    call_kwargs = mock_build_startup.call_args[1]
+    env_map = call_kwargs["env_map"]
+
+    # Verify all Goldfish env vars are in env_map
+    assert env_map["GOLDFISH_PROJECT_NAME"] == "my-ml-project"
+    assert env_map["GOLDFISH_WORKSPACE"] == "baseline_lstm"
+    assert env_map["GOLDFISH_STAGE"] == "train"
+    assert env_map["GOLDFISH_RUN_ID"] == "stage-abc123"  # Note: may be overridden
+    assert env_map["GOLDFISH_GIT_SHA"] == "abc123def456"
+    assert env_map["GOLDFISH_OUTPUTS_DIR"] == "/mnt/outputs"
+    assert env_map["GOLDFISH_METRICS_BACKEND"] == "wandb"
+    assert env_map["GOLDFISH_WANDB_PROJECT"] == "my-wandb-project"
+    assert env_map["GOLDFISH_WANDB_GROUP"] == "baseline_lstm"
+    assert env_map["GOLDFISH_WANDB_ENTITY"] == "my-team"
+    assert env_map["WANDB_API_KEY"] == "fake-wandb-key"
     assert call_kwargs["gcsfuse"] is True
 
     # Verify ResourceLauncher was created and used
