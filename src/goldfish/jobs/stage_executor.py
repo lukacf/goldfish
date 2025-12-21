@@ -710,6 +710,54 @@ class StageExecutor:
         log_path.write_text(logs or "")
         return str(log_path)
 
+    def _collect_metrics(self, stage_run_id: str, backend: str) -> None:
+        """Collect metrics from JSONL and store in database."""
+        from goldfish.metrics.collector import MetricsCollector
+
+        collector = MetricsCollector(self.db)
+
+        # Determine metrics file location based on backend
+        if backend == "local":
+            # For local execution, metrics.jsonl is in the outputs directory
+            metrics_file = (
+                self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs" / ".goldfish" / "metrics.jsonl"
+            )
+        elif backend == "gce":
+            # For GCE, download metrics.jsonl from GCS to local temp
+            if not self.config.gcs or not self.config.gcs.bucket:
+                logger.debug(f"No GCS bucket configured, skipping metrics collection for {stage_run_id}")
+                return
+
+            bucket = self.config.gcs.bucket
+            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+            gcs_path = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/metrics.jsonl"
+
+            # Download to local temp directory
+            import subprocess
+            import tempfile
+
+            temp_dir = Path(tempfile.gettempdir()) / "goldfish_metrics" / stage_run_id
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            metrics_file = temp_dir / "metrics.jsonl"
+
+            try:
+                subprocess.run(
+                    ["gsutil", "cp", gcs_path, str(metrics_file)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError:
+                # Metrics file doesn't exist (stage didn't log any metrics)
+                logger.debug(f"No metrics file found in GCS for {stage_run_id}")
+                return
+        else:
+            logger.warning(f"Unknown backend {backend}, skipping metrics collection")
+            return
+
+        # Collect metrics from file
+        collector.collect_from_file(stage_run_id, metrics_file)
+
     def _build_docker_image(self, workspace: str, version: str, profile_name: str | None = None) -> str:
         """Build Docker image for this run.
 
@@ -1082,6 +1130,13 @@ echo "Stage completed successfully"
                     pass
         else:
             log_uri = self._persist_logs(stage_run_id, logs) if logs is not None else None
+
+        # Collect metrics from JSONL and store in database
+        try:
+            self._collect_metrics(stage_run_id, backend)
+        except Exception as e:
+            # Log warning but don't fail the run if metrics collection fails
+            logger.warning(f"Failed to collect metrics for {stage_run_id}: {e}")
 
         self.db.update_stage_run_status(
             stage_run_id=stage_run_id,
