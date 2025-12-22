@@ -45,6 +45,7 @@ class LocalWriter:
         # Buffer for metrics
         self._metrics_buffer: list[dict] = []
         self._artifacts: list[dict] = []
+        self._auto_flush_threshold = 100  # Auto-flush after 100 metrics to prevent OOM
 
     def log_metric(
         self,
@@ -72,6 +73,10 @@ class LocalWriter:
             "timestamp": timestamp,
         }
         self._metrics_buffer.append(metric)
+
+        # Auto-flush if threshold exceeded
+        if len(self._metrics_buffer) >= self._auto_flush_threshold:
+            self.flush()
 
     def log_metrics(
         self,
