@@ -65,6 +65,7 @@ class LocalWriter:
             timestamp = time.time()
 
         metric = {
+            "type": "metric",
             "name": name,
             "value": value,
             "step": step,
@@ -96,6 +97,7 @@ class LocalWriter:
             path: Path to artifact (relative to outputs dir)
         """
         artifact = {
+            "type": "artifact",
             "name": name,
             "path": str(path),
             "timestamp": time.time(),
@@ -111,7 +113,9 @@ class LocalWriter:
                     f.write(json.dumps(metric) + "\n")
             self._metrics_buffer.clear()
 
-        # Write artifacts (overwrite entire file)
+        # Write artifacts to metrics.jsonl (same file as metrics)
         if self._artifacts:
-            with open(self.artifacts_file, "w") as f:
-                json.dump(self._artifacts, f, indent=2)
+            with open(self.metrics_file, "a") as f:
+                for artifact in self._artifacts:
+                    f.write(json.dumps(artifact) + "\n")
+            self._artifacts.clear()
