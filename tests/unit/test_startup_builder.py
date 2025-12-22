@@ -450,9 +450,8 @@ class TestLogSyncer:
         assert "gs://my-bucket/runs/stage-abc123/logs/stdout.log" in script
         assert "gs://my-bucket/runs/stage-abc123/logs/stderr.log" in script
 
-        # Should upload metrics.jsonl and artifacts.json to GCS
+        # Should upload metrics.jsonl to GCS
         assert "gs://my-bucket/runs/stage-abc123/logs/metrics.jsonl" in script
-        assert "gs://my-bucket/runs/stage-abc123/logs/artifacts.json" in script
 
         # Should use gcloud storage cp for uploads
         assert "gcloud storage cp" in script

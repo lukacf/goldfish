@@ -37,8 +37,9 @@ class MockBackend(MetricsBackend):
         for name, value in metrics.items():
             self.log_metric(name, value, step, timestamp)
 
-    def log_artifact(self, name: str, path: Path) -> None:
+    def log_artifact(self, name: str, path: Path) -> str | None:
         self.artifacts.append({"name": name, "path": path})
+        return "http://example.com/artifact/123"
 
     def finish(self) -> str | None:
         self.finished = True
@@ -76,8 +77,8 @@ class UnavailableBackend(MetricsBackend):
     ) -> None:
         pass
 
-    def log_artifact(self, name: str, path: Path) -> None:
-        pass
+    def log_artifact(self, name: str, path: Path) -> str | None:
+        return None
 
     def finish(self) -> str | None:
         return None
@@ -172,9 +173,10 @@ class TestMockBackend:
     def test_log_artifact(self):
         """Test logging an artifact."""
         backend = MockBackend()
-        backend.log_artifact("model", Path("/tmp/model.pt"))
+        url = backend.log_artifact("model", Path("/tmp/model.pt"))
         assert len(backend.artifacts) == 1
         assert backend.artifacts[0]["name"] == "model"
+        assert url == "http://example.com/artifact/123"
 
     def test_finish(self):
         """Test finishing a run."""

@@ -146,3 +146,34 @@ class TestPublicMetricsAPI:
         with open(metrics_file2) as f:
             data = json.loads(f.readline())
             assert data["name"] == "accuracy"
+
+    def test_auto_finalize_flushes_metrics(self, tmp_path, monkeypatch):
+        """Metrics should be flushed on auto-finalize (atexit hook)."""
+        from goldfish import metrics
+
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(tmp_path))
+
+        log_metric("loss", 0.5, step=1)
+
+        # Simulate process exit hook
+        metrics._auto_finalize()
+
+        metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"
+        assert metrics_file.exists()
+        with open(metrics_file) as f:
+            data = json.loads(f.readline())
+            assert data["name"] == "loss"
+
+    def test_numpy_scalar_metric_values(self, tmp_path, monkeypatch):
+        """NumPy scalar metric values should serialize correctly."""
+        np = pytest.importorskip("numpy")
+
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(tmp_path))
+
+        log_metric("loss", np.float32(0.5), step=1)
+        finish()
+
+        metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"
+        with open(metrics_file) as f:
+            data = json.loads(f.readline())
+            assert data["value"] == 0.5
