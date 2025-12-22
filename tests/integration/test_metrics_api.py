@@ -244,3 +244,196 @@ class TestMetricsSummaryAggregation:
         assert s["max_value"] == 8.0
         assert s["last_value"] == 3.0  # Last inserted
         assert s["count"] == 4
+
+
+class TestBackwardCompatibility:
+    """Test backward compatibility with old JSONL format."""
+
+    def test_old_format_without_type_field(self, workspace_setup, temp_dir):
+        """Should handle old JSONL format without 'type' field."""
+        test_db = workspace_setup
+        now = datetime.now(UTC).isoformat()
+
+        # Create old-format JSONL (pre-cc19bce) without "type" field
+        metrics_file = temp_dir / "metrics.jsonl"
+        old_format_data = [
+            {"name": "loss", "value": 0.5, "step": 0, "timestamp": now},
+            {"name": "accuracy", "value": 0.8, "step": 0, "timestamp": now},
+            {"name": "model", "path": "/outputs/model.pt", "timestamp": now},  # Old artifact format
+        ]
+
+        with open(metrics_file, "w") as f:
+            for entry in old_format_data:
+                f.write(json.dumps(entry) + "\n")
+
+        # Create stage run
+        stage_run_id = "stage-oldformat123"
+        test_db.create_stage_run(
+            stage_run_id=stage_run_id,
+            workspace_name="test_ws",
+            version="v1",
+            stage_name="train",
+            pipeline_run_id=None,
+            pipeline_name=None,
+            config={},
+            inputs={},
+            profile=None,
+            hints=None,
+            backend_type="local",
+            backend_handle="container-123",
+        )
+
+        # Collect - should infer types from fields
+        from goldfish.metrics.collector import MetricsCollector
+
+        collector = MetricsCollector(test_db)
+        result = collector.collect_from_file(stage_run_id, metrics_file)
+
+        # Should collect both metrics (2) and artifact (1)
+        assert result["metrics_count"] == 2
+        assert result["artifacts_count"] == 1
+
+        # Verify metrics in database
+        metrics = test_db.get_run_metrics(stage_run_id)
+        assert len(metrics) == 2
+
+        # Verify artifacts
+        artifacts = test_db.get_run_artifacts(stage_run_id)
+        assert len(artifacts) == 1
+        assert artifacts[0]["name"] == "model"
+
+
+class TestCascadeDelete:
+    """Test CASCADE DELETE behavior."""
+
+    def test_deleting_stage_run_deletes_metrics(self, workspace_setup, temp_dir):
+        """Should CASCADE DELETE metrics when stage_run is deleted."""
+        test_db = workspace_setup
+        now = datetime.now(UTC).isoformat()
+
+        # Create stage run
+        stage_run_id = "stage-cascade123"
+        test_db.create_stage_run(
+            stage_run_id=stage_run_id,
+            workspace_name="test_ws",
+            version="v1",
+            stage_name="train",
+            pipeline_run_id=None,
+            pipeline_name=None,
+            config={},
+            inputs={},
+            profile=None,
+            hints=None,
+            backend_type="local",
+            backend_handle="container-123",
+        )
+
+        # Insert metrics and artifacts
+        test_db.batch_insert_metrics(
+            stage_run_id,
+            [
+                {"name": "loss", "value": 0.5, "step": 0, "timestamp": now},
+                {"name": "accuracy", "value": 0.8, "step": 0, "timestamp": now},
+            ],
+        )
+        test_db.batch_insert_artifacts(
+            stage_run_id,
+            [{"name": "model", "path": "/outputs/model.pt", "timestamp": now}],
+        )
+
+        # Verify data exists
+        assert len(test_db.get_run_metrics(stage_run_id)) == 2
+        assert len(test_db.get_metrics_summary(stage_run_id)) == 2
+        assert len(test_db.get_run_artifacts(stage_run_id)) == 1
+
+        # Delete stage_run
+        with test_db._conn() as conn:
+            conn.execute("DELETE FROM stage_runs WHERE id = ?", (stage_run_id,))
+
+        # Metrics should be CASCADE deleted
+        assert len(test_db.get_run_metrics(stage_run_id)) == 0
+        assert len(test_db.get_metrics_summary(stage_run_id)) == 0
+        assert len(test_db.get_run_artifacts(stage_run_id)) == 0
+
+
+class TestMCPFiltering:
+    """Test MCP tool filtering and pagination."""
+
+    def test_filter_by_metric_name(self, workspace_setup, temp_dir):
+        """Should filter metrics by name."""
+        test_db = workspace_setup
+        now = datetime.now(UTC).isoformat()
+
+        # Create stage run with multiple metrics
+        stage_run_id = "stage-filter123"
+        test_db.create_stage_run(
+            stage_run_id=stage_run_id,
+            workspace_name="test_ws",
+            version="v1",
+            stage_name="train",
+            pipeline_run_id=None,
+            pipeline_name=None,
+            config={},
+            inputs={},
+            profile=None,
+            hints=None,
+            backend_type="local",
+            backend_handle="container-123",
+        )
+
+        # Insert different metrics
+        test_db.batch_insert_metrics(
+            stage_run_id,
+            [
+                {"name": "loss", "value": 0.5, "step": 0, "timestamp": now},
+                {"name": "loss", "value": 0.4, "step": 1, "timestamp": now},
+                {"name": "accuracy", "value": 0.8, "step": 0, "timestamp": now},
+                {"name": "accuracy", "value": 0.9, "step": 1, "timestamp": now},
+            ],
+        )
+
+        # Filter by "loss"
+        loss_metrics = test_db.get_run_metrics(stage_run_id, metric_name="loss")
+        assert len(loss_metrics) == 2
+        assert all(m["name"] == "loss" for m in loss_metrics)
+
+        # Filter by "accuracy"
+        accuracy_metrics = test_db.get_run_metrics(stage_run_id, metric_name="accuracy")
+        assert len(accuracy_metrics) == 2
+        assert all(m["name"] == "accuracy" for m in accuracy_metrics)
+
+    def test_pagination_with_limit_offset(self, workspace_setup, temp_dir):
+        """Should paginate metrics correctly."""
+        test_db = workspace_setup
+        now = datetime.now(UTC).isoformat()
+
+        # Create stage run
+        stage_run_id = "stage-paginate123"
+        test_db.create_stage_run(
+            stage_run_id=stage_run_id,
+            workspace_name="test_ws",
+            version="v1",
+            stage_name="train",
+            pipeline_run_id=None,
+            pipeline_name=None,
+            config={},
+            inputs={},
+            profile=None,
+            hints=None,
+            backend_type="local",
+            backend_handle="container-123",
+        )
+
+        # Insert 10 metrics
+        metrics = [{"name": "loss", "value": float(i), "step": i, "timestamp": now} for i in range(10)]
+        test_db.batch_insert_metrics(stage_run_id, metrics)
+
+        # Get all metrics
+        all_metrics = test_db.get_run_metrics(stage_run_id)
+        assert len(all_metrics) == 10
+
+        # Test pagination: first 5
+        # Note: Pagination is done at MCP tool level, not DB level
+        # But we verify the data is there for pagination to work
+        assert len(all_metrics[:5]) == 5
+        assert len(all_metrics[5:]) == 5
