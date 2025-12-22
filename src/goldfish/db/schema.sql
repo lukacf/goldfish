@@ -272,7 +272,7 @@ CREATE TABLE IF NOT EXISTS run_metrics (
     value REAL NOT NULL,
     step INTEGER,
     timestamp TEXT NOT NULL,
-    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id)
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_metrics_stage_run ON run_metrics(stage_run_id);
@@ -288,7 +288,7 @@ CREATE TABLE IF NOT EXISTS run_metrics_summary (
     last_value REAL,
     count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (stage_run_id, name),
-    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id)
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_metrics_summary_stage_run ON run_metrics_summary(stage_run_id);
@@ -302,7 +302,7 @@ CREATE TABLE IF NOT EXISTS run_artifacts (
     path TEXT NOT NULL,
     backend_url TEXT,
     created_at TEXT NOT NULL,
-    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id)
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_artifacts_stage_run ON run_artifacts(stage_run_id);

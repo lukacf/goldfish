@@ -34,6 +34,9 @@ class MetricsCollector:
             logger.debug(f"No metrics file found for {stage_run_id}: {metrics_file}")
             return {"metrics_count": 0, "artifacts_count": 0}
 
+        # Parse all entries into batches first
+        metrics_batch = []
+        artifacts_batch = []
         metrics_count = 0
         artifacts_count = 0
 
@@ -49,39 +52,37 @@ class MetricsCollector:
                         entry_type = entry.get("type")
 
                         if entry_type == "metric":
-                            # Insert individual metric
-                            self.db.insert_metric(
-                                stage_run_id=stage_run_id,
-                                name=entry["name"],
-                                value=entry["value"],
-                                step=entry.get("step"),
-                                timestamp=entry["timestamp"],
-                            )
-
-                            # Update summary
-                            self.db.upsert_metric_summary(
-                                stage_run_id=stage_run_id,
-                                name=entry["name"],
-                                value=entry["value"],
-                            )
-
-                            metrics_count += 1
-
+                            # Validate required fields before adding to batch
+                            if "name" in entry and "value" in entry:
+                                metrics_batch.append(entry)
+                            else:
+                                logger.warning(f"Skipping metric entry missing required fields: {entry}")
                         elif entry_type == "artifact":
-                            # Insert artifact record
-                            self.db.insert_artifact(
-                                stage_run_id=stage_run_id,
-                                name=entry["name"],
-                                path=entry["path"],
-                                backend_url=entry.get("backend_url"),
-                                created_at=entry["timestamp"],
-                            )
-
-                            artifacts_count += 1
+                            # Validate required fields before adding to batch
+                            if "name" in entry and "path" in entry:
+                                artifacts_batch.append(entry)
+                            else:
+                                logger.warning(f"Skipping artifact entry missing required fields: {entry}")
 
                     except (json.JSONDecodeError, KeyError) as e:
                         logger.warning(f"Skipping invalid metrics entry: {e}")
                         continue
+
+            # Insert all metrics in a single transaction
+            if metrics_batch:
+                self.db.batch_insert_metrics(stage_run_id, metrics_batch)
+                metrics_count = len(metrics_batch)
+
+            # Insert artifacts
+            for artifact in artifacts_batch:
+                self.db.insert_artifact(
+                    stage_run_id=stage_run_id,
+                    name=artifact["name"],
+                    path=artifact["path"],
+                    backend_url=artifact.get("backend_url"),
+                    created_at=artifact["timestamp"],
+                )
+                artifacts_count += 1
 
             logger.info(
                 f"Collected metrics for {stage_run_id}: " f"{metrics_count} metrics, {artifacts_count} artifacts"
