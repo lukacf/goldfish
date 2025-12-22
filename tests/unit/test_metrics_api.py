@@ -57,13 +57,15 @@ class TestPublicMetricsAPI:
         log_artifact("model", "model.pt")
         finish()
 
-        artifacts_file = tmp_path / ".goldfish" / "artifacts.json"
-        assert artifacts_file.exists()
+        metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"
+        assert metrics_file.exists()
 
-        with open(artifacts_file) as f:
-            data = json.load(f)
-            assert len(data) == 1
-            assert data[0]["name"] == "model"
+        with open(metrics_file) as f:
+            line = f.readline()
+            data = json.loads(line)
+            assert data["type"] == "artifact"
+            assert data["name"] == "model"
+            assert data["path"] == "model.pt"
 
     def test_multiple_calls_same_logger(self, tmp_path, monkeypatch):
         """Test that multiple calls use the same logger instance."""

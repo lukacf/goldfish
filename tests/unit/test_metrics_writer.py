@@ -26,6 +26,7 @@ class TestLocalWriter:
         with open(metrics_file) as f:
             line = f.readline()
             data = json.loads(line)
+            assert data["type"] == "metric"
             assert data["name"] == "loss"
             assert data["value"] == 0.5
             assert data["step"] == 10
@@ -54,14 +55,16 @@ class TestLocalWriter:
         writer.log_artifact("model", "model.pt")
         writer.flush()
 
-        artifacts_file = tmp_path / ".goldfish" / "artifacts.json"
-        assert artifacts_file.exists()
+        metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"
+        assert metrics_file.exists()
 
-        with open(artifacts_file) as f:
-            data = json.load(f)
-            assert len(data) == 1
-            assert data[0]["name"] == "model"
-            assert data[0]["path"] == "model.pt"
+        with open(metrics_file) as f:
+            line = f.readline()
+            data = json.loads(line)
+            assert data["type"] == "artifact"
+            assert data["name"] == "model"
+            assert data["path"] == "model.pt"
+            assert "timestamp" in data
 
     def test_multiple_metrics(self, tmp_path):
         """Test logging multiple metrics sequentially."""
