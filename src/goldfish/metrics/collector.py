@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from pathlib import Path
 
 from goldfish.db.database import Database
@@ -90,7 +91,16 @@ class MetricsCollector:
 
             return {"metrics_count": metrics_count, "artifacts_count": artifacts_count}
 
+        except OSError as e:
+            logger.error(f"I/O error reading metrics file for {stage_run_id}: {e}")
+            # Return partial counts - don't fail the stage if metrics collection fails
+            return {"metrics_count": metrics_count, "artifacts_count": artifacts_count}
+        except sqlite3.IntegrityError as e:
+            logger.error(f"Database integrity error for {stage_run_id}: {e}")
+            # Database error - return zero counts since we can't reliably continue
+            return {"metrics_count": 0, "artifacts_count": 0}
         except Exception as e:
-            logger.error(f"Failed to collect metrics for {stage_run_id}: {e}")
+            # Catch-all for unexpected errors - still need this for true unknowns
+            logger.error(f"Unexpected error collecting metrics for {stage_run_id}: {e}", exc_info=True)
             # Return partial counts - don't fail the stage if metrics collection fails
             return {"metrics_count": metrics_count, "artifacts_count": artifacts_count}
