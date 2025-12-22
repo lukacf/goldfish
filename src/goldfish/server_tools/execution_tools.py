@@ -582,36 +582,64 @@ def get_outputs(run_id: str) -> dict:
 
 
 @mcp.tool()
-def get_run_metrics(run_id: str) -> dict:
+def get_run_metrics(
+    run_id: str,
+    metric_name: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> dict:
     """Get metrics and artifacts from a stage run.
 
     Returns metrics logged during stage execution, summary statistics,
     and artifacts. Useful for analyzing run performance and results.
+    Supports filtering and pagination for large metric sets.
 
     Args:
         run_id: The stage run ID (e.g., "stage-abc123")
+        metric_name: Optional filter by metric name (e.g., "loss")
+        limit: Optional limit on number of metrics returned (1-10000)
+        offset: Optional offset for pagination (default 0)
 
     Returns:
         Dict with:
         - metrics: List of individual metric data points
         - summary: Summary statistics (min, max, last, count) per metric
         - artifacts: List of artifacts logged during execution
+        - total_metrics: Total count of metrics (before limit/offset)
 
     Examples:
         # Get all metrics from a training run
         metrics = get_run_metrics("stage-abc123")
-        print(f"Loss: {[m for m in metrics['metrics'] if m['name'] == 'loss']}")
-        print(f"Summary: {metrics['summary']}")
+        print(f"Total: {metrics['total_metrics']}")
+
+        # Filter by metric name
+        loss_metrics = get_run_metrics("stage-abc123", metric_name="loss")
+
+        # Paginate large metric sets
+        page1 = get_run_metrics("stage-abc123", limit=1000, offset=0)
+        page2 = get_run_metrics("stage-abc123", limit=1000, offset=1000)
     """
     db = _get_db()
+
+    # Validate parameters
+    if limit is not None and (limit < 1 or limit > 10000):
+        raise GoldfishError("limit must be 1-10000")
+    if offset < 0:
+        raise GoldfishError("offset must be >= 0")
 
     # Verify run exists
     row = db.get_stage_run(run_id)
     if not row:
         raise GoldfishError(f"Run not found: {run_id}")
 
-    # Get metrics
-    metric_rows = db.get_run_metrics(run_id)
+    # Get metrics (with optional filtering)
+    metric_rows = db.get_run_metrics(run_id, metric_name=metric_name)
+    total_metrics = len(metric_rows)
+
+    # Apply pagination
+    if limit is not None:
+        metric_rows = metric_rows[offset : offset + limit]
+
     metrics = [
         MetricInfo(
             name=m["name"],
@@ -622,8 +650,11 @@ def get_run_metrics(run_id: str) -> dict:
         for m in metric_rows
     ]
 
-    # Get summary
+    # Get summary (filter by metric_name if provided)
     summary_rows = db.get_metrics_summary(run_id)
+    if metric_name:
+        summary_rows = [s for s in summary_rows if s["name"] == metric_name]
+
     summaries = [
         MetricSummary(
             name=s["name"],
@@ -653,6 +684,10 @@ def get_run_metrics(run_id: str) -> dict:
         summary=summaries,
         artifacts=artifacts,
     ).model_dump(mode="json")
+
+    # Add total_metrics count
+    result["total_metrics"] = total_metrics
+
     return result
 
 
