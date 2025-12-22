@@ -5,6 +5,7 @@ Provides tools for running pipeline stages and monitoring execution.
 
 import json
 import logging
+import threading
 from datetime import UTC, datetime
 from typing import Any
 
@@ -37,6 +38,8 @@ from goldfish.server import (
 )
 from goldfish.utils import parse_datetime
 from goldfish.validation import (
+    validate_metric_name,
+    validate_stage_run_id,
     validate_workspace_name,
 )
 
@@ -51,24 +54,26 @@ _MAX_TAIL_LINES = 10000
 _log_cursors: dict[str, tuple[int, float]] = {}
 _CURSOR_TTL_SECONDS = 3600  # 1 hour
 _MAX_CURSORS = 1000  # Maximum number of cursors to keep
+_log_cursor_lock = threading.Lock()
 
 
 def _cleanup_stale_cursors() -> None:
     """Remove cursors that haven't been accessed in over TTL seconds."""
     import time
 
-    now = time.time()
-    stale_keys = [
-        run_id for run_id, (_, last_access) in _log_cursors.items() if now - last_access > _CURSOR_TTL_SECONDS
-    ]
-    for key in stale_keys:
-        del _log_cursors[key]
-
-    # If still over max, remove oldest entries
-    if len(_log_cursors) > _MAX_CURSORS:
-        sorted_by_access = sorted(_log_cursors.items(), key=lambda x: x[1][1])
-        for key, _ in sorted_by_access[: len(_log_cursors) - _MAX_CURSORS]:
+    with _log_cursor_lock:
+        now = time.time()
+        stale_keys = [
+            run_id for run_id, (_, last_access) in _log_cursors.items() if now - last_access > _CURSOR_TTL_SECONDS
+        ]
+        for key in stale_keys:
             del _log_cursors[key]
+
+        # If still over max, remove oldest entries
+        if len(_log_cursors) > _MAX_CURSORS:
+            sorted_by_access = sorted(_log_cursors.items(), key=lambda x: x[1][1])
+            for key, _ in sorted_by_access[: len(_log_cursors) - _MAX_CURSORS]:
+                del _log_cursors[key]
 
 
 def _stage_run_row_to_info(row: dict) -> StageRunInfo:
@@ -350,8 +355,9 @@ def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = 
         }
 
         # Get current cursor position (0 if first call)
-        cursor_entry = _log_cursors.get(run_id)
-        prev_cursor = cursor_entry[0] if cursor_entry else 0
+        with _log_cursor_lock:
+            cursor_entry = _log_cursors.get(run_id)
+            prev_cursor = cursor_entry[0] if cursor_entry else 0
 
         # Calculate new content
         full_content = log_content or ""
@@ -375,11 +381,12 @@ def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = 
         has_new_content = len(new_content) > 0
 
         # Update cursor to end of current content with current timestamp
-        _log_cursors[run_id] = (content_len, time.time())
+        with _log_cursor_lock:
+            _log_cursors[run_id] = (content_len, time.time())
 
-        # Clean up cursor when run reaches terminal state
-        if status in terminal_states:
-            _log_cursors.pop(run_id, None)
+            # Clean up cursor when run reaches terminal state
+            if status in terminal_states:
+                _log_cursors.pop(run_id, None)
 
         return {
             "run_id": run_id,
@@ -621,26 +628,33 @@ def get_run_metrics(
     """
     db = _get_db()
 
+    # Validate inputs (security: reject invalid IDs before any DB access)
+    validate_stage_run_id(run_id)
+    if metric_name is not None:
+        validate_metric_name(metric_name)
+
     # Validate parameters
     if limit is not None and (limit < 1 or limit > 10000):
         raise GoldfishError("limit must be 1-10000")
     if offset < 0:
         raise GoldfishError("offset must be >= 0")
-    if offset > 0 and limit is None:
-        raise GoldfishError("offset requires limit parameter")
 
     # Verify run exists
     row = db.get_stage_run(run_id)
     if not row:
         raise GoldfishError(f"Run not found: {run_id}")
 
-    # Get metrics (with optional filtering)
-    metric_rows = db.get_run_metrics(run_id, metric_name=metric_name)
-    total_metrics = len(metric_rows)
+    # Get total count first (for pagination info) - separate query
+    total_metrics = db.count_run_metrics(run_id, metric_name=metric_name)
 
-    # Apply pagination
-    if limit is not None:
-        metric_rows = metric_rows[offset : offset + limit]
+    # Get metrics with SQL-level pagination (critical for performance)
+    # This avoids loading all metrics into memory then slicing
+    metric_rows = db.get_run_metrics(
+        run_id,
+        metric_name=metric_name,
+        limit=limit,
+        offset=offset,
+    )
 
     metrics = [
         MetricInfo(
@@ -652,10 +666,8 @@ def get_run_metrics(
         for m in metric_rows
     ]
 
-    # Get summary (filter by metric_name if provided)
-    summary_rows = db.get_metrics_summary(run_id)
-    if metric_name:
-        summary_rows = [s for s in summary_rows if s["name"] == metric_name]
+    # Get summary (filter pushed to SQL for efficiency)
+    summary_rows = db.get_metrics_summary(run_id, metric_name=metric_name)
 
     summaries = [
         MetricSummary(
@@ -685,10 +697,8 @@ def get_run_metrics(
         metrics=metrics,
         summary=summaries,
         artifacts=artifacts,
+        total_metrics=total_metrics,
     ).model_dump(mode="json")
-
-    # Add total_metrics count
-    result["total_metrics"] = total_metrics
 
     return result
 

@@ -277,6 +277,14 @@ CREATE TABLE IF NOT EXISTS run_metrics (
 
 CREATE INDEX IF NOT EXISTS idx_run_metrics_stage_run ON run_metrics(stage_run_id);
 CREATE INDEX IF NOT EXISTS idx_run_metrics_name ON run_metrics(stage_run_id, name);
+-- Timestamp index for ORDER BY timestamp ASC queries (critical for pagination performance)
+CREATE INDEX IF NOT EXISTS idx_run_metrics_timestamp ON run_metrics(stage_run_id, timestamp);
+-- Composite index for pagination stability (ORDER BY timestamp ASC, id ASC)
+CREATE INDEX IF NOT EXISTS idx_run_metrics_pagination ON run_metrics(stage_run_id, timestamp, id);
+-- Unique constraint to prevent duplicate metrics (idempotency)
+-- COALESCE(step, -1) ensures NULL steps are deduplicated too.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_run_metrics_unique
+    ON run_metrics(stage_run_id, name, COALESCE(step, -1), timestamp);
 
 
 -- Run metrics summary (aggregated stats for quick queries)

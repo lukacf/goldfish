@@ -153,6 +153,7 @@ class TestWandBBackend:
     def test_log_artifact_saves_file(self, mock_wandb, tmp_path):
         """Test log_artifact saves artifact to W&B."""
         mock_run = MagicMock()
+        mock_run.url = "https://wandb.ai/team/project/runs/abc123"
         mock_wandb.init.return_value = mock_run
         mock_wandb.Settings = MagicMock()
 
@@ -161,14 +162,16 @@ class TestWandBBackend:
 
         artifact_path = tmp_path / "model.pt"
         artifact_path.touch()  # Create file
-        backend.log_artifact("model", artifact_path)
+        url = backend.log_artifact("model", artifact_path)
 
         # Should call wandb.save
         mock_wandb.save.assert_called_once_with(str(artifact_path), base_path=str(tmp_path))
+        assert url == "https://wandb.ai/team/project/runs/abc123"
 
     def test_log_artifact_with_directory(self, mock_wandb, tmp_path):
         """Test log_artifact handles directories."""
         mock_run = MagicMock()
+        mock_run.url = "https://wandb.ai/team/project/runs/abc123"
         mock_wandb.init.return_value = mock_run
         mock_wandb.Settings = MagicMock()
 
@@ -177,10 +180,19 @@ class TestWandBBackend:
 
         artifact_path = tmp_path / "checkpoints"
         artifact_path.mkdir()  # Create directory
-        backend.log_artifact("checkpoints", artifact_path)
+        # Add nested files
+        (artifact_path / "epoch1.pt").touch()
+        nested_dir = artifact_path / "nested"
+        nested_dir.mkdir()
+        (nested_dir / "epoch2.pt").touch()
 
-        # Should call wandb.save with glob pattern for directory
-        mock_wandb.save.assert_called_once_with(str(artifact_path / "*"), base_path=str(tmp_path))
+        url = backend.log_artifact("checkpoints", artifact_path)
+
+        # Should call wandb.save for each file (recursive)
+        assert mock_wandb.save.call_count == 2
+        mock_wandb.save.assert_any_call(str(artifact_path / "epoch1.pt"), base_path=str(artifact_path))
+        mock_wandb.save.assert_any_call(str(nested_dir / "epoch2.pt"), base_path=str(artifact_path))
+        assert url == "https://wandb.ai/team/project/runs/abc123"
 
     def test_finish_returns_run_url(self, mock_wandb):
         """Test finish returns W&B run URL."""

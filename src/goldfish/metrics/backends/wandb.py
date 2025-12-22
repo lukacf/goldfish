@@ -152,7 +152,7 @@ class WandBBackend(MetricsBackend):
         self,
         name: str,
         path: Path,
-    ) -> None:
+    ) -> str | None:
         """Log an artifact to W&B.
 
         Args:
@@ -161,20 +161,19 @@ class WandBBackend(MetricsBackend):
         """
         import wandb
 
-        # Determine base path (parent of the artifact)
-        base_path = str(path.parent)
-
-        # For directories, use glob pattern
+        # For directories, save all files recursively
         if path.is_dir():
-            # W&B expects "dir/*" pattern for directories
-            artifact_path = str(path / "*")
+            for file_path in path.rglob("*"):
+                if file_path.is_file():
+                    wandb.save(str(file_path), base_path=str(path))
         else:
-            artifact_path = str(path)
-
-        # wandb.save uploads files to W&B
-        wandb.save(artifact_path, base_path=base_path)
+            wandb.save(str(path), base_path=str(path.parent))
 
         logger.info(f"Logged artifact '{name}' to W&B: {path}")
+
+        if self._run is not None:
+            return self._run.url
+        return None
 
     def finish(self) -> str | None:
         """Finalize the W&B run.

@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from goldfish.metrics.writer import LocalWriter
 
 
@@ -98,13 +100,14 @@ class TestLocalWriter:
     def test_custom_timestamp(self, tmp_path):
         """Test logging with a custom timestamp."""
         writer = LocalWriter(outputs_dir=tmp_path)
-        writer.log_metric("loss", 0.5, timestamp=1234567890.0)
+        writer.log_metric("loss", 0.5, timestamp=1700000000.0)
         writer.flush()
 
         metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"
         with open(metrics_file) as f:
             data = json.loads(f.readline())
-            assert data["timestamp"] == 1234567890.0
+            # Float timestamps are converted to ISO 8601 format
+            assert data["timestamp"] == "2023-11-14T22:13:20+00:00"
 
     def test_flush_creates_file(self, tmp_path):
         """Test that flush creates the file."""
@@ -152,6 +155,8 @@ class TestLocalWriter:
 
     def test_flush_error_clears_buffer(self, tmp_path):
         """Test that buffer is cleared even on flush error."""
+        from goldfish.metrics.writer import MetricsFlushError
+
         writer = LocalWriter(outputs_dir=tmp_path)
 
         # Log some metrics
@@ -163,8 +168,9 @@ class TestLocalWriter:
         metrics_file.touch()
         metrics_file.chmod(0o444)
 
-        # Flush should fail but not raise (logs error instead)
-        writer.flush()
+        # Flush should fail and raise
+        with pytest.raises(MetricsFlushError):
+            writer.flush()
 
         # Buffer should be cleared to prevent infinite loop
         assert len(writer._metrics_buffer) == 0

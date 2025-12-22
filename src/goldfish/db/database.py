@@ -181,6 +181,9 @@ class Database:
                 """
             )
 
+            # Track latest schema version applied
+            new_version = current_version
+
             # Version 3: Add CASCADE DELETE to metrics tables
             # Required because SQLite can't modify foreign key constraints
             if current_version < 3:
@@ -257,17 +260,41 @@ class Database:
                         """
                     )
 
-            # Bump schema version
-            if current_version < 3:
+                new_version = 3
+
+            # Version 4: Enforce idempotency for NULL steps using COALESCE
+            if current_version < 4:
+                conn.execute("DROP INDEX IF EXISTS idx_run_metrics_unique")
+                # Deduplicate existing rows that would violate the new unique index
+                conn.execute(
+                    """
+                    DELETE FROM run_metrics
+                    WHERE id NOT IN (
+                        SELECT MIN(id)
+                        FROM run_metrics
+                        GROUP BY stage_run_id, name, COALESCE(step, -1), timestamp
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_run_metrics_unique
+                        ON run_metrics(stage_run_id, name, COALESCE(step, -1), timestamp)
+                    """
+                )
+                new_version = 4
+
+            # Bump schema version if needed
+            if new_version != current_version:
                 if version_row:
-                    conn.execute("UPDATE schema_version SET version = 3")
+                    conn.execute("UPDATE schema_version SET version = ?", (new_version,))
                 else:
-                    conn.execute("INSERT INTO schema_version (version) VALUES (3)")
+                    conn.execute("INSERT INTO schema_version (version) VALUES (?)", (new_version,))
 
     @contextmanager
     def _conn(self) -> Generator[sqlite3.Connection, None, None]:
         """Get a database connection with row factory."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         # Enable foreign keys
         conn.execute("PRAGMA foreign_keys = ON")
@@ -293,7 +320,7 @@ class Database:
         Yields:
             Connection with autocommit disabled
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         try:
@@ -2166,7 +2193,7 @@ class Database:
         step: int | None = None,
         timestamp: str | None = None,
     ) -> None:
-        """Insert a metric data point."""
+        """Insert a metric data point and update summary."""
         from datetime import UTC, datetime
 
         if timestamp is None:
@@ -2181,49 +2208,177 @@ class Database:
                 (stage_run_id, name, value, step, timestamp),
             )
 
+            # Also update summary (keeps summary in sync with detail table)
+            conn.execute(
+                """
+                INSERT INTO run_metrics_summary (stage_run_id, name, min_value, max_value, last_value, count)
+                VALUES (?, ?, ?, ?, ?, 1)
+                ON CONFLICT(stage_run_id, name) DO UPDATE SET
+                    min_value = CASE WHEN excluded.min_value < min_value THEN excluded.min_value ELSE min_value END,
+                    max_value = CASE WHEN excluded.max_value > max_value THEN excluded.max_value ELSE max_value END,
+                    last_value = excluded.last_value,
+                    count = count + 1
+                """,
+                (stage_run_id, name, value, value, value),
+            )
+
+    def _batch_insert_metrics_conn(
+        self,
+        conn: sqlite3.Connection,
+        stage_run_id: str,
+        metrics: list[dict],
+        update_summary: bool = True,
+    ) -> int:
+        """Insert multiple metrics using an existing connection.
+
+        Returns number of inserted rows (duplicates ignored).
+        """
+        from datetime import UTC, datetime
+
+        from goldfish.validation import validate_batch_size
+
+        if not metrics:
+            return 0
+
+        validate_batch_size(len(metrics))
+
+        now = datetime.now(UTC).isoformat()
+        metric_data = [
+            (
+                stage_run_id,
+                m["name"],
+                m["value"],
+                m.get("step"),
+                m.get("timestamp") or now,
+            )
+            for m in metrics
+        ]
+
+        before_changes = conn.total_changes
+
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO run_metrics (stage_run_id, name, value, step, timestamp)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            metric_data,
+        )
+
+        inserted = conn.total_changes - before_changes
+
+        if update_summary:
+            metric_names = {m["name"] for m in metrics}
+            self._rebuild_metrics_summary_for_names_conn(conn, stage_run_id, metric_names)
+
+        return inserted
+
     def batch_insert_metrics(
         self,
         stage_run_id: str,
         metrics: list[dict],
+        update_summary: bool = True,
     ) -> None:
-        """Insert multiple metrics in a single transaction.
+        """Insert multiple metrics in a single transaction using executemany.
 
         Args:
             stage_run_id: Stage run ID
             metrics: List of metric dicts with keys: name, value, step, timestamp
+            update_summary: If True, rebuild summaries for affected metric names
+
+        Raises:
+            InvalidBatchSizeError: If batch size exceeds 10,000 items
         """
-        from datetime import UTC, datetime
+
+        # Empty batch is a no-op
+        if not metrics:
+            return
 
         with self._conn() as conn:
-            for m in metrics:
-                # Ensure timestamp is set
-                timestamp = m.get("timestamp")
-                if timestamp is None:
-                    timestamp = datetime.now(UTC).isoformat()
+            self._batch_insert_metrics_conn(conn, stage_run_id, metrics, update_summary=update_summary)
 
-                # Insert metric
-                conn.execute(
-                    """
-                    INSERT INTO run_metrics (stage_run_id, name, value, step, timestamp)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (stage_run_id, m["name"], m["value"], m.get("step"), timestamp),
-                )
+    def _rebuild_metrics_summary_for_names_conn(
+        self,
+        conn: sqlite3.Connection,
+        stage_run_id: str,
+        metric_names: set[str],
+    ) -> None:
+        """Rebuild summaries for a subset of metric names (chunked)."""
+        if not metric_names:
+            return
 
-                # Update summary (in same transaction)
-                value = m["value"]
-                conn.execute(
-                    """
-                    INSERT INTO run_metrics_summary (stage_run_id, name, min_value, max_value, last_value, count)
-                    VALUES (?, ?, ?, ?, ?, 1)
-                    ON CONFLICT(stage_run_id, name) DO UPDATE SET
-                        min_value = MIN(min_value, excluded.min_value),
-                        max_value = MAX(max_value, excluded.max_value),
-                        last_value = excluded.last_value,
-                        count = count + 1
-                    """,
-                    (stage_run_id, m["name"], value, value, value),
+        names = sorted(metric_names)
+        chunk_size = 500  # Stay under SQLite variable limit
+
+        for i in range(0, len(names), chunk_size):
+            chunk = names[i : i + chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            conn.execute(
+                f"DELETE FROM run_metrics_summary WHERE stage_run_id = ? AND name IN ({placeholders})",
+                [stage_run_id, *chunk],
+            )
+            conn.execute(
+                f"""
+                INSERT INTO run_metrics_summary (stage_run_id, name, min_value, max_value, last_value, count)
+                WITH ranked AS (
+                    SELECT
+                        stage_run_id,
+                        name,
+                        value,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY stage_run_id, name
+                            ORDER BY timestamp DESC, id DESC
+                        ) as rn
+                    FROM run_metrics
+                    WHERE stage_run_id = ? AND name IN ({placeholders})
                 )
+                SELECT
+                    stage_run_id,
+                    name,
+                    MIN(value) as min_value,
+                    MAX(value) as max_value,
+                    MAX(CASE WHEN rn = 1 THEN value END) as last_value,
+                    COUNT(*) as count
+                FROM ranked
+                GROUP BY stage_run_id, name
+                """,
+                [stage_run_id, *chunk],
+            )
+
+    def _rebuild_metrics_summary_conn(self, conn: sqlite3.Connection, stage_run_id: str) -> None:
+        """Rebuild summary for all metrics in a stage run (single pass)."""
+        conn.execute("DELETE FROM run_metrics_summary WHERE stage_run_id = ?", (stage_run_id,))
+        conn.execute(
+            """
+            INSERT INTO run_metrics_summary (stage_run_id, name, min_value, max_value, last_value, count)
+            WITH ranked AS (
+                SELECT
+                    stage_run_id,
+                    name,
+                    value,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY stage_run_id, name
+                        ORDER BY timestamp DESC, id DESC
+                    ) as rn
+                FROM run_metrics
+                WHERE stage_run_id = ?
+            )
+            SELECT
+                stage_run_id,
+                name,
+                MIN(value) as min_value,
+                MAX(value) as max_value,
+                MAX(CASE WHEN rn = 1 THEN value END) as last_value,
+                COUNT(*) as count
+            FROM ranked
+            GROUP BY stage_run_id, name
+            """,
+            (stage_run_id,),
+        )
+
+    def rebuild_metrics_summary(self, stage_run_id: str) -> None:
+        """Rebuild metrics summary for a stage run."""
+        with self._conn() as conn:
+            self._rebuild_metrics_summary_conn(conn, stage_run_id)
 
     def upsert_metric_summary(
         self,
@@ -2231,15 +2386,19 @@ class Database:
         name: str,
         value: float,
     ) -> None:
-        """Update or insert a metric summary (min, max, last, count)."""
+        """Update or insert a metric summary (min, max, last, count).
+
+        Uses CASE WHEN for correct min/max comparison (MIN/MAX aggregates
+        don't work in ON CONFLICT UPDATE clause).
+        """
         with self._conn() as conn:
             conn.execute(
                 """
                 INSERT INTO run_metrics_summary (stage_run_id, name, min_value, max_value, last_value, count)
                 VALUES (?, ?, ?, ?, ?, 1)
                 ON CONFLICT(stage_run_id, name) DO UPDATE SET
-                    min_value = MIN(min_value, excluded.min_value),
-                    max_value = MAX(max_value, excluded.max_value),
+                    min_value = CASE WHEN excluded.min_value < min_value THEN excluded.min_value ELSE min_value END,
+                    max_value = CASE WHEN excluded.max_value > max_value THEN excluded.max_value ELSE max_value END,
                     last_value = excluded.last_value,
                     count = count + 1
                 """,
@@ -2250,51 +2409,105 @@ class Database:
         self,
         stage_run_id: str,
         metric_name: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[MetricRow]:
-        """Get metrics for a stage run, optionally filtered by metric name."""
+        """Get metrics for a stage run with optional filtering and SQL-level pagination.
+
+        Args:
+            stage_run_id: Stage run ID to filter by
+            metric_name: Optional metric name to filter by
+            limit: Maximum number of results to return (SQL LIMIT)
+            offset: Number of results to skip (SQL OFFSET)
+
+        Returns:
+            List of MetricRow dicts
+        """
         from goldfish.db.types import MetricRow
 
         with self._conn() as conn:
-            if metric_name:
-                rows = conn.execute(
-                    """
-                    SELECT id, stage_run_id, name, value, step, timestamp
-                    FROM run_metrics
-                    WHERE stage_run_id = ? AND name = ?
-                    ORDER BY timestamp ASC
-                    """,
-                    (stage_run_id, metric_name),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT id, stage_run_id, name, value, step, timestamp
-                    FROM run_metrics
-                    WHERE stage_run_id = ?
-                    ORDER BY timestamp ASC
-                    """,
-                    (stage_run_id,),
-                ).fetchall()
+            # Build query dynamically
+            query = """
+                SELECT id, stage_run_id, name, value, step, timestamp
+                FROM run_metrics
+                WHERE stage_run_id = ?
+            """
+            params: list = [stage_run_id]
 
+            if metric_name:
+                query += " AND name = ?"
+                params.append(metric_name)
+
+            query += " ORDER BY timestamp ASC, id ASC"
+
+            # Add SQL-level pagination (critical for performance)
+            if limit is not None:
+                query += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+            elif offset:
+                # SQLite requires LIMIT when OFFSET is used; -1 means "no limit"
+                query += " LIMIT -1 OFFSET ?"
+                params.append(offset)
+
+            rows = conn.execute(query, params).fetchall()
             return [cast(MetricRow, dict(row)) for row in rows]
+
+    def count_run_metrics(
+        self,
+        stage_run_id: str,
+        metric_name: str | None = None,
+    ) -> int:
+        """Get total count of metrics for pagination.
+
+        Args:
+            stage_run_id: Stage run ID to count metrics for
+            metric_name: Optional metric name to filter by
+
+        Returns:
+            Total count of matching metrics
+        """
+        with self._conn() as conn:
+            query = "SELECT COUNT(*) FROM run_metrics WHERE stage_run_id = ?"
+            params: list = [stage_run_id]
+
+            if metric_name:
+                query += " AND name = ?"
+                params.append(metric_name)
+
+            result = conn.execute(query, params).fetchone()
+            return int(result[0]) if result else 0
 
     def get_metrics_summary(
         self,
         stage_run_id: str,
+        metric_name: str | None = None,
     ) -> list[MetricsSummaryRow]:
-        """Get aggregated metrics summary for a stage run."""
+        """Get aggregated metrics summary for a stage run.
+
+        Args:
+            stage_run_id: Stage run ID to filter by
+            metric_name: Optional metric name to filter by (pushed to SQL for efficiency)
+
+        Returns:
+            List of MetricsSummaryRow dicts
+        """
         from goldfish.db.types import MetricsSummaryRow
 
         with self._conn() as conn:
-            rows = conn.execute(
-                """
+            query = """
                 SELECT stage_run_id, name, min_value, max_value, last_value, count
                 FROM run_metrics_summary
                 WHERE stage_run_id = ?
-                ORDER BY name ASC
-                """,
-                (stage_run_id,),
-            ).fetchall()
+            """
+            params: list = [stage_run_id]
+
+            if metric_name:
+                query += " AND name = ?"
+                params.append(metric_name)
+
+            query += " ORDER BY name ASC"
+
+            rows = conn.execute(query, params).fetchall()
 
             return [cast(MetricsSummaryRow, dict(row)) for row in rows]
 
@@ -2321,33 +2534,57 @@ class Database:
                 (stage_run_id, name, path, backend_url, created_at),
             )
 
+    def _batch_insert_artifacts_conn(
+        self,
+        conn: sqlite3.Connection,
+        stage_run_id: str,
+        artifacts: list[dict],
+    ) -> int:
+        """Insert artifacts using an existing connection."""
+        from datetime import UTC, datetime
+
+        if not artifacts:
+            return 0
+
+        now = datetime.now(UTC).isoformat()
+
+        artifact_data = [
+            (
+                stage_run_id,
+                a["name"],
+                a["path"],
+                a.get("backend_url"),
+                a.get("created_at") or a.get("timestamp") or now,
+            )
+            for a in artifacts
+        ]
+
+        before_changes = conn.total_changes
+        conn.executemany(
+            """
+            INSERT INTO run_artifacts (stage_run_id, name, path, backend_url, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            artifact_data,
+        )
+        return conn.total_changes - before_changes
+
     def batch_insert_artifacts(
         self,
         stage_run_id: str,
         artifacts: list[dict],
     ) -> None:
-        """Insert multiple artifacts in a single transaction.
+        """Insert multiple artifacts in a single transaction using executemany.
 
         Args:
             stage_run_id: Stage run ID
             artifacts: List of artifact dicts with keys: name, path, backend_url, timestamp/created_at
         """
-        from datetime import UTC, datetime
+        if not artifacts:
+            return
 
         with self._conn() as conn:
-            for a in artifacts:
-                # Handle both 'timestamp' (from writer) and 'created_at' (from old format)
-                created_at = a.get("created_at") or a.get("timestamp")
-                if created_at is None:
-                    created_at = datetime.now(UTC).isoformat()
-
-                conn.execute(
-                    """
-                    INSERT INTO run_artifacts (stage_run_id, name, path, backend_url, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (stage_run_id, a["name"], a["path"], a.get("backend_url"), created_at),
-                )
+            self._batch_insert_artifacts_conn(conn, stage_run_id, artifacts)
 
     def get_run_artifacts(
         self,

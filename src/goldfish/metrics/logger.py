@@ -15,7 +15,9 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from goldfish.metrics.utils import normalize_metric_step, normalize_metric_value, timestamp_to_float
 from goldfish.metrics.writer import LocalWriter
+from goldfish.validation import validate_artifact_path, validate_metric_name
 
 if TYPE_CHECKING:
     from goldfish.metrics.backends.base import MetricsBackend
@@ -125,7 +127,7 @@ class MetricsLogger:
         name: str,
         value: float,
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: str | float | None = None,
     ) -> None:
         """Log a single metric value.
 
@@ -133,27 +135,29 @@ class MetricsLogger:
             name: Metric name (e.g., "loss", "accuracy")
             value: Metric value
             step: Optional step/epoch number
-            timestamp: Optional Unix timestamp
+            timestamp: Optional timestamp - ISO 8601 string or Unix float
         """
         # Always write to local
         self.local_writer.log_metric(name, value, step, timestamp)
 
         # Try backend if configured
         self._ensure_backend_initialized()
-        if self._backend_initialized and not self._backend_failed:
+        backend = self.backend  # Local var for type narrowing
+        if self._backend_initialized and not self._backend_failed and backend is not None:
             try:
-                self.backend.log_metric(name, value, step, timestamp)  # type: ignore
+                backend_value = normalize_metric_value(value)
+                backend_step = normalize_metric_step(step)
+                ts_float = timestamp_to_float(timestamp)
+                backend.log_metric(name, backend_value, backend_step, ts_float)
             except Exception as e:
-                logger.error(
-                    f"Backend '{self.backend.name()}' failed to log metric '{name}': {e}"  # type: ignore
-                )
+                logger.error(f"Backend '{backend.name()}' failed to log metric '{name}': {e}")
                 self._backend_failed = True
 
     def log_metrics(
         self,
         metrics: dict[str, float],
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: str | float | None = None,
     ) -> None:
         """Log multiple metrics at once.
 
@@ -167,13 +171,15 @@ class MetricsLogger:
 
         # Try backend if configured
         self._ensure_backend_initialized()
-        if self._backend_initialized and not self._backend_failed:
+        backend = self.backend  # Local var for type narrowing
+        if self._backend_initialized and not self._backend_failed and backend is not None:
             try:
-                self.backend.log_metrics(metrics, step, timestamp)  # type: ignore
+                ts_float = timestamp_to_float(timestamp)
+                backend_step = normalize_metric_step(step)
+                backend_metrics = {name: normalize_metric_value(value) for name, value in metrics.items()}
+                backend.log_metrics(backend_metrics, backend_step, ts_float)
             except Exception as e:
-                logger.error(
-                    f"Backend '{self.backend.name()}' failed to log metrics: {e}"  # type: ignore
-                )
+                logger.error(f"Backend '{backend.name()}' failed to log metrics: {e}")
                 self._backend_failed = True
 
     def log_artifact(self, name: str, path: str | Path) -> None:
@@ -183,25 +189,27 @@ class MetricsLogger:
             name: Artifact name (e.g., "model", "predictions")
             path: Path to artifact relative to outputs dir
         """
-        # Always write to local
-        self.local_writer.log_artifact(name, path)
+        # Validate upfront so backend/local stay consistent
+        validate_metric_name(name)
+        validate_artifact_path(str(path))
 
-        # Try backend if configured
+        # Try backend first to capture URL if available
+        backend_url: str | None = None
         self._ensure_backend_initialized()
-        if self._backend_initialized and not self._backend_failed:
+        backend = self.backend  # Local var for type narrowing
+        if self._backend_initialized and not self._backend_failed and backend is not None:
             try:
                 # Backend expects absolute Path
-                if not isinstance(path, Path):
-                    path = Path(path)
-                # Make absolute relative to outputs dir if needed
-                if not path.is_absolute():
-                    path = self.local_writer.outputs_dir / path
-                self.backend.log_artifact(name, path)  # type: ignore
+                backend_path = Path(path) if not isinstance(path, Path) else path
+                if not backend_path.is_absolute():
+                    backend_path = self.local_writer.outputs_dir / backend_path
+                backend_url = backend.log_artifact(name, backend_path)
             except Exception as e:
-                logger.error(
-                    f"Backend '{self.backend.name()}' failed to log artifact '{name}': {e}"  # type: ignore
-                )
+                logger.error(f"Backend '{backend.name()}' failed to log artifact '{name}': {e}")
                 self._backend_failed = True
+
+        # Always write to local (include backend_url if available)
+        self.local_writer.log_artifact(name, path, backend_url=backend_url)
 
     def flush(self) -> None:
         """Flush buffered metrics to disk.
@@ -222,16 +230,14 @@ class MetricsLogger:
         self.flush()
 
         # Try backend finish if configured
-        if self._backend_initialized and not self._backend_failed:
+        backend = self.backend  # Local var for type narrowing
+        if self._backend_initialized and not self._backend_failed and backend is not None:
             try:
-                url = self.backend.finish()  # type: ignore
-                logger.info(f"Backend '{self.backend.name()}' finished successfully")  # type: ignore
+                url = backend.finish()
+                logger.info(f"Backend '{backend.name()}' finished successfully")
                 return url
             except Exception as e:
-                logger.error(
-                    f"Backend '{self.backend.name()}' failed to finish: {e}",  # type: ignore
-                    exc_info=True,
-                )
+                logger.error(f"Backend '{backend.name()}' failed to finish: {e}", exc_info=True)
                 return None
 
         return None
@@ -240,6 +246,11 @@ class MetricsLogger:
         """Context manager entry."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
         """Context manager exit - automatically calls finish()."""
         self.finish()

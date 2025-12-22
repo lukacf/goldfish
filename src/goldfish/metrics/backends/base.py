@@ -82,12 +82,15 @@ class MetricsBackend(ABC):
         self,
         name: str,
         path: Path,
-    ) -> None:
+    ) -> str | None:
         """Log an artifact (file or directory).
 
         Args:
             name: Artifact name (e.g., "model", "predictions")
             path: Path to artifact (file or directory)
+
+        Returns:
+            Optional backend URL for the artifact or run.
         """
         pass
 

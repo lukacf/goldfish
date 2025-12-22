@@ -92,15 +92,14 @@ def register_backend(backend_class: type[MetricsBackend]) -> None:
 
 
 # Auto-register built-in backends
-# Import and register WandBBackend if wandb is available
+# Register WandBBackend regardless of availability (availability is checked at runtime)
 try:
     from goldfish.metrics.backends.wandb import WandBBackend
 
-    if WandBBackend.is_available():
-        register_backend(WandBBackend)
-        logger.debug("Auto-registered WandBBackend")
+    register_backend(WandBBackend)
+    logger.debug("Registered WandBBackend")
 except ImportError:
-    # wandb package not installed, skip registration
+    # If the backend module itself is missing, skip registration
     pass
 
 
