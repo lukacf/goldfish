@@ -2104,6 +2104,50 @@ class Database:
                 (stage_run_id, name, value, step, timestamp),
             )
 
+    def batch_insert_metrics(
+        self,
+        stage_run_id: str,
+        metrics: list[dict],
+    ) -> None:
+        """Insert multiple metrics in a single transaction.
+
+        Args:
+            stage_run_id: Stage run ID
+            metrics: List of metric dicts with keys: name, value, step, timestamp
+        """
+        from datetime import UTC, datetime
+
+        with self._conn() as conn:
+            for m in metrics:
+                # Ensure timestamp is set
+                timestamp = m.get("timestamp")
+                if timestamp is None:
+                    timestamp = datetime.now(UTC).isoformat()
+
+                # Insert metric
+                conn.execute(
+                    """
+                    INSERT INTO run_metrics (stage_run_id, name, value, step, timestamp)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (stage_run_id, m["name"], m["value"], m.get("step"), timestamp),
+                )
+
+                # Update summary (in same transaction)
+                value = m["value"]
+                conn.execute(
+                    """
+                    INSERT INTO run_metrics_summary (stage_run_id, name, min_value, max_value, last_value, count)
+                    VALUES (?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(stage_run_id, name) DO UPDATE SET
+                        min_value = MIN(min_value, excluded.min_value),
+                        max_value = MAX(max_value, excluded.max_value),
+                        last_value = excluded.last_value,
+                        count = count + 1
+                    """,
+                    (stage_run_id, m["name"], value, value, value),
+                )
+
     def upsert_metric_summary(
         self,
         stage_run_id: str,
