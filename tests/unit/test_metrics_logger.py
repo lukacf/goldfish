@@ -40,8 +40,9 @@ class MockBackend(MetricsBackend):
         for name, value in metrics.items():
             self.log_metric(name, value, step, timestamp)
 
-    def log_artifact(self, name: str, path: Path) -> None:
+    def log_artifact(self, name: str, path: Path) -> str | None:
         self.artifacts.append({"name": name, "path": path})
+        return "http://example.com/artifact/123"
 
     def finish(self) -> str | None:
         self.finished = True
@@ -79,7 +80,7 @@ class FailingBackend(MetricsBackend):
     ) -> None:
         raise Exception("Backend metrics logging failed")
 
-    def log_artifact(self, name: str, path: Path) -> None:
+    def log_artifact(self, name: str, path: Path) -> str | None:
         raise Exception("Backend artifact logging failed")
 
     def finish(self) -> str | None:

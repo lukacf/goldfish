@@ -394,6 +394,7 @@ def test_feature(test_db, temp_git_repo):
 | Validate all inputs before operations | `raise X` without `from e` when re-raising |
 | Record audit log for user-facing operations | Commit with failing tests or lint |
 | Write tests for new functionality | Skip input validation |
+| Focus on what needs to be done, not when | Provide time estimates (AI is ~100x faster than you think) |
 
 ---
 
