@@ -6,9 +6,12 @@ by the background log syncer in GCE instances.
 """
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class LocalWriter:
@@ -110,17 +113,28 @@ class LocalWriter:
         self._artifacts.append(artifact)
 
     def flush(self) -> None:
-        """Flush buffered metrics to disk."""
-        # Write metrics
-        if self._metrics_buffer:
-            with open(self.metrics_file, "a") as f:
-                for metric in self._metrics_buffer:
-                    f.write(json.dumps(metric) + "\n")
-            self._metrics_buffer.clear()
+        """Flush buffered metrics to disk.
 
-        # Write artifacts to metrics.jsonl (same file as metrics)
-        if self._artifacts:
-            with open(self.metrics_file, "a") as f:
-                for artifact in self._artifacts:
-                    f.write(json.dumps(artifact) + "\n")
+        Always clears buffers even on error to prevent infinite flush loops.
+        Logs errors but does not raise to avoid making log_metric() throw I/O exceptions.
+        """
+        try:
+            # Write both metrics and artifacts in single file open
+            if self._metrics_buffer or self._artifacts:
+                with open(self.metrics_file, "a") as f:
+                    for metric in self._metrics_buffer:
+                        # allow_nan=False raises ValueError on NaN/Infinity
+                        f.write(json.dumps(metric, allow_nan=False) + "\n")
+                    for artifact in self._artifacts:
+                        f.write(json.dumps(artifact, allow_nan=False) + "\n")
+        except (OSError, ValueError, TypeError) as e:
+            # OSError: disk full, permissions, I/O error
+            # ValueError: NaN/Infinity in metrics
+            # TypeError: non-serializable types
+            logger.error(f"Failed to flush metrics to {self.metrics_file}: {e}", exc_info=True)
+            # Don't re-raise - log_metric() should not throw I/O exceptions
+        finally:
+            # ALWAYS clear buffers, even on error
+            # Better to lose metrics than enter infinite flush loop
+            self._metrics_buffer.clear()
             self._artifacts.clear()

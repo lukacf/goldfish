@@ -626,6 +626,8 @@ def get_run_metrics(
         raise GoldfishError("limit must be 1-10000")
     if offset < 0:
         raise GoldfishError("offset must be >= 0")
+    if offset > 0 and limit is None:
+        raise GoldfishError("offset requires limit parameter")
 
     # Verify run exists
     row = db.get_stage_run(run_id)

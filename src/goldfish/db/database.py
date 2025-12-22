@@ -180,12 +180,89 @@ class Database:
                     ON stage_versions(workspace_name, stage_name);
                 """
             )
+
+            # Version 3: Add CASCADE DELETE to metrics tables
+            # Required because SQLite can't modify foreign key constraints
+            if current_version < 3:
+                # Check if run_metrics already has CASCADE DELETE
+                fk_info = conn.execute("PRAGMA foreign_key_list(run_metrics)").fetchall()
+                has_cascade = any("CASCADE" in str(fk["on_delete"] if fk["on_delete"] else "") for fk in fk_info)
+
+                if not has_cascade:
+                    # Rebuild run_metrics with CASCADE DELETE
+                    conn.executescript(
+                        """
+                        -- Temporarily disable foreign keys
+                        PRAGMA foreign_keys = OFF;
+
+                        -- Create new table with CASCADE DELETE
+                        CREATE TABLE run_metrics_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            stage_run_id TEXT NOT NULL,
+                            name TEXT NOT NULL,
+                            value REAL NOT NULL,
+                            step INTEGER,
+                            timestamp TEXT NOT NULL,
+                            FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+                        );
+
+                        -- Copy data
+                        INSERT INTO run_metrics_new SELECT * FROM run_metrics;
+
+                        -- Drop old table
+                        DROP TABLE run_metrics;
+
+                        -- Rename new table
+                        ALTER TABLE run_metrics_new RENAME TO run_metrics;
+
+                        -- Recreate indexes
+                        CREATE INDEX idx_run_metrics_stage_run ON run_metrics(stage_run_id);
+                        CREATE INDEX idx_run_metrics_name ON run_metrics(stage_run_id, name);
+
+                        -- Rebuild run_metrics_summary with CASCADE DELETE
+                        CREATE TABLE run_metrics_summary_new (
+                            stage_run_id TEXT NOT NULL,
+                            name TEXT NOT NULL,
+                            min_value REAL,
+                            max_value REAL,
+                            last_value REAL,
+                            count INTEGER NOT NULL DEFAULT 0,
+                            PRIMARY KEY (stage_run_id, name),
+                            FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+                        );
+
+                        INSERT INTO run_metrics_summary_new SELECT * FROM run_metrics_summary;
+                        DROP TABLE run_metrics_summary;
+                        ALTER TABLE run_metrics_summary_new RENAME TO run_metrics_summary;
+                        CREATE INDEX idx_run_metrics_summary_stage_run ON run_metrics_summary(stage_run_id);
+
+                        -- Rebuild run_artifacts with CASCADE DELETE
+                        CREATE TABLE run_artifacts_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            stage_run_id TEXT NOT NULL,
+                            name TEXT NOT NULL,
+                            path TEXT NOT NULL,
+                            backend_url TEXT,
+                            created_at TEXT NOT NULL,
+                            FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+                        );
+
+                        INSERT INTO run_artifacts_new SELECT * FROM run_artifacts;
+                        DROP TABLE run_artifacts;
+                        ALTER TABLE run_artifacts_new RENAME TO run_artifacts;
+                        CREATE INDEX idx_run_artifacts_stage_run ON run_artifacts(stage_run_id);
+
+                        -- Re-enable foreign keys
+                        PRAGMA foreign_keys = ON;
+                        """
+                    )
+
             # Bump schema version
-            if current_version < 2:
+            if current_version < 3:
                 if version_row:
-                    conn.execute("UPDATE schema_version SET version = 2")
+                    conn.execute("UPDATE schema_version SET version = 3")
                 else:
-                    conn.execute("INSERT INTO schema_version (version) VALUES (2)")
+                    conn.execute("INSERT INTO schema_version (version) VALUES (3)")
 
     @contextmanager
     def _conn(self) -> Generator[sqlite3.Connection, None, None]:
@@ -2243,6 +2320,34 @@ class Database:
                 """,
                 (stage_run_id, name, path, backend_url, created_at),
             )
+
+    def batch_insert_artifacts(
+        self,
+        stage_run_id: str,
+        artifacts: list[dict],
+    ) -> None:
+        """Insert multiple artifacts in a single transaction.
+
+        Args:
+            stage_run_id: Stage run ID
+            artifacts: List of artifact dicts with keys: name, path, backend_url, timestamp/created_at
+        """
+        from datetime import UTC, datetime
+
+        with self._conn() as conn:
+            for a in artifacts:
+                # Handle both 'timestamp' (from writer) and 'created_at' (from old format)
+                created_at = a.get("created_at") or a.get("timestamp")
+                if created_at is None:
+                    created_at = datetime.now(UTC).isoformat()
+
+                conn.execute(
+                    """
+                    INSERT INTO run_artifacts (stage_run_id, name, path, backend_url, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (stage_run_id, a["name"], a["path"], a.get("backend_url"), created_at),
+                )
 
     def get_run_artifacts(
         self,

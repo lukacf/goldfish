@@ -53,17 +53,36 @@ class MetricsCollector:
                         entry_type = entry.get("type")
 
                         if entry_type == "metric":
-                            # Validate required fields before adding to batch
+                            # New format with explicit type
                             if "name" in entry and "value" in entry:
                                 metrics_batch.append(entry)
                             else:
                                 logger.warning(f"Skipping metric entry missing required fields: {entry}")
                         elif entry_type == "artifact":
-                            # Validate required fields before adding to batch
+                            # New format with explicit type
                             if "name" in entry and "path" in entry:
                                 artifacts_batch.append(entry)
                             else:
                                 logger.warning(f"Skipping artifact entry missing required fields: {entry}")
+                        elif entry_type is None:
+                            # Old format without "type" field - infer type from fields present
+                            # BACKWARD COMPATIBILITY: Support pre-cc19bce JSONL format
+                            if "value" in entry and "name" in entry:
+                                # Has value field → metric
+                                logger.debug(
+                                    f"Collecting old-format metric (missing 'type' field): {entry.get('name')}"
+                                )
+                                metrics_batch.append(entry)
+                            elif "path" in entry and "name" in entry:
+                                # Has path field → artifact
+                                logger.debug(
+                                    f"Collecting old-format artifact (missing 'type' field): {entry.get('name')}"
+                                )
+                                artifacts_batch.append(entry)
+                            else:
+                                logger.warning(
+                                    f"Skipping entry with unknown format (missing 'type' and can't infer): {entry}"
+                                )
 
                     except (json.JSONDecodeError, KeyError) as e:
                         logger.warning(f"Skipping invalid metrics entry: {e}")
@@ -74,16 +93,10 @@ class MetricsCollector:
                 self.db.batch_insert_metrics(stage_run_id, metrics_batch)
                 metrics_count = len(metrics_batch)
 
-            # Insert artifacts
-            for artifact in artifacts_batch:
-                self.db.insert_artifact(
-                    stage_run_id=stage_run_id,
-                    name=artifact["name"],
-                    path=artifact["path"],
-                    backend_url=artifact.get("backend_url"),
-                    created_at=artifact["timestamp"],
-                )
-                artifacts_count += 1
+            # Insert all artifacts in a single transaction
+            if artifacts_batch:
+                self.db.batch_insert_artifacts(stage_run_id, artifacts_batch)
+                artifacts_count = len(artifacts_batch)
 
             logger.info(
                 f"Collected metrics for {stage_run_id}: " f"{metrics_count} metrics, {artifacts_count} artifacts"
