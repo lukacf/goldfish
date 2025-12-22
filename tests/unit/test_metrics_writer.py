@@ -130,3 +130,44 @@ class TestLocalWriter:
         with open(metrics_file) as f:
             lines = f.readlines()
             assert len(lines) == 2
+
+    def test_auto_flush_at_threshold(self, tmp_path):
+        """Test that auto-flush triggers at 100 metrics."""
+        writer = LocalWriter(outputs_dir=tmp_path)
+
+        # Log 99 metrics - should not flush
+        for i in range(99):
+            writer.log_metric("loss", float(i))
+
+        metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"
+        assert not metrics_file.exists()  # Not flushed yet
+
+        # 100th metric should trigger auto-flush
+        writer.log_metric("loss", 99.0)
+
+        assert metrics_file.exists()
+        with open(metrics_file) as f:
+            lines = f.readlines()
+            assert len(lines) == 100
+
+    def test_flush_error_clears_buffer(self, tmp_path):
+        """Test that buffer is cleared even on flush error."""
+        writer = LocalWriter(outputs_dir=tmp_path)
+
+        # Log some metrics
+        writer.log_metric("loss", 0.5)
+        writer.log_metric("accuracy", 0.9)
+
+        # Make metrics file read-only to cause write error
+        metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"
+        metrics_file.touch()
+        metrics_file.chmod(0o444)
+
+        # Flush should fail but not raise (logs error instead)
+        writer.flush()
+
+        # Buffer should be cleared to prevent infinite loop
+        assert len(writer._metrics_buffer) == 0
+
+        # Cleanup
+        metrics_file.chmod(0o644)
