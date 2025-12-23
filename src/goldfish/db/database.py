@@ -129,9 +129,13 @@ class Database:
 
             # Add missing columns
             for table, cols in required_columns.items():
-                existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-                if not existing:
+                table_exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                if not table_exists:
                     continue
+                existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
                 for col, col_type in cols:
                     if col not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
