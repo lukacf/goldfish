@@ -772,7 +772,7 @@ def get_run_metrics(
 
     db.log_audit(
         operation="get_run_metrics",
-        reason="metrics query",
+        reason="metrics query request",
         workspace=row.get("workspace_name"),
         details={
             "run_id": run_id,
