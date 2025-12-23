@@ -491,11 +491,13 @@ finish()  # safe to call multiple times
 ```
 
 Notes:
-- A given metric name must consistently use either `step=None` or `step=int` (no mixing).
+- A given metric name should consistently use either `step=None` or `step=int`.
+  Mixed step modes are skipped with a warning (no crash).
 - `timestamp` accepts ISO 8601 strings or Unix float seconds (returned as ISO 8601 UTC strings).
 - Bool values are rejected; use 0/1.
 - Artifact paths must be relative to outputs dir (absolute paths and symlinks are rejected).
 - Unique metric names are capped per run (default 10,000).
+- Live sync: `get_run_metrics` will attempt a best-effort live sync for running runs.
 
 ### Progress Indicators
 

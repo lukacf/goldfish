@@ -5,6 +5,7 @@ Provides tools for running pipeline stages and monitoring execution.
 
 import json
 import logging
+import os
 import threading
 from datetime import UTC, datetime
 from typing import Any
@@ -51,7 +52,20 @@ DEFAULT_METRICS_LIMIT = 1000
 DEFAULT_ARTIFACT_LIMIT = 1000
 UNBOUNDED_METRICS_WARNING = 10000
 UNBOUNDED_ARTIFACTS_WARNING = 5000
-MAX_METRICS_OFFSET = 1_000_000
+
+
+def _read_max_metrics_offset() -> int:
+    value = os.environ.get("GOLDFISH_METRICS_MAX_OFFSET")
+    if not value:
+        return 1_000_000
+    try:
+        parsed = int(value)
+    except ValueError:
+        return 1_000_000
+    return max(1, min(100_000_000, parsed))
+
+
+MAX_METRICS_OFFSET = _read_max_metrics_offset()
 
 # Cursor tracking for follow mode - maps run_id to (cursor_position, last_access_time)
 # Used to return only new logs since the last call
@@ -609,6 +623,7 @@ def get_run_metrics(
     Returns metrics logged during stage execution, summary statistics,
     and artifacts. Useful for analyzing run performance and results.
     Supports filtering and pagination for large metric sets.
+    For running runs, performs a best-effort live sync before returning.
 
     Args:
         run_id: The stage run ID (e.g., "stage-abc123")
@@ -673,6 +688,13 @@ def get_run_metrics(
         raise GoldfishError(f"Run not found: {run_id}")
     if workspace is not None and row.get("workspace_name") != workspace:
         raise GoldfishError(f"Run {run_id} does not belong to workspace {workspace}")
+
+    # Opportunistic live sync for running runs (best-effort, non-blocking)
+    if row.get("status") == StageRunStatus.RUNNING:
+        try:
+            _get_stage_executor().sync_metrics_if_running(run_id)
+        except Exception as exc:
+            logger.debug("Live metrics sync failed for %s: %s", run_id, exc)
 
     # Get total count first (for pagination info) - separate query
     total_metrics = db.count_run_metrics(run_id, metric_name=metric_name, metric_prefix=metric_prefix)

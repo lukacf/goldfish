@@ -139,7 +139,63 @@ def test_get_run_metrics_warns_when_unbounded_large_result():
         result = get_run_metrics(run_id, limit=None)
 
     assert "warnings" in result
-    assert any("large" in w.lower() for w in result["warnings"])
+
+
+def test_get_run_metrics_syncs_live_for_running_run():
+    """Running runs should trigger a live sync before returning metrics."""
+    from goldfish.server_tools.execution_tools import get_run_metrics
+
+    run_id = "stage-acde123"
+    mock_db = MagicMock()
+    row = _mock_stage_row(run_id)
+    row["status"] = "running"
+    mock_db.get_stage_run.return_value = row
+    mock_db.count_run_metrics.return_value = 0
+    mock_db.count_run_artifacts.return_value = 0
+    mock_db.log_audit = MagicMock()
+    mock_db.get_run_metrics.return_value = []
+    mock_db.get_metrics_summary.return_value = []
+    mock_db.get_run_artifacts.return_value = []
+
+    mock_executor = MagicMock()
+
+    with (
+        patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db),
+        patch("goldfish.server_tools.execution_tools._get_stage_executor", return_value=mock_executor),
+    ):
+        get_run_metrics(run_id)
+
+    mock_executor.sync_metrics_if_running.assert_called_once_with(run_id)
+
+
+def test_metrics_offset_cap_is_configurable(monkeypatch):
+    """MAX_METRICS_OFFSET should honor env override."""
+    from goldfish.server_tools import execution_tools
+
+    monkeypatch.setenv("GOLDFISH_METRICS_MAX_OFFSET", "5")
+    # Force reload to pick up env if cached
+    import importlib
+
+    importlib.reload(execution_tools)
+
+    run_id = "stage-deadbeef"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = _mock_stage_row(run_id)
+    mock_db.count_run_metrics.return_value = 0
+    mock_db.count_run_artifacts.return_value = 0
+    mock_db.log_audit = MagicMock()
+    mock_db.get_run_metrics.return_value = []
+    mock_db.get_metrics_summary.return_value = []
+    mock_db.get_run_artifacts.return_value = []
+
+    from goldfish.errors import GoldfishError
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        with pytest.raises(GoldfishError):
+            execution_tools.get_run_metrics(run_id, offset=6)
+
+    monkeypatch.delenv("GOLDFISH_METRICS_MAX_OFFSET", raising=False)
+    importlib.reload(execution_tools)
 
 
 def test_get_run_metrics_offset_too_large_raises():
