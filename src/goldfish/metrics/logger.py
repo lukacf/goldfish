@@ -124,7 +124,12 @@ class MetricsLogger:
                     stage=self.stage,
                 )
                 self._backend_initialized = True
-                logger.info(f"Initialized backend '{self.backend.name()}' for run {self.run_id}")
+                error = self._consume_backend_error(self.backend)
+                if error:
+                    self._record_backend_error(f"Failed to initialize backend '{self.backend.name()}': {error}")
+                    self._backend_initialized = False
+                else:
+                    logger.info(f"Initialized backend '{self.backend.name()}' for run {self.run_id}")
             else:
                 logger.warning("Backend provided but run metadata missing, backend will not be initialized")
                 self._backend_failed = True
@@ -159,6 +164,7 @@ class MetricsLogger:
                 backend_step = normalize_metric_step(step)
                 ts_float = timestamp_to_float(timestamp)
                 backend.log_metric(name, backend_value, backend_step, ts_float)
+                self._capture_backend_error(backend, f"Backend '{backend.name()}' failed to log metric '{name}'")
             except Exception as e:
                 self._record_backend_error(f"Backend '{backend.name()}' failed to log metric '{name}': {e}")
 
@@ -193,6 +199,7 @@ class MetricsLogger:
                 backend_step = normalize_metric_step(step)
                 backend_metrics = {name: normalize_metric_value(value) for name, value in accepted.items()}
                 backend.log_metrics(backend_metrics, backend_step, ts_float)
+                self._capture_backend_error(backend, f"Backend '{backend.name()}' failed to log metrics")
             except Exception as e:
                 self._record_backend_error(f"Backend '{backend.name()}' failed to log metrics: {e}")
 
@@ -217,6 +224,7 @@ class MetricsLogger:
         if self._backend_initialized and self._should_attempt_backend() and backend is not None:
             try:
                 backend_url = backend.log_artifact(name, backend_path)
+                self._capture_backend_error(backend, f"Backend '{backend.name()}' failed to log artifact '{name}'")
             except Exception as e:
                 self._record_backend_error(f"Backend '{backend.name()}' failed to log artifact '{name}': {e}")
 
@@ -256,6 +264,35 @@ class MetricsLogger:
         self._backend_failed = True
         self._backend_retry_after = time.time() + self._backend_retry_delay
 
+    def _consume_backend_error(self, backend: MetricsBackend) -> str | None:
+        """Return and clear any backend-reported error message."""
+        consume = getattr(backend, "consume_error", None)
+        if callable(consume):
+            try:
+                error = consume()
+            except Exception:
+                return None
+            return str(error) if error is not None else None
+        get_error = getattr(backend, "get_last_error", None)
+        if callable(get_error):
+            try:
+                error = get_error()
+            except Exception:
+                return None
+            if error and hasattr(backend, "clear_last_error"):
+                try:
+                    backend.clear_last_error()
+                except Exception:
+                    pass
+            return str(error) if error is not None else None
+        return None
+
+    def _capture_backend_error(self, backend: MetricsBackend, message: str) -> None:
+        """Record backend error if backend reported one without raising."""
+        error = self._consume_backend_error(backend)
+        if error:
+            self._record_backend_error(f"{message}: {error}")
+
     def finish(self) -> str | None:
         """Finalize the metrics collection.
 
@@ -272,6 +309,10 @@ class MetricsLogger:
         if self._backend_initialized and self._should_attempt_backend() and backend is not None:
             try:
                 url = backend.finish()
+                error = self._consume_backend_error(backend)
+                if error:
+                    self._record_backend_error(f"Backend '{backend.name()}' failed to finish: {error}")
+                    return None
                 logger.info(f"Backend '{backend.name()}' finished successfully")
                 return url
             except Exception as e:
@@ -301,23 +342,17 @@ class MetricsLogger:
             backend_path = self.local_writer.outputs_dir / backend_path
 
         resolved = Path(os.path.realpath(str(backend_path)))
+        absolute = Path(os.path.abspath(str(backend_path)))
         root = Path(os.path.realpath(str(self.local_writer.outputs_dir)))
         try:
             resolved.relative_to(root)
         except ValueError as exc:
             raise InvalidArtifactPathError(str(path), "artifact path escapes outputs directory") from exc
 
-        current = backend_path
-        while True:
-            if current.is_symlink():
-                raise InvalidArtifactPathError(str(path), "artifact path cannot be a symlink")
-            if current == self.local_writer.outputs_dir:
-                break
-            if current.parent == current:
-                break
-            current = current.parent
+        if resolved != absolute:
+            raise InvalidArtifactPathError(str(path), "artifact path cannot contain symlinks")
 
-        return backend_path
+        return resolved
 
     def __enter__(self) -> MetricsLogger:
         """Context manager entry."""
