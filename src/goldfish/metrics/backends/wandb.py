@@ -20,7 +20,9 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from goldfish.errors import GoldfishError
 from goldfish.metrics.backends.base import MetricsBackend
+from goldfish.validation import InvalidArtifactPathError
 
 if TYPE_CHECKING:
     pass
@@ -68,7 +70,11 @@ class WandBBackend(MetricsBackend):
             stage: Stage name (used for run naming and tagging)
         """
         # Import wandb here (lazy import) so the module loads even if wandb not installed
-        import wandb
+        try:
+            import wandb
+        except Exception as exc:
+            logger.error("Failed to import wandb: %s", exc)
+            raise GoldfishError("W&B backend unavailable", {"error": str(exc)}) from exc
 
         # Get git SHA from environment (set by StageExecutor)
         git_sha = os.environ.get("GOLDFISH_GIT_SHA")
@@ -106,7 +112,11 @@ class WandBBackend(MetricsBackend):
         if git_sha:
             init_kwargs["settings"] = wandb.Settings(git_commit=git_sha)
 
-        self._run = wandb.init(**init_kwargs)
+        try:
+            self._run = wandb.init(**init_kwargs)
+        except Exception as exc:
+            logger.error("W&B init failed: %s", exc)
+            raise GoldfishError("W&B init failed", {"error": str(exc)}) from exc
         self._initialized = True
 
         logger.info(f"Initialized W&B run: project={project}, name={stage}-{run_id}, " f"git_sha={git_sha}")
@@ -116,7 +126,7 @@ class WandBBackend(MetricsBackend):
         name: str,
         value: float,
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: float | str | None = None,
     ) -> None:
         """Log a single metric to W&B.
 
@@ -126,16 +136,20 @@ class WandBBackend(MetricsBackend):
             step: Optional step/epoch number
             timestamp: Optional Unix timestamp (W&B uses step, not timestamp)
         """
-        import wandb
+        try:
+            import wandb
 
-        # W&B uses step for x-axis, not timestamp
-        wandb.log({name: value}, step=step)
+            # W&B uses step for x-axis, not timestamp
+            wandb.log({name: value}, step=step)
+        except Exception as exc:
+            logger.error("W&B log_metric failed: %s", exc)
+            raise GoldfishError("W&B log_metric failed", {"error": str(exc)}) from exc
 
     def log_metrics(
         self,
         metrics: dict[str, float],
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: float | str | None = None,
     ) -> None:
         """Log multiple metrics to W&B.
 
@@ -144,9 +158,13 @@ class WandBBackend(MetricsBackend):
             step: Optional step/epoch number
             timestamp: Optional Unix timestamp (W&B uses step, not timestamp)
         """
-        import wandb
+        try:
+            import wandb
 
-        wandb.log(metrics, step=step)
+            wandb.log(metrics, step=step)
+        except Exception as exc:
+            logger.error("W&B log_metrics failed: %s", exc)
+            raise GoldfishError("W&B log_metrics failed", {"error": str(exc)}) from exc
 
     def log_artifact(
         self,
@@ -159,15 +177,32 @@ class WandBBackend(MetricsBackend):
             name: Artifact name (e.g., "model", "predictions")
             path: Path to artifact (file or directory)
         """
-        import wandb
+        try:
+            import wandb
+        except Exception as exc:
+            logger.error("Failed to import wandb: %s", exc)
+            raise GoldfishError("W&B backend unavailable", {"error": str(exc)}) from exc
+
+        if path.is_symlink():
+            raise InvalidArtifactPathError(str(path), "artifact path cannot be a symlink")
 
         # For directories, save all files recursively
         if path.is_dir():
             for file_path in path.rglob("*"):
+                if file_path.is_symlink():
+                    raise InvalidArtifactPathError(str(file_path), "artifact path cannot contain symlinks")
                 if file_path.is_file():
-                    wandb.save(str(file_path), base_path=str(path))
+                    try:
+                        wandb.save(str(file_path), base_path=str(path))
+                    except Exception as exc:
+                        logger.error("W&B save failed: %s", exc)
+                        raise GoldfishError("W&B artifact save failed", {"error": str(exc)}) from exc
         else:
-            wandb.save(str(path), base_path=str(path.parent))
+            try:
+                wandb.save(str(path), base_path=str(path.parent))
+            except Exception as exc:
+                logger.error("W&B save failed: %s", exc)
+                raise GoldfishError("W&B artifact save failed", {"error": str(exc)}) from exc
 
         logger.info(f"Logged artifact '{name}' to W&B: {path}")
 
@@ -181,7 +216,11 @@ class WandBBackend(MetricsBackend):
         Returns:
             W&B run URL (e.g., "https://wandb.ai/team/project/runs/abc123")
         """
-        import wandb
+        try:
+            import wandb
+        except Exception as exc:
+            logger.error("Failed to import wandb: %s", exc)
+            raise GoldfishError("W&B backend unavailable", {"error": str(exc)}) from exc
 
         # Get run URL before finishing
         url = None
@@ -189,7 +228,11 @@ class WandBBackend(MetricsBackend):
             url = self._run.url
 
         # Finish the run (uploads any pending data)
-        wandb.finish()
+        try:
+            wandb.finish()
+        except Exception as exc:
+            logger.error("W&B finish failed: %s", exc)
+            raise GoldfishError("W&B finish failed", {"error": str(exc)}) from exc
 
         logger.info(f"Finished W&B run: {url}")
         return url

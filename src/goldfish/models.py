@@ -668,7 +668,7 @@ class RunReview(BaseModel):
 
 
 class MetricInfo(BaseModel):
-    """Individual metric data point."""
+    """Individual metric data point (timestamp is ISO 8601 UTC string)."""
 
     name: str
     value: float
@@ -706,4 +706,5 @@ class GetRunMetricsResponse(BaseModel):
     summary: list[MetricSummary] = Field(default_factory=list)
     artifacts: list[ArtifactInfo] = Field(default_factory=list)
     total_metrics: int = 0
+    total_artifacts: int = 0
     warnings: list[str] = Field(default_factory=list)

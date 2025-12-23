@@ -154,8 +154,8 @@ class TestLocalWriter:
             lines = f.readlines()
             assert len(lines) == 100
 
-    def test_flush_error_clears_buffer(self, tmp_path):
-        """Test that buffer is cleared even on flush error."""
+    def test_flush_error_retains_buffer(self, tmp_path):
+        """Flush errors should retain the buffer for retry."""
         from goldfish.metrics.writer import MetricsFlushError
 
         writer = LocalWriter(outputs_dir=tmp_path)
@@ -173,8 +173,8 @@ class TestLocalWriter:
         with pytest.raises(MetricsFlushError):
             writer.flush()
 
-        # Buffer should be cleared to prevent infinite loop
-        assert len(writer._metrics_buffer) == 0
+        # Buffer should remain so a later flush can retry
+        assert len(writer._metrics_buffer) == 2
 
         # Cleanup
         metrics_file.chmod(0o644)
@@ -186,3 +186,44 @@ class TestLocalWriter:
         writer.log_metric("loss", 0.5)
         with pytest.raises(InvalidMetricStepError):
             writer.log_metric("loss", 0.4, step=1)
+
+    def test_metric_name_limit_enforced(self, tmp_path, monkeypatch):
+        """Too many unique metric names should raise an error."""
+        monkeypatch.setenv("GOLDFISH_METRICS_MAX_NAMES", "2")
+        writer = LocalWriter(outputs_dir=tmp_path)
+
+        writer.log_metric("loss", 0.5)
+        writer.log_metric("accuracy", 0.9)
+
+        with pytest.raises(Exception) as exc_info:
+            writer.log_metric("precision", 0.8)
+
+        assert "metric names" in str(exc_info.value).lower()
+
+    def test_outputs_dir_requires_absolute_path(self):
+        """Relative outputs_dir should be rejected."""
+        with pytest.raises(Exception) as exc_info:
+            LocalWriter(outputs_dir="relative/path")
+        assert "absolute" in str(exc_info.value).lower()
+
+    def test_outputs_dir_requires_directory(self, tmp_path):
+        """Non-directory outputs_dir should be rejected."""
+        file_path = tmp_path / "file.txt"
+        file_path.write_text("data")
+
+        with pytest.raises(Exception) as exc_info:
+            LocalWriter(outputs_dir=file_path)
+        assert "directory" in str(exc_info.value).lower()
+
+    def test_outputs_dir_mkdir_error(self, tmp_path, monkeypatch):
+        """Initialization should raise if outputs dir cannot be created."""
+
+        def raise_os_error(*args, **kwargs):
+            raise OSError("no permission")
+
+        monkeypatch.setattr("goldfish.metrics.writer.Path.mkdir", raise_os_error)
+
+        with pytest.raises(Exception) as exc_info:
+            LocalWriter(outputs_dir=tmp_path)
+
+        assert "outputs" in str(exc_info.value).lower()

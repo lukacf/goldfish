@@ -4,6 +4,7 @@ TDD: These tests define expected behavior for metric name, value, and path valid
 """
 
 import math
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -176,6 +177,20 @@ class TestMetricTimestampValidation:
         """Invalid timestamp strings should be rejected."""
         with pytest.raises(InvalidMetricTimestampError):
             validate_metric_timestamp("not-a-timestamp")
+
+    def test_future_timestamp_rejected_by_default(self, monkeypatch):
+        """Future timestamps beyond the default drift should be rejected."""
+        monkeypatch.delenv("GOLDFISH_METRICS_MAX_FUTURE_DRIFT_SECONDS", raising=False)
+        future = datetime.now(UTC) + timedelta(days=2)
+        with pytest.raises(InvalidMetricTimestampError):
+            validate_metric_timestamp(future.isoformat())
+
+    def test_future_timestamp_allowed_with_env_override(self, monkeypatch):
+        """Env override should allow larger future drift."""
+        monkeypatch.setenv("GOLDFISH_METRICS_MAX_FUTURE_DRIFT_SECONDS", str(7 * 24 * 3600))
+        future = datetime.now(UTC) + timedelta(days=2)
+        ts = validate_metric_timestamp(future.isoformat())
+        assert ts.endswith("+00:00")
 
     def test_valid_positive(self) -> None:
         """Positive values should be accepted."""
