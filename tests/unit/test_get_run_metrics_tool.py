@@ -254,6 +254,27 @@ def test_get_run_metrics_total_metrics_in_response():
     assert result["total_metrics"] == 1
 
 
+def test_get_run_metrics_audit_reason_meets_min_length():
+    """Audit reason should satisfy DB length constraint."""
+    from goldfish.server_tools.execution_tools import get_run_metrics
+
+    run_id = "stage-abc123"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = _mock_stage_row(run_id)
+    mock_db.count_run_metrics.return_value = 0
+    mock_db.count_run_artifacts.return_value = 0
+    mock_db.log_audit = MagicMock()
+    mock_db.get_run_metrics.return_value = []
+    mock_db.get_metrics_summary.return_value = []
+    mock_db.get_run_artifacts.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        get_run_metrics(run_id)
+
+    _, kwargs = mock_db.log_audit.call_args
+    assert len(kwargs["reason"]) >= 15
+
+
 def test_list_metric_names_tool():
     """list_metric_names should return distinct names."""
     from goldfish.server_tools.execution_tools import list_metric_names
