@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 
+import pytest
+
 
 class DummyArtifact:
     def __init__(self, name: str, type: str) -> None:
@@ -74,3 +76,28 @@ def test_wandb_artifact_mode_uses_artifact(tmp_path, monkeypatch):
     assert logged.type == "model"
     assert str(file_path) in logged.files
     assert url == logged.url
+
+
+def test_wandb_artifact_mode_rejects_symlink_dir(tmp_path, monkeypatch):
+    """Artifact logging should reject directories containing symlinks."""
+    dummy = DummyWandb()
+    monkeypatch.setitem(sys.modules, "wandb", dummy)
+    monkeypatch.setenv("GOLDFISH_WANDB_ARTIFACT_MODE", "artifact")
+
+    from goldfish.metrics.backends.wandb import WandBBackend
+    from goldfish.validation import InvalidArtifactPathError
+
+    backend = WandBBackend()
+    backend.init_run(run_id="stage-123", config={}, workspace="ws", stage="train")
+
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    (root / "model.pt").write_text("data")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret")
+    (root / "link").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(InvalidArtifactPathError):
+        backend.log_artifact("model", root)

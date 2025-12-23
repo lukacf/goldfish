@@ -95,6 +95,55 @@ class FailingBackend(MetricsBackend):
         return "failing"
 
 
+class SoftFailBackend(MetricsBackend):
+    """Backend that records errors without raising."""
+
+    def __init__(self) -> None:
+        self._error: str | None = None
+        self.initialized = False
+
+    def init_run(self, run_id: str, config: dict, workspace: str, stage: str) -> None:
+        self.initialized = True
+
+    def log_metric(
+        self,
+        name: str,
+        value: float,
+        step: int | None = None,
+        timestamp: float | str | None = None,
+    ) -> None:
+        self._error = "backend metric logging failed"
+
+    def log_metrics(
+        self,
+        metrics: dict[str, float],
+        step: int | None = None,
+        timestamp: float | str | None = None,
+    ) -> None:
+        self._error = "backend metrics logging failed"
+
+    def log_artifact(self, name: str, path: Path) -> str | None:
+        self._error = "backend artifact logging failed"
+        return None
+
+    def finish(self) -> str | None:
+        self._error = "backend finish failed"
+        return None
+
+    def consume_error(self) -> str | None:
+        error = self._error
+        self._error = None
+        return error
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return True
+
+    @classmethod
+    def name(cls) -> str:
+        return "soft-fail"
+
+
 class TestMetricsLogger:
     """Tests for MetricsLogger."""
 
@@ -264,6 +313,22 @@ class TestMetricsLogger:
         # Local file should have both metrics
         metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"
         assert metrics_file.exists()
+
+    def test_backend_error_reported_without_exception(self, tmp_path):
+        """Backend errors should be recorded even without exceptions."""
+        backend = SoftFailBackend()
+        logger = MetricsLogger(
+            outputs_dir=tmp_path,
+            backend=backend,
+            run_id="stage-abc123",
+            config={},
+            workspace="test",
+            stage="train",
+        )
+
+        logger.log_metric("loss", 0.5)
+
+        assert logger.had_backend_errors()
 
     def test_graceful_degradation_on_backend_finish_failure(self, tmp_path):
         """Test that backend finish failure doesn't crash logger."""
