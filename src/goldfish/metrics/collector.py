@@ -214,6 +214,163 @@ class MetricsCollector:
             self._log_audit(stage_run_id, result)
             return result
 
+    def collect_from_file_incremental(
+        self,
+        stage_run_id: str,
+        metrics_file: Path,
+        start_offset: int = 0,
+        *,
+        step_modes: dict[str, str] | None = None,
+        metric_names: set[str] | None = None,
+        validated_names: set[str] | None = None,
+    ) -> tuple[CollectionResult, int]:
+        """Incrementally collect new metrics from a JSONL file.
+
+        Reads from start_offset (byte offset) and only ingests complete lines.
+
+        Returns:
+            (CollectionResult, new_offset)
+        """
+        result = CollectionResult()
+
+        if not metrics_file.exists():
+            logger.debug("No metrics file found for %s: %s", stage_run_id, metrics_file)
+            return result, start_offset
+
+        try:
+            file_size = metrics_file.stat().st_size
+            if file_size > MAX_METRICS_FILE_SIZE:
+                error_msg = f"Metrics file too large: {file_size} bytes (max {MAX_METRICS_FILE_SIZE})"
+                logger.error(error_msg)
+                self._record_error(result, error_msg)
+                return result, start_offset
+        except OSError as e:
+            logger.error("Cannot stat metrics file for %s: %s", stage_run_id, type(e).__name__)
+            self._record_error(result, "Cannot read metrics file")
+            return result, start_offset
+
+        if file_size < start_offset:
+            start_offset = 0
+
+        if file_size == start_offset:
+            return result, start_offset
+
+        metrics_batch: list[dict] = []
+        artifacts_batch: list[dict] = []
+        step_modes = step_modes if step_modes is not None else {}
+        metric_names = metric_names if metric_names is not None else set()
+        validated_names = validated_names if validated_names is not None else set()
+        line_count = 0
+        new_offset = start_offset
+
+        try:
+            with self.db.transaction() as conn:
+                with open(metrics_file, "rb") as f:
+                    f.seek(start_offset)
+
+                    while True:
+                        line_start = f.tell()
+                        line = f.readline()
+                        if not line:
+                            new_offset = f.tell()
+                            break
+                        if not line.endswith(b"\n"):
+                            new_offset = line_start
+                            break
+
+                        new_offset = f.tell()
+                        line_count += 1
+
+                        if line_count > MAX_METRICS_LINES:
+                            error_msg = f"Metrics file exceeds max lines: {MAX_METRICS_LINES}"
+                            logger.error(error_msg)
+                            self._record_error(result, error_msg)
+                            raise _CollectionAbort()
+
+                        line_str = line.decode("utf-8", errors="replace").strip()
+                        if not line_str:
+                            continue
+
+                        entry = self._parse_entry(line_str, result)
+                        if entry is None:
+                            continue
+
+                        entry_type = entry.get("type")
+
+                        if entry_type == "metric":
+                            self._process_metric_entry(
+                                entry,
+                                metrics_batch,
+                                result,
+                                step_modes,
+                                metric_names,
+                                validated_names,
+                            )
+                        elif entry_type == "artifact":
+                            self._process_artifact_entry(entry, artifacts_batch, result)
+                        elif entry_type is None:
+                            self._process_legacy_entry(
+                                entry,
+                                metrics_batch,
+                                artifacts_batch,
+                                result,
+                                step_modes,
+                                metric_names,
+                                validated_names,
+                            )
+                        else:
+                            result.skipped_count += 1
+                            self._record_error(result, f"Unknown entry type: {entry_type}")
+                            logger.warning("Skipping entry with unknown type: %s", entry_type)
+
+                        if len(metrics_batch) >= BATCH_SIZE:
+                            inserted = self.db._batch_insert_metrics_conn(
+                                conn, stage_run_id, metrics_batch, update_summary=True
+                            )
+                            result.metrics_count += inserted
+                            metrics_batch.clear()
+
+                if metrics_batch:
+                    inserted = self.db._batch_insert_metrics_conn(
+                        conn, stage_run_id, metrics_batch, update_summary=True
+                    )
+                    result.metrics_count += inserted
+
+                if artifacts_batch:
+                    result.artifacts_count = self.db._batch_insert_artifacts_conn(conn, stage_run_id, artifacts_batch)
+
+            if result.metrics_count or result.artifacts_count:
+                logger.info(
+                    "Incremental metrics sync for %s: %s metrics, %s artifacts",
+                    stage_run_id,
+                    result.metrics_count,
+                    result.artifacts_count,
+                )
+
+            self._log_audit(stage_run_id, result)
+            return result, new_offset
+
+        except _CollectionAbort:
+            result.metrics_count = 0
+            result.artifacts_count = 0
+            self._log_audit(stage_run_id, result)
+            return result, start_offset
+        except OSError as e:
+            logger.error("I/O error reading metrics file for %s: %s", stage_run_id, type(e).__name__)
+            self._record_error(result, "I/O error reading metrics file")
+            self._log_audit(stage_run_id, result)
+            return result, start_offset
+        except sqlite3.Error as e:
+            logger.error("Database error for %s: %s", stage_run_id, type(e).__name__)
+            self._record_error(result, "Database error storing metrics")
+            self._log_audit(stage_run_id, result)
+            return result, start_offset
+        except Exception as e:
+            logger.error("Unexpected error collecting metrics for %s: %s", stage_run_id, type(e).__name__)
+            self._record_error(result, "Unexpected error collecting metrics")
+            self._log_audit(stage_run_id, result)
+            return result, start_offset
+
     def _log_audit(self, stage_run_id: str, result: CollectionResult) -> None:
         """Best-effort audit logging for metrics collection."""
         try:

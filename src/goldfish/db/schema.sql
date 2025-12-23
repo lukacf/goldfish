@@ -294,6 +294,7 @@ CREATE TABLE IF NOT EXISTS run_metrics_summary (
     min_value REAL,
     max_value REAL,
     last_value REAL,
+    last_timestamp TEXT,
     count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (stage_run_id, name),
     FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE

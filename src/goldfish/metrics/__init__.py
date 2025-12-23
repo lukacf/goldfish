@@ -181,6 +181,7 @@ def log_metric(
         name: Metric name (e.g., "loss", "accuracy"). Use slashes for grouping (e.g., "train/loss").
         value: Metric value (bool values are rejected; use 0/1 instead).
         step: Optional step/epoch number. Use None for stepless metrics (consistent per metric).
+              Mixed step modes are skipped with a warning (no crash).
         timestamp: Optional ISO 8601 string (UTC) or Unix timestamp float.
 
     Example:

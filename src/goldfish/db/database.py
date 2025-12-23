@@ -6,7 +6,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 from goldfish.db.types import (
     ArtifactRow,
@@ -110,6 +110,9 @@ class Database:
                 ("source_stage_run_id", "TEXT"),  # Upstream stage run
                 ("source_stage_version_id", "INTEGER"),  # Upstream stage version
             ],
+            "run_metrics_summary": [
+                ("last_timestamp", "TEXT"),
+            ],
         }
 
         with self._conn() as conn:
@@ -127,6 +130,8 @@ class Database:
             # Add missing columns
             for table, cols in required_columns.items():
                 existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if not existing:
+                    continue
                 for col, col_type in cols:
                     if col not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
@@ -233,12 +238,14 @@ class Database:
                             min_value REAL,
                             max_value REAL,
                             last_value REAL,
+                            last_timestamp TEXT,
                             count INTEGER NOT NULL DEFAULT 0,
                             PRIMARY KEY (stage_run_id, name),
                             FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
                         );
 
-                        INSERT INTO run_metrics_summary_new SELECT * FROM run_metrics_summary;
+                        INSERT INTO run_metrics_summary_new (stage_run_id, name, min_value, max_value, last_value, count)
+                        SELECT stage_run_id, name, min_value, max_value, last_value, count FROM run_metrics_summary;
                         DROP TABLE run_metrics_summary;
                         ALTER TABLE run_metrics_summary_new RENAME TO run_metrics_summary;
                         CREATE INDEX idx_run_metrics_summary_stage_run ON run_metrics_summary(stage_run_id);
@@ -2217,15 +2224,32 @@ class Database:
             # Also update summary (keeps summary in sync with detail table)
             conn.execute(
                 """
-                INSERT INTO run_metrics_summary (stage_run_id, name, min_value, max_value, last_value, count)
-                VALUES (?, ?, ?, ?, ?, 1)
+                INSERT INTO run_metrics_summary (
+                    stage_run_id,
+                    name,
+                    min_value,
+                    max_value,
+                    last_value,
+                    last_timestamp,
+                    count
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(stage_run_id, name) DO UPDATE SET
                     min_value = CASE WHEN excluded.min_value < min_value THEN excluded.min_value ELSE min_value END,
                     max_value = CASE WHEN excluded.max_value > max_value THEN excluded.max_value ELSE max_value END,
-                    last_value = excluded.last_value,
+                    last_value = CASE
+                        WHEN last_timestamp IS NULL OR excluded.last_timestamp >= last_timestamp
+                        THEN excluded.last_value
+                        ELSE last_value
+                    END,
+                    last_timestamp = CASE
+                        WHEN last_timestamp IS NULL OR excluded.last_timestamp >= last_timestamp
+                        THEN excluded.last_timestamp
+                        ELSE last_timestamp
+                    END,
                     count = count + 1
                 """,
-                (stage_run_id, name, value, value, value),
+                (stage_run_id, name, value, value, value, timestamp),
             )
 
     def _batch_insert_metrics_conn(
@@ -2260,6 +2284,12 @@ class Database:
             for m in metrics
         ]
 
+        last_id_row = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM run_metrics WHERE stage_run_id = ?",
+            (stage_run_id,),
+        ).fetchone()
+        last_id = int(last_id_row[0]) if last_id_row else 0
+
         before_changes = conn.total_changes
 
         conn.executemany(
@@ -2272,11 +2302,102 @@ class Database:
 
         inserted = conn.total_changes - before_changes
 
-        if update_summary:
-            metric_names = {m["name"] for m in metrics}
-            self._rebuild_metrics_summary_for_names_conn(conn, stage_run_id, metric_names)
+        if update_summary and inserted > 0:
+            rows = conn.execute(
+                """
+                SELECT name, value, timestamp
+                FROM run_metrics
+                WHERE stage_run_id = ? AND id > ?
+                ORDER BY id ASC
+                """,
+                (stage_run_id, last_id),
+            ).fetchall()
+            self._upsert_metrics_summary_batch_conn(conn, stage_run_id, rows)
 
         return inserted
+
+    def _upsert_metrics_summary_batch_conn(
+        self,
+        conn: sqlite3.Connection,
+        stage_run_id: str,
+        rows: list[sqlite3.Row],
+    ) -> None:
+        """Incrementally upsert summary rows based on newly inserted metrics."""
+        if not rows:
+            return
+
+        class _SummaryStats(TypedDict):
+            min_value: float
+            max_value: float
+            count: int
+            last_timestamp: str
+            last_value: float
+
+        summary: dict[str, _SummaryStats] = {}
+        for row in rows:
+            name = row["name"]
+            value = float(row["value"])
+            timestamp = cast(str, row["timestamp"])
+            entry = summary.get(name)
+            if entry is None:
+                summary[name] = {
+                    "min_value": value,
+                    "max_value": value,
+                    "count": 1,
+                    "last_timestamp": timestamp,
+                    "last_value": value,
+                }
+                continue
+            entry["min_value"] = min(entry["min_value"], value)
+            entry["max_value"] = max(entry["max_value"], value)
+            entry["count"] = int(entry["count"]) + 1
+            last_ts = entry["last_timestamp"]
+            if last_ts is None or timestamp >= last_ts:
+                entry["last_timestamp"] = timestamp
+                entry["last_value"] = value
+
+        payload = [
+            (
+                stage_run_id,
+                name,
+                data["min_value"],
+                data["max_value"],
+                data["last_value"],
+                data["last_timestamp"],
+                data["count"],
+            )
+            for name, data in summary.items()
+        ]
+
+        conn.executemany(
+            """
+            INSERT INTO run_metrics_summary (
+                stage_run_id,
+                name,
+                min_value,
+                max_value,
+                last_value,
+                last_timestamp,
+                count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(stage_run_id, name) DO UPDATE SET
+                min_value = CASE WHEN excluded.min_value < min_value THEN excluded.min_value ELSE min_value END,
+                max_value = CASE WHEN excluded.max_value > max_value THEN excluded.max_value ELSE max_value END,
+                last_value = CASE
+                    WHEN last_timestamp IS NULL OR excluded.last_timestamp >= last_timestamp
+                    THEN excluded.last_value
+                    ELSE last_value
+                END,
+                last_timestamp = CASE
+                    WHEN last_timestamp IS NULL OR excluded.last_timestamp >= last_timestamp
+                    THEN excluded.last_timestamp
+                    ELSE last_timestamp
+                END,
+                count = count + excluded.count
+            """,
+            payload,
+        )
 
     def batch_insert_metrics(
         self,
@@ -2324,12 +2445,21 @@ class Database:
             )
             conn.execute(
                 f"""
-                INSERT INTO run_metrics_summary (stage_run_id, name, min_value, max_value, last_value, count)
+                INSERT INTO run_metrics_summary (
+                    stage_run_id,
+                    name,
+                    min_value,
+                    max_value,
+                    last_value,
+                    last_timestamp,
+                    count
+                )
                 WITH ranked AS (
                     SELECT
                         stage_run_id,
                         name,
                         value,
+                        timestamp,
                         ROW_NUMBER() OVER (
                             PARTITION BY stage_run_id, name
                             ORDER BY timestamp DESC, id DESC
@@ -2343,6 +2473,7 @@ class Database:
                     MIN(value) as min_value,
                     MAX(value) as max_value,
                     MAX(CASE WHEN rn = 1 THEN value END) as last_value,
+                    MAX(CASE WHEN rn = 1 THEN timestamp END) as last_timestamp,
                     COUNT(*) as count
                 FROM ranked
                 GROUP BY stage_run_id, name
@@ -2355,12 +2486,21 @@ class Database:
         conn.execute("DELETE FROM run_metrics_summary WHERE stage_run_id = ?", (stage_run_id,))
         conn.execute(
             """
-            INSERT INTO run_metrics_summary (stage_run_id, name, min_value, max_value, last_value, count)
+            INSERT INTO run_metrics_summary (
+                stage_run_id,
+                name,
+                min_value,
+                max_value,
+                last_value,
+                last_timestamp,
+                count
+            )
             WITH ranked AS (
                 SELECT
                     stage_run_id,
                     name,
                     value,
+                    timestamp,
                     ROW_NUMBER() OVER (
                         PARTITION BY stage_run_id, name
                         ORDER BY timestamp DESC, id DESC
@@ -2374,6 +2514,7 @@ class Database:
                 MIN(value) as min_value,
                 MAX(value) as max_value,
                 MAX(CASE WHEN rn = 1 THEN value END) as last_value,
+                MAX(CASE WHEN rn = 1 THEN timestamp END) as last_timestamp,
                 COUNT(*) as count
             FROM ranked
             GROUP BY stage_run_id, name
@@ -2391,24 +2532,46 @@ class Database:
         stage_run_id: str,
         name: str,
         value: float,
+        timestamp: str | None = None,
     ) -> None:
         """Update or insert a metric summary (min, max, last, count).
 
         Uses CASE WHEN for correct min/max comparison (MIN/MAX aggregates
         don't work in ON CONFLICT UPDATE clause).
         """
+        from datetime import UTC, datetime
+
+        if timestamp is None:
+            timestamp = datetime.now(UTC).isoformat()
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO run_metrics_summary (stage_run_id, name, min_value, max_value, last_value, count)
-                VALUES (?, ?, ?, ?, ?, 1)
+                INSERT INTO run_metrics_summary (
+                    stage_run_id,
+                    name,
+                    min_value,
+                    max_value,
+                    last_value,
+                    last_timestamp,
+                    count
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(stage_run_id, name) DO UPDATE SET
                     min_value = CASE WHEN excluded.min_value < min_value THEN excluded.min_value ELSE min_value END,
                     max_value = CASE WHEN excluded.max_value > max_value THEN excluded.max_value ELSE max_value END,
-                    last_value = excluded.last_value,
+                    last_value = CASE
+                        WHEN last_timestamp IS NULL OR excluded.last_timestamp >= last_timestamp
+                        THEN excluded.last_value
+                        ELSE last_value
+                    END,
+                    last_timestamp = CASE
+                        WHEN last_timestamp IS NULL OR excluded.last_timestamp >= last_timestamp
+                        THEN excluded.last_timestamp
+                        ELSE last_timestamp
+                    END,
                     count = count + 1
                 """,
-                (stage_run_id, name, value, value, value),
+                (stage_run_id, name, value, value, value, timestamp),
             )
 
     def get_run_metrics(

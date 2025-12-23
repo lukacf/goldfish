@@ -8,6 +8,8 @@ This backend syncs metrics and artifacts to W&B in real-time. It requires:
 Configuration via environment variables:
 - GOLDFISH_WANDB_PROJECT: W&B project name (defaults to goldfish-{workspace})
 - GOLDFISH_WANDB_ENTITY: W&B entity/team name (optional)
+- GOLDFISH_WANDB_ARTIFACT_MODE: "file" (wandb.save) or "artifact" (wandb.Artifact)
+- GOLDFISH_WANDB_ARTIFACT_TYPE: Artifact type when using artifact mode (default "artifact")
 - WANDB_API_KEY: W&B API key for authentication (required)
 - GOLDFISH_GIT_SHA: Git commit SHA for provenance (automatic)
 """
@@ -186,7 +188,36 @@ class WandBBackend(MetricsBackend):
         if path.is_symlink():
             raise InvalidArtifactPathError(str(path), "artifact path cannot be a symlink")
 
-        # For directories, save all files recursively
+        artifact_mode = os.environ.get("GOLDFISH_WANDB_ARTIFACT_MODE", "file").strip().lower()
+        if artifact_mode == "artifact":
+            artifact_type = os.environ.get("GOLDFISH_WANDB_ARTIFACT_TYPE", "artifact")
+            artifact = wandb.Artifact(name=name, type=artifact_type)
+
+            if path.is_dir():
+                for file_path in path.rglob("*"):
+                    if file_path.is_symlink():
+                        raise InvalidArtifactPathError(str(file_path), "artifact path cannot contain symlinks")
+                artifact.add_dir(str(path))
+            else:
+                artifact.add_file(str(path))
+
+            try:
+                if self._run is not None and hasattr(self._run, "log_artifact"):
+                    logged = self._run.log_artifact(artifact)
+                else:
+                    logged = wandb.log_artifact(artifact)
+            except Exception as exc:
+                logger.error("W&B artifact logging failed: %s", exc)
+                raise GoldfishError("W&B artifact logging failed", {"error": str(exc)}) from exc
+
+            url = getattr(logged, "url", None)
+            if url:
+                return str(url)
+            if self._run is not None:
+                return str(self._run.url)
+            return None
+
+        # Default mode: wandb.save
         if path.is_dir():
             for file_path in path.rglob("*"):
                 if file_path.is_symlink():
