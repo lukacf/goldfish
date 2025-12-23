@@ -146,8 +146,9 @@ class MetricsLogger:
             step: Optional step/epoch number
             timestamp: Optional timestamp - ISO 8601 string or Unix float
         """
-        # Always write to local
-        self.local_writer.log_metric(name, value, step, timestamp)
+        # Always write to local; skip backend if local rejected the metric
+        if not self.local_writer.log_metric(name, value, step, timestamp):
+            return
 
         # Try backend if configured
         self._ensure_backend_initialized()
@@ -174,8 +175,14 @@ class MetricsLogger:
             step: Optional step/epoch number
             timestamp: Optional Unix timestamp
         """
-        # Always write to local
-        self.local_writer.log_metrics(metrics, step, timestamp)
+        # Always write to local; track accepted metrics for backend
+        accepted: dict[str, float] = {}
+        for name, value in metrics.items():
+            if self.local_writer.log_metric(name, value, step, timestamp):
+                accepted[name] = value
+
+        if not accepted:
+            return
 
         # Try backend if configured
         self._ensure_backend_initialized()
@@ -184,7 +191,7 @@ class MetricsLogger:
             try:
                 ts_float = timestamp_to_float(timestamp)
                 backend_step = normalize_metric_step(step)
-                backend_metrics = {name: normalize_metric_value(value) for name, value in metrics.items()}
+                backend_metrics = {name: normalize_metric_value(value) for name, value in accepted.items()}
                 backend.log_metrics(backend_metrics, backend_step, ts_float)
             except Exception as e:
                 self._record_backend_error(f"Backend '{backend.name()}' failed to log metrics: {e}")

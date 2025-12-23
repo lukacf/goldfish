@@ -5,7 +5,6 @@ import json
 import pytest
 
 from goldfish.metrics.writer import LocalWriter
-from goldfish.validation import InvalidMetricStepError
 
 
 class TestLocalWriter:
@@ -179,13 +178,16 @@ class TestLocalWriter:
         # Cleanup
         metrics_file.chmod(0o644)
 
-    def test_step_consistency_enforced(self, tmp_path):
-        """Mixing step=None and step=int for the same metric should error."""
+    def test_step_consistency_warns_and_skips(self, tmp_path):
+        """Mixing step=None and step=int for the same metric should be skipped (no crash)."""
         writer = LocalWriter(outputs_dir=tmp_path)
 
         writer.log_metric("loss", 0.5)
-        with pytest.raises(InvalidMetricStepError):
-            writer.log_metric("loss", 0.4, step=1)
+        # Should not raise; inconsistent metric should be skipped
+        writer.log_metric("loss", 0.4, step=1)
+
+        assert len(writer._metrics_buffer) == 1
+        assert writer.get_metrics_lost_count() == 1
 
     def test_metric_name_limit_enforced(self, tmp_path, monkeypatch):
         """Too many unique metric names should raise an error."""

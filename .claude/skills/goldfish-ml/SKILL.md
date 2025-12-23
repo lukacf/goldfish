@@ -231,7 +231,7 @@ def main():
 
 **Key semantics (important):**
 - **Step consistency:** A given metric name must be logged with either `step=None` or `step=int` consistently.
-  Mixing `None` and integers for the same metric raises `InvalidMetricStepError`.
+  Mixing `None` and integers for the same metric is **skipped with a warning** (no crash).
 - **Timestamp formats:** `timestamp` accepts ISO 8601 strings (UTC) or Unix float seconds.
   Stored and returned (via MCP tools) as ISO 8601 UTC strings.
 - **Values:** Must be numeric (bools are rejected; use 0/1). NumPy scalars are supported.
@@ -239,6 +239,8 @@ def main():
 - **Metric name cap:** Per run, unique metric names are capped (default 10,000) to prevent abuse.
 - **Artifacts:** `path` is **relative** to outputs dir; absolute paths and symlinks are rejected.
   `log_artifact` returns a backend URL if available.
+- **Live metrics:** `get_run_metrics` will attempt a best-effort live sync for running runs
+  (throttled by `GOLDFISH_METRICS_LIVE_SYNC_INTERVAL`).
 - **Auto-finalize:** `finish()` is optional but recommended in a `finally` block. Auto-finalize uses `atexit`
   and won’t run on SIGKILL/crash.
 - **Backend errors:** Use `had_backend_errors()` / `get_backend_errors()` to detect backend failures.
@@ -247,6 +249,11 @@ def main():
 - `GOLDFISH_METRICS_FLUSH_THRESHOLD` controls auto-flush (default 100).
 - `GOLDFISH_METRICS_MAX_NAMES` caps unique metric names per run (default 10000).
 - `GOLDFISH_METRICS_MAX_FUTURE_DRIFT_SECONDS` controls allowed future timestamp drift (default 86400).
+- `GOLDFISH_METRICS_LIVE_SYNC` enables live DB sync for running runs (default true).
+- `GOLDFISH_METRICS_LIVE_SYNC_INTERVAL` controls live sync cadence in seconds (default 15).
+- `GOLDFISH_METRICS_MAX_OFFSET` caps pagination offset for metrics/artifacts (default 1,000,000).
+- `GOLDFISH_WANDB_ARTIFACT_MODE` set to `artifact` to use W&B Artifacts (default `file`).
+- `GOLDFISH_WANDB_ARTIFACT_TYPE` sets artifact type when using W&B Artifacts (default `artifact`).
 
 **Advanced (avoid global logger):**
 - `use_logger(custom_logger)` context manager routes calls to a specific `MetricsLogger`.

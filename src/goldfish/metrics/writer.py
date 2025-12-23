@@ -91,6 +91,7 @@ class LocalWriter:
         # Error tracking for flush failures (silent data loss detection)
         self._flush_errors: list[str] = []
         self._metrics_lost: int = 0
+        self._validation_errors: list[str] = []
 
     def log_metric(
         self,
@@ -98,7 +99,7 @@ class LocalWriter:
         value: float,
         step: int | None = None,
         timestamp: str | float | None = None,
-    ) -> None:
+    ) -> bool:
         """Log a single metric.
 
         Args:
@@ -110,10 +111,12 @@ class LocalWriter:
         Raises:
             InvalidMetricNameError: If name is invalid
             InvalidMetricValueError: If value is NaN or infinite
+
+        Returns:
+            True if the metric was logged, False if it was skipped.
         """
         from goldfish.validation import (
             InvalidMetricNameError,
-            InvalidMetricStepError,
             validate_metric_name,
             validate_metric_value,
         )
@@ -138,10 +141,11 @@ class LocalWriter:
         if existing_mode is None:
             self._metric_step_modes[name] = step_mode
         elif existing_mode != step_mode:
-            raise InvalidMetricStepError(
-                str(step),
-                f"metric '{name}' logged with mixed step modes (None and int)",
-            )
+            error_msg = f"metric '{name}' logged with mixed step modes (None and int)"
+            logger.warning(error_msg)
+            self._validation_errors.append(error_msg)
+            self._metrics_lost += 1
+            return False
 
         # Normalize timestamp to ISO 8601 string (UTC)
         ts_str = normalize_metric_timestamp(timestamp)
@@ -161,6 +165,8 @@ class LocalWriter:
             # Auto-flush if threshold exceeded (inside lock)
             if len(self._metrics_buffer) >= self._auto_flush_threshold:
                 self._flush_unlocked(raise_on_error=True)
+
+        return True
 
     def log_metrics(
         self,
@@ -305,6 +311,11 @@ class LocalWriter:
         """
         with self._lock:
             return self._metrics_lost
+
+    def get_validation_errors(self) -> list[str]:
+        """Get validation errors recorded during logging."""
+        with self._lock:
+            return list(self._validation_errors)
 
     def had_flush_errors(self) -> bool:
         """Check if any flush errors occurred (quick data loss check).
