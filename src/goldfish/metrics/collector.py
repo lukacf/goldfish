@@ -41,6 +41,7 @@ class CollectionResult:
     artifacts_count: int = 0
     skipped_count: int = 0
     errors: list[str] = field(default_factory=list)
+    errors_truncated: bool = False
 
 
 class MetricsCollector:
@@ -84,6 +85,7 @@ class MetricsCollector:
         # Stream file in chunks to avoid loading all into memory
         metrics_batch: list[dict] = []
         artifacts_batch: list[dict] = []
+        step_modes: dict[str, str] = {}
         line_count = 0
 
         try:
@@ -110,12 +112,12 @@ class MetricsCollector:
                         entry_type = entry.get("type")
 
                         if entry_type == "metric":
-                            self._process_metric_entry(entry, metrics_batch, result)
+                            self._process_metric_entry(entry, metrics_batch, result, step_modes)
                         elif entry_type == "artifact":
                             self._process_artifact_entry(entry, artifacts_batch, result)
                         elif entry_type is None:
                             # Old format without "type" field - infer type from fields present
-                            self._process_legacy_entry(entry, metrics_batch, artifacts_batch, result)
+                            self._process_legacy_entry(entry, metrics_batch, artifacts_batch, result, step_modes)
                         else:
                             result.skipped_count += 1
                             self._record_error(result, f"Unknown entry type: {entry_type}")
@@ -185,7 +187,13 @@ class MetricsCollector:
             logger.warning(f"Skipping invalid JSON entry: {e}")
             return None
 
-    def _process_metric_entry(self, entry: dict, metrics_batch: list[dict], result: CollectionResult) -> None:
+    def _process_metric_entry(
+        self,
+        entry: dict,
+        metrics_batch: list[dict],
+        result: CollectionResult,
+        step_modes: dict[str, str],
+    ) -> None:
         """Process a metric entry with explicit type."""
         if "name" not in entry or "value" not in entry:
             result.skipped_count += 1
@@ -198,6 +206,8 @@ class MetricsCollector:
             value = normalize_metric_value(entry["value"])
             validate_metric_value(value)
             entry["step"] = normalize_metric_step(entry.get("step"))
+            if not self._ensure_step_mode(entry["name"], entry["step"], step_modes, result):
+                return
             entry["value"] = value
             entry["timestamp"] = normalize_metric_timestamp(entry.get("timestamp"))
             metrics_batch.append(entry)
@@ -232,6 +242,7 @@ class MetricsCollector:
         metrics_batch: list[dict],
         artifacts_batch: list[dict],
         result: CollectionResult,
+        step_modes: dict[str, str],
     ) -> None:
         """Process old format entry without explicit type field (backward compatibility)."""
         if "value" in entry and "name" in entry:
@@ -242,6 +253,8 @@ class MetricsCollector:
                 value = normalize_metric_value(entry["value"])
                 validate_metric_value(value)
                 entry["step"] = normalize_metric_step(entry.get("step"))
+                if not self._ensure_step_mode(entry["name"], entry["step"], step_modes, result):
+                    return
                 entry["value"] = value
                 entry["timestamp"] = normalize_metric_timestamp(entry.get("timestamp"))
                 metrics_batch.append(entry)
@@ -272,3 +285,25 @@ class MetricsCollector:
         """Record an error with a cap to avoid memory blowups."""
         if len(result.errors) < MAX_ERROR_MESSAGES:
             result.errors.append(message)
+        else:
+            result.errors_truncated = True
+
+    def _ensure_step_mode(
+        self,
+        name: str,
+        step: int | None,
+        step_modes: dict[str, str],
+        result: CollectionResult,
+    ) -> bool:
+        """Ensure step usage is consistent for a given metric name."""
+        mode = "none" if step is None else "value"
+        existing = step_modes.get(name)
+        if existing is None:
+            step_modes[name] = mode
+            return True
+        if existing != mode:
+            result.skipped_count += 1
+            self._record_error(result, f"Metric '{name}' logged with mixed step modes (None and int)")
+            logger.warning("Skipping metric with mixed step modes: %s", name)
+            return False
+        return True

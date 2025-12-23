@@ -689,6 +689,7 @@ class TestMetricsCollectorEdgeCases:
         assert result.artifacts_count == 0
         assert result.skipped_count == 1
         assert any("Unknown entry type" in err for err in result.errors)
+        assert result.errors_truncated is False
 
     def test_error_list_is_capped(self, workspace_setup, temp_dir, monkeypatch):
         """Collector should cap error list to prevent memory blowups."""
@@ -723,6 +724,7 @@ class TestMetricsCollectorEdgeCases:
 
         assert result.skipped_count == 20
         assert len(result.errors) <= 5
+        assert result.errors_truncated is True
 
     def test_line_limit_aborts_collection(self, workspace_setup, temp_dir, monkeypatch):
         """Exceeding max lines should abort collection and insert nothing."""
