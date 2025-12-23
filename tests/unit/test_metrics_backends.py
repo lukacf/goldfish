@@ -24,7 +24,7 @@ class MockBackend(MetricsBackend):
         name: str,
         value: float,
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: float | str | None = None,
     ) -> None:
         self.metrics.append({"name": name, "value": value, "step": step})
 
@@ -32,7 +32,7 @@ class MockBackend(MetricsBackend):
         self,
         metrics: dict[str, float],
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: float | str | None = None,
     ) -> None:
         for name, value in metrics.items():
             self.log_metric(name, value, step, timestamp)
@@ -65,7 +65,7 @@ class UnavailableBackend(MetricsBackend):
         name: str,
         value: float,
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: float | str | None = None,
     ) -> None:
         pass
 
@@ -73,7 +73,7 @@ class UnavailableBackend(MetricsBackend):
         self,
         metrics: dict[str, float],
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: float | str | None = None,
     ) -> None:
         pass
 

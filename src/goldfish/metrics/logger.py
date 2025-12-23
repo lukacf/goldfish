@@ -12,12 +12,14 @@ and optional MetricsBackend (pluggable, e.g., W&B, MLflow). It provides:
 from __future__ import annotations
 
 import logging
+import os
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from goldfish.metrics.utils import normalize_metric_step, normalize_metric_value, timestamp_to_float
 from goldfish.metrics.writer import LocalWriter
-from goldfish.validation import validate_artifact_path, validate_metric_name
+from goldfish.validation import InvalidArtifactPathError, validate_artifact_path, validate_metric_name
 
 if TYPE_CHECKING:
     from goldfish.metrics.backends.base import MetricsBackend
@@ -64,6 +66,7 @@ class MetricsLogger:
         workspace: str | None = None,
         stage: str | None = None,
         auto_flush_threshold: int | None = None,
+        backend_retry_delay: float | None = None,
     ):
         """Initialize metrics logger.
 
@@ -75,6 +78,7 @@ class MetricsLogger:
             workspace: Workspace name (for backend tagging)
             stage: Stage name (for backend tagging)
             auto_flush_threshold: Auto-flush after N metrics (default 100)
+            backend_retry_delay: Seconds to wait before retrying a failed backend (default 60)
         """
         # LocalWriter always runs
         threshold = 100 if auto_flush_threshold is None else auto_flush_threshold
@@ -85,6 +89,9 @@ class MetricsLogger:
         self._backend_initialized = False
         self._backend_failed = False
         self._backend_errors: list[str] = []
+        delay = 60.0 if backend_retry_delay is None else float(backend_retry_delay)
+        self._backend_retry_delay = max(0.0, delay)
+        self._backend_retry_after: float | None = None
 
         # Run metadata for backend initialization
         self.run_id = run_id
@@ -102,7 +109,9 @@ class MetricsLogger:
         if self.backend is None:
             return
 
-        if self._backend_initialized or self._backend_failed:
+        if self._backend_initialized:
+            return
+        if self._backend_failed and not self._should_attempt_backend():
             return
 
         # Try to initialize backend
@@ -143,7 +152,7 @@ class MetricsLogger:
         # Try backend if configured
         self._ensure_backend_initialized()
         backend = self.backend  # Local var for type narrowing
-        if self._backend_initialized and not self._backend_failed and backend is not None:
+        if self._backend_initialized and self._should_attempt_backend() and backend is not None:
             try:
                 backend_value = normalize_metric_value(value)
                 backend_step = normalize_metric_step(step)
@@ -171,7 +180,7 @@ class MetricsLogger:
         # Try backend if configured
         self._ensure_backend_initialized()
         backend = self.backend  # Local var for type narrowing
-        if self._backend_initialized and not self._backend_failed and backend is not None:
+        if self._backend_initialized and self._should_attempt_backend() and backend is not None:
             try:
                 ts_float = timestamp_to_float(timestamp)
                 backend_step = normalize_metric_step(step)
@@ -191,16 +200,15 @@ class MetricsLogger:
         validate_metric_name(name)
         validate_artifact_path(str(path))
 
+        # Resolve path for safety (prevents symlink/path traversal issues)
+        backend_path = self._resolve_artifact_path(path)
+
         # Try backend first to capture URL if available
         backend_url: str | None = None
         self._ensure_backend_initialized()
         backend = self.backend  # Local var for type narrowing
-        if self._backend_initialized and not self._backend_failed and backend is not None:
+        if self._backend_initialized and self._should_attempt_backend() and backend is not None:
             try:
-                # Backend expects absolute Path
-                backend_path = Path(path) if not isinstance(path, Path) else path
-                if not backend_path.is_absolute():
-                    backend_path = self.local_writer.outputs_dir / backend_path
                 backend_url = backend.log_artifact(name, backend_path)
             except Exception as e:
                 self._record_backend_error(f"Backend '{backend.name()}' failed to log artifact '{name}': {e}")
@@ -239,6 +247,7 @@ class MetricsLogger:
             logger.error(message)
         self._backend_errors.append(message)
         self._backend_failed = True
+        self._backend_retry_after = time.time() + self._backend_retry_delay
 
     def finish(self) -> str | None:
         """Finalize the metrics collection.
@@ -253,7 +262,7 @@ class MetricsLogger:
 
         # Try backend finish if configured
         backend = self.backend  # Local var for type narrowing
-        if self._backend_initialized and not self._backend_failed and backend is not None:
+        if self._backend_initialized and self._should_attempt_backend() and backend is not None:
             try:
                 url = backend.finish()
                 logger.info(f"Backend '{backend.name()}' finished successfully")
@@ -263,6 +272,45 @@ class MetricsLogger:
                 return None
 
         return None
+
+    def _should_attempt_backend(self) -> bool:
+        """Return True if backend should be attempted (including retry window)."""
+        if self.backend is None:
+            return False
+        if not self._backend_failed:
+            return True
+        if self._backend_retry_after is None:
+            return False
+        if time.time() >= self._backend_retry_after:
+            self._backend_failed = False
+            self._backend_retry_after = None
+            return True
+        return False
+
+    def _resolve_artifact_path(self, path: str | Path) -> Path:
+        """Resolve and validate artifact path within outputs dir."""
+        backend_path = Path(path) if not isinstance(path, Path) else path
+        if not backend_path.is_absolute():
+            backend_path = self.local_writer.outputs_dir / backend_path
+
+        resolved = Path(os.path.realpath(str(backend_path)))
+        root = Path(os.path.realpath(str(self.local_writer.outputs_dir)))
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise InvalidArtifactPathError(str(path), "artifact path escapes outputs directory") from exc
+
+        current = backend_path
+        while True:
+            if current.is_symlink():
+                raise InvalidArtifactPathError(str(path), "artifact path cannot be a symlink")
+            if current == self.local_writer.outputs_dir:
+                break
+            if current.parent == current:
+                break
+            current = current.parent
+
+        return backend_path
 
     def __enter__(self) -> MetricsLogger:
         """Context manager entry."""

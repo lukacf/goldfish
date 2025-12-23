@@ -12,18 +12,27 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
+from goldfish.errors import GoldfishError
 from goldfish.metrics.utils import normalize_metric_step, normalize_metric_timestamp, normalize_metric_value
 
 logger = logging.getLogger(__name__)
 
 
-class MetricsFlushError(RuntimeError):
+class MetricsFlushError(GoldfishError):
     """Raised when metrics cannot be flushed to disk."""
 
     def __init__(self, message: str, lost_count: int, errors: list[str]):
-        super().__init__(message)
+        super().__init__(message, {"lost_count": lost_count, "errors": errors})
         self.lost_count = lost_count
         self.errors = errors
+
+
+class MetricsInitializationError(GoldfishError):
+    """Raised when metrics writer cannot be initialized."""
+
+    def __init__(self, message: str, path: Path | None = None):
+        details = {"path": str(path)} if path is not None else None
+        super().__init__(message, details)
 
 
 class LocalWriter:
@@ -49,13 +58,24 @@ class LocalWriter:
         if outputs_dir is None:
             outputs_dir_str = os.environ.get("GOLDFISH_OUTPUTS_DIR", "/mnt/outputs")
             outputs_dir = Path(outputs_dir_str)
+        elif not isinstance(outputs_dir, Path):
+            outputs_dir = Path(str(outputs_dir))
 
         self.outputs_dir = Path(outputs_dir)
+        if not self.outputs_dir.is_absolute():
+            raise MetricsInitializationError("Outputs directory must be an absolute path", self.outputs_dir)
+        if self.outputs_dir.is_symlink():
+            raise MetricsInitializationError("Outputs directory cannot be a symlink", self.outputs_dir)
+        if self.outputs_dir.exists() and not self.outputs_dir.is_dir():
+            raise MetricsInitializationError("Outputs directory must be a directory", self.outputs_dir)
         self.metrics_dir = self.outputs_dir / ".goldfish"
         self.metrics_file = self.metrics_dir / "metrics.jsonl"
 
         # Ensure directory exists
-        self.metrics_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.metrics_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise MetricsInitializationError(f"Failed to create outputs directory: {exc}", self.metrics_dir) from exc
 
         # Thread safety lock
         self._lock = threading.Lock()
@@ -65,6 +85,8 @@ class LocalWriter:
         self._artifacts: list[dict] = []
         self._auto_flush_threshold = max(10, min(10000, auto_flush_threshold))
         self._metric_step_modes: dict[str, str] = {}
+        self._validated_metric_names: set[str] = set()
+        self._max_metric_names = self._read_max_metric_names()
 
         # Error tracking for flush failures (silent data loss detection)
         self._flush_errors: list[str] = []
@@ -89,10 +111,23 @@ class LocalWriter:
             InvalidMetricNameError: If name is invalid
             InvalidMetricValueError: If value is NaN or infinite
         """
-        from goldfish.validation import InvalidMetricStepError, validate_metric_name, validate_metric_value
+        from goldfish.validation import (
+            InvalidMetricNameError,
+            InvalidMetricStepError,
+            validate_metric_name,
+            validate_metric_value,
+        )
+
+        if name not in self._metric_step_modes and len(self._metric_step_modes) >= self._max_metric_names:
+            raise InvalidMetricNameError(
+                name,
+                f"too many unique metric names (limit {self._max_metric_names})",
+            )
 
         # Validate inputs early (strict mode - fail fast)
-        validate_metric_name(name)
+        if name not in self._validated_metric_names:
+            validate_metric_name(name)
+            self._validated_metric_names.add(name)
         value = normalize_metric_value(value)
         validate_metric_value(value)
         step = normalize_metric_step(step)
@@ -176,7 +211,7 @@ class LocalWriter:
     def flush(self) -> None:
         """Flush buffered metrics to disk (thread-safe).
 
-        Always clears buffers even on error to prevent infinite flush loops.
+        Retains buffers on I/O errors to allow retry.
         Raises MetricsFlushError on failure to avoid silent data loss.
         """
         with self._lock:
@@ -184,17 +219,44 @@ class LocalWriter:
 
     def _flush_unlocked(self, raise_on_error: bool) -> None:
         """Internal flush without locking - caller must hold self._lock."""
-        metrics_count = len(self._metrics_buffer)
+        valid_metrics: list[dict] = []
+        valid_artifacts: list[dict] = []
+        metrics_lines: list[str] = []
+        artifact_lines: list[str] = []
 
+        # Pre-serialize metrics to catch type/NaN errors before writing
+        for metric in self._metrics_buffer:
+            try:
+                metrics_lines.append(json.dumps(metric, allow_nan=False))
+                valid_metrics.append(metric)
+            except (ValueError, TypeError) as exc:
+                error_msg = f"Failed to serialize metric '{metric.get('name', '?')}': {type(exc).__name__} ({exc})"
+                logger.error(error_msg)
+                self._flush_errors.append(error_msg)
+                self._metrics_lost += 1
+
+        for artifact in self._artifacts:
+            try:
+                artifact_lines.append(json.dumps(artifact, allow_nan=False))
+                valid_artifacts.append(artifact)
+            except (ValueError, TypeError) as exc:
+                error_msg = f"Failed to serialize artifact '{artifact.get('name', '?')}': {type(exc).__name__} ({exc})"
+                logger.error(error_msg)
+                self._flush_errors.append(error_msg)
+                self._metrics_lost += 1
+
+        metrics_count = len(metrics_lines)
+
+        wrote = False
         try:
             # Write both metrics and artifacts in single file open
-            if self._metrics_buffer or self._artifacts:
+            if metrics_lines or artifact_lines:
                 with open(self.metrics_file, "a") as f:
-                    for metric in self._metrics_buffer:
-                        # allow_nan=False raises ValueError on NaN/Infinity
-                        f.write(json.dumps(metric, allow_nan=False) + "\n")
-                    for artifact in self._artifacts:
-                        f.write(json.dumps(artifact, allow_nan=False) + "\n")
+                    for line in metrics_lines:
+                        f.write(line + "\n")
+                    for line in artifact_lines:
+                        f.write(line + "\n")
+                wrote = True
         except (OSError, ValueError, TypeError) as e:
             # OSError: disk full, permissions, I/O error
             # ValueError: NaN/Infinity in metrics
@@ -203,14 +265,27 @@ class LocalWriter:
             logger.error(f"Failed to flush metrics to {self.metrics_file}: {e}", exc_info=True)
             # Track error for later inspection
             self._flush_errors.append(error_msg)
-            self._metrics_lost += metrics_count
             if raise_on_error:
                 raise MetricsFlushError(error_msg, self._metrics_lost, list(self._flush_errors)) from e
         finally:
-            # ALWAYS clear buffers, even on error
-            # Better to lose metrics than enter infinite flush loop
-            self._metrics_buffer.clear()
-            self._artifacts.clear()
+            if wrote:
+                self._metrics_buffer.clear()
+                self._artifacts.clear()
+            else:
+                # Retain valid entries for retry; drop invalid ones already counted as lost
+                self._metrics_buffer = valid_metrics
+                self._artifacts = valid_artifacts
+
+    def _read_max_metric_names(self) -> int:
+        """Read max unique metric names from env (with sane bounds)."""
+        env_val = os.environ.get("GOLDFISH_METRICS_MAX_NAMES")
+        if not env_val:
+            return 10000
+        try:
+            limit = int(env_val)
+        except ValueError:
+            return 10000
+        return max(1, min(100000, limit))
 
     def get_flush_errors(self) -> list[str]:
         """Get list of flush errors that occurred (data loss indicator).

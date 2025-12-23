@@ -22,6 +22,7 @@ The metrics API automatically:
 - Writes to local JSONL file (.goldfish/metrics.jsonl) for audit trail
 - Syncs to configured backend (W&B, MLflow) if GOLDFISH_METRICS_BACKEND is set
 - Handles backend failures gracefully (stage continues even if backend fails)
+- Stores timestamps as ISO 8601 UTC strings (float inputs are converted)
 
 Optional configuration:
 - GOLDFISH_METRICS_FLUSH_THRESHOLD: auto-flush after N metrics (default 100)
@@ -30,8 +31,12 @@ Optional configuration:
 from __future__ import annotations
 
 import atexit
+import logging
 import os
 import threading
+import weakref
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -42,8 +47,26 @@ if TYPE_CHECKING:
 
 # Global logger instance (lazily initialized)
 _global_logger: MetricsLogger | None = None
+_logger_context: ContextVar[MetricsLogger | None] = ContextVar("goldfish_metrics_logger", default=None)
+_logger_registry: weakref.WeakSet[MetricsLogger] = weakref.WeakSet()
 _logger_lock = threading.Lock()
 _auto_finalize_registered = False
+logger = logging.getLogger(__name__)
+
+
+def _register_logger(instance: MetricsLogger) -> None:
+    _logger_registry.add(instance)
+
+
+@contextmanager
+def use_logger(instance: MetricsLogger):
+    """Use a specific MetricsLogger for the current context."""
+    token = _logger_context.set(instance)
+    _register_logger(instance)
+    try:
+        yield instance
+    finally:
+        _logger_context.reset(token)
 
 
 def _get_or_create_logger() -> MetricsLogger:
@@ -61,6 +84,10 @@ def _get_or_create_logger() -> MetricsLogger:
         Global MetricsLogger instance
     """
     global _global_logger, _auto_finalize_registered
+
+    ctx_logger = _logger_context.get()
+    if ctx_logger is not None:
+        return ctx_logger
 
     # Ensure only one logger is created in concurrent scenarios
     with _logger_lock:
@@ -81,7 +108,8 @@ def _get_or_create_logger() -> MetricsLogger:
 
         try:
             config = json.loads(config_str)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            logger.warning(f"Failed to parse metrics config JSON: {exc}")
             config = {}
 
         # Metrics flush configuration
@@ -132,6 +160,7 @@ def _get_or_create_logger() -> MetricsLogger:
             stage=stage,
             auto_flush_threshold=flush_threshold,
         )
+        _register_logger(_global_logger)
 
         if not _auto_finalize_registered:
             atexit.register(_auto_finalize)
@@ -228,21 +257,20 @@ def finish() -> str | None:
         if url:
             print(f"View run at: {url}")
     """
-    if _global_logger is not None:
-        return _global_logger.finish()
+    instance = _logger_context.get() or _global_logger
+    if instance is not None:
+        return instance.finish()
     return None
 
 
 def _auto_finalize() -> None:
     """Auto-finalize metrics at process exit."""
     try:
-        if _global_logger is not None:
-            _global_logger.finish()
+        for instance in list(_logger_registry):
+            instance.finish()
     except Exception:
         # Avoid raising during interpreter shutdown
-        import logging
-
-        logging.getLogger(__name__).exception("Auto-finalize of metrics failed")
+        logger.exception("Auto-finalize of metrics failed")
 
 
 def _reset_global_logger() -> None:
@@ -254,6 +282,8 @@ def _reset_global_logger() -> None:
     global _global_logger, _auto_finalize_registered
     _global_logger = None
     _auto_finalize_registered = False
+    _logger_registry.clear()
+    _logger_context.set(None)
 
 
 def had_backend_errors() -> bool:
@@ -274,6 +304,7 @@ __all__ = [
     "log_artifact",
     "log_artifacts",
     "finish",
+    "use_logger",
     "had_backend_errors",
     "get_backend_errors",
 ]

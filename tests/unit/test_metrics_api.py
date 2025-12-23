@@ -1,11 +1,12 @@
 """Unit tests for the public metrics API."""
 
 import json
+import logging
 from unittest.mock import patch
 
 import pytest
 
-from goldfish.metrics import finish, log_artifact, log_metric, log_metrics
+from goldfish.metrics import finish, log_artifact, log_metric, log_metrics, use_logger
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +50,18 @@ class TestPublicMetricsAPI:
         with open(metrics_file) as f:
             lines = f.readlines()
             assert len(lines) == 2
+
+    def test_use_logger_context(self, tmp_path):
+        """use_logger should route logging to the provided logger instance."""
+        from goldfish.metrics.logger import MetricsLogger
+
+        logger = MetricsLogger(outputs_dir=tmp_path)
+        with use_logger(logger):
+            log_metric("loss", 0.5, step=1)
+            finish()
+
+        metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"
+        assert metrics_file.exists()
 
     def test_log_artifact(self, tmp_path, monkeypatch):
         """Test artifact logging."""
@@ -190,6 +203,16 @@ class TestPublicMetricsAPI:
             data = json.loads(f.readline())
             assert data["timestamp"] == "2024-01-01T00:00:00+00:00"
 
+    def test_invalid_config_logs_warning(self, tmp_path, monkeypatch, caplog):
+        """Invalid metrics config JSON should log a warning."""
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(tmp_path))
+        monkeypatch.setenv("GOLDFISH_CONFIG", "{bad json")
+
+        with caplog.at_level(logging.WARNING):
+            log_metric("loss", 0.5)
+
+        assert any("metrics config" in record.message.lower() for record in caplog.records)
+
     def test_log_artifact_returns_backend_url(self, tmp_path, monkeypatch):
         """log_artifact should return backend URL when available."""
         from goldfish import metrics as metrics_module
@@ -201,12 +224,12 @@ class TestPublicMetricsAPI:
                 pass
 
             def log_metric(
-                self, name: str, value: float, step: int | None = None, timestamp: float | None = None
+                self, name: str, value: float, step: int | None = None, timestamp: float | str | None = None
             ) -> None:
                 pass
 
             def log_metrics(
-                self, metrics: dict[str, float], step: int | None = None, timestamp: float | None = None
+                self, metrics: dict[str, float], step: int | None = None, timestamp: float | str | None = None
             ) -> None:
                 pass
 
@@ -239,6 +262,20 @@ class TestPublicMetricsAPI:
         url = log_artifact("model", "model.pt")
         assert url == "https://example.com/run/abc"
 
+    def test_log_artifact_rejects_symlink(self, tmp_path, monkeypatch):
+        """Artifact paths that are symlinks should be rejected."""
+        from goldfish.validation import InvalidArtifactPathError
+
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(tmp_path))
+
+        real_file = tmp_path / "real.txt"
+        real_file.write_text("data")
+        link_path = tmp_path / "link.txt"
+        link_path.symlink_to(real_file)
+
+        with pytest.raises(InvalidArtifactPathError):
+            log_artifact("model", "link.txt")
+
     def test_log_artifacts_batch_returns_urls(self, tmp_path, monkeypatch):
         """log_artifacts should return a mapping of names to URLs."""
         from goldfish import metrics as metrics_module
@@ -250,12 +287,12 @@ class TestPublicMetricsAPI:
                 pass
 
             def log_metric(
-                self, name: str, value: float, step: int | None = None, timestamp: float | None = None
+                self, name: str, value: float, step: int | None = None, timestamp: float | str | None = None
             ) -> None:
                 pass
 
             def log_metrics(
-                self, metrics: dict[str, float], step: int | None = None, timestamp: float | None = None
+                self, metrics: dict[str, float], step: int | None = None, timestamp: float | str | None = None
             ) -> None:
                 pass
 

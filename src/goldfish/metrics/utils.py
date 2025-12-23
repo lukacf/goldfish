@@ -61,10 +61,29 @@ def normalize_metric_step(step: Any | None) -> int | None:
     raise InvalidMetricStepError(str(step), "step must be an integer")
 
 
+_LAST_TIMESTAMP_SECOND: int | None = None
+_LAST_TIMESTAMP_ISO: str | None = None
+
+
+def _cached_now_iso() -> str:
+    """Return a cached ISO timestamp for the current second."""
+    global _LAST_TIMESTAMP_SECOND, _LAST_TIMESTAMP_ISO
+
+    now = datetime.now(UTC)
+    now_sec = int(now.timestamp())
+    if _LAST_TIMESTAMP_SECOND == now_sec and _LAST_TIMESTAMP_ISO is not None:
+        return _LAST_TIMESTAMP_ISO
+
+    iso = now.isoformat()
+    _LAST_TIMESTAMP_SECOND = now_sec
+    _LAST_TIMESTAMP_ISO = iso
+    return iso
+
+
 def normalize_metric_timestamp(timestamp: str | float | int | None) -> str:
     """Normalize timestamps to ISO 8601 string in UTC."""
     if timestamp is None:
-        return datetime.now(UTC).isoformat()
+        return _cached_now_iso()
 
     if isinstance(timestamp, int | float):
         try:
