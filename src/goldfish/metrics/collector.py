@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +28,20 @@ MAX_METRICS_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 MAX_METRICS_LINES = 1_000_000  # 1M lines
 BATCH_SIZE = 1000  # Process in chunks to avoid memory spikes
 MAX_ERROR_MESSAGES = 1000  # Cap error list to avoid memory blowups
+
+
+def _read_max_metric_names() -> int:
+    env_val = os.environ.get("GOLDFISH_METRICS_MAX_NAMES")
+    if not env_val:
+        return 10000
+    try:
+        limit = int(env_val)
+    except ValueError:
+        return 10000
+    return max(1, min(100000, limit))
+
+
+MAX_METRIC_NAMES_PER_RUN = _read_max_metric_names()
 
 
 class _CollectionAbort(Exception):
@@ -86,6 +101,8 @@ class MetricsCollector:
         metrics_batch: list[dict] = []
         artifacts_batch: list[dict] = []
         step_modes: dict[str, str] = {}
+        metric_names: set[str] = set()
+        validated_names: set[str] = set()
         line_count = 0
 
         try:
@@ -112,12 +129,27 @@ class MetricsCollector:
                         entry_type = entry.get("type")
 
                         if entry_type == "metric":
-                            self._process_metric_entry(entry, metrics_batch, result, step_modes)
+                            self._process_metric_entry(
+                                entry,
+                                metrics_batch,
+                                result,
+                                step_modes,
+                                metric_names,
+                                validated_names,
+                            )
                         elif entry_type == "artifact":
                             self._process_artifact_entry(entry, artifacts_batch, result)
                         elif entry_type is None:
                             # Old format without "type" field - infer type from fields present
-                            self._process_legacy_entry(entry, metrics_batch, artifacts_batch, result, step_modes)
+                            self._process_legacy_entry(
+                                entry,
+                                metrics_batch,
+                                artifacts_batch,
+                                result,
+                                step_modes,
+                                metric_names,
+                                validated_names,
+                            )
                         else:
                             result.skipped_count += 1
                             self._record_error(result, f"Unknown entry type: {entry_type}")
@@ -152,29 +184,54 @@ class MetricsCollector:
                 + (f", {result.skipped_count} skipped" if result.skipped_count > 0 else "")
             )
 
+            self._log_audit(stage_run_id, result)
             return result
 
         except _CollectionAbort:
             # Transaction rolled back; clear counts
             result.metrics_count = 0
             result.artifacts_count = 0
+            self._log_audit(stage_run_id, result)
             return result
         except OSError as e:
             logger.error("I/O error reading metrics file for %s: %s", stage_run_id, type(e).__name__)
             self._record_error(result, "I/O error reading metrics file")
+            self._log_audit(stage_run_id, result)
             return result
         except sqlite3.IntegrityError as e:
             logger.error("Database integrity error for %s: %s", stage_run_id, type(e).__name__)
             self._record_error(result, "Database integrity error storing metrics")
+            self._log_audit(stage_run_id, result)
             return result
         except sqlite3.Error as e:
             logger.error("Database error for %s: %s", stage_run_id, type(e).__name__)
             self._record_error(result, "Database error storing metrics")
+            self._log_audit(stage_run_id, result)
             return result
         except Exception as e:
             logger.error("Unexpected error collecting metrics for %s: %s", stage_run_id, type(e).__name__)
             self._record_error(result, "Unexpected error collecting metrics")
+            self._log_audit(stage_run_id, result)
             return result
+
+    def _log_audit(self, stage_run_id: str, result: CollectionResult) -> None:
+        """Best-effort audit logging for metrics collection."""
+        try:
+            row = self.db.get_stage_run(stage_run_id)
+            if row:
+                self.db.log_audit(
+                    operation="collect_metrics",
+                    reason="metrics collection",
+                    workspace=row.get("workspace_name"),
+                    details={
+                        "run_id": stage_run_id,
+                        "metrics_count": result.metrics_count,
+                        "artifacts_count": result.artifacts_count,
+                        "skipped_count": result.skipped_count,
+                    },
+                )
+        except Exception:
+            logger.warning("Failed to log audit entry for metrics collection", exc_info=True)
 
     def _parse_entry(self, line: str, result: CollectionResult) -> dict | None:
         """Parse a JSON line, returning None on error."""
@@ -193,6 +250,8 @@ class MetricsCollector:
         metrics_batch: list[dict],
         result: CollectionResult,
         step_modes: dict[str, str],
+        metric_names: set[str],
+        validated_names: set[str],
     ) -> None:
         """Process a metric entry with explicit type."""
         if "name" not in entry or "value" not in entry:
@@ -202,10 +261,14 @@ class MetricsCollector:
             return
 
         try:
-            validate_metric_name(entry["name"])
+            if entry["name"] not in validated_names:
+                validate_metric_name(entry["name"])
+                validated_names.add(entry["name"])
             value = normalize_metric_value(entry["value"])
             validate_metric_value(value)
             entry["step"] = normalize_metric_step(entry.get("step"))
+            if not self._ensure_metric_name_limit(entry["name"], metric_names, result):
+                return
             if not self._ensure_step_mode(entry["name"], entry["step"], step_modes, result):
                 return
             entry["value"] = value
@@ -243,16 +306,22 @@ class MetricsCollector:
         artifacts_batch: list[dict],
         result: CollectionResult,
         step_modes: dict[str, str],
+        metric_names: set[str],
+        validated_names: set[str],
     ) -> None:
         """Process old format entry without explicit type field (backward compatibility)."""
         if "value" in entry and "name" in entry:
             # Has value field → metric
             logger.debug(f"Collecting old-format metric: {entry.get('name')}")
             try:
-                validate_metric_name(entry["name"])
+                if entry["name"] not in validated_names:
+                    validate_metric_name(entry["name"])
+                    validated_names.add(entry["name"])
                 value = normalize_metric_value(entry["value"])
                 validate_metric_value(value)
                 entry["step"] = normalize_metric_step(entry.get("step"))
+                if not self._ensure_metric_name_limit(entry["name"], metric_names, result):
+                    return
                 if not self._ensure_step_mode(entry["name"], entry["step"], step_modes, result):
                     return
                 entry["value"] = value
@@ -306,4 +375,24 @@ class MetricsCollector:
             self._record_error(result, f"Metric '{name}' logged with mixed step modes (None and int)")
             logger.warning("Skipping metric with mixed step modes: %s", name)
             return False
+        return True
+
+    def _ensure_metric_name_limit(
+        self,
+        name: str,
+        metric_names: set[str],
+        result: CollectionResult,
+    ) -> bool:
+        """Ensure per-run metric name limit is respected."""
+        if name in metric_names:
+            return True
+        if len(metric_names) >= MAX_METRIC_NAMES_PER_RUN:
+            result.skipped_count += 1
+            self._record_error(
+                result,
+                f"Too many unique metric names (limit {MAX_METRIC_NAMES_PER_RUN})",
+            )
+            logger.warning("Skipping metric due to name limit: %s", name)
+            return False
+        metric_names.add(name)
         return True

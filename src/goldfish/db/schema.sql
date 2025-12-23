@@ -300,6 +300,8 @@ CREATE TABLE IF NOT EXISTS run_metrics_summary (
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_metrics_summary_stage_run ON run_metrics_summary(stage_run_id);
+CREATE INDEX IF NOT EXISTS idx_run_metrics_summary_name ON run_metrics_summary(name);
+CREATE INDEX IF NOT EXISTS idx_run_metrics_summary_stage_name ON run_metrics_summary(stage_run_id, name);
 
 
 -- Run artifacts (artifacts logged during stage execution)

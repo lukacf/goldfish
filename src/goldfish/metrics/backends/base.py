@@ -49,7 +49,7 @@ class MetricsBackend(ABC):
         name: str,
         value: float,
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: float | str | None = None,
     ) -> None:
         """Log a single metric value.
 
@@ -66,7 +66,7 @@ class MetricsBackend(ABC):
         self,
         metrics: dict[str, float],
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: float | str | None = None,
     ) -> None:
         """Log multiple metrics at once.
 

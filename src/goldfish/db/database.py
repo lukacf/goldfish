@@ -146,6 +146,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_workspace ON pipeline_runs(workspace_name);
                 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status);
 
+                CREATE INDEX IF NOT EXISTS idx_run_metrics_summary_name ON run_metrics_summary(name);
+                CREATE INDEX IF NOT EXISTS idx_run_metrics_summary_stage_name
+                    ON run_metrics_summary(stage_run_id, name);
+
                 CREATE TABLE IF NOT EXISTS pipeline_stage_queue (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     pipeline_run_id TEXT NOT NULL,
@@ -238,6 +242,8 @@ class Database:
                         DROP TABLE run_metrics_summary;
                         ALTER TABLE run_metrics_summary_new RENAME TO run_metrics_summary;
                         CREATE INDEX idx_run_metrics_summary_stage_run ON run_metrics_summary(stage_run_id);
+                        CREATE INDEX idx_run_metrics_summary_name ON run_metrics_summary(name);
+                        CREATE INDEX idx_run_metrics_summary_stage_name ON run_metrics_summary(stage_run_id, name);
 
                         -- Rebuild run_artifacts with CASCADE DELETE
                         CREATE TABLE run_artifacts_new (
@@ -2472,7 +2478,7 @@ class Database:
             Total count of matching metrics
         """
         with self._conn() as conn:
-            query = "SELECT COUNT(*) FROM run_metrics WHERE stage_run_id = ?"
+            query = "SELECT COALESCE(SUM(count), 0) FROM run_metrics_summary WHERE stage_run_id = ?"
             params: list = [stage_run_id]
 
             if metric_name:
@@ -2621,19 +2627,36 @@ class Database:
     def get_run_artifacts(
         self,
         stage_run_id: str,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[ArtifactRow]:
         """Get artifacts for a stage run."""
         from goldfish.db.types import ArtifactRow
 
         with self._conn() as conn:
-            rows = conn.execute(
-                """
+            query = """
                 SELECT id, stage_run_id, name, path, backend_url, created_at
                 FROM run_artifacts
                 WHERE stage_run_id = ?
-                ORDER BY created_at ASC
-                """,
-                (stage_run_id,),
-            ).fetchall()
+                ORDER BY created_at ASC, id ASC
+            """
+            params: list = [stage_run_id]
+            if limit is not None:
+                query += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+            elif offset:
+                query += " LIMIT -1 OFFSET ?"
+                params.append(offset)
+
+            rows = conn.execute(query, params).fetchall()
 
             return [cast(ArtifactRow, dict(row)) for row in rows]
+
+    def count_run_artifacts(self, stage_run_id: str) -> int:
+        """Get total count of artifacts for pagination."""
+        with self._conn() as conn:
+            result = conn.execute(
+                "SELECT COUNT(*) FROM run_artifacts WHERE stage_run_id = ?",
+                (stage_run_id,),
+            ).fetchone()
+            return int(result[0]) if result else 0

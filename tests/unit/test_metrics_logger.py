@@ -27,7 +27,7 @@ class MockBackend(MetricsBackend):
         name: str,
         value: float,
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: float | str | None = None,
     ) -> None:
         self.metrics.append({"name": name, "value": value, "step": step})
 
@@ -35,7 +35,7 @@ class MockBackend(MetricsBackend):
         self,
         metrics: dict[str, float],
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: float | str | None = None,
     ) -> None:
         for name, value in metrics.items():
             self.log_metric(name, value, step, timestamp)
@@ -68,7 +68,7 @@ class FailingBackend(MetricsBackend):
         name: str,
         value: float,
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: float | str | None = None,
     ) -> None:
         raise Exception("Backend metric logging failed")
 
@@ -76,7 +76,7 @@ class FailingBackend(MetricsBackend):
         self,
         metrics: dict[str, float],
         step: int | None = None,
-        timestamp: float | None = None,
+        timestamp: float | str | None = None,
     ) -> None:
         raise Exception("Backend metrics logging failed")
 
@@ -332,3 +332,65 @@ class TestMetricsLogger:
 
         # Backend should be finished after context exit
         assert backend.finished
+
+    def test_backend_retry_after_failure(self, tmp_path):
+        """Backend should retry after a failure instead of staying disabled."""
+
+        class FlakyBackend(MetricsBackend):
+            def __init__(self) -> None:
+                self.calls = 0
+                self.initialized = False
+
+            def init_run(self, run_id: str, config: dict, workspace: str, stage: str) -> None:
+                self.initialized = True
+
+            def log_metric(
+                self,
+                name: str,
+                value: float,
+                step: int | None = None,
+                timestamp: float | str | None = None,
+            ) -> None:
+                self.calls += 1
+                if self.calls == 1:
+                    raise Exception("fail once")
+
+            def log_metrics(
+                self,
+                metrics: dict[str, float],
+                step: int | None = None,
+                timestamp: float | str | None = None,
+            ) -> None:
+                self.log_metric("batch", 0.0, step, timestamp)
+
+            def log_artifact(self, name: str, path: Path) -> str | None:
+                return None
+
+            def finish(self) -> str | None:
+                return None
+
+            @classmethod
+            def is_available(cls) -> bool:
+                return True
+
+            @classmethod
+            def name(cls) -> str:
+                return "flaky"
+
+        backend = FlakyBackend()
+        logger = MetricsLogger(
+            outputs_dir=tmp_path,
+            backend=backend,
+            run_id="stage-abc123",
+            config={},
+            workspace="test",
+            stage="train",
+            backend_retry_delay=0,
+        )
+
+        logger.log_metric("loss", 0.5)
+        assert backend.calls == 1
+
+        # Retry should happen immediately (delay=0)
+        logger.log_metric("loss", 0.4)
+        assert backend.calls == 2

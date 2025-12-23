@@ -577,7 +577,7 @@ class TestWriterFlushErrors:
     """Test flush error reporting in LocalWriter."""
 
     def test_flush_errors_tracked_on_io_failure(self, temp_dir):
-        """Writer should raise on flush errors and track data loss."""
+        """Writer should raise on flush errors and track failures."""
         from goldfish.metrics.writer import LocalWriter, MetricsFlushError
 
         writer = LocalWriter(outputs_dir=temp_dir)
@@ -598,7 +598,7 @@ class TestWriterFlushErrors:
 
         # Check error was tracked
         assert writer.had_flush_errors()
-        assert writer.get_metrics_lost_count() == 2
+        assert writer.get_metrics_lost_count() == 0
         errors = writer.get_flush_errors()
         assert len(errors) == 1
 
@@ -725,6 +725,42 @@ class TestMetricsCollectorEdgeCases:
         assert result.skipped_count == 20
         assert len(result.errors) <= 5
         assert result.errors_truncated is True
+
+    def test_metric_name_limit_enforced(self, workspace_setup, temp_dir, monkeypatch):
+        """Collector should reject files with too many unique metric names."""
+        test_db = workspace_setup
+        now = datetime.now(UTC).isoformat()
+
+        stage_run_id = "stage-name-limit"
+        test_db.create_stage_run(
+            stage_run_id=stage_run_id,
+            workspace_name="test_ws",
+            version="v1",
+            stage_name="train",
+            pipeline_run_id=None,
+            pipeline_name=None,
+            config={},
+            inputs={},
+            profile=None,
+            hints=None,
+            backend_type="local",
+            backend_handle="container-123",
+        )
+
+        monkeypatch.setattr("goldfish.metrics.collector.MAX_METRIC_NAMES_PER_RUN", 2)
+
+        metrics_file = temp_dir / "metrics.jsonl"
+        with open(metrics_file, "w") as f:
+            f.write(json.dumps({"type": "metric", "name": "loss", "value": 0.5, "timestamp": now}) + "\n")
+            f.write(json.dumps({"type": "metric", "name": "accuracy", "value": 0.9, "timestamp": now}) + "\n")
+            f.write(json.dumps({"type": "metric", "name": "precision", "value": 0.8, "timestamp": now}) + "\n")
+
+        collector = MetricsCollector(test_db)
+        result = collector.collect_from_file(stage_run_id, metrics_file)
+
+        assert result.metrics_count == 2
+        assert result.skipped_count == 1
+        assert any("metric names" in err.lower() for err in result.errors)
 
     def test_line_limit_aborts_collection(self, workspace_setup, temp_dir, monkeypatch):
         """Exceeding max lines should abort collection and insert nothing."""

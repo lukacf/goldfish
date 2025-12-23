@@ -12,6 +12,7 @@ NEVER bypass these validations. If a new input type is needed,
 add validation here first.
 """
 
+import os
 import re
 import unicodedata
 from datetime import UTC, datetime, timedelta
@@ -940,8 +941,23 @@ def validate_metric_value(value: float) -> None:
 
 
 # Allow minor clock skew but prevent obviously corrupt timestamps.
-_MAX_METRIC_FUTURE_DRIFT = timedelta(days=7)
+_DEFAULT_MAX_METRIC_FUTURE_DRIFT = timedelta(days=1)
 _MAX_METRIC_PAST_DRIFT = timedelta(days=3650)  # 10 years
+
+
+def _get_metric_future_drift() -> timedelta:
+    """Get max allowed future drift for metrics timestamps."""
+    override = os.environ.get("GOLDFISH_METRICS_MAX_FUTURE_DRIFT_SECONDS")
+    if override:
+        try:
+            seconds = int(override)
+            if seconds < 0:
+                raise ValueError("negative drift")
+            return timedelta(seconds=seconds)
+        except ValueError:
+            # Fall back to default if env var is invalid
+            return _DEFAULT_MAX_METRIC_FUTURE_DRIFT
+    return _DEFAULT_MAX_METRIC_FUTURE_DRIFT
 
 
 def validate_metric_timestamp(timestamp: str) -> str:
@@ -964,7 +980,8 @@ def validate_metric_timestamp(timestamp: str) -> str:
     dt_utc = dt.astimezone(UTC)
     now = datetime.now(UTC)
 
-    if dt_utc > now + _MAX_METRIC_FUTURE_DRIFT:
+    max_future_drift = _get_metric_future_drift()
+    if dt_utc > now + max_future_drift:
         raise InvalidMetricTimestampError(timestamp, "timestamp is too far in the future")
     if dt_utc < now - _MAX_METRIC_PAST_DRIFT:
         raise InvalidMetricTimestampError(timestamp, "timestamp is too far in the past")
