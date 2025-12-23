@@ -2409,6 +2409,7 @@ class Database:
         self,
         stage_run_id: str,
         metric_name: str | None = None,
+        metric_prefix: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[MetricRow]:
@@ -2437,6 +2438,9 @@ class Database:
             if metric_name:
                 query += " AND name = ?"
                 params.append(metric_name)
+            elif metric_prefix:
+                query += " AND name LIKE ?"
+                params.append(f"{metric_prefix}%")
 
             query += " ORDER BY timestamp ASC, id ASC"
 
@@ -2456,6 +2460,7 @@ class Database:
         self,
         stage_run_id: str,
         metric_name: str | None = None,
+        metric_prefix: str | None = None,
     ) -> int:
         """Get total count of metrics for pagination.
 
@@ -2473,6 +2478,9 @@ class Database:
             if metric_name:
                 query += " AND name = ?"
                 params.append(metric_name)
+            elif metric_prefix:
+                query += " AND name LIKE ?"
+                params.append(f"{metric_prefix}%")
 
             result = conn.execute(query, params).fetchone()
             return int(result[0]) if result else 0
@@ -2481,6 +2489,7 @@ class Database:
         self,
         stage_run_id: str,
         metric_name: str | None = None,
+        metric_prefix: str | None = None,
     ) -> list[MetricsSummaryRow]:
         """Get aggregated metrics summary for a stage run.
 
@@ -2504,12 +2513,35 @@ class Database:
             if metric_name:
                 query += " AND name = ?"
                 params.append(metric_name)
+            elif metric_prefix:
+                query += " AND name LIKE ?"
+                params.append(f"{metric_prefix}%")
 
             query += " ORDER BY name ASC"
 
             rows = conn.execute(query, params).fetchall()
 
             return [cast(MetricsSummaryRow, dict(row)) for row in rows]
+
+    def list_metric_names(
+        self,
+        stage_run_id: str,
+        metric_prefix: str | None = None,
+    ) -> list[str]:
+        """List distinct metric names for a stage run."""
+        with self._conn() as conn:
+            query = """
+                SELECT name
+                FROM run_metrics_summary
+                WHERE stage_run_id = ?
+            """
+            params: list = [stage_run_id]
+            if metric_prefix:
+                query += " AND name LIKE ?"
+                params.append(f"{metric_prefix}%")
+            query += " ORDER BY name ASC"
+            rows = conn.execute(query, params).fetchall()
+            return [row[0] for row in rows]
 
     def insert_artifact(
         self,

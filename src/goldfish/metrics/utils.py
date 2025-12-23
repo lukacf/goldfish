@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from goldfish.validation import (
+    InvalidMetricStepError,
     InvalidMetricTimestampError,
     InvalidMetricValueError,
     validate_metric_timestamp,
@@ -40,11 +41,11 @@ def normalize_metric_step(step: Any | None) -> int | None:
         return None
 
     if isinstance(step, bool):
-        raise InvalidMetricValueError(str(step), "step must be an integer")
+        raise InvalidMetricStepError(str(step), "step must be an integer")
 
     if isinstance(step, int):
         if step < 0:
-            raise InvalidMetricValueError(str(step), "step must be >= 0")
+            raise InvalidMetricStepError(str(step), "step must be >= 0")
         return step
 
     item = getattr(step, "item", None)
@@ -52,12 +53,12 @@ def normalize_metric_step(step: Any | None) -> int | None:
         try:
             step_val = int(item())
         except Exception as exc:  # pragma: no cover - defensive
-            raise InvalidMetricValueError(str(step), "step must be an integer") from exc
+            raise InvalidMetricStepError(str(step), "step must be an integer") from exc
         if step_val < 0:
-            raise InvalidMetricValueError(str(step), "step must be >= 0")
+            raise InvalidMetricStepError(str(step), "step must be >= 0")
         return step_val
 
-    raise InvalidMetricValueError(str(step), "step must be an integer")
+    raise InvalidMetricStepError(str(step), "step must be an integer")
 
 
 def normalize_metric_timestamp(timestamp: str | float | int | None) -> str:

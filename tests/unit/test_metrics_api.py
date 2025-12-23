@@ -177,3 +177,115 @@ class TestPublicMetricsAPI:
         with open(metrics_file) as f:
             data = json.loads(f.readline())
             assert data["value"] == 0.5
+
+    def test_log_metric_accepts_iso_timestamp(self, tmp_path, monkeypatch):
+        """ISO 8601 timestamps should be accepted in public API."""
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(tmp_path))
+
+        log_metric("loss", 0.5, timestamp="2024-01-01T00:00:00Z")
+        finish()
+
+        metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"
+        with open(metrics_file) as f:
+            data = json.loads(f.readline())
+            assert data["timestamp"] == "2024-01-01T00:00:00+00:00"
+
+    def test_log_artifact_returns_backend_url(self, tmp_path, monkeypatch):
+        """log_artifact should return backend URL when available."""
+        from goldfish import metrics as metrics_module
+        from goldfish.metrics.backends import MetricsBackend
+        from goldfish.metrics.logger import MetricsLogger
+
+        class UrlBackend(MetricsBackend):
+            def init_run(self, run_id: str, config: dict, workspace: str, stage: str) -> None:
+                pass
+
+            def log_metric(
+                self, name: str, value: float, step: int | None = None, timestamp: float | None = None
+            ) -> None:
+                pass
+
+            def log_metrics(
+                self, metrics: dict[str, float], step: int | None = None, timestamp: float | None = None
+            ) -> None:
+                pass
+
+            def log_artifact(self, name: str, path):  # type: ignore[override]
+                return "https://example.com/run/abc"
+
+            def finish(self) -> str | None:
+                return None
+
+            @classmethod
+            def is_available(cls) -> bool:
+                return True
+
+            @classmethod
+            def name(cls) -> str:
+                return "url"
+
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(tmp_path))
+
+        backend = UrlBackend()
+        metrics_module._global_logger = MetricsLogger(
+            outputs_dir=tmp_path,
+            backend=backend,
+            run_id="stage-abc",
+            config={},
+            workspace="ws",
+            stage="train",
+        )
+
+        url = log_artifact("model", "model.pt")
+        assert url == "https://example.com/run/abc"
+
+    def test_log_artifacts_batch_returns_urls(self, tmp_path, monkeypatch):
+        """log_artifacts should return a mapping of names to URLs."""
+        from goldfish import metrics as metrics_module
+        from goldfish.metrics.backends import MetricsBackend
+        from goldfish.metrics.logger import MetricsLogger
+
+        class UrlBackend(MetricsBackend):
+            def init_run(self, run_id: str, config: dict, workspace: str, stage: str) -> None:
+                pass
+
+            def log_metric(
+                self, name: str, value: float, step: int | None = None, timestamp: float | None = None
+            ) -> None:
+                pass
+
+            def log_metrics(
+                self, metrics: dict[str, float], step: int | None = None, timestamp: float | None = None
+            ) -> None:
+                pass
+
+            def log_artifact(self, name: str, path):  # type: ignore[override]
+                return f"https://example.com/{name}"
+
+            def finish(self) -> str | None:
+                return None
+
+            @classmethod
+            def is_available(cls) -> bool:
+                return True
+
+            @classmethod
+            def name(cls) -> str:
+                return "url"
+
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(tmp_path))
+
+        backend = UrlBackend()
+        metrics_module._global_logger = MetricsLogger(
+            outputs_dir=tmp_path,
+            backend=backend,
+            run_id="stage-abc",
+            config={},
+            workspace="ws",
+            stage="train",
+        )
+
+        from goldfish.metrics import log_artifacts
+
+        urls = log_artifacts({"a": "a.txt", "b": "b.txt"})
+        assert urls == {"a": "https://example.com/a", "b": "https://example.com/b"}

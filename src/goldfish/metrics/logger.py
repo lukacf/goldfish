@@ -63,6 +63,7 @@ class MetricsLogger:
         config: dict | None = None,
         workspace: str | None = None,
         stage: str | None = None,
+        auto_flush_threshold: int | None = None,
     ):
         """Initialize metrics logger.
 
@@ -73,14 +74,17 @@ class MetricsLogger:
             config: Stage configuration dict (for backend hyperparameters)
             workspace: Workspace name (for backend tagging)
             stage: Stage name (for backend tagging)
+            auto_flush_threshold: Auto-flush after N metrics (default 100)
         """
         # LocalWriter always runs
-        self.local_writer = LocalWriter(outputs_dir=outputs_dir)
+        threshold = 100 if auto_flush_threshold is None else auto_flush_threshold
+        self.local_writer = LocalWriter(outputs_dir=outputs_dir, auto_flush_threshold=threshold)
 
         # Backend is optional
         self.backend = backend
         self._backend_initialized = False
         self._backend_failed = False
+        self._backend_errors: list[str] = []
 
         # Run metadata for backend initialization
         self.run_id = run_id
@@ -116,11 +120,7 @@ class MetricsLogger:
                 logger.warning("Backend provided but run metadata missing, backend will not be initialized")
                 self._backend_failed = True
         except Exception as e:
-            logger.error(
-                f"Failed to initialize backend '{self.backend.name()}': {e}",
-                exc_info=True,
-            )
-            self._backend_failed = True
+            self._record_backend_error(f"Failed to initialize backend '{self.backend.name()}': {e}")
 
     def log_metric(
         self,
@@ -150,8 +150,7 @@ class MetricsLogger:
                 ts_float = timestamp_to_float(timestamp)
                 backend.log_metric(name, backend_value, backend_step, ts_float)
             except Exception as e:
-                logger.error(f"Backend '{backend.name()}' failed to log metric '{name}': {e}")
-                self._backend_failed = True
+                self._record_backend_error(f"Backend '{backend.name()}' failed to log metric '{name}': {e}")
 
     def log_metrics(
         self,
@@ -179,10 +178,9 @@ class MetricsLogger:
                 backend_metrics = {name: normalize_metric_value(value) for name, value in metrics.items()}
                 backend.log_metrics(backend_metrics, backend_step, ts_float)
             except Exception as e:
-                logger.error(f"Backend '{backend.name()}' failed to log metrics: {e}")
-                self._backend_failed = True
+                self._record_backend_error(f"Backend '{backend.name()}' failed to log metrics: {e}")
 
-    def log_artifact(self, name: str, path: str | Path) -> None:
+    def log_artifact(self, name: str, path: str | Path) -> str | None:
         """Log an artifact (file or directory).
 
         Args:
@@ -205,11 +203,26 @@ class MetricsLogger:
                     backend_path = self.local_writer.outputs_dir / backend_path
                 backend_url = backend.log_artifact(name, backend_path)
             except Exception as e:
-                logger.error(f"Backend '{backend.name()}' failed to log artifact '{name}': {e}")
-                self._backend_failed = True
+                self._record_backend_error(f"Backend '{backend.name()}' failed to log artifact '{name}': {e}")
 
         # Always write to local (include backend_url if available)
         self.local_writer.log_artifact(name, path, backend_url=backend_url)
+        return backend_url
+
+    def log_artifacts(self, artifacts: dict[str, str | Path]) -> dict[str, str | None]:
+        """Log multiple artifacts at once."""
+        results: dict[str, str | None] = {}
+        for name, path in artifacts.items():
+            results[name] = self.log_artifact(name, path)
+        return results
+
+    def had_backend_errors(self) -> bool:
+        """Return True if backend errors occurred."""
+        return bool(self._backend_errors)
+
+    def get_backend_errors(self) -> list[str]:
+        """Get backend error messages."""
+        return list(self._backend_errors)
 
     def flush(self) -> None:
         """Flush buffered metrics to disk.
@@ -217,6 +230,15 @@ class MetricsLogger:
         This only affects the LocalWriter. Backends typically flush in real-time.
         """
         self.local_writer.flush()
+
+    def _record_backend_error(self, message: str) -> None:
+        """Record backend errors and mark backend as failed."""
+        if not self._backend_errors:
+            logger.warning(message)
+        else:
+            logger.error(message)
+        self._backend_errors.append(message)
+        self._backend_failed = True
 
     def finish(self) -> str | None:
         """Finalize the metrics collection.
