@@ -706,3 +706,4 @@ class GetRunMetricsResponse(BaseModel):
     summary: list[MetricSummary] = Field(default_factory=list)
     artifacts: list[ArtifactInfo] = Field(default_factory=list)
     total_metrics: int = 0
+    warnings: list[str] = Field(default_factory=list)

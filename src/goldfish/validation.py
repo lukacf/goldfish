@@ -195,6 +195,17 @@ class InvalidMetricValueError(ValidationError):
         )
 
 
+class InvalidMetricStepError(ValidationError):
+    """Metric step is invalid."""
+
+    def __init__(self, value: str, reason: str):
+        super().__init__(
+            f"Invalid metric step '{value}': {reason}",
+            value=value,
+            field="metric_step",
+        )
+
+
 class InvalidMetricTimestampError(ValidationError):
     """Metric timestamp is invalid."""
 
@@ -966,9 +977,9 @@ def validate_metric_step(step: int | None) -> None:
     if step is None:
         return
     if not isinstance(step, int):
-        raise InvalidMetricValueError(str(step), "step must be an integer")
+        raise InvalidMetricStepError(str(step), "step must be an integer")
     if step < 0:
-        raise InvalidMetricValueError(str(step), "step must be >= 0")
+        raise InvalidMetricStepError(str(step), "step must be >= 0")
 
 
 def validate_artifact_path(path: str) -> None:

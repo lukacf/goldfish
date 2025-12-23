@@ -71,7 +71,28 @@ def test_get_run_metrics_limit_none_returns_all():
 
     assert result["total_metrics"] == 2
     assert len(result["metrics"]) == 2
-    mock_db.get_run_metrics.assert_called_once_with(run_id, metric_name=None, limit=None, offset=0)
+    mock_db.get_run_metrics.assert_called_once_with(run_id, metric_name=None, metric_prefix=None, limit=None, offset=0)
+
+
+def test_get_run_metrics_default_limit_applied():
+    """Default limit should prevent unbounded fetches."""
+    from goldfish.server_tools.execution_tools import DEFAULT_METRICS_LIMIT, get_run_metrics
+
+    run_id = "stage-abc123"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = _mock_stage_row(run_id)
+    mock_db.count_run_metrics.return_value = 100
+    mock_db.get_run_metrics.return_value = []
+    mock_db.get_metrics_summary.return_value = []
+    mock_db.get_run_artifacts.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = get_run_metrics(run_id)
+
+    assert result["total_metrics"] == 100
+    mock_db.get_run_metrics.assert_called_once_with(
+        run_id, metric_name=None, metric_prefix=None, limit=DEFAULT_METRICS_LIMIT, offset=0
+    )
 
 
 def test_get_run_metrics_offset_without_limit():
@@ -90,7 +111,26 @@ def test_get_run_metrics_offset_without_limit():
         result = get_run_metrics(run_id, limit=None, offset=5)
 
     assert result["total_metrics"] == 0
-    mock_db.get_run_metrics.assert_called_once_with(run_id, metric_name=None, limit=None, offset=5)
+    mock_db.get_run_metrics.assert_called_once_with(run_id, metric_name=None, metric_prefix=None, limit=None, offset=5)
+
+
+def test_get_run_metrics_warns_when_unbounded_large_result():
+    """Warn when limit=None and total exceeds warning threshold."""
+    from goldfish.server_tools.execution_tools import get_run_metrics
+
+    run_id = "stage-abc123"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = _mock_stage_row(run_id)
+    mock_db.count_run_metrics.return_value = 20000
+    mock_db.get_run_metrics.return_value = []
+    mock_db.get_metrics_summary.return_value = []
+    mock_db.get_run_artifacts.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = get_run_metrics(run_id, limit=None)
+
+    assert "warnings" in result
+    assert any("large" in w.lower() for w in result["warnings"])
 
 
 def test_get_run_metrics_total_metrics_in_response():
@@ -111,3 +151,20 @@ def test_get_run_metrics_total_metrics_in_response():
         result = get_run_metrics(run_id, limit=1)
 
     assert result["total_metrics"] == 1
+
+
+def test_list_metric_names_tool():
+    """list_metric_names should return distinct names."""
+    from goldfish.server_tools.execution_tools import list_metric_names
+
+    run_id = "stage-abc123"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = _mock_stage_row(run_id)
+    mock_db.list_metric_names.return_value = ["loss", "accuracy"]
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = list_metric_names(run_id)
+
+    assert result["run_id"] == run_id
+    assert result["metric_names"] == ["loss", "accuracy"]
+    assert result["count"] == 2

@@ -5,6 +5,7 @@ import json
 import pytest
 
 from goldfish.metrics.writer import LocalWriter
+from goldfish.validation import InvalidMetricStepError
 
 
 class TestLocalWriter:
@@ -177,3 +178,11 @@ class TestLocalWriter:
 
         # Cleanup
         metrics_file.chmod(0o644)
+
+    def test_step_consistency_enforced(self, tmp_path):
+        """Mixing step=None and step=int for the same metric should error."""
+        writer = LocalWriter(outputs_dir=tmp_path)
+
+        writer.log_metric("loss", 0.5)
+        with pytest.raises(InvalidMetricStepError):
+            writer.log_metric("loss", 0.4, step=1)

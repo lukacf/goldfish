@@ -64,6 +64,7 @@ class LocalWriter:
         self._metrics_buffer: list[dict] = []
         self._artifacts: list[dict] = []
         self._auto_flush_threshold = max(10, min(10000, auto_flush_threshold))
+        self._metric_step_modes: dict[str, str] = {}
 
         # Error tracking for flush failures (silent data loss detection)
         self._flush_errors: list[str] = []
@@ -88,13 +89,24 @@ class LocalWriter:
             InvalidMetricNameError: If name is invalid
             InvalidMetricValueError: If value is NaN or infinite
         """
-        from goldfish.validation import validate_metric_name, validate_metric_value
+        from goldfish.validation import InvalidMetricStepError, validate_metric_name, validate_metric_value
 
         # Validate inputs early (strict mode - fail fast)
         validate_metric_name(name)
         value = normalize_metric_value(value)
         validate_metric_value(value)
         step = normalize_metric_step(step)
+
+        # Enforce consistent step usage per metric
+        step_mode = "none" if step is None else "value"
+        existing_mode = self._metric_step_modes.get(name)
+        if existing_mode is None:
+            self._metric_step_modes[name] = step_mode
+        elif existing_mode != step_mode:
+            raise InvalidMetricStepError(
+                str(step),
+                f"metric '{name}' logged with mixed step modes (None and int)",
+            )
 
         # Normalize timestamp to ISO 8601 string (UTC)
         ts_str = normalize_metric_timestamp(timestamp)
@@ -187,7 +199,7 @@ class LocalWriter:
             # OSError: disk full, permissions, I/O error
             # ValueError: NaN/Infinity in metrics
             # TypeError: non-serializable types
-            error_msg = f"Failed to flush {metrics_count} metrics: {type(e).__name__}"
+            error_msg = f"Failed to flush {metrics_count} metrics: {type(e).__name__} ({e})"
             logger.error(f"Failed to flush metrics to {self.metrics_file}: {e}", exc_info=True)
             # Track error for later inspection
             self._flush_errors.append(error_msg)

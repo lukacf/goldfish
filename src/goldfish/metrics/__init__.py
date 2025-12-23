@@ -22,6 +22,9 @@ The metrics API automatically:
 - Writes to local JSONL file (.goldfish/metrics.jsonl) for audit trail
 - Syncs to configured backend (W&B, MLflow) if GOLDFISH_METRICS_BACKEND is set
 - Handles backend failures gracefully (stage continues even if backend fails)
+
+Optional configuration:
+- GOLDFISH_METRICS_FLUSH_THRESHOLD: auto-flush after N metrics (default 100)
 """
 
 from __future__ import annotations
@@ -81,6 +84,15 @@ def _get_or_create_logger() -> MetricsLogger:
         except json.JSONDecodeError:
             config = {}
 
+        # Metrics flush configuration
+        flush_threshold = None
+        threshold_str = os.environ.get("GOLDFISH_METRICS_FLUSH_THRESHOLD")
+        if threshold_str:
+            try:
+                flush_threshold = int(threshold_str)
+            except ValueError:
+                flush_threshold = None
+
         # Backend configuration - instantiate from registry
         backend = None
         backend_name = os.environ.get("GOLDFISH_METRICS_BACKEND")
@@ -118,6 +130,7 @@ def _get_or_create_logger() -> MetricsLogger:
             config=config,
             workspace=workspace,
             stage=stage,
+            auto_flush_threshold=flush_threshold,
         )
 
         if not _auto_finalize_registered:
@@ -131,19 +144,20 @@ def log_metric(
     name: str,
     value: float,
     step: int | None = None,
-    timestamp: float | None = None,
+    timestamp: str | float | None = None,
 ) -> None:
     """Log a single metric value.
 
     Args:
-        name: Metric name (e.g., "loss", "accuracy")
-        value: Metric value
-        step: Optional step/epoch number
-        timestamp: Optional Unix timestamp (defaults to current time)
+        name: Metric name (e.g., "loss", "accuracy"). Use slashes for grouping (e.g., "train/loss").
+        value: Metric value (bool values are rejected; use 0/1 instead).
+        step: Optional step/epoch number. Use None for stepless metrics (consistent per metric).
+        timestamp: Optional ISO 8601 string (UTC) or Unix timestamp float.
 
     Example:
         log_metric("loss", 0.5, step=1)
-        log_metric("learning_rate", 0.001, step=1)
+        log_metric("train/accuracy", 0.92, step=1, timestamp="2024-01-01T00:00:00Z")
+        log_metric("learning_rate", 0.001)  # stepless metric
     """
     logger = _get_or_create_logger()
     logger.log_metric(name, value, step, timestamp)
@@ -152,42 +166,59 @@ def log_metric(
 def log_metrics(
     metrics: dict[str, float],
     step: int | None = None,
-    timestamp: float | None = None,
+    timestamp: str | float | None = None,
 ) -> None:
     """Log multiple metrics at once.
 
     Args:
         metrics: Dict of metric_name -> value
-        step: Optional step/epoch number
-        timestamp: Optional Unix timestamp (defaults to current time)
+        step: Optional step/epoch number (consistent per metric)
+        timestamp: Optional ISO 8601 string (UTC) or Unix timestamp float
 
     Example:
-        log_metrics({"accuracy": 0.92, "f1": 0.88, "precision": 0.89}, step=10)
+        log_metrics({"accuracy": 0.92, "f1": 0.88}, step=10)
     """
     logger = _get_or_create_logger()
     logger.log_metrics(metrics, step, timestamp)
 
 
-def log_artifact(name: str, path: str | Path) -> None:
+def log_artifact(name: str, path: str | Path) -> str | None:
     """Log an artifact (file or directory).
 
     Args:
         name: Artifact name (e.g., "model", "predictions")
-        path: Path to artifact (relative to outputs dir)
+        path: Relative path under outputs dir (no absolute paths)
+
+    Returns:
+        Backend URL if available (e.g., W&B run URL), else None.
 
     Example:
         log_artifact("model", "model.pt")
-        log_artifact("predictions", "predictions.csv")
+        log_artifact("checkpoints", "checkpoints/epoch_10")
     """
     logger = _get_or_create_logger()
-    logger.log_artifact(name, path)
+    return logger.log_artifact(name, path)
+
+
+def log_artifacts(artifacts: dict[str, str | Path]) -> dict[str, str | None]:
+    """Log multiple artifacts at once.
+
+    Args:
+        artifacts: Dict of artifact_name -> relative path
+
+    Returns:
+        Dict of artifact_name -> backend URL (or None)
+    """
+    logger = _get_or_create_logger()
+    return logger.log_artifacts(artifacts)
 
 
 def finish() -> str | None:
     """Finalize metrics collection.
 
     Flushes buffered metrics to disk and calls backend.finish() if configured.
-    This is optional - the logger will automatically finalize at stage end.
+    This is optional - the logger will automatically finalize at stage end
+    using an atexit hook (won't run on SIGKILL/crash). Safe to call multiple times.
 
     Returns:
         Optional URL to the run in the backend's UI (e.g., W&B run page)
@@ -225,9 +256,24 @@ def _reset_global_logger() -> None:
     _auto_finalize_registered = False
 
 
+def had_backend_errors() -> bool:
+    """Return True if the backend failed during this run."""
+    logger = _get_or_create_logger()
+    return logger.had_backend_errors()
+
+
+def get_backend_errors() -> list[str]:
+    """Get backend error messages (if any)."""
+    logger = _get_or_create_logger()
+    return logger.get_backend_errors()
+
+
 __all__ = [
     "log_metric",
     "log_metrics",
     "log_artifact",
+    "log_artifacts",
     "finish",
+    "had_backend_errors",
+    "get_backend_errors",
 ]
