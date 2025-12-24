@@ -26,6 +26,7 @@ The metrics API automatically:
 
 Optional configuration:
 - GOLDFISH_METRICS_FLUSH_THRESHOLD: auto-flush after N metrics (default 100)
+- GOLDFISH_METRICS_FLUSH_INTERVAL: auto-flush after N seconds (default 30)
 """
 
 from __future__ import annotations
@@ -121,6 +122,14 @@ def _get_or_create_logger() -> MetricsLogger:
             except ValueError:
                 flush_threshold = None
 
+        flush_interval = None
+        interval_str = os.environ.get("GOLDFISH_METRICS_FLUSH_INTERVAL")
+        if interval_str:
+            try:
+                flush_interval = float(interval_str)
+            except ValueError:
+                flush_interval = None
+
         # Backend configuration - instantiate from registry
         backend = None
         backend_name = os.environ.get("GOLDFISH_METRICS_BACKEND")
@@ -159,6 +168,7 @@ def _get_or_create_logger() -> MetricsLogger:
             workspace=workspace,
             stage=stage,
             auto_flush_threshold=flush_threshold,
+            auto_flush_interval=flush_interval,
         )
         _register_logger(_global_logger)
 
