@@ -5,6 +5,8 @@ Provides tools for running pipeline stages and monitoring execution.
 
 import json
 import logging
+import os
+import threading
 from datetime import UTC, datetime
 from typing import Any
 
@@ -16,9 +18,13 @@ from goldfish.errors import (
 )
 from goldfish.jobs.conversion import stage_run_dict_to_info
 from goldfish.models import (
+    ArtifactInfo,
     CancelRunResponse,
     GetOutputsResponse,
+    GetRunMetricsResponse,
     GetRunResponse,
+    MetricInfo,
+    MetricSummary,
     RunReason,
     StageRunInfo,
     StageRunStatus,
@@ -33,6 +39,8 @@ from goldfish.server import (
 )
 from goldfish.utils import parse_datetime
 from goldfish.validation import (
+    validate_metric_name,
+    validate_stage_run_id,
     validate_workspace_name,
 )
 
@@ -40,6 +48,24 @@ logger = logging.getLogger("goldfish.server")
 
 # Maximum lines that can be requested from logs (prevents memory exhaustion)
 _MAX_TAIL_LINES = 10000
+DEFAULT_METRICS_LIMIT = 1000
+DEFAULT_ARTIFACT_LIMIT = 1000
+UNBOUNDED_METRICS_WARNING = 10000
+UNBOUNDED_ARTIFACTS_WARNING = 5000
+
+
+def _read_max_metrics_offset() -> int:
+    value = os.environ.get("GOLDFISH_METRICS_MAX_OFFSET")
+    if not value:
+        return 1_000_000
+    try:
+        parsed = int(value)
+    except ValueError:
+        return 1_000_000
+    return max(1, min(100_000_000, parsed))
+
+
+MAX_METRICS_OFFSET = _read_max_metrics_offset()
 
 # Cursor tracking for follow mode - maps run_id to (cursor_position, last_access_time)
 # Used to return only new logs since the last call
@@ -47,24 +73,26 @@ _MAX_TAIL_LINES = 10000
 _log_cursors: dict[str, tuple[int, float]] = {}
 _CURSOR_TTL_SECONDS = 3600  # 1 hour
 _MAX_CURSORS = 1000  # Maximum number of cursors to keep
+_log_cursor_lock = threading.Lock()
 
 
 def _cleanup_stale_cursors() -> None:
     """Remove cursors that haven't been accessed in over TTL seconds."""
     import time
 
-    now = time.time()
-    stale_keys = [
-        run_id for run_id, (_, last_access) in _log_cursors.items() if now - last_access > _CURSOR_TTL_SECONDS
-    ]
-    for key in stale_keys:
-        del _log_cursors[key]
-
-    # If still over max, remove oldest entries
-    if len(_log_cursors) > _MAX_CURSORS:
-        sorted_by_access = sorted(_log_cursors.items(), key=lambda x: x[1][1])
-        for key, _ in sorted_by_access[: len(_log_cursors) - _MAX_CURSORS]:
+    with _log_cursor_lock:
+        now = time.time()
+        stale_keys = [
+            run_id for run_id, (_, last_access) in _log_cursors.items() if now - last_access > _CURSOR_TTL_SECONDS
+        ]
+        for key in stale_keys:
             del _log_cursors[key]
+
+        # If still over max, remove oldest entries
+        if len(_log_cursors) > _MAX_CURSORS:
+            sorted_by_access = sorted(_log_cursors.items(), key=lambda x: x[1][1])
+            for key, _ in sorted_by_access[: len(_log_cursors) - _MAX_CURSORS]:
+                del _log_cursors[key]
 
 
 def _stage_run_row_to_info(row: dict) -> StageRunInfo:
@@ -346,8 +374,9 @@ def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = 
         }
 
         # Get current cursor position (0 if first call)
-        cursor_entry = _log_cursors.get(run_id)
-        prev_cursor = cursor_entry[0] if cursor_entry else 0
+        with _log_cursor_lock:
+            cursor_entry = _log_cursors.get(run_id)
+            prev_cursor = cursor_entry[0] if cursor_entry else 0
 
         # Calculate new content
         full_content = log_content or ""
@@ -371,11 +400,12 @@ def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = 
         has_new_content = len(new_content) > 0
 
         # Update cursor to end of current content with current timestamp
-        _log_cursors[run_id] = (content_len, time.time())
+        with _log_cursor_lock:
+            _log_cursors[run_id] = (content_len, time.time())
 
-        # Clean up cursor when run reaches terminal state
-        if status in terminal_states:
-            _log_cursors.pop(run_id, None)
+            # Clean up cursor when run reaches terminal state
+            if status in terminal_states:
+                _log_cursors.pop(run_id, None)
 
         return {
             "run_id": run_id,
@@ -575,6 +605,222 @@ def get_outputs(run_id: str) -> dict:
     outputs = json.loads(row["outputs_json"]) if row.get("outputs_json") else []
     result: dict[str, Any] = GetOutputsResponse(stage_run_id=run_id, outputs=outputs).model_dump(mode="json")
     return result
+
+
+@mcp.tool()
+def get_run_metrics(
+    run_id: str,
+    metric_name: str | None = None,
+    limit: int | None = DEFAULT_METRICS_LIMIT,
+    offset: int = 0,
+    metric_prefix: str | None = None,
+    artifact_limit: int | None = DEFAULT_ARTIFACT_LIMIT,
+    artifact_offset: int = 0,
+    workspace: str | None = None,
+) -> dict:
+    """Get metrics and artifacts from a stage run.
+
+    Returns metrics logged during stage execution, summary statistics,
+    and artifacts. Useful for analyzing run performance and results.
+    Supports filtering and pagination for large metric sets.
+    For running runs, performs a best-effort live sync before returning.
+
+    Args:
+        run_id: The stage run ID (e.g., "stage-abc123")
+        metric_name: Optional filter by metric name (e.g., "loss")
+        limit: Optional limit on number of metrics returned (1-10000). None returns all.
+        offset: Optional offset for pagination (default 0)
+        metric_prefix: Optional prefix filter (e.g., "train/")
+        artifact_limit: Optional limit on number of artifacts returned (1-10000). None returns all.
+        artifact_offset: Optional offset for artifact pagination (default 0)
+        workspace: Optional workspace name to enforce run ownership
+
+    Returns:
+        Dict with:
+        - metrics: List of individual metric data points
+        - summary: Summary statistics (min, max, last, count) per metric
+        - artifacts: List of artifacts logged during execution
+        - total_metrics: Total count of metrics (before limit/offset)
+        - total_artifacts: Total count of artifacts (before limit/offset)
+
+    Examples:
+        # Get all metrics from a training run
+        metrics = get_run_metrics("stage-abc123")
+        print(f"Total: {metrics['total_metrics']}")
+
+        # Filter by metric name
+        loss_metrics = get_run_metrics("stage-abc123", metric_name="loss")
+
+        # Paginate large metric sets
+        page1 = get_run_metrics("stage-abc123", limit=1000, offset=0)
+        page2 = get_run_metrics("stage-abc123", limit=1000, offset=1000)
+    """
+    db = _get_db()
+
+    # Validate inputs (security: reject invalid IDs before any DB access)
+    validate_stage_run_id(run_id)
+    if metric_name is not None:
+        validate_metric_name(metric_name)
+    if metric_prefix is not None:
+        validate_metric_name(metric_prefix)
+    if metric_name is not None and metric_prefix is not None:
+        raise GoldfishError("metric_name and metric_prefix cannot be used together")
+    if workspace is not None:
+        validate_workspace_name(workspace)
+
+    # Validate parameters
+    if limit is not None and (limit < 1 or limit > 10000):
+        raise GoldfishError("limit must be 1-10000")
+    if offset < 0:
+        raise GoldfishError("offset must be >= 0")
+    if offset > MAX_METRICS_OFFSET:
+        raise GoldfishError(f"offset must be <= {MAX_METRICS_OFFSET}")
+    if artifact_limit is not None and (artifact_limit < 1 or artifact_limit > 10000):
+        raise GoldfishError("artifact_limit must be 1-10000")
+    if artifact_offset < 0:
+        raise GoldfishError("artifact_offset must be >= 0")
+    if artifact_offset > MAX_METRICS_OFFSET:
+        raise GoldfishError(f"artifact_offset must be <= {MAX_METRICS_OFFSET}")
+
+    # Verify run exists
+    row = db.get_stage_run(run_id)
+    if not row:
+        raise GoldfishError(f"Run not found: {run_id}")
+    if workspace is not None and row.get("workspace_name") != workspace:
+        raise GoldfishError(f"Run {run_id} does not belong to workspace {workspace}")
+
+    # Opportunistic live sync for running runs (best-effort, non-blocking)
+    if row.get("status") == StageRunStatus.RUNNING:
+        try:
+            _get_stage_executor().sync_metrics_if_running(run_id)
+        except Exception as exc:
+            logger.debug("Live metrics sync failed for %s: %s", run_id, exc)
+
+    # Get total count first (for pagination info) - separate query
+    total_metrics = db.count_run_metrics(run_id, metric_name=metric_name, metric_prefix=metric_prefix)
+    total_artifacts = db.count_run_artifacts(run_id)
+
+    # Get metrics with SQL-level pagination (critical for performance)
+    # This avoids loading all metrics into memory then slicing
+    if offset >= total_metrics and total_metrics > 0:
+        metric_rows = []
+    else:
+        metric_rows = db.get_run_metrics(
+            run_id,
+            metric_name=metric_name,
+            metric_prefix=metric_prefix,
+            limit=limit,
+            offset=offset,
+        )
+
+    metrics = [
+        MetricInfo(
+            name=m["name"],
+            value=m["value"],
+            step=m["step"],
+            timestamp=m["timestamp"],
+        )
+        for m in metric_rows
+    ]
+
+    # Get summary (filter pushed to SQL for efficiency)
+    summary_rows = db.get_metrics_summary(run_id, metric_name=metric_name, metric_prefix=metric_prefix)
+
+    summaries = [
+        MetricSummary(
+            name=s["name"],
+            min_value=s["min_value"],
+            max_value=s["max_value"],
+            last_value=s["last_value"],
+            count=s["count"],
+        )
+        for s in summary_rows
+    ]
+
+    # Get artifacts
+    if artifact_offset >= total_artifacts and total_artifacts > 0:
+        artifact_rows = []
+    else:
+        artifact_rows = db.get_run_artifacts(run_id, limit=artifact_limit, offset=artifact_offset)
+    artifacts = [
+        ArtifactInfo(
+            name=a["name"],
+            path=a["path"],
+            backend_url=a["backend_url"],
+            created_at=a["created_at"],
+        )
+        for a in artifact_rows
+    ]
+
+    warnings: list[str] = []
+    if limit is None and total_metrics > UNBOUNDED_METRICS_WARNING:
+        warnings.append(f"Request returned {total_metrics} metrics. Consider using limit/offset for large runs.")
+    if artifact_limit is None and total_artifacts > UNBOUNDED_ARTIFACTS_WARNING:
+        warnings.append(
+            f"Request returned {total_artifacts} artifacts. Consider using artifact_limit/offset for large runs."
+        )
+
+    result: dict[str, Any] = GetRunMetricsResponse(
+        stage_run_id=run_id,
+        metrics=metrics,
+        summary=summaries,
+        artifacts=artifacts,
+        total_metrics=total_metrics,
+        total_artifacts=total_artifacts,
+        warnings=warnings,
+    ).model_dump(mode="json")
+
+    db.log_audit(
+        operation="get_run_metrics",
+        reason="metrics query request",
+        workspace=row.get("workspace_name"),
+        details={
+            "run_id": run_id,
+            "metric_name": metric_name,
+            "metric_prefix": metric_prefix,
+            "limit": limit,
+            "offset": offset,
+            "artifact_limit": artifact_limit,
+            "artifact_offset": artifact_offset,
+        },
+    )
+
+    return result
+
+
+@mcp.tool()
+def list_metric_names(run_id: str, metric_prefix: str | None = None, workspace: str | None = None) -> dict:
+    """List distinct metric names for a stage run.
+
+    Args:
+        run_id: The stage run ID
+        metric_prefix: Optional prefix filter (e.g., "train/")
+        workspace: Optional workspace name to enforce run ownership
+
+    Returns:
+        Dict with run_id, metric_names, and count
+    """
+    db = _get_db()
+    validate_stage_run_id(run_id)
+    if metric_prefix is not None:
+        validate_metric_name(metric_prefix)
+    if workspace is not None:
+        validate_workspace_name(workspace)
+
+    row = db.get_stage_run(run_id)
+    if not row:
+        raise GoldfishError(f"Run not found: {run_id}")
+    if workspace is not None and row.get("workspace_name") != workspace:
+        raise GoldfishError(f"Run {run_id} does not belong to workspace {workspace}")
+
+    names = db.list_metric_names(run_id, metric_prefix=metric_prefix)
+    db.log_audit(
+        operation="list_metric_names",
+        reason="metrics discovery",
+        workspace=row.get("workspace_name"),
+        details={"run_id": run_id, "metric_prefix": metric_prefix},
+    )
+    return {"run_id": run_id, "metric_names": names, "count": len(names)}
 
 
 @mcp.tool()

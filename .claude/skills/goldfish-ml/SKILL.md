@@ -170,6 +170,11 @@ stages:
         type: csv
 ```
 
+**Signal aliasing (important):**
+- `signal` is optional. If omitted, it defaults to the input name.
+- Use `signal` to map an input name to a different upstream output name.
+  Example: `X: { from_stage: preprocess, signal: features }`
+
 ### 3. Stage Implementation Pattern
 
 Stage modules follow a consistent pattern:
@@ -196,7 +201,77 @@ if __name__ == "__main__":
 
 **Heartbeat API**: Call `heartbeat()` periodically in long-running computations to prevent the job from being terminated due to inactivity. See `references/stage_authoring.md` for details.
 
-### 4. Monitoring Runs
+### 4. Metrics API (Stage Code)
+
+Use the Metrics API from inside stage modules to record scalars and artifacts.
+
+```python
+# modules/train.py
+from goldfish.metrics import (
+    log_metric,
+    log_metrics,
+    log_artifact,
+    log_artifacts,
+    finish,
+)
+
+def main():
+    for step in range(epochs):
+        loss = train_step(...)
+        acc = evaluate(...)
+
+        # Single metric
+        log_metric("train/loss", loss, step=step)
+
+        # Batch metrics (same step)
+        log_metrics({"train/acc": acc, "train/lr": lr}, step=step)
+
+    # Artifacts must be relative to outputs dir
+    log_artifact("model", "model.pt")
+    log_artifacts({"checkpoints": "checkpoints/epoch_10"})
+
+    # Ensure flush at end (safe to call multiple times)
+    finish()
+```
+
+**Key semantics (important):**
+- **Step consistency:** A given metric name must be logged with either `step=None` or `step=int` consistently.
+  Mixing `None` and integers for the same metric is **skipped with a warning** (no crash).
+- **Timestamp formats:** `timestamp` accepts ISO 8601 strings (UTC) or Unix float seconds.
+  Stored and returned (via MCP tools) as ISO 8601 UTC strings.
+- **Values:** Must be numeric (bools are rejected; use 0/1). NumPy scalars are supported.
+- **Metric names:** Start with a letter, up to 256 chars. Use slashes for grouping (e.g., `train/loss`).
+- **Metric name cap:** Per run, unique metric names are capped (default 10,000) to prevent abuse.
+- **Artifacts:** `path` is **relative** to outputs dir; absolute paths and symlinks are rejected.
+  `log_artifact` returns a backend URL if available.
+- **Live metrics:** `get_run_metrics` will attempt a best-effort live sync for running runs
+  (throttled by `GOLDFISH_METRICS_LIVE_SYNC_INTERVAL`).
+- **Auto-finalize:** `finish()` is optional but recommended in a `finally` block. Auto-finalize uses `atexit`
+  and won’t run on SIGKILL/crash.
+- **Backend errors:** Use `had_backend_errors()` / `get_backend_errors()` to detect backend failures.
+
+**Tuning flush behavior:**
+- `GOLDFISH_METRICS_FLUSH_THRESHOLD` controls auto-flush (default 100).
+- `GOLDFISH_METRICS_FLUSH_INTERVAL` controls time-based auto-flush in seconds (default 30).
+- `GOLDFISH_METRICS_MAX_NAMES` caps unique metric names per run (default 10000).
+- `GOLDFISH_METRICS_MAX_FUTURE_DRIFT_SECONDS` controls allowed future timestamp drift (default 86400).
+- `GOLDFISH_METRICS_LIVE_SYNC` enables live DB sync for running runs (default true).
+- `GOLDFISH_METRICS_LIVE_SYNC_INTERVAL` controls live sync cadence in seconds (default 15).
+- `GOLDFISH_METRICS_MAX_OFFSET` caps pagination offset for metrics/artifacts (default 1,000,000).
+- `GOLDFISH_WANDB_ARTIFACT_MODE` set to `artifact` to use W&B Artifacts (default `file`).
+- `GOLDFISH_WANDB_ARTIFACT_TYPE` sets artifact type when using W&B Artifacts (default `artifact`).
+
+**Advanced (avoid global logger):**
+- `use_logger(custom_logger)` context manager routes calls to a specific `MetricsLogger`.
+
+**Querying metrics (server tools):**
+- `list_metric_names(run_id, metric_prefix=None)` to discover metrics without loading all data.
+- `get_run_metrics(run_id, limit=1000, offset=0, metric_name=None, metric_prefix=None,
+  artifact_limit=1000, artifact_offset=0)` for pagination. `limit=None` or `artifact_limit=None`
+  returns all and may include a warning for very large runs.
+- Optional `workspace=` parameter on both tools enforces run ownership.
+
+### 5. Monitoring Runs
 
 ```
 1. List recent runs
@@ -212,7 +287,7 @@ if __name__ == "__main__":
    cancel(run_id="stage-abc123", reason="Wrong hyperparameters")
 ```
 
-### 5. Lineage & Provenance
+### 6. Lineage & Provenance
 
 Track exactly what produced what:
 

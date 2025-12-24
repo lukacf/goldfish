@@ -14,6 +14,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from goldfish.metrics import finish as finish_metrics
+from goldfish.metrics import log_artifact, log_metric, log_metrics
+
 # Heartbeat configuration
 HEARTBEAT_DIR = ".goldfish"
 HEARTBEAT_FILE = "heartbeat"
@@ -394,3 +397,26 @@ def read_heartbeat() -> dict[str, Any] | None:
 def _get_heartbeat_path() -> Path:
     """Get path to heartbeat file."""
     return _get_outputs_dir() / HEARTBEAT_DIR / HEARTBEAT_FILE
+
+
+# =============================================================================
+# Metrics API - Re-export for convenience
+# =============================================================================
+
+__all__ = [
+    # IO functions
+    "load_input",
+    "save_output",
+    "get_config",
+    "get_input_path",
+    "get_output_path",
+    # Heartbeat functions
+    "heartbeat",
+    "get_heartbeat_age",
+    "read_heartbeat",
+    # Metrics functions
+    "log_metric",
+    "log_metrics",
+    "log_artifact",
+    "finish_metrics",
+]

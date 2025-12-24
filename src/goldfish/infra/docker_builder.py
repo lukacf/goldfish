@@ -8,8 +8,12 @@ from pathlib import Path
 
 from goldfish.errors import GoldfishError
 
-# Path to goldfish.io module (relative to this file)
+# Paths to goldfish runtime modules (relative to this file)
 GOLDFISH_IO_PATH = Path(__file__).parent.parent / "io" / "__init__.py"
+GOLDFISH_METRICS_PATH = Path(__file__).parent.parent / "metrics"
+# Metrics depends on validation and errors modules
+GOLDFISH_VALIDATION_PATH = Path(__file__).parent.parent / "validation.py"
+GOLDFISH_ERRORS_PATH = Path(__file__).parent.parent / "errors.py"
 
 # Default base image when none specified (backwards compatibility)
 DEFAULT_BASE_IMAGE = "python:3.11-slim"
@@ -177,6 +181,23 @@ CMD ["/bin/bash"]
                     '"""Goldfish ML package (container runtime)."""\n'
                 )
                 (build_context / "goldfish_io" / "__init__.py").write_text("")
+
+            # Copy goldfish.metrics module into build context
+            # This enables `from goldfish.metrics import log_metric, log_metrics, ...`
+            if GOLDFISH_METRICS_PATH.exists() and GOLDFISH_METRICS_PATH.is_dir():
+                goldfish_metrics_dest = build_context / "goldfish_io" / "goldfish" / "metrics"
+                shutil.copytree(
+                    GOLDFISH_METRICS_PATH,
+                    goldfish_metrics_dest,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                )
+
+            # Copy goldfish.validation and goldfish.errors (metrics dependencies)
+            goldfish_pkg_dest = build_context / "goldfish_io" / "goldfish"
+            if GOLDFISH_VALIDATION_PATH.exists():
+                shutil.copy2(GOLDFISH_VALIDATION_PATH, goldfish_pkg_dest / "validation.py")
+            if GOLDFISH_ERRORS_PATH.exists():
+                shutil.copy2(GOLDFISH_ERRORS_PATH, goldfish_pkg_dest / "errors.py")
 
             # Generate Dockerfile in build context (not workspace)
             dockerfile_content = self.generate_dockerfile(workspace_dir, base_image=base_image)

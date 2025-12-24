@@ -365,3 +365,49 @@ class TestCursorCleanup:
             assert len(cursor_entry) == 2
             assert isinstance(cursor_entry[0], int)  # position
             assert isinstance(cursor_entry[1], float)  # timestamp
+
+    def test_logs_follow_mode_concurrent_calls_no_race(self):
+        """Concurrent follow calls should not crash with cursor races."""
+        import threading
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.server_tools.execution_tools import _log_cursors, logs
+
+        _log_cursors.clear()
+
+        mock_db = MagicMock()
+        mock_stage_run = {
+            "id": "stage-abc123",
+            "workspace_name": "test-workspace",
+            "stage_name": "train",
+            "status": "running",
+            "backend_type": "local",
+            "backend_handle": "stage-abc123",
+            "log_uri": None,
+        }
+
+        full_logs = "line1\nline2\nline3\n"
+
+        with (
+            patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db),
+            patch("goldfish.server_tools.execution_tools._get_stage_executor") as mock_executor,
+        ):
+            mock_db.get_stage_run.return_value = mock_stage_run
+            mock_executor.return_value.local_executor.get_container_logs.return_value = full_logs
+
+            errors: list[Exception] = []
+
+            def worker() -> None:
+                try:
+                    for _ in range(50):
+                        logs("stage-abc123", tail=3, follow=True)
+                except Exception as exc:  # pragma: no cover - should not happen
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=worker) for _ in range(5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            assert errors == []

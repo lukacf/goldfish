@@ -4,8 +4,10 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from collections.abc import Coroutine
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,17 @@ from goldfish.workspace.manager import WorkspaceManager
 logger = logging.getLogger(__name__)
 
 STAGE_LOG_TAIL_FOR_FINALIZE = int(os.getenv("GOLDFISH_FINALIZE_LOG_TAIL", "1000"))
+
+
+@dataclass
+class _MetricsSyncState:
+    offset: int = 0
+    last_sync: float = 0.0
+    metric_names: set[str] = field(default_factory=set)
+    validated_names: set[str] = field(default_factory=set)
+    step_modes: dict[str, str] = field(default_factory=dict)
+    temp_path: Path | None = None
+    sync_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class StageExecutor:
@@ -112,6 +125,12 @@ class StageExecutor:
             zones=gce_zones,
             gpu_preference=gce_gpu_preference,
         )
+
+        # Live metrics sync state (per run)
+        self._metrics_sync_state: dict[str, _MetricsSyncState] = {}
+        self._metrics_sync_lock = threading.Lock()
+        self._gcs_client = None
+        self._gcs_client_lock = threading.Lock()
 
     def run_stage(
         self,
@@ -284,6 +303,7 @@ class StageExecutor:
                 input_configs,
                 output_configs,
                 user_config=stage_config,
+                git_sha=git_sha,
             )
         except Exception as e:
             # Mark failed immediately with error and re-raise
@@ -386,7 +406,8 @@ class StageExecutor:
 
                 # Get signal from that run
                 signals = self.db.list_signals(stage_run_id=source_run_id)
-                signal_name = input_def.name  # Signal name from input definition
+                # Use explicit signal name if specified, otherwise default to input name
+                signal_name = input_def.signal or input_def.name
 
                 signal = None
                 for s in signals:
@@ -395,7 +416,11 @@ class StageExecutor:
                         break
 
                 if not signal:
-                    raise GoldfishError(f"Signal '{signal_name}' not found in stage run {source_run_id}")
+                    available = [s["signal_name"] for s in signals]
+                    raise GoldfishError(
+                        f"Signal '{signal_name}' not found in stage '{input_def.from_stage}' "
+                        f"(run {source_run_id}). Available signals: {available}"
+                    )
 
                 inputs[input_name] = signal["storage_location"]
                 sources[input_name] = {
@@ -709,6 +734,237 @@ class StageExecutor:
         log_path.write_text(logs or "")
         return str(log_path)
 
+    def _collect_metrics(self, stage_run_id: str, backend: str) -> None:
+        """Collect metrics from JSONL and store in database."""
+        from goldfish.metrics.collector import MetricsCollector
+
+        collector = MetricsCollector(self.db)
+
+        # Determine metrics file location based on backend
+        if backend == "local":
+            # For local execution, metrics.jsonl is in the outputs directory
+            metrics_file = (
+                self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs" / ".goldfish" / "metrics.jsonl"
+            )
+        elif backend == "gce":
+            # For GCE, download metrics.jsonl from GCS to local temp
+            if not self.config.gcs or not self.config.gcs.bucket:
+                logger.debug(f"No GCS bucket configured, skipping metrics collection for {stage_run_id}")
+                return
+
+            bucket = self.config.gcs.bucket
+            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+            gcs_path = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/metrics.jsonl"
+
+            # Download to local temp directory
+            import tempfile
+
+            temp_dir = Path(tempfile.gettempdir()) / "goldfish_metrics" / stage_run_id
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            metrics_file = temp_dir / "metrics.jsonl"
+
+            if not self._download_metrics_from_gcs(gcs_path, metrics_file):
+                logger.debug(f"No metrics file found in GCS for {stage_run_id}")
+                return
+        else:
+            logger.warning(f"Unknown backend {backend}, skipping metrics collection")
+            return
+
+        # Collect metrics from file
+        collector.collect_from_file(stage_run_id, metrics_file)
+
+    def _download_metrics_from_gcs(self, gcs_path: str, destination: Path) -> bool:
+        """Download metrics.jsonl from GCS using the Python client.
+
+        Returns True if download succeeded, False if the object doesn't exist.
+        """
+        client = self._get_gcs_client()
+        if client is None:
+            return False
+
+        try:
+            from google.api_core.exceptions import NotFound
+        except Exception as exc:
+            logger.warning("google-cloud-storage not available for metrics download: %s", exc)
+            return False
+
+        if not gcs_path.startswith("gs://"):
+            logger.warning("Invalid GCS path: %s", gcs_path)
+            return False
+
+        bucket_name, blob_path = gcs_path[5:].split("/", 1)
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+
+        try:
+            blob.reload()
+        except NotFound:
+            return False
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            blob.download_to_filename(str(destination))
+        except Exception as exc:
+            logger.warning("Failed to download metrics from GCS: %s", exc)
+            return False
+        return True
+
+    def _get_gcs_client(self):
+        if self._gcs_client is not None:
+            return self._gcs_client
+
+        with self._gcs_client_lock:
+            if self._gcs_client is not None:
+                return self._gcs_client
+            try:
+                from google.cloud import storage
+            except Exception as exc:
+                logger.warning("google-cloud-storage not available: %s", exc)
+                return None
+            self._gcs_client = storage.Client()
+            return self._gcs_client
+
+    def _metrics_live_sync_enabled(self) -> bool:
+        value = os.getenv("GOLDFISH_METRICS_LIVE_SYNC", "1").strip().lower()
+        return value not in {"0", "false", "no", "off"}
+
+    def _metrics_live_sync_interval(self) -> int:
+        value = os.getenv("GOLDFISH_METRICS_LIVE_SYNC_INTERVAL", "15")
+        try:
+            parsed = int(value)
+        except ValueError:
+            return 15
+        return max(5, min(300, parsed))
+
+    def _get_metrics_sync_state(self, stage_run_id: str) -> _MetricsSyncState:
+        with self._metrics_sync_lock:
+            state = self._metrics_sync_state.get(stage_run_id)
+            if state is None:
+                state = _MetricsSyncState()
+                self._metrics_sync_state[stage_run_id] = state
+            return state
+
+    def _sync_metrics_file_from_gcs(self, gcs_path: str, state: _MetricsSyncState) -> tuple[Path | None, int]:
+        """Append new bytes from GCS metrics.jsonl into a local temp file."""
+        client = self._get_gcs_client()
+        if client is None:
+            return None, state.offset
+
+        try:
+            from google.api_core.exceptions import NotFound
+        except Exception as exc:
+            logger.warning("google-cloud-storage not available for live metrics sync: %s", exc)
+            return None, state.offset
+
+        if not gcs_path.startswith("gs://"):
+            logger.warning("Invalid GCS path: %s", gcs_path)
+            return None, state.offset
+
+        bucket_name, blob_path = gcs_path[5:].split("/", 1)
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+
+        try:
+            blob.reload()
+        except NotFound:
+            return None, state.offset
+
+        size = blob.size or 0
+        local_path = state.temp_path
+        if local_path is None:
+            import tempfile
+
+            temp_dir = Path(tempfile.gettempdir()) / "goldfish_metrics_live" / blob_path.replace("/", "_")
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            local_path = temp_dir / "metrics.jsonl"
+            state.temp_path = local_path
+
+        if state.offset == 0 and local_path.exists():
+            try:
+                local_path.unlink()
+            except Exception:
+                pass
+
+        if size < state.offset:
+            # GCS object reset; start over
+            state.offset = 0
+            if local_path.exists():
+                local_path.unlink()
+
+        if size == state.offset:
+            return local_path, state.offset
+
+        try:
+            data = blob.download_as_bytes(start=state.offset)
+        except Exception as exc:
+            logger.warning("Failed to download metrics bytes from GCS: %s", exc)
+            return local_path, state.offset
+
+        if data:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(local_path, "ab") as f:
+                f.write(data)
+
+        return local_path, state.offset
+
+    def sync_metrics_if_running(self, stage_run_id: str) -> None:
+        """Best-effort incremental metrics sync for running stages."""
+        if not self._metrics_live_sync_enabled():
+            return
+
+        row = self.db.get_stage_run(stage_run_id)
+        if not row or row.get("status") != StageRunStatus.RUNNING:
+            with self._metrics_sync_lock:
+                self._metrics_sync_state.pop(stage_run_id, None)
+            return
+
+        state = self._get_metrics_sync_state(stage_run_id)
+        if not state.sync_lock.acquire(blocking=False):
+            return
+        try:
+            interval = self._metrics_live_sync_interval()
+            now = time.time()
+            if now - state.last_sync < interval:
+                return
+
+            backend = row.get("backend_type") or self.config.jobs.backend
+            metrics_file: Path | None = None
+            start_offset = state.offset
+
+            if backend == "local":
+                metrics_file = (
+                    self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs" / ".goldfish" / "metrics.jsonl"
+                )
+            elif backend == "gce":
+                if not self.config.gcs or not self.config.gcs.bucket:
+                    return
+                bucket = self.config.gcs.bucket
+                bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+                gcs_path = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/metrics.jsonl"
+                metrics_file, start_offset = self._sync_metrics_file_from_gcs(gcs_path, state)
+            else:
+                return
+
+            if metrics_file is None or not metrics_file.exists():
+                return
+
+            from goldfish.metrics.collector import MetricsCollector
+
+            collector = MetricsCollector(self.db)
+            _, new_offset = collector.collect_from_file_incremental(
+                stage_run_id,
+                metrics_file,
+                start_offset=start_offset,
+                step_modes=state.step_modes,
+                metric_names=state.metric_names,
+                validated_names=state.validated_names,
+            )
+
+            state.offset = new_offset
+            state.last_sync = now
+        finally:
+            state.sync_lock.release()
+
     def _build_docker_image(self, workspace: str, version: str, profile_name: str | None = None) -> str:
         """Build Docker image for this run.
 
@@ -887,6 +1143,7 @@ class StageExecutor:
         input_configs: dict | None = None,
         output_configs: dict | None = None,
         user_config: dict | None = None,
+        git_sha: str | None = None,
     ):
         """Launch Docker container (local) or GCE instance."""
         backend = self.config.jobs.backend
@@ -897,6 +1154,40 @@ class StageExecutor:
         stage_config["stage"] = stage_name
         stage_config["inputs"] = input_configs or inputs
         stage_config["outputs"] = output_configs or {}
+
+        # Build Goldfish environment variables for metrics and provenance
+        goldfish_env = {
+            "GOLDFISH_PROJECT_NAME": self.config.project_name,
+            "GOLDFISH_WORKSPACE": workspace,
+            "GOLDFISH_STAGE": stage_name,
+            "GOLDFISH_RUN_ID": stage_run_id,
+            "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
+            "GOLDFISH_CONFIG": json.dumps(stage_config),
+        }
+
+        # Add git SHA if available
+        if git_sha:
+            goldfish_env["GOLDFISH_GIT_SHA"] = git_sha
+
+        # Add metrics backend config if configured
+        if self.config.metrics.backend:
+            goldfish_env["GOLDFISH_METRICS_BACKEND"] = self.config.metrics.backend
+
+            # Add W&B-specific config if backend is wandb
+            if self.config.metrics.backend == "wandb" and self.config.metrics.wandb:
+                wandb_config = self.config.metrics.wandb
+                if wandb_config.get("project"):
+                    goldfish_env["GOLDFISH_WANDB_PROJECT"] = wandb_config["project"]
+                if wandb_config.get("group"):
+                    goldfish_env["GOLDFISH_WANDB_GROUP"] = wandb_config["group"]
+                if wandb_config.get("entity"):
+                    goldfish_env["GOLDFISH_WANDB_ENTITY"] = wandb_config["entity"]
+
+        # Passthrough WANDB_API_KEY from host environment if set
+        import os
+
+        if "WANDB_API_KEY" in os.environ:
+            goldfish_env["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
 
         if backend == "local":
             # Create work directory for this run
@@ -929,6 +1220,7 @@ echo "Stage completed successfully"
                 work_dir=run_dir,
                 inputs_dir=inputs_dir,
                 outputs_dir=outputs_dir,
+                goldfish_env=goldfish_env,
             )
 
         elif backend == "gce":
@@ -976,6 +1268,7 @@ echo "Stage completed successfully"
                 gpu_count=gpu_count,
                 zones=zones,
                 use_capacity_search=use_capacity_search,
+                goldfish_env=goldfish_env,
             )
         else:
             raise GoldfishError(f"Backend {backend} not supported for launch")
@@ -1044,6 +1337,16 @@ echo "Stage completed successfully"
                     pass
         else:
             log_uri = self._persist_logs(stage_run_id, logs) if logs is not None else None
+
+        # Collect metrics from JSONL and store in database
+        try:
+            self._collect_metrics(stage_run_id, backend)
+        except Exception as e:
+            # Log warning but don't fail the run if metrics collection fails
+            logger.warning(f"Failed to collect metrics for {stage_run_id}: {e}")
+
+        with self._metrics_sync_lock:
+            self._metrics_sync_state.pop(stage_run_id, None)
 
         self.db.update_stage_run_status(
             stage_run_id=stage_run_id,

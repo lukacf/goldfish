@@ -1,0 +1,405 @@
+"""MetricsLogger - orchestration layer for metrics collection.
+
+This module provides MetricsLogger, which orchestrates the LocalWriter (always on)
+and optional MetricsBackend (pluggable, e.g., W&B, MLflow). It provides:
+
+- Lazy backend initialization (only on first metric call)
+- Graceful degradation (backend failures don't crash the stage)
+- Unified interface for logging metrics and artifacts
+- Context manager support for automatic finalization
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
+
+from goldfish.metrics.utils import normalize_metric_step, normalize_metric_value, timestamp_to_float
+from goldfish.metrics.writer import LocalWriter, MetricsFlushError
+from goldfish.validation import (
+    InvalidArtifactPathError,
+    InvalidMetricNameError,
+    validate_artifact_path,
+    validate_metric_name,
+)
+
+if TYPE_CHECKING:
+    from goldfish.metrics.backends.base import MetricsBackend
+
+
+class BackendWithErrorReporting(Protocol):
+    """Optional backend protocol for error reporting hooks."""
+
+    def consume_error(self) -> str | None:
+        """Return and clear the last backend error message."""
+        ...
+
+    def get_last_error(self) -> str | None:
+        """Return the last backend error message without clearing."""
+        ...
+
+    def clear_last_error(self) -> None:
+        """Clear the last backend error message."""
+        ...
+
+
+logger = logging.getLogger(__name__)
+
+
+class MetricsLogger:
+    """Orchestrates metrics collection to local JSONL and optional backend.
+
+    This is the internal coordination layer that ensures:
+    1. Local JSONL writer always runs (audit trail + crash recovery)
+    2. Backend (if configured) receives real-time updates
+    3. Backend failures don't crash the stage (graceful degradation)
+    4. Backend is lazily initialized on first metric call
+
+    Example:
+        # Without backend
+        logger = MetricsLogger(outputs_dir=Path("/mnt/outputs"))
+        logger.log_metric("loss", 0.5, step=1)
+        logger.finish()
+
+        # With backend
+        from goldfish.metrics.backends.wandb import WandBBackend
+        backend = WandBBackend()
+        logger = MetricsLogger(
+            outputs_dir=Path("/mnt/outputs"),
+            backend=backend,
+            run_id="stage-abc123",
+            config={"lr": 0.01},
+            workspace="baseline",
+            stage="train"
+        )
+        logger.log_metric("loss", 0.5, step=1)
+        url = logger.finish()  # Returns W&B run URL
+    """
+
+    def __init__(
+        self,
+        outputs_dir: Path | None = None,
+        backend: MetricsBackend | None = None,
+        run_id: str | None = None,
+        config: dict | None = None,
+        workspace: str | None = None,
+        stage: str | None = None,
+        auto_flush_threshold: int | None = None,
+        auto_flush_interval: float | None = None,
+        backend_retry_delay: float | None = None,
+    ):
+        """Initialize metrics logger.
+
+        Args:
+            outputs_dir: Output directory (defaults to GOLDFISH_OUTPUTS_DIR)
+            backend: Optional metrics backend (e.g., WandBBackend)
+            run_id: Goldfish stage run ID (required if backend is set)
+            config: Stage configuration dict (for backend hyperparameters)
+            workspace: Workspace name (for backend tagging)
+            stage: Stage name (for backend tagging)
+            auto_flush_threshold: Auto-flush after N metrics (default 100)
+            auto_flush_interval: Max seconds between flushes for real-time visibility (default 30)
+            backend_retry_delay: Seconds to wait before retrying a failed backend (default 60)
+        """
+        # LocalWriter always runs
+        threshold = 100 if auto_flush_threshold is None else auto_flush_threshold
+        interval = 30.0 if auto_flush_interval is None else auto_flush_interval
+        self.local_writer = LocalWriter(
+            outputs_dir=outputs_dir,
+            auto_flush_threshold=threshold,
+            auto_flush_interval=interval,
+        )
+
+        # Backend is optional
+        self.backend = backend
+        self._backend_initialized = False
+        self._backend_failed = False
+        self._backend_errors: list[str] = []
+        delay = 60.0 if backend_retry_delay is None else float(backend_retry_delay)
+        self._backend_retry_delay = max(0.0, delay)
+        self._backend_retry_after: float | None = None
+
+        # Run metadata for backend initialization
+        self.run_id = run_id
+        self.config = config or {}
+        self.workspace = workspace
+        self.stage = stage
+
+    def _ensure_backend_initialized(self) -> None:
+        """Lazy initialization of backend on first metric call.
+
+        Catches initialization errors and marks backend as failed for graceful
+        degradation. This is called on every metric/artifact call, but only
+        initializes once.
+        """
+        if self.backend is None:
+            return
+
+        if self._backend_initialized:
+            return
+        if self._backend_failed and not self._should_attempt_backend():
+            return
+
+        # Try to initialize backend
+        try:
+            if self.run_id and self.workspace and self.stage:
+                self.backend.init_run(
+                    run_id=self.run_id,
+                    config=self.config,
+                    workspace=self.workspace,
+                    stage=self.stage,
+                )
+                self._backend_initialized = True
+                error = self._consume_backend_error(self.backend)
+                if error:
+                    self._record_backend_error(f"Failed to initialize backend '{self.backend.name()}': {error}")
+                    self._backend_initialized = False
+                else:
+                    logger.info(f"Initialized backend '{self.backend.name()}' for run {self.run_id}")
+            else:
+                logger.warning("Backend provided but run metadata missing, backend will not be initialized")
+                self._backend_failed = True
+        except Exception as e:
+            self._record_backend_error(f"Failed to initialize backend '{self.backend.name()}': {e}")
+
+    def log_metric(
+        self,
+        name: str,
+        value: float,
+        step: int | None = None,
+        timestamp: str | float | None = None,
+    ) -> None:
+        """Log a single metric value.
+
+        Args:
+            name: Metric name (e.g., "loss", "accuracy")
+            value: Metric value
+            step: Optional step/epoch number
+            timestamp: Optional timestamp - ISO 8601 string or Unix float
+        """
+        # Always write to local; skip backend if local rejected the metric
+        if not self.local_writer.log_metric(name, value, step, timestamp):
+            return
+
+        # Try backend if configured
+        self._ensure_backend_initialized()
+        backend = self.backend  # Local var for type narrowing
+        if self._backend_initialized and self._should_attempt_backend() and backend is not None:
+            try:
+                backend_value = normalize_metric_value(value)
+                backend_step = normalize_metric_step(step)
+                ts_float = timestamp_to_float(timestamp)
+                backend.log_metric(name, backend_value, backend_step, ts_float)
+                self._capture_backend_error(backend, f"Backend '{backend.name()}' failed to log metric '{name}'")
+            except Exception as e:
+                self._record_backend_error(f"Backend '{backend.name()}' failed to log metric '{name}': {e}")
+
+    def log_metrics(
+        self,
+        metrics: dict[str, float],
+        step: int | None = None,
+        timestamp: str | float | None = None,
+    ) -> None:
+        """Log multiple metrics at once.
+
+        Args:
+            metrics: Dict of metric_name -> value
+            step: Optional step/epoch number
+            timestamp: Optional Unix timestamp
+        """
+        # Always write to local; track accepted metrics for backend
+        accepted: dict[str, float] = {}
+        for name, value in metrics.items():
+            if self.local_writer.log_metric(name, value, step, timestamp):
+                accepted[name] = value
+
+        if not accepted:
+            return
+
+        # Try backend if configured
+        self._ensure_backend_initialized()
+        backend = self.backend  # Local var for type narrowing
+        if self._backend_initialized and self._should_attempt_backend() and backend is not None:
+            try:
+                ts_float = timestamp_to_float(timestamp)
+                backend_step = normalize_metric_step(step)
+                backend_metrics = {name: normalize_metric_value(value) for name, value in accepted.items()}
+                backend.log_metrics(backend_metrics, backend_step, ts_float)
+                self._capture_backend_error(backend, f"Backend '{backend.name()}' failed to log metrics")
+            except Exception as e:
+                self._record_backend_error(f"Backend '{backend.name()}' failed to log metrics: {e}")
+
+    def log_artifact(self, name: str, path: str | Path) -> str | None:
+        """Log an artifact (file or directory).
+
+        Args:
+            name: Artifact name (e.g., "model", "predictions")
+            path: Path to artifact relative to outputs dir
+        """
+        # Validate upfront so backend/local stay consistent
+        try:
+            validate_metric_name(name)
+            validate_artifact_path(str(path))
+            backend_path = self._resolve_artifact_path(path)
+        except (InvalidArtifactPathError, InvalidMetricNameError) as exc:
+            self.local_writer.record_validation_error(str(exc))
+            return None
+
+        # Try backend first to capture URL if available
+        backend_url: str | None = None
+        self._ensure_backend_initialized()
+        backend = self.backend  # Local var for type narrowing
+        if self._backend_initialized and self._should_attempt_backend() and backend is not None:
+            try:
+                backend_url = backend.log_artifact(name, backend_path)
+                self._capture_backend_error(backend, f"Backend '{backend.name()}' failed to log artifact '{name}'")
+            except Exception as e:
+                self._record_backend_error(f"Backend '{backend.name()}' failed to log artifact '{name}': {e}")
+
+        # Always write to local (include backend_url if available)
+        self.local_writer.log_artifact(name, path, backend_url=backend_url)
+        return backend_url
+
+    def log_artifacts(self, artifacts: dict[str, str | Path]) -> dict[str, str | None]:
+        """Log multiple artifacts at once."""
+        results: dict[str, str | None] = {}
+        for name, path in artifacts.items():
+            results[name] = self.log_artifact(name, path)
+        return results
+
+    def had_backend_errors(self) -> bool:
+        """Return True if backend errors occurred."""
+        return bool(self._backend_errors)
+
+    def get_backend_errors(self) -> list[str]:
+        """Get backend error messages."""
+        return list(self._backend_errors)
+
+    def flush(self) -> None:
+        """Flush buffered metrics to disk.
+
+        This only affects the LocalWriter. Backends typically flush in real-time.
+        """
+        self.local_writer.flush()
+
+    def _record_backend_error(self, message: str) -> None:
+        """Record backend errors and mark backend as failed."""
+        if not self._backend_errors:
+            logger.warning(message)
+        else:
+            logger.error(message)
+        self._backend_errors.append(message)
+        self._backend_failed = True
+        self._backend_retry_after = time.time() + self._backend_retry_delay
+
+    def _consume_backend_error(self, backend: MetricsBackend) -> str | None:
+        """Return and clear any backend-reported error message."""
+        consume = getattr(backend, "consume_error", None)
+        if callable(consume):
+            try:
+                error = consume()
+            except Exception:
+                return None
+            return str(error) if error is not None else None
+        get_error = getattr(backend, "get_last_error", None)
+        if callable(get_error):
+            try:
+                error = get_error()
+            except Exception:
+                return None
+            if error and hasattr(backend, "clear_last_error"):
+                try:
+                    backend.clear_last_error()
+                except Exception:
+                    pass
+            return str(error) if error is not None else None
+        return None
+
+    def _capture_backend_error(self, backend: MetricsBackend, message: str) -> None:
+        """Record backend error if backend reported one without raising."""
+        error = self._consume_backend_error(backend)
+        if error:
+            self._record_backend_error(f"{message}: {error}")
+
+    def finish(self) -> str | None:
+        """Finalize the metrics collection.
+
+        Flushes local writer and calls backend.finish() if configured.
+
+        Returns:
+            Optional URL to the run in the backend's UI (e.g., W&B run page)
+        """
+        # Flush local
+        try:
+            self.flush()
+        except MetricsFlushError as exc:
+            logger.error("Failed to flush metrics: %s", exc)
+
+        # Try backend finish if configured
+        backend = self.backend  # Local var for type narrowing
+        if self._backend_initialized and self._should_attempt_backend() and backend is not None:
+            try:
+                url = backend.finish()
+                error = self._consume_backend_error(backend)
+                if error:
+                    self._record_backend_error(f"Backend '{backend.name()}' failed to finish: {error}")
+                    return None
+                logger.info(f"Backend '{backend.name()}' finished successfully")
+                return url
+            except Exception as e:
+                logger.error(f"Backend '{backend.name()}' failed to finish: {e}", exc_info=True)
+                return None
+
+        return None
+
+    def _should_attempt_backend(self) -> bool:
+        """Return True if backend should be attempted (including retry window)."""
+        if self.backend is None:
+            return False
+        if not self._backend_failed:
+            return True
+        if self._backend_retry_after is None:
+            return False
+        if time.time() >= self._backend_retry_after:
+            self._backend_failed = False
+            self._backend_retry_after = None
+            return True
+        return False
+
+    def _resolve_artifact_path(self, path: str | Path) -> Path:
+        """Resolve and validate artifact path within outputs dir."""
+        backend_path = Path(path) if not isinstance(path, Path) else path
+        if not backend_path.is_absolute():
+            backend_path = self.local_writer.outputs_dir / backend_path
+
+        if backend_path.exists() and backend_path.is_symlink():
+            raise InvalidArtifactPathError(str(path), "artifact path cannot be a symlink")
+
+        resolved = Path(os.path.realpath(str(backend_path)))
+        absolute = Path(os.path.abspath(str(backend_path)))
+        root = Path(os.path.realpath(str(self.local_writer.outputs_dir)))
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise InvalidArtifactPathError(str(path), "artifact path escapes outputs directory") from exc
+
+        if resolved != absolute:
+            raise InvalidArtifactPathError(str(path), "artifact path cannot contain symlinks")
+
+        return resolved
+
+    def __enter__(self) -> MetricsLogger:
+        """Context manager entry."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        """Context manager exit - automatically calls finish()."""
+        self.finish()

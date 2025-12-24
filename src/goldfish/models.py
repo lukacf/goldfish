@@ -447,6 +447,7 @@ class SignalDef(BaseModel):
     name: str
     type: str  # dataset, npy, csv, directory, file
     from_stage: str | None = None  # For inputs: which stage produces this
+    signal: str | None = None  # For from_stage: which output signal to use (defaults to input name)
     dataset: str | None = None  # For dataset type: dataset name
     storage: str | None = None  # gcs, hyperdisk, local (hint)
     format: str | None = None  # Override format detection
@@ -660,3 +661,51 @@ class RunReview(BaseModel):
     def warning_count(self) -> int:
         """Count of WARNING severity issues."""
         return sum(1 for i in self.issues if i.severity == ReviewSeverity.WARNING)
+
+
+# =============================================================================
+# Metrics API Models
+# =============================================================================
+
+
+class MetricInfo(BaseModel):
+    """Individual metric data point (timestamp is ISO 8601 UTC string)."""
+
+    name: str
+    value: float
+    step: int | None = None
+    timestamp: str
+
+
+class MetricSummary(BaseModel):
+    """Summary statistics for a metric."""
+
+    name: str
+    min_value: float | None = None
+    max_value: float | None = None
+    last_value: float | None = None
+    count: int
+
+
+class ArtifactInfo(BaseModel):
+    """Artifact logged during stage execution."""
+
+    name: str
+    path: str
+    backend_url: str | None = None
+    created_at: str
+
+
+class GetRunMetricsResponse(BaseModel):
+    """Response from get_run_metrics tool.
+
+    Returns metrics, summary statistics, and artifacts for a stage run.
+    """
+
+    stage_run_id: str
+    metrics: list[MetricInfo] = Field(default_factory=list)
+    summary: list[MetricSummary] = Field(default_factory=list)
+    artifacts: list[ArtifactInfo] = Field(default_factory=list)
+    total_metrics: int = 0
+    total_artifacts: int = 0
+    warnings: list[str] = Field(default_factory=list)
