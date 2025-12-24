@@ -472,15 +472,32 @@ print(f"Final accuracy: {acc:.2%}")
 
 Logs are captured and available via `logs(run_id)`.
 
-### Structured Logging
+### Metrics API (Preferred)
+
+Use the Metrics API for scalars and artifacts. It is structured, validated, and persisted in `.goldfish/metrics.jsonl`.
 
 ```python
-import json
+from goldfish.metrics import log_metric, log_metrics, log_artifact, finish
 
-# Log metrics as JSON for easy parsing
-metrics = {"epoch": epoch, "loss": loss, "accuracy": acc}
-print(f"METRICS: {json.dumps(metrics)}")
+for step in range(epochs):
+    loss = train_step(...)
+    acc = evaluate(...)
+
+    log_metric("train/loss", loss, step=step)
+    log_metrics({"train/acc": acc, "train/lr": lr}, step=step)
+
+log_artifact("model", "model.pt")  # relative to outputs dir
+finish()  # safe to call multiple times
 ```
+
+Notes:
+- A given metric name should consistently use either `step=None` or `step=int`.
+  Mixed step modes are skipped with a warning (no crash).
+- `timestamp` accepts ISO 8601 strings or Unix float seconds (returned as ISO 8601 UTC strings).
+- Bool values are rejected; use 0/1.
+- Artifact paths must be relative to outputs dir (absolute paths and symlinks are rejected).
+- Unique metric names are capped per run (default 10,000).
+- Live sync: `get_run_metrics` will attempt a best-effort live sync for running runs.
 
 ### Progress Indicators
 

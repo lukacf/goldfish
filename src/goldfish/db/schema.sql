@@ -262,3 +262,58 @@ CREATE INDEX IF NOT EXISTS idx_mounts_status ON workspace_mounts(status);
 -- Prevent concurrent mounts of the same workspace (only one active mount per workspace)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mounts_active_workspace ON workspace_mounts(workspace_name)
     WHERE status = 'active';
+
+
+-- Run metrics (individual metric data points logged during stage execution)
+CREATE TABLE IF NOT EXISTS run_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_run_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    value REAL NOT NULL,
+    step INTEGER,
+    timestamp TEXT NOT NULL,
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_metrics_stage_run ON run_metrics(stage_run_id);
+CREATE INDEX IF NOT EXISTS idx_run_metrics_name ON run_metrics(stage_run_id, name);
+-- Timestamp index for ORDER BY timestamp ASC queries (critical for pagination performance)
+CREATE INDEX IF NOT EXISTS idx_run_metrics_timestamp ON run_metrics(stage_run_id, timestamp);
+-- Composite index for pagination stability (ORDER BY timestamp ASC, id ASC)
+CREATE INDEX IF NOT EXISTS idx_run_metrics_pagination ON run_metrics(stage_run_id, timestamp, id);
+-- Unique constraint to prevent duplicate metrics (idempotency)
+-- COALESCE(step, -1) ensures NULL steps are deduplicated too.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_run_metrics_unique
+    ON run_metrics(stage_run_id, name, COALESCE(step, -1), timestamp);
+
+
+-- Run metrics summary (aggregated stats for quick queries)
+CREATE TABLE IF NOT EXISTS run_metrics_summary (
+    stage_run_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    min_value REAL,
+    max_value REAL,
+    last_value REAL,
+    last_timestamp TEXT,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (stage_run_id, name),
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_metrics_summary_stage_run ON run_metrics_summary(stage_run_id);
+CREATE INDEX IF NOT EXISTS idx_run_metrics_summary_name ON run_metrics_summary(name);
+CREATE INDEX IF NOT EXISTS idx_run_metrics_summary_stage_name ON run_metrics_summary(stage_run_id, name);
+
+
+-- Run artifacts (artifacts logged during stage execution)
+CREATE TABLE IF NOT EXISTS run_artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_run_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    backend_url TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_artifacts_stage_run ON run_artifacts(stage_run_id);
