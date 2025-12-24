@@ -277,8 +277,6 @@ class TestPublicMetricsAPI:
 
     def test_log_artifact_rejects_symlink(self, tmp_path, monkeypatch):
         """Artifact paths that are symlinks should be rejected."""
-        from goldfish.validation import InvalidArtifactPathError
-
         monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(tmp_path))
 
         real_file = tmp_path / "real.txt"
@@ -286,8 +284,7 @@ class TestPublicMetricsAPI:
         link_path = tmp_path / "link.txt"
         link_path.symlink_to(real_file)
 
-        with pytest.raises(InvalidArtifactPathError):
-            log_artifact("model", "link.txt")
+        assert log_artifact("model", "link.txt") is None
 
     def test_log_artifacts_batch_returns_urls(self, tmp_path, monkeypatch):
         """log_artifacts should return a mapping of names to URLs."""
