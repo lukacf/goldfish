@@ -358,6 +358,9 @@ class MetricsLogger:
         if not backend_path.is_absolute():
             backend_path = self.local_writer.outputs_dir / backend_path
 
+        if backend_path.exists() and backend_path.is_symlink():
+            raise InvalidArtifactPathError(str(path), "artifact path cannot be a symlink")
+
         resolved = Path(os.path.realpath(str(backend_path)))
         absolute = Path(os.path.abspath(str(backend_path)))
         root = Path(os.path.realpath(str(self.local_writer.outputs_dir)))
