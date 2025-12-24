@@ -3,6 +3,7 @@
 Extracted from server.py for better organization.
 """
 
+import json
 import logging
 from datetime import UTC, datetime
 
@@ -22,7 +23,7 @@ from goldfish.models import (
     RegisterSourceResponse,
     SourceInfo,
     SourceLineage,
-    SourceStatus,
+    UpdateSourceMetadataResponse,
 )
 from goldfish.server import (
     _get_config,
@@ -32,11 +33,13 @@ from goldfish.server import (
     _get_state_md,
     mcp,
 )
-from goldfish.utils import parse_datetime
+from goldfish.sources.conversion import source_row_to_info
 from goldfish.validation import (
+    InvalidSourceMetadataError,
     validate_artifact_uri,
     validate_job_id,
     validate_output_name,
+    validate_source_metadata,
     validate_source_name,
 )
 
@@ -86,18 +89,7 @@ def list_sources(
         offset=offset,
     )
 
-    source_infos = [
-        SourceInfo(
-            name=s["name"],
-            description=s.get("description"),
-            created_at=parse_datetime(s["created_at"]),
-            created_by=s["created_by"],
-            gcs_location=s["gcs_location"],
-            size_bytes=s.get("size_bytes"),
-            status=SourceStatus(s["status"]),
-        )
-        for s in sources
-    ]
+    source_infos = [source_row_to_info(source) for source in sources]
 
     # Calculate has_more
     has_more = (offset + len(source_infos)) < total_count
@@ -133,19 +125,78 @@ def get_source(name: str) -> SourceInfo:
     if source is None:
         raise SourceNotFoundError(f"Source not found: {name}")
 
-    return SourceInfo(
-        name=source["name"],
-        description=source.get("description"),
-        created_at=parse_datetime(source["created_at"]),
-        created_by=source["created_by"],
-        gcs_location=source["gcs_location"],
-        size_bytes=source.get("size_bytes"),
-        status=SourceStatus(source["status"]),
-    )
+    return source_row_to_info(source)
 
 
 @mcp.tool()
-def register_source(name: str, gcs_path: str, description: str, reason: str) -> RegisterSourceResponse:
+def update_source_metadata(
+    source_name: str,
+    metadata: dict,
+    reason: str,
+) -> UpdateSourceMetadataResponse:
+    """Update metadata for an existing source.
+
+    Args:
+        source_name: Source name to update
+        metadata: Required metadata dict (strict schema)
+        reason: Why you're updating metadata (min 15 chars)
+    """
+    logger.info("update_source_metadata() called", extra={"source_name": source_name})
+
+    config = _get_config()
+    db = _get_db()
+    state_manager = _get_state_manager()
+
+    validate_source_name(source_name)
+    validate_reason(reason, config.audit.min_reason_length)
+
+    if metadata is None:
+        raise InvalidSourceMetadataError("metadata is required")
+
+    validate_source_metadata(metadata)
+
+    if not db.source_exists(source_name):
+        raise SourceNotFoundError(f"Source not found: {source_name}")
+
+    description = metadata.get("description")
+    size_bytes = metadata.get("source", {}).get("size_bytes")
+
+    db.update_source_metadata(
+        source_id_or_name=source_name,
+        metadata=metadata,
+        description=description,
+        size_bytes=size_bytes,
+    )
+
+    db.log_audit(
+        operation="update_source_metadata",
+        reason=reason,
+        details={"source_name": source_name},
+    )
+
+    state_manager.add_action(f"Updated metadata for source '{source_name}'")
+
+    source = db.get_source(source_name)
+    if source is None:
+        raise SourceNotFoundError(f"Source not found: {source_name}")
+
+    source_info = source_row_to_info(source)
+
+    state_md = _get_state_md()
+
+    return UpdateSourceMetadataResponse(success=True, source=source_info, state_md=state_md)
+
+
+@mcp.tool()
+def register_source(
+    name: str,
+    gcs_path: str,
+    description: str,
+    reason: str,
+    metadata: dict,
+    format: str | None = None,
+    size_bytes: int | None = None,
+) -> RegisterSourceResponse:
     """Register an external data source.
 
     Args:
@@ -153,6 +204,9 @@ def register_source(name: str, gcs_path: str, description: str, reason: str) -> 
         gcs_path: GCS location (e.g., "gs://bucket/data/eurusd.csv")
         description: What this data contains
         reason: Why you're registering this source (min 15 chars)
+        metadata: Required metadata dict (strict schema)
+        format: Optional format (must match metadata.source.format)
+        size_bytes: Optional size bytes (must match metadata.source.size_bytes)
     """
     logger.info("register_source() called", extra={"source": name, "gcs_path": gcs_path})
 
@@ -164,6 +218,33 @@ def register_source(name: str, gcs_path: str, description: str, reason: str) -> 
     validate_source_name(name)
     validate_reason(reason, config.audit.min_reason_length)
 
+    if metadata is None:
+        raise InvalidSourceMetadataError("metadata is required for new sources")
+
+    validate_source_metadata(metadata)
+
+    if description != metadata.get("description"):
+        raise InvalidSourceMetadataError(
+            f"description '{description}' does not match metadata.description '{metadata.get('description')}'",
+            field="description",
+        )
+
+    metadata_format = metadata.get("source", {}).get("format")
+    metadata_size = metadata.get("source", {}).get("size_bytes")
+
+    if format is not None and format != metadata_format:
+        raise InvalidSourceMetadataError(
+            f"format '{format}' does not match metadata.source.format '{metadata_format}'",
+            field="format",
+        )
+    if size_bytes is not None and metadata_size != size_bytes:
+        raise InvalidSourceMetadataError(
+            f"size_bytes {size_bytes} does not match metadata.source.size_bytes {metadata_size}",
+            field="size_bytes",
+        )
+
+    size_bytes = metadata_size
+
     if db.source_exists(name):
         raise SourceAlreadyExistsError(f"Source '{name}' already exists")
 
@@ -174,6 +255,8 @@ def register_source(name: str, gcs_path: str, description: str, reason: str) -> 
             gcs_location=gcs_path,
             created_by="external",
             description=description,
+            size_bytes=size_bytes,
+            metadata=metadata,
         )
 
         db.log_audit(
@@ -192,6 +275,9 @@ def register_source(name: str, gcs_path: str, description: str, reason: str) -> 
             created_at=datetime.now(),
             created_by="external",
             gcs_location=gcs_path,
+            size_bytes=size_bytes,
+            metadata=metadata,
+            metadata_status="ok",
         )
 
         state_md = _get_state_md()
@@ -293,7 +379,16 @@ def get_source_lineage(source_name: str) -> SourceLineage:
 
 
 @mcp.tool()
-def promote_artifact(job_id: str, output_name: str, source_name: str, reason: str) -> PromoteArtifactResponse:
+def promote_artifact(
+    job_id: str,
+    output_name: str,
+    source_name: str,
+    reason: str,
+    metadata: dict,
+    description: str | None = None,
+    format: str | None = None,
+    size_bytes: int | None = None,
+) -> PromoteArtifactResponse:
     """Promote a job output to a reusable data source.
 
     This creates a registry entry pointing to the artifact location
@@ -305,6 +400,10 @@ def promote_artifact(job_id: str, output_name: str, source_name: str, reason: st
         output_name: Name of the output in job config (e.g., "preprocessed")
         source_name: Name for the new source (e.g., "preprocessed_v1")
         reason: Why you're promoting this artifact (min 15 chars)
+        metadata: Required metadata dict (strict schema)
+        description: Optional description (must match metadata.description)
+        format: Optional format (must match metadata.source.format)
+        size_bytes: Optional size bytes (must match metadata.source.size_bytes)
     """
     logger.info(
         "promote_artifact() called",
@@ -324,6 +423,11 @@ def promote_artifact(job_id: str, output_name: str, source_name: str, reason: st
     validate_source_name(source_name)
     validate_output_name(output_name)
     validate_reason(reason, config.audit.min_reason_length)
+
+    if metadata is None:
+        raise InvalidSourceMetadataError("metadata is required for promoted artifacts")
+
+    validate_source_metadata(metadata)
 
     # Check job exists and completed
     job = db.get_job(job_id)
@@ -348,6 +452,29 @@ def promote_artifact(job_id: str, output_name: str, source_name: str, reason: st
         # The artifact path for a specific output
         gcs_location = f"{artifact_uri.rstrip('/')}/{output_name}/"
 
+        metadata_description = metadata.get("description")
+        metadata_format = metadata.get("source", {}).get("format")
+        metadata_size = metadata.get("source", {}).get("size_bytes")
+
+        if description is not None and description != metadata_description:
+            raise InvalidSourceMetadataError(
+                f"description '{description}' does not match metadata.description '{metadata_description}'",
+                field="description",
+            )
+        if format is not None and format != metadata_format:
+            raise InvalidSourceMetadataError(
+                f"format '{format}' does not match metadata.source.format '{metadata_format}'",
+                field="format",
+            )
+        if size_bytes is not None and metadata_size != size_bytes:
+            raise InvalidSourceMetadataError(
+                f"size_bytes {size_bytes} does not match metadata.source.size_bytes {metadata_size}",
+                field="size_bytes",
+            )
+
+        description = metadata_description
+        size_bytes = metadata_size
+
         # Atomically create source and lineage (transaction prevents partial writes)
         with db.transaction() as conn:
             # Create source entry
@@ -360,13 +487,13 @@ def promote_artifact(job_id: str, output_name: str, source_name: str, reason: st
                 (
                     source_name,
                     source_name,
-                    f"Promoted from job {job_id} output '{output_name}'",
+                    description,
                     datetime.now(UTC).isoformat(),
                     f"job:{job_id}",
                     gcs_location,
-                    None,  # size_bytes
+                    size_bytes,
                     "available",
-                    None,  # metadata
+                    json.dumps(metadata),
                 ),
             )
 
@@ -405,10 +532,13 @@ def promote_artifact(job_id: str, output_name: str, source_name: str, reason: st
 
         source = SourceInfo(
             name=source_name,
-            description=f"Promoted from job {job_id} output '{output_name}'",
+            description=description,
             created_at=datetime.now(),
             created_by=f"job:{job_id}",
             gcs_location=gcs_location,
+            size_bytes=size_bytes,
+            metadata=metadata,
+            metadata_status="ok",
         )
 
         lineage = SourceLineage(
@@ -438,7 +568,8 @@ def register_dataset(
     source: str,
     description: str,
     format: str,
-    metadata: dict | None = None,
+    metadata: dict,
+    size_bytes: int | None = None,
 ) -> RegisterDatasetResponse:
     """Register a project-level dataset.
 
@@ -452,7 +583,8 @@ def register_dataset(
             - "gs://bucket/path" - GCS path (used directly)
         description: Human-readable description
         format: File format (csv, npy, directory, etc.)
-        metadata: Optional metadata dict (e.g., {"rows": 1000, "columns": 5})
+        metadata: Required metadata dict (strict schema)
+        size_bytes: Optional size bytes (must match metadata.source.size_bytes)
 
     Returns:
         Dataset info with GCS location
@@ -470,6 +602,31 @@ def register_dataset(
     dataset_registry = _get_dataset_registry()
     validate_source_name(name)
 
+    if metadata is None:
+        raise InvalidSourceMetadataError("metadata is required for new datasets")
+
+    validate_source_metadata(metadata)
+
+    if description != metadata.get("description"):
+        raise InvalidSourceMetadataError(
+            f"description '{description}' does not match metadata.description '{metadata.get('description')}'",
+            field="description",
+        )
+
+    source_format = metadata.get("source", {}).get("format")
+    if format != source_format:
+        raise InvalidSourceMetadataError(
+            f"format '{format}' does not match metadata.source.format '{source_format}'",
+            field="format",
+        )
+
+    metadata_size = metadata.get("source", {}).get("size_bytes")
+    if size_bytes is not None and metadata_size != size_bytes:
+        raise InvalidSourceMetadataError(
+            f"size_bytes {size_bytes} does not match metadata.source.size_bytes {metadata_size}",
+            field="size_bytes",
+        )
+
     try:
         dataset = dataset_registry.register_dataset(
             name=name,
@@ -477,6 +634,7 @@ def register_dataset(
             description=description,
             format=format,
             metadata=metadata,
+            size_bytes=size_bytes,
         )
 
         return RegisterDatasetResponse(

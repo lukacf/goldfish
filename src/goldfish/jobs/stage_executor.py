@@ -667,6 +667,7 @@ class StageExecutor:
                         "storage_location": storage_location,
                         "from_stage_ref": f"{stage_name}/{output_name}",
                         "is_artifact": bool(output_def.artifact),
+                        "metadata": getattr(output_def, "metadata", None),
                     }
                 )
 
@@ -687,27 +688,47 @@ class StageExecutor:
                 except Exception:
                     existing = None
 
-                metadata: dict[str, Any] | None = None
+                output_meta = output.get("metadata")
+                if output_meta is None:
+                    logger.warning("Skipping auto-registration for %s: missing metadata", source_id)
+                    continue
+
+                from goldfish.validation import parse_source_metadata, validate_source_metadata
+
                 try:
-                    meta_str = existing.get("metadata") if existing else None
-                    if meta_str:
-                        metadata = json.loads(meta_str)
-                except Exception:
-                    metadata = None
-                if metadata is None:
-                    metadata = {}
-                metadata["produced_by_stage_run_id"] = stage_run_id
+                    validate_source_metadata(output_meta)
+                except Exception as exc:
+                    logger.warning("Skipping auto-registration for %s: invalid metadata (%s)", source_id, exc)
+                    continue
+
+                metadata = output_meta
+                description = metadata.get("description")
+                size_bytes = metadata.get("source", {}).get("size_bytes")
+
+                if existing:
+                    existing_meta, status = parse_source_metadata(existing.get("metadata"))
+                    if status == "ok" and existing_meta != metadata:
+                        logger.warning(
+                            "Skipping auto-registration for %s: metadata mismatch with existing source", source_id
+                        )
+                        continue
 
                 try:
                     if existing:
                         with self.db._conn() as conn:
                             conn.execute(
-                                "UPDATE sources SET gcs_location=?, created_by=?, status=?, metadata=? WHERE id=?",
+                                """
+                                UPDATE sources
+                                SET gcs_location=?, created_by=?, status=?, metadata=?, description=?, size_bytes=?
+                                WHERE id=?
+                                """,
                                 (
                                     output["storage_location"],
                                     f"stage:{stage_run_id}",
                                     "available",
                                     json.dumps(metadata),
+                                    description,
+                                    size_bytes,
                                     source_id,
                                 ),
                             )
@@ -718,7 +739,8 @@ class StageExecutor:
                             name=source_name,
                             gcs_location=gcs_loc,
                             created_by=f"stage:{stage_run_id}",
-                            description=f"Artifact from {stage_run_id}",
+                            description=description,
+                            size_bytes=size_bytes,
                             metadata=metadata,
                         )
                 except Exception as e:

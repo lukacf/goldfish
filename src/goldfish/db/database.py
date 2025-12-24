@@ -432,6 +432,26 @@ class Database:
             row = conn.execute("SELECT * FROM sources WHERE name = ?", (source_id_or_name,)).fetchone()
             return cast(SourceRow, dict(row)) if row else None
 
+    def update_source_metadata(
+        self,
+        source_id_or_name: str,
+        metadata: dict[str, Any],
+        description: str | None = None,
+        size_bytes: int | None = None,
+    ) -> None:
+        """Update metadata (and related fields) for a source."""
+        metadata_json = json.dumps(metadata)
+
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE sources
+                SET metadata = ?, description = ?, size_bytes = ?
+                WHERE id = ? OR name = ?
+                """,
+                (metadata_json, description, size_bytes, source_id_or_name, source_id_or_name),
+            )
+
     def count_sources(
         self,
         status: str | None = None,

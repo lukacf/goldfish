@@ -12,11 +12,13 @@ NEVER bypass these validations. If a new input type is needed,
 add validation here first.
 """
 
+import json
 import os
 import re
 import unicodedata
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote
 
 from goldfish.errors import GoldfishError
@@ -105,6 +107,17 @@ class InvalidOutputNameError(ValidationError):
             f"Invalid output name '{name}': {reason}",
             value=name,
             field="output_name",
+        )
+
+
+class InvalidSourceMetadataError(ValidationError):
+    """Source metadata is invalid."""
+
+    def __init__(self, reason: str, field: str = "metadata"):
+        super().__init__(
+            f"Invalid source metadata: {reason}",
+            value=str(reason),
+            field=field,
         )
 
 
@@ -276,6 +289,32 @@ _DANGEROUS_CHARS = set(";|&$`\"'\\<>*?[]{}~!\n\t\r")
 # Path traversal patterns
 _PATH_TRAVERSAL_PATTERNS = ["..", "//"]
 
+# Source metadata validation limits and enums
+_MAX_SOURCE_METADATA_BYTES = 1_000_000  # 1 MB
+_MAX_FEATURE_NAME_VALUES = 1_000_000
+_MIN_SOURCE_DESCRIPTION_LENGTH = 20
+_MAX_SOURCE_DESCRIPTION_LENGTH = 4000
+_MAX_METADATA_DEPTH = 20
+_MAX_METADATA_NODES = 100_000
+_MAX_SHAPE_DIMS = 32
+_MAX_ARRAY_COUNT = 1000
+_MAX_COLUMNS = 100_000
+_MAX_COLUMN_NAME_LENGTH = 256
+_MAX_FEATURE_NAME_LENGTH = 1024
+_MAX_FEATURE_TEMPLATE_LENGTH = 256
+_MAX_FEATURE_SAMPLE_VALUES = 100
+_MAX_CONTENT_TYPE_LENGTH = 256
+_ALLOWED_SOURCE_FORMATS = {"npy", "npz", "csv", "file"}
+_ALLOWED_TENSOR_ROLES = {
+    "features",
+    "labels",
+    "embeddings",
+    "weights",
+    "metadata",
+    "index",
+    "unknown",
+}
+
 
 def _contains_dangerous_chars(value: str) -> str | None:
     """Check if string contains shell metacharacters.
@@ -357,6 +396,448 @@ def validate_source_name(name: str) -> None:
         validate_workspace_name(name)
     except InvalidWorkspaceNameError as e:
         raise InvalidSourceNameError(name, e.message.split(": ", 1)[-1]) from e
+
+
+def validate_source_metadata(metadata: dict[str, Any]) -> None:
+    """Validate strict source metadata schema.
+
+    Args:
+        metadata: Metadata dict to validate
+
+    Raises:
+        InvalidSourceMetadataError: If metadata fails validation
+    """
+    if not isinstance(metadata, dict):
+        raise InvalidSourceMetadataError("metadata must be a JSON object")
+
+    _validate_metadata_size(metadata)
+    _validate_metadata_structure_limits(metadata)
+
+    _validate_exact_keys(metadata, {"schema_version", "description", "source", "schema"}, "metadata")
+
+    schema_version = metadata.get("schema_version")
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version != 1:
+        raise InvalidSourceMetadataError("schema_version must be 1", field="schema_version")
+
+    description = metadata.get("description")
+    if not isinstance(description, str):
+        raise InvalidSourceMetadataError("description must be a string", field="description")
+    if len(description.strip()) < _MIN_SOURCE_DESCRIPTION_LENGTH:
+        raise InvalidSourceMetadataError(
+            f"description must be at least {_MIN_SOURCE_DESCRIPTION_LENGTH} characters",
+            field="description",
+        )
+    if len(description) > _MAX_SOURCE_DESCRIPTION_LENGTH:
+        raise InvalidSourceMetadataError(
+            f"description must be at most {_MAX_SOURCE_DESCRIPTION_LENGTH} characters",
+            field="description",
+        )
+
+    source = metadata.get("source")
+    if not isinstance(source, dict):
+        raise InvalidSourceMetadataError("source must be an object", field="source")
+    source_format = _validate_source_section(source)
+
+    schema = metadata.get("schema")
+    if not isinstance(schema, dict):
+        raise InvalidSourceMetadataError("schema must be an object", field="schema")
+    _validate_schema_section(schema, source_format)
+
+
+def parse_source_metadata(raw: str | dict[str, Any] | None) -> tuple[dict[str, Any] | None, str]:
+    """Parse metadata from DB and return (metadata, status).
+
+    Status values: "ok", "missing", "invalid".
+    """
+    if raw is None:
+        return None, "missing"
+
+    if isinstance(raw, str):
+        if len(raw.encode("utf-8")) > _MAX_SOURCE_METADATA_BYTES:
+            return None, "invalid"
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None, "invalid"
+    elif isinstance(raw, dict):
+        parsed = raw
+    else:
+        return None, "invalid"
+
+    if not isinstance(parsed, dict):
+        return None, "invalid"
+
+    try:
+        validate_source_metadata(parsed)
+    except InvalidSourceMetadataError:
+        return None, "invalid"
+
+    return parsed, "ok"
+
+
+def _validate_metadata_size(metadata: dict[str, Any]) -> None:
+    """Ensure metadata JSON is within size limits."""
+    try:
+        payload = json.dumps(metadata, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except TypeError as exc:
+        raise InvalidSourceMetadataError(f"metadata must be JSON-serializable: {exc}") from exc
+
+    if len(payload) > _MAX_SOURCE_METADATA_BYTES:
+        raise InvalidSourceMetadataError(
+            f"metadata exceeds {_MAX_SOURCE_METADATA_BYTES} bytes",
+            field="metadata",
+        )
+
+
+def _validate_metadata_structure_limits(metadata: dict[str, Any]) -> None:
+    """Limit metadata nesting depth and node count."""
+    stack: list[tuple[Any, int]] = [(metadata, 1)]
+    nodes = 0
+
+    while stack:
+        node, depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_METADATA_NODES:
+            raise InvalidSourceMetadataError(
+                f"metadata exceeds {_MAX_METADATA_NODES} nodes",
+                field="metadata",
+            )
+        if depth > _MAX_METADATA_DEPTH:
+            raise InvalidSourceMetadataError(
+                f"metadata nesting exceeds {_MAX_METADATA_DEPTH} levels",
+                field="metadata",
+            )
+        if isinstance(node, dict):
+            for value in node.values():
+                if isinstance(value, dict | list):
+                    stack.append((value, depth + 1))
+        elif isinstance(node, list):
+            for value in node:
+                if isinstance(value, dict | list):
+                    stack.append((value, depth + 1))
+
+
+def _validate_exact_keys(obj: dict[str, Any], expected: set[str], context: str) -> None:
+    """Ensure object has exactly the expected keys."""
+    missing = expected - obj.keys()
+    if missing:
+        raise InvalidSourceMetadataError(
+            f"{context} missing required fields: {', '.join(sorted(missing))}",
+            field=context,
+        )
+    extra = obj.keys() - expected
+    if extra:
+        raise InvalidSourceMetadataError(
+            f"{context} has unexpected fields: {', '.join(sorted(extra))}",
+            field=context,
+        )
+
+
+def _validate_source_section(source: dict[str, Any]) -> str:
+    """Validate source section and return format."""
+    required = {"format", "size_bytes", "created_at"}
+    if source.get("format") == "csv":
+        required = required | {"format_params"}
+    _validate_exact_keys(source, required, "source")
+
+    fmt = source.get("format")
+    if not isinstance(fmt, str):
+        raise InvalidSourceMetadataError("source.format must be a string", field="source.format")
+    if fmt == "directory":
+        raise InvalidSourceMetadataError("directory format is not allowed", field="source.format")
+    if fmt not in _ALLOWED_SOURCE_FORMATS:
+        raise InvalidSourceMetadataError(f"unsupported source format '{fmt}'", field="source.format")
+
+    size_bytes = source.get("size_bytes")
+    if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes <= 0:
+        raise InvalidSourceMetadataError("source.size_bytes must be a positive integer", field="source.size_bytes")
+
+    created_at = source.get("created_at")
+    _validate_utc_isoformat(created_at, field="source.created_at")
+
+    if fmt == "csv":
+        format_params = source.get("format_params")
+        if not isinstance(format_params, dict):
+            raise InvalidSourceMetadataError("source.format_params must be an object", field="source.format_params")
+        _validate_exact_keys(format_params, {"delimiter"}, "source.format_params")
+        delimiter = format_params.get("delimiter")
+        if not isinstance(delimiter, str) or len(delimiter) != 1:
+            raise InvalidSourceMetadataError("delimiter must be a single character", field="source.format_params")
+        if delimiter.strip() == "":
+            raise InvalidSourceMetadataError("delimiter cannot be whitespace", field="source.format_params")
+
+    return fmt
+
+
+def _validate_schema_section(schema: dict[str, Any], source_format: str) -> None:
+    """Validate schema section based on source format."""
+    kind = schema.get("kind")
+    if not isinstance(kind, str):
+        raise InvalidSourceMetadataError("schema.kind must be a string", field="schema.kind")
+
+    if source_format in {"npy", "npz"}:
+        if kind != "tensor":
+            raise InvalidSourceMetadataError("schema.kind must be 'tensor' for npy/npz", field="schema.kind")
+        _validate_tensor_schema(schema, source_format)
+    elif source_format == "csv":
+        if kind != "tabular":
+            raise InvalidSourceMetadataError("schema.kind must be 'tabular' for csv", field="schema.kind")
+        _validate_tabular_schema(schema)
+    elif source_format == "file":
+        if kind != "file":
+            raise InvalidSourceMetadataError("schema.kind must be 'file' for file format", field="schema.kind")
+        _validate_file_schema(schema)
+    else:
+        raise InvalidSourceMetadataError(f"unsupported schema format '{source_format}'", field="schema.kind")
+
+
+def _validate_tensor_schema(schema: dict[str, Any], source_format: str) -> None:
+    _validate_exact_keys(schema, {"kind", "arrays", "primary_array"}, "schema")
+
+    arrays = schema.get("arrays")
+    if not isinstance(arrays, dict) or not arrays:
+        raise InvalidSourceMetadataError("schema.arrays must be a non-empty object", field="schema.arrays")
+
+    if source_format == "npy" and len(arrays) != 1:
+        raise InvalidSourceMetadataError("npy metadata must define exactly one array", field="schema.arrays")
+    if len(arrays) > _MAX_ARRAY_COUNT:
+        raise InvalidSourceMetadataError(
+            f"arrays exceeds {_MAX_ARRAY_COUNT} entries",
+            field="schema.arrays",
+        )
+
+    primary_array = schema.get("primary_array")
+    if not isinstance(primary_array, str) or primary_array not in arrays:
+        raise InvalidSourceMetadataError("primary_array must reference an array key", field="schema.primary_array")
+
+    for name, array in arrays.items():
+        if not isinstance(name, str) or not name:
+            raise InvalidSourceMetadataError("array names must be strings", field="schema.arrays")
+        if len(name) > _MAX_COLUMN_NAME_LENGTH:
+            raise InvalidSourceMetadataError(
+                f"array name exceeds {_MAX_COLUMN_NAME_LENGTH} characters",
+                field=f"schema.arrays.{name}",
+            )
+        if not isinstance(array, dict):
+            raise InvalidSourceMetadataError("array definition must be an object", field=f"schema.arrays.{name}")
+
+        _validate_exact_keys(array, {"role", "shape", "dtype", "feature_names"}, f"schema.arrays.{name}")
+
+        role = array.get("role")
+        if not isinstance(role, str) or role not in _ALLOWED_TENSOR_ROLES:
+            raise InvalidSourceMetadataError(
+                f"invalid role '{role}'",
+                field=f"schema.arrays.{name}.role",
+            )
+
+        shape = array.get("shape")
+        if not isinstance(shape, list):
+            raise InvalidSourceMetadataError(
+                "shape must be a list of non-negative integers",
+                field=f"schema.arrays.{name}.shape",
+            )
+        if len(shape) > _MAX_SHAPE_DIMS:
+            raise InvalidSourceMetadataError(
+                f"shape exceeds {_MAX_SHAPE_DIMS} dimensions",
+                field=f"schema.arrays.{name}.shape",
+            )
+        if any(isinstance(dim, bool) or not isinstance(dim, int) or dim < 0 for dim in shape):
+            raise InvalidSourceMetadataError(
+                "shape must be a list of non-negative integers",
+                field=f"schema.arrays.{name}.shape",
+            )
+
+        dtype = array.get("dtype")
+        if not isinstance(dtype, str) or not dtype:
+            raise InvalidSourceMetadataError(
+                "dtype must be a non-empty string",
+                field=f"schema.arrays.{name}.dtype",
+            )
+
+        feature_names = array.get("feature_names")
+        _validate_feature_names(feature_names, shape, name)
+
+
+def _validate_feature_names(feature_names: Any, shape: list[int], array_name: str) -> None:
+    if not isinstance(feature_names, dict):
+        raise InvalidSourceMetadataError(
+            "feature_names must be an object",
+            field=f"schema.arrays.{array_name}.feature_names",
+        )
+
+    kind = feature_names.get("kind")
+    if kind not in {"list", "pattern", "none"}:
+        raise InvalidSourceMetadataError(
+            "feature_names.kind must be list, pattern, or none",
+            field=f"schema.arrays.{array_name}.feature_names.kind",
+        )
+
+    if len(shape) == 0 and kind != "none":
+        raise InvalidSourceMetadataError(
+            "feature_names.kind 'none' required for scalar shapes",
+            field=f"schema.arrays.{array_name}.feature_names.kind",
+        )
+
+    if kind == "list":
+        _validate_exact_keys(feature_names, {"kind", "values"}, f"schema.arrays.{array_name}.feature_names")
+        values = feature_names.get("values")
+        if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+            raise InvalidSourceMetadataError(
+                "feature_names.values must be a list of strings",
+                field=f"schema.arrays.{array_name}.feature_names.values",
+            )
+        if len(values) > _MAX_FEATURE_NAME_VALUES:
+            raise InvalidSourceMetadataError(
+                f"feature_names.values exceeds {_MAX_FEATURE_NAME_VALUES} entries",
+                field=f"schema.arrays.{array_name}.feature_names.values",
+            )
+        if any(len(v) > _MAX_FEATURE_NAME_LENGTH for v in values):
+            raise InvalidSourceMetadataError(
+                f"feature_names.values entries must be <= {_MAX_FEATURE_NAME_LENGTH} chars",
+                field=f"schema.arrays.{array_name}.feature_names.values",
+            )
+        _validate_feature_count(values_count=len(values), shape=shape, array_name=array_name)
+        return
+
+    if kind == "pattern":
+        _validate_exact_keys(
+            feature_names,
+            {"kind", "template", "start", "count", "sample"},
+            f"schema.arrays.{array_name}.feature_names",
+        )
+        template = feature_names.get("template")
+        start = feature_names.get("start")
+        count = feature_names.get("count")
+        sample = feature_names.get("sample")
+        if not isinstance(template, str) or "{i}" not in template:
+            raise InvalidSourceMetadataError(
+                "feature_names.template must include '{i}'",
+                field=f"schema.arrays.{array_name}.feature_names.template",
+            )
+        if len(template) > _MAX_FEATURE_TEMPLATE_LENGTH:
+            raise InvalidSourceMetadataError(
+                f"feature_names.template must be <= {_MAX_FEATURE_TEMPLATE_LENGTH} chars",
+                field=f"schema.arrays.{array_name}.feature_names.template",
+            )
+        if isinstance(start, bool) or not isinstance(start, int):
+            raise InvalidSourceMetadataError(
+                "feature_names.start must be an integer",
+                field=f"schema.arrays.{array_name}.feature_names.start",
+            )
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise InvalidSourceMetadataError(
+                "feature_names.count must be a non-negative integer",
+                field=f"schema.arrays.{array_name}.feature_names.count",
+            )
+        if not isinstance(sample, list) or any(not isinstance(v, str) for v in sample):
+            raise InvalidSourceMetadataError(
+                "feature_names.sample must be a list of strings",
+                field=f"schema.arrays.{array_name}.feature_names.sample",
+            )
+        if len(sample) > _MAX_FEATURE_SAMPLE_VALUES:
+            raise InvalidSourceMetadataError(
+                f"feature_names.sample must be <= {_MAX_FEATURE_SAMPLE_VALUES} entries",
+                field=f"schema.arrays.{array_name}.feature_names.sample",
+            )
+        if any(len(v) > _MAX_FEATURE_NAME_LENGTH for v in sample):
+            raise InvalidSourceMetadataError(
+                f"feature_names.sample entries must be <= {_MAX_FEATURE_NAME_LENGTH} chars",
+                field=f"schema.arrays.{array_name}.feature_names.sample",
+            )
+        _validate_feature_count(values_count=count, shape=shape, array_name=array_name)
+        return
+
+    if kind == "none":
+        _validate_exact_keys(feature_names, {"kind", "reason"}, f"schema.arrays.{array_name}.feature_names")
+        reason = feature_names.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise InvalidSourceMetadataError(
+                "feature_names.reason must be a non-empty string",
+                field=f"schema.arrays.{array_name}.feature_names.reason",
+            )
+        if len(reason) > _MAX_SOURCE_DESCRIPTION_LENGTH:
+            raise InvalidSourceMetadataError(
+                f"feature_names.reason must be <= {_MAX_SOURCE_DESCRIPTION_LENGTH} chars",
+                field=f"schema.arrays.{array_name}.feature_names.reason",
+            )
+        if len(shape) != 0:
+            raise InvalidSourceMetadataError(
+                "feature_names.kind 'none' only allowed for scalar shapes",
+                field=f"schema.arrays.{array_name}.feature_names.kind",
+            )
+
+
+def _validate_feature_count(values_count: int, shape: list[int], array_name: str) -> None:
+    if len(shape) == 0:
+        if values_count != 0:
+            raise InvalidSourceMetadataError(
+                "feature_names must be empty for scalar shapes",
+                field=f"schema.arrays.{array_name}.feature_names",
+            )
+        return
+
+    last_dim = shape[-1]
+    if values_count != last_dim:
+        raise InvalidSourceMetadataError(
+            f"feature_names count ({values_count}) must equal last dimension ({last_dim})",
+            field=f"schema.arrays.{array_name}.feature_names",
+        )
+
+
+def _validate_tabular_schema(schema: dict[str, Any]) -> None:
+    _validate_exact_keys(schema, {"kind", "row_count", "columns", "dtypes"}, "schema")
+
+    row_count = schema.get("row_count")
+    if isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0:
+        raise InvalidSourceMetadataError("row_count must be a non-negative integer", field="schema.row_count")
+
+    columns = schema.get("columns")
+    if not isinstance(columns, list) or any(not isinstance(col, str) for col in columns):
+        raise InvalidSourceMetadataError("columns must be a list of strings", field="schema.columns")
+    if len(columns) > _MAX_COLUMNS:
+        raise InvalidSourceMetadataError(
+            f"columns exceeds {_MAX_COLUMNS} entries",
+            field="schema.columns",
+        )
+    if any(len(col) > _MAX_COLUMN_NAME_LENGTH for col in columns):
+        raise InvalidSourceMetadataError(
+            f"column names must be <= {_MAX_COLUMN_NAME_LENGTH} chars",
+            field="schema.columns",
+        )
+
+    if len(columns) != len(set(columns)):
+        raise InvalidSourceMetadataError("columns must be unique", field="schema.columns")
+
+    dtypes = schema.get("dtypes")
+    if not isinstance(dtypes, dict) or any(not isinstance(k, str) for k in dtypes.keys()):
+        raise InvalidSourceMetadataError("dtypes must be an object with string keys", field="schema.dtypes")
+
+    if set(dtypes.keys()) != set(columns):
+        raise InvalidSourceMetadataError("dtypes keys must match columns", field="schema.dtypes")
+
+    if any(not isinstance(v, str) or not v for v in dtypes.values()):
+        raise InvalidSourceMetadataError("dtypes values must be non-empty strings", field="schema.dtypes")
+
+
+def _validate_file_schema(schema: dict[str, Any]) -> None:
+    _validate_exact_keys(schema, {"kind", "content_type"}, "schema")
+    content_type = schema.get("content_type")
+    if not isinstance(content_type, str) or not content_type.strip():
+        raise InvalidSourceMetadataError("content_type must be a non-empty string", field="schema.content_type")
+    if len(content_type) > _MAX_CONTENT_TYPE_LENGTH:
+        raise InvalidSourceMetadataError(
+            f"content_type must be <= {_MAX_CONTENT_TYPE_LENGTH} chars",
+            field="schema.content_type",
+        )
+
+
+def _validate_utc_isoformat(value: Any, field: str) -> None:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise InvalidSourceMetadataError("created_at must be ISO-8601 UTC with Z suffix", field=field)
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise InvalidSourceMetadataError("created_at must be ISO-8601 UTC with Z suffix", field=field) from exc
 
 
 def validate_script_path(path: str) -> None:
