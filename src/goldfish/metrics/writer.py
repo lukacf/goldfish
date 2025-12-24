@@ -135,31 +135,43 @@ class LocalWriter:
         """
         from goldfish.validation import (
             InvalidMetricNameError,
+            InvalidMetricStepError,
+            InvalidMetricTimestampError,
             InvalidMetricValueError,
             validate_metric_name,
             validate_metric_value,
         )
 
         if name not in self._metric_step_modes and len(self._metric_step_modes) >= self._max_metric_names:
-            raise InvalidMetricNameError(
-                name,
-                f"too many unique metric names (limit {self._max_metric_names})",
+            self._record_validation_error(
+                str(
+                    InvalidMetricNameError(
+                        name,
+                        f"too many unique metric names (limit {self._max_metric_names})",
+                    )
+                )
             )
+            return False
 
         # Validate inputs early (strict mode - fail fast)
         if name not in self._validated_metric_names:
-            validate_metric_name(name)
+            try:
+                validate_metric_name(name)
+            except InvalidMetricNameError as exc:
+                self._record_validation_error(str(exc))
+                return False
             self._validated_metric_names.add(name)
         try:
             value = normalize_metric_value(value)
             validate_metric_value(value)
         except InvalidMetricValueError as exc:
-            error_msg = str(exc)
-            logger.warning(error_msg)
-            self._validation_errors.append(error_msg)
-            self._metrics_lost += 1
+            self._record_validation_error(str(exc))
             return False
-        step = normalize_metric_step(step)
+        try:
+            step = normalize_metric_step(step)
+        except InvalidMetricStepError as exc:
+            self._record_validation_error(str(exc))
+            return False
 
         # Enforce consistent step usage per metric
         step_mode = "none" if step is None else "value"
@@ -167,14 +179,15 @@ class LocalWriter:
         if existing_mode is None:
             self._metric_step_modes[name] = step_mode
         elif existing_mode != step_mode:
-            error_msg = f"metric '{name}' logged with mixed step modes (None and int)"
-            logger.warning(error_msg)
-            self._validation_errors.append(error_msg)
-            self._metrics_lost += 1
+            self._record_validation_error(f"metric '{name}' logged with mixed step modes (None and int)")
             return False
 
         # Normalize timestamp to ISO 8601 string (UTC)
-        ts_str = normalize_metric_timestamp(timestamp)
+        try:
+            ts_str = normalize_metric_timestamp(timestamp)
+        except InvalidMetricTimestampError as exc:
+            self._record_validation_error(str(exc))
+            return False
 
         metric = {
             "type": "metric",
@@ -226,11 +239,20 @@ class LocalWriter:
             InvalidMetricNameError: If name is invalid
             InvalidArtifactPathError: If path contains traversal or is absolute
         """
-        from goldfish.validation import validate_artifact_path, validate_metric_name
+        from goldfish.validation import (
+            InvalidArtifactPathError,
+            InvalidMetricNameError,
+            validate_artifact_path,
+            validate_metric_name,
+        )
 
         # Validate inputs early (strict mode - fail fast)
-        validate_metric_name(name)
-        validate_artifact_path(str(path))
+        try:
+            validate_metric_name(name)
+            validate_artifact_path(str(path))
+        except (InvalidMetricNameError, InvalidArtifactPathError) as exc:
+            self._record_validation_error(str(exc))
+            return
 
         artifact = {
             "type": "artifact",
@@ -244,6 +266,17 @@ class LocalWriter:
         # Thread-safe buffer append
         with self._lock:
             self._artifacts.append(artifact)
+
+    def _record_validation_error(self, message: str) -> None:
+        """Record a validation error and count it as lost."""
+        logger.warning(message)
+        with self._lock:
+            self._validation_errors.append(message)
+            self._metrics_lost += 1
+
+    def record_validation_error(self, message: str) -> None:
+        """Public helper to record validation errors from callers."""
+        self._record_validation_error(message)
 
     def flush(self) -> None:
         """Flush buffered metrics to disk (thread-safe).
