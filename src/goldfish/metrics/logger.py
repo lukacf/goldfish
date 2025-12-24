@@ -15,7 +15,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from goldfish.metrics.utils import normalize_metric_step, normalize_metric_value, timestamp_to_float
 from goldfish.metrics.writer import LocalWriter, MetricsFlushError
@@ -28,6 +28,23 @@ from goldfish.validation import (
 
 if TYPE_CHECKING:
     from goldfish.metrics.backends.base import MetricsBackend
+
+
+class BackendWithErrorReporting(Protocol):
+    """Optional backend protocol for error reporting hooks."""
+
+    def consume_error(self) -> str | None:
+        """Return and clear the last backend error message."""
+        ...
+
+    def get_last_error(self) -> str | None:
+        """Return the last backend error message without clearing."""
+        ...
+
+    def clear_last_error(self) -> None:
+        """Clear the last backend error message."""
+        ...
+
 
 logger = logging.getLogger(__name__)
 
