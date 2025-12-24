@@ -56,6 +56,15 @@ class PreRunReviewConfig(BaseModel):
     max_turns: int = 5  # Max agent turns for exploring code
 
 
+class MetricsConfig(BaseModel):
+    """Metrics collection configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    backend: str | None = None  # "wandb", "mlflow", or None for local-only
+    wandb: dict[str, str] | None = None  # W&B-specific config (project, entity)
+
+
 class GCEConfig(BaseModel):
     """GCE (Google Compute Engine) configuration."""
 
@@ -130,6 +139,7 @@ def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
         "gcs": list(GCSConfig.model_fields.keys()),
         "gce": list(GCEConfig.model_fields.keys()),
         "pre_run_review": list(PreRunReviewConfig.model_fields.keys()),
+        "metrics": list(MetricsConfig.model_fields.keys()),
     }
 
     top_level_fields = [
@@ -143,6 +153,7 @@ def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
         "gcs",
         "gce",
         "pre_run_review",
+        "metrics",
         "invariants",
     ]
 
@@ -177,6 +188,7 @@ class GoldfishConfig(BaseModel):
     gcs: GCSConfig | None = None
     gce: GCEConfig | None = None
     pre_run_review: PreRunReviewConfig = Field(default_factory=PreRunReviewConfig)
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     invariants: list[str] = Field(default_factory=list)
 
     @classmethod

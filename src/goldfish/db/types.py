@@ -101,3 +101,36 @@ class StageVersionRow(TypedDict):
     git_sha: str
     config_hash: str
     created_at: str
+
+
+class MetricRow(TypedDict):
+    """Row from the run_metrics table."""
+
+    id: int
+    stage_run_id: str
+    name: str
+    value: float
+    step: int | None
+    timestamp: str
+
+
+class MetricsSummaryRow(TypedDict):
+    """Row from the run_metrics_summary table."""
+
+    stage_run_id: str
+    name: str
+    min_value: float | None
+    max_value: float | None
+    last_value: float | None
+    count: int
+
+
+class ArtifactRow(TypedDict):
+    """Row from the run_artifacts table."""
+
+    id: int
+    stage_run_id: str
+    name: str
+    path: str
+    backend_url: str | None
+    created_at: str

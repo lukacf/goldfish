@@ -119,6 +119,10 @@ stages:
 
 The agent edits this file directly. Goldfish validates the DAG and wires data automatically.
 
+Notes on `from_stage` inputs:
+- Use `signal:` to point at a specific output name from the upstream stage.
+- If `signal` is omitted, it defaults to the input name (e.g., input `features` pulls `preprocess.features`).
+
 ### Stages = Executable Steps
 
 A **stage** is a Python module that runs in an isolated container:

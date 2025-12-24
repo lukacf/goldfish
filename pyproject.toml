@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.27.0",
     "claude-agent-sdk>=0.1.0",
     "python-dotenv>=1.0.0",
+    "google-cloud-storage>=2.16.0",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +34,9 @@ dev = [
     "ruff>=0.8.4",
     "mypy>=1.10",
     "pre-commit>=3.5",
+]
+wandb = [
+    "wandb>=0.16.0",
 ]
 
 [project.scripts]

@@ -269,3 +269,36 @@ stages:
 
         # Should pass validation with matching types
         assert len([e for e in errors if "type mismatch" in e.lower()]) == 0
+
+    def test_validate_allows_signal_alias(self, temp_dir):
+        """Should allow from_stage inputs to alias a different output signal."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text("""
+name: test_pipeline
+stages:
+  - name: preprocess
+    outputs:
+      features:
+        type: npy
+  - name: train
+    inputs:
+      X:
+        from_stage: preprocess
+        signal: features
+        type: npy
+""")
+
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "preprocess.py").write_text("def main(): pass")
+        (configs_dir / "preprocess.yaml").write_text("env: {}")
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text("env: {}")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        assert errors == []
