@@ -23,6 +23,25 @@ def _valid_file_metadata() -> dict:
     }
 
 
+def _valid_csv_metadata() -> dict:
+    return {
+        "schema_version": 1,
+        "description": "CSV source for metadata enforcement tests.",
+        "source": {
+            "format": "csv",
+            "size_bytes": 456,
+            "created_at": "2025-12-24T12:00:00Z",
+            "format_params": {"delimiter": ","},
+        },
+        "schema": {
+            "kind": "tabular",
+            "row_count": 10,
+            "columns": ["col1"],
+            "dtypes": {"col1": "int64"},
+        },
+    }
+
+
 class TestSourceMetadataTools:
     """Test metadata enforcement in MCP tools."""
 
@@ -212,6 +231,59 @@ class TestSourceMetadataTools:
             stored = db.get_source("legacy")
             assert stored is not None
             assert stored["metadata"] is not None
+        finally:
+            server.reset_server()
+
+    def test_update_source_metadata_rejects_format_change(self, temp_dir):
+        """update_source_metadata should not allow format changes."""
+        from goldfish import server
+
+        db = Database(temp_dir / "test.db")
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path="../test-dev",
+            state_md=StateMdConfig(),
+            audit=AuditConfig(min_reason_length=15),
+            jobs=JobsConfig(),
+        )
+        state_manager = StateManager(temp_dir / "STATE.md", config)
+
+        db.create_source(
+            source_id="csv_source",
+            name="csv_source",
+            gcs_location="gs://bucket/data.csv",
+            created_by="external",
+            description=_valid_csv_metadata()["description"],
+            size_bytes=_valid_csv_metadata()["source"]["size_bytes"],
+            metadata=_valid_csv_metadata(),
+        )
+
+        server.configure_server(
+            project_root=temp_dir,
+            config=config,
+            db=db,
+            workspace_manager=MagicMock(),
+            state_manager=state_manager,
+            job_launcher=MagicMock(),
+            job_tracker=MagicMock(),
+            pipeline_manager=MagicMock(),
+            dataset_registry=MagicMock(),
+            stage_executor=MagicMock(),
+            pipeline_executor=MagicMock(),
+        )
+
+        try:
+            update_fn = (
+                server.update_source_metadata.fn
+                if hasattr(server.update_source_metadata, "fn")
+                else server.update_source_metadata
+            )
+            with pytest.raises(InvalidSourceMetadataError, match="format"):
+                update_fn(
+                    source_name="csv_source",
+                    metadata=_valid_file_metadata(),
+                    reason="Attempting to change format should fail.",
+                )
         finally:
             server.reset_server()
 

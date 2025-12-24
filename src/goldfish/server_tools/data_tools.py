@@ -36,6 +36,7 @@ from goldfish.server import (
 from goldfish.sources.conversion import source_row_to_info
 from goldfish.validation import (
     InvalidSourceMetadataError,
+    parse_source_metadata,
     validate_artifact_uri,
     validate_job_id,
     validate_output_name,
@@ -155,11 +156,28 @@ def update_source_metadata(
 
     validate_source_metadata(metadata)
 
-    if not db.source_exists(source_name):
+    source = db.get_source(source_name)
+    if source is None:
         raise SourceNotFoundError(f"Source not found: {source_name}")
 
     description = metadata.get("description")
     size_bytes = metadata.get("source", {}).get("size_bytes")
+
+    existing_metadata, status = parse_source_metadata(source.get("metadata"))
+    if status == "ok" and existing_metadata is not None:
+        existing_format = existing_metadata.get("source", {}).get("format")
+        new_format = metadata.get("source", {}).get("format")
+        if existing_format and new_format != existing_format:
+            raise InvalidSourceMetadataError(
+                f"metadata.source.format '{new_format}' does not match existing format '{existing_format}'",
+                field="source.format",
+            )
+        existing_size = source.get("size_bytes")
+        if existing_size is not None and size_bytes != existing_size:
+            raise InvalidSourceMetadataError(
+                f"metadata.source.size_bytes {size_bytes} does not match existing size_bytes {existing_size}",
+                field="source.size_bytes",
+            )
 
     db.update_source_metadata(
         source_id_or_name=source_name,

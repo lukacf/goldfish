@@ -122,6 +122,15 @@ def test_validate_source_metadata_rejects_csv_missing_delimiter() -> None:
         validate_source_metadata(metadata)
 
 
+def test_validate_source_metadata_rejects_control_delimiter() -> None:
+    """CSV delimiter cannot be a control character."""
+    metadata = _valid_csv_metadata()
+    metadata["source"]["format_params"]["delimiter"] = "\x00"
+
+    with pytest.raises(InvalidSourceMetadataError, match="delimiter"):
+        validate_source_metadata(metadata)
+
+
 def test_validate_source_metadata_rejects_feature_names_mismatch() -> None:
     """Feature names count must match last dimension."""
     metadata = _valid_npy_metadata()
@@ -143,6 +152,17 @@ def test_validate_source_metadata_rejects_schema_version_bool() -> None:
     metadata["schema_version"] = True
 
     with pytest.raises(InvalidSourceMetadataError, match="schema_version"):
+        validate_source_metadata(metadata)
+
+
+def test_validate_source_metadata_rejects_size_bytes_too_large() -> None:
+    """size_bytes must not exceed the maximum limit."""
+    import goldfish.validation as validation
+
+    metadata = _valid_npy_metadata()
+    metadata["source"]["size_bytes"] = validation._MAX_SOURCE_SIZE_BYTES + 1
+
+    with pytest.raises(InvalidSourceMetadataError, match="size_bytes"):
         validate_source_metadata(metadata)
 
 

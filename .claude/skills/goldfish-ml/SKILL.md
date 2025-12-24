@@ -99,6 +99,9 @@ CSV requires `format_params`:
 { "format_params": { "delimiter": "," } }
 ```
 
+Rules:
+- `delimiter` must be a single printable character (no control chars).
+
 **Directory sources are rejected.**
 
 ### Schema Section (meaning/semantics)
@@ -167,6 +170,7 @@ File (blob):
 Optional tool arguments (must match metadata if provided):
 - `format`
 - `size_bytes`
+  - Must be a positive integer and ≤ 1 PB.
 - `description` (for promote_artifact)
 
 Missing or invalid metadata is rejected.

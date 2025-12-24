@@ -66,6 +66,7 @@ For `format=csv`, an extra `format_params` object is required:
 
 Rules:
 - `delimiter` must be a single-character string.
+- `delimiter` must be a printable character (no control chars).
 
 ---
 
@@ -182,6 +183,7 @@ No exceptions.
 ## 5) Limits
 
 - Max metadata size (UTF-8 JSON): **1 MB**
+- Max `source.size_bytes`: **1 PB**
 - Max `feature_names.list.values` length: **1,000,000**
 - Max metadata nesting depth: **20**
 - Max metadata node count: **100,000**

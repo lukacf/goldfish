@@ -291,6 +291,7 @@ _PATH_TRAVERSAL_PATTERNS = ["..", "//"]
 
 # Source metadata validation limits and enums
 _MAX_SOURCE_METADATA_BYTES = 1_000_000  # 1 MB
+_MAX_SOURCE_SIZE_BYTES = 1_000_000_000_000_000  # 1 PB
 _MAX_FEATURE_NAME_VALUES = 1_000_000
 _MIN_SOURCE_DESCRIPTION_LENGTH = 20
 _MAX_SOURCE_DESCRIPTION_LENGTH = 4000
@@ -479,7 +480,7 @@ def _validate_metadata_size(metadata: dict[str, Any]) -> None:
     """Ensure metadata JSON is within size limits."""
     try:
         payload = json.dumps(metadata, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    except TypeError as exc:
+    except (TypeError, ValueError) as exc:
         raise InvalidSourceMetadataError(f"metadata must be JSON-serializable: {exc}") from exc
 
     if len(payload) > _MAX_SOURCE_METADATA_BYTES:
@@ -551,6 +552,11 @@ def _validate_source_section(source: dict[str, Any]) -> str:
     size_bytes = source.get("size_bytes")
     if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes <= 0:
         raise InvalidSourceMetadataError("source.size_bytes must be a positive integer", field="source.size_bytes")
+    if size_bytes > _MAX_SOURCE_SIZE_BYTES:
+        raise InvalidSourceMetadataError(
+            f"source.size_bytes exceeds {_MAX_SOURCE_SIZE_BYTES}",
+            field="source.size_bytes",
+        )
 
     created_at = source.get("created_at")
     _validate_utc_isoformat(created_at, field="source.created_at")
@@ -565,6 +571,11 @@ def _validate_source_section(source: dict[str, Any]) -> str:
             raise InvalidSourceMetadataError("delimiter must be a single character", field="source.format_params")
         if delimiter.strip() == "":
             raise InvalidSourceMetadataError("delimiter cannot be whitespace", field="source.format_params")
+        if not delimiter.isprintable():
+            raise InvalidSourceMetadataError(
+                "delimiter must be a printable character",
+                field="source.format_params",
+            )
 
     return fmt
 
