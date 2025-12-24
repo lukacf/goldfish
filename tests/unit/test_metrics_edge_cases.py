@@ -127,10 +127,22 @@ class TestWriterNaNRejection:
         assert writer.get_validation_errors()
 
     def test_invalid_name_rejected_at_log_metric(self, tmp_path) -> None:
-        """Invalid names should be rejected when logging."""
+        """Invalid names should be rejected when logging (without raising)."""
         writer = LocalWriter(outputs_dir=tmp_path)
-        with pytest.raises(InvalidMetricNameError):
-            writer.log_metric("", 0.5)
+        assert writer.log_metric("", 0.5) is False
+        assert writer.get_validation_errors()
+
+    def test_invalid_step_rejected_at_log_metric(self, tmp_path) -> None:
+        """Invalid step values should be rejected without raising."""
+        writer = LocalWriter(outputs_dir=tmp_path)
+        assert writer.log_metric("loss", 0.5, step="bad") is False
+        assert writer.get_validation_errors()
+
+    def test_invalid_timestamp_rejected_at_log_metric(self, tmp_path) -> None:
+        """Invalid timestamp values should be rejected without raising."""
+        writer = LocalWriter(outputs_dir=tmp_path)
+        assert writer.log_metric("loss", 0.5, timestamp="not-a-time") is False
+        assert writer.get_validation_errors()
 
     def test_valid_metric_accepted(self, tmp_path) -> None:
         """Valid metrics should be accepted."""

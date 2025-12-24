@@ -18,8 +18,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from goldfish.metrics.utils import normalize_metric_step, normalize_metric_value, timestamp_to_float
-from goldfish.metrics.writer import LocalWriter
-from goldfish.validation import InvalidArtifactPathError, validate_artifact_path, validate_metric_name
+from goldfish.metrics.writer import LocalWriter, MetricsFlushError
+from goldfish.validation import (
+    InvalidArtifactPathError,
+    InvalidMetricNameError,
+    validate_artifact_path,
+    validate_metric_name,
+)
 
 if TYPE_CHECKING:
     from goldfish.metrics.backends.base import MetricsBackend
@@ -218,11 +223,13 @@ class MetricsLogger:
             path: Path to artifact relative to outputs dir
         """
         # Validate upfront so backend/local stay consistent
-        validate_metric_name(name)
-        validate_artifact_path(str(path))
-
-        # Resolve path for safety (prevents symlink/path traversal issues)
-        backend_path = self._resolve_artifact_path(path)
+        try:
+            validate_metric_name(name)
+            validate_artifact_path(str(path))
+            backend_path = self._resolve_artifact_path(path)
+        except (InvalidArtifactPathError, InvalidMetricNameError) as exc:
+            self.local_writer.record_validation_error(str(exc))
+            return None
 
         # Try backend first to capture URL if available
         backend_url: str | None = None
@@ -309,7 +316,10 @@ class MetricsLogger:
             Optional URL to the run in the backend's UI (e.g., W&B run page)
         """
         # Flush local
-        self.flush()
+        try:
+            self.flush()
+        except MetricsFlushError as exc:
+            logger.error("Failed to flush metrics: %s", exc)
 
         # Try backend finish if configured
         backend = self.backend  # Local var for type narrowing

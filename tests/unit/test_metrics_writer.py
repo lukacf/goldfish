@@ -251,17 +251,15 @@ class TestLocalWriter:
         assert writer.get_metrics_lost_count() == 1
 
     def test_metric_name_limit_enforced(self, tmp_path, monkeypatch):
-        """Too many unique metric names should raise an error."""
+        """Too many unique metric names should be skipped (no crash)."""
         monkeypatch.setenv("GOLDFISH_METRICS_MAX_NAMES", "2")
         writer = LocalWriter(outputs_dir=tmp_path)
 
         writer.log_metric("loss", 0.5)
         writer.log_metric("accuracy", 0.9)
 
-        with pytest.raises(Exception) as exc_info:
-            writer.log_metric("precision", 0.8)
-
-        assert "metric names" in str(exc_info.value).lower()
+        assert writer.log_metric("precision", 0.8) is False
+        assert any("metric names" in msg.lower() for msg in writer.get_validation_errors())
 
     def test_outputs_dir_requires_absolute_path(self):
         """Relative outputs_dir should be rejected."""
