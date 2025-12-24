@@ -129,13 +129,13 @@ class LocalWriter:
 
         Raises:
             InvalidMetricNameError: If name is invalid
-            InvalidMetricValueError: If value is NaN or infinite
 
         Returns:
             True if the metric was logged, False if it was skipped.
         """
         from goldfish.validation import (
             InvalidMetricNameError,
+            InvalidMetricValueError,
             validate_metric_name,
             validate_metric_value,
         )
@@ -150,8 +150,15 @@ class LocalWriter:
         if name not in self._validated_metric_names:
             validate_metric_name(name)
             self._validated_metric_names.add(name)
-        value = normalize_metric_value(value)
-        validate_metric_value(value)
+        try:
+            value = normalize_metric_value(value)
+            validate_metric_value(value)
+        except InvalidMetricValueError as exc:
+            error_msg = str(exc)
+            logger.warning(error_msg)
+            self._validation_errors.append(error_msg)
+            self._metrics_lost += 1
+            return False
         step = normalize_metric_step(step)
 
         # Enforce consistent step usage per metric
