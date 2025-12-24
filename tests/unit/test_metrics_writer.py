@@ -155,11 +155,17 @@ class TestLocalWriter:
             lines = f.readlines()
             assert len(lines) == 100
 
-    def test_time_based_auto_flush(self, tmp_path):
+    def test_time_based_auto_flush(self, tmp_path, monkeypatch):
         """Test that time-based flush triggers after interval expires."""
-        import time
+        from goldfish.metrics import writer as writer_module
+
+        clock = {"now": 100.0}
+
+        def fake_time():
+            return clock["now"]
 
         # Short interval for testing (0.1 seconds)
+        monkeypatch.setattr(writer_module.time, "time", fake_time)
         writer = LocalWriter(outputs_dir=tmp_path, auto_flush_interval=0.1)
 
         # Log 1 metric - won't trigger threshold-based flush (100)
@@ -169,8 +175,8 @@ class TestLocalWriter:
         # File exists but should be empty - not flushed yet
         assert metrics_file.stat().st_size == 0
 
-        # Wait for interval to expire
-        time.sleep(0.15)
+        # Advance clock past interval
+        clock["now"] = 100.2
 
         # Log another metric - should trigger time-based flush
         writer.log_metric("loss", 0.4)
@@ -180,16 +186,22 @@ class TestLocalWriter:
             lines = f.readlines()
             assert len(lines) == 2
 
-    def test_time_based_flush_disabled(self, tmp_path):
+    def test_time_based_flush_disabled(self, tmp_path, monkeypatch):
         """Test that time-based flush can be disabled with interval=0."""
-        import time
+        from goldfish.metrics import writer as writer_module
 
+        clock = {"now": 100.0}
+
+        def fake_time():
+            return clock["now"]
+
+        monkeypatch.setattr(writer_module.time, "time", fake_time)
         # Disable time-based flush
         writer = LocalWriter(outputs_dir=tmp_path, auto_flush_interval=0)
 
         # Log metrics
         writer.log_metric("loss", 0.5)
-        time.sleep(0.05)
+        clock["now"] = 100.05
         writer.log_metric("loss", 0.4)
 
         metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"

@@ -128,6 +128,19 @@ class TestPublicMetricsAPI:
         assert url1 is None
         assert url2 is None
 
+    def test_env_flush_interval_is_applied(self, tmp_path, monkeypatch):
+        """GOLDFISH_METRICS_FLUSH_INTERVAL should configure the logger."""
+        from goldfish import metrics as metrics_module
+
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(tmp_path))
+        monkeypatch.setenv("GOLDFISH_METRICS_FLUSH_INTERVAL", "5.5")
+
+        log_metric("loss", 0.5)
+
+        logger = metrics_module._global_logger
+        assert logger is not None
+        assert logger.local_writer._auto_flush_interval == 5.5
+
     def test_logger_reset_between_tests(self, tmp_path, monkeypatch):
         """Test that logger can be reset (for testing purposes)."""
         from goldfish import metrics
