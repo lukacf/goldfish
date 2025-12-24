@@ -115,16 +115,16 @@ class TestWriterNaNRejection:
     """Test that LocalWriter rejects NaN at log_metric time."""
 
     def test_nan_rejected_at_log_metric(self, tmp_path) -> None:
-        """NaN should be rejected when logging."""
+        """NaN should be rejected when logging (without raising)."""
         writer = LocalWriter(outputs_dir=tmp_path)
-        with pytest.raises(InvalidMetricValueError):
-            writer.log_metric("loss", float("nan"))
+        assert writer.log_metric("loss", float("nan")) is False
+        assert writer.get_validation_errors()
 
     def test_infinity_rejected_at_log_metric(self, tmp_path) -> None:
-        """Infinity should be rejected when logging."""
+        """Infinity should be rejected when logging (without raising)."""
         writer = LocalWriter(outputs_dir=tmp_path)
-        with pytest.raises(InvalidMetricValueError):
-            writer.log_metric("loss", float("inf"))
+        assert writer.log_metric("loss", float("inf")) is False
+        assert writer.get_validation_errors()
 
     def test_invalid_name_rejected_at_log_metric(self, tmp_path) -> None:
         """Invalid names should be rejected when logging."""
