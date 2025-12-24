@@ -183,7 +183,8 @@ class PipelineParser:
                 # This allows dataset-type signals to be passed between stages
                 if input_def.from_stage:
                     # Check signal from previous stage
-                    signal_ref = f"{input_def.from_stage}.{input_name}"
+                    signal_name = input_def.signal or input_name
+                    signal_ref = f"{input_def.from_stage}.{signal_name}"
                     if signal_ref not in available_signals:
                         # Check if the stage exists
                         stage_names = [s.name for s in pipeline.stages]
@@ -196,7 +197,7 @@ class PipelineParser:
                             errors.append(
                                 f"Stage '{stage.name}' input '{input_name}': "
                                 f"signal '{signal_ref}' not found. Stage '{input_def.from_stage}' "
-                                f"does not produce output '{input_name}'"
+                                f"does not produce output '{signal_name}'"
                             )
                     else:
                         # Check type compatibility
