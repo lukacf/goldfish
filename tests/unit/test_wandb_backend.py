@@ -101,3 +101,24 @@ def test_wandb_artifact_mode_rejects_symlink_dir(tmp_path, monkeypatch):
 
     with pytest.raises(InvalidArtifactPathError):
         backend.log_artifact("model", root)
+
+
+def test_wandb_invalid_artifact_mode_defaults_to_file(tmp_path, monkeypatch, caplog):
+    """Invalid artifact mode should warn and default to file."""
+    dummy = DummyWandb()
+    monkeypatch.setitem(sys.modules, "wandb", dummy)
+    monkeypatch.setenv("GOLDFISH_WANDB_ARTIFACT_MODE", "nope")
+
+    from goldfish.metrics.backends.wandb import WandBBackend
+
+    backend = WandBBackend()
+    backend.init_run(run_id="stage-123", config={}, workspace="ws", stage="train")
+
+    file_path = tmp_path / "model.pt"
+    file_path.write_text("data")
+
+    with caplog.at_level("WARNING"):
+        backend.log_artifact("model", file_path)
+
+    assert any("GOLDFISH_WANDB_ARTIFACT_MODE" in record.message for record in caplog.records)
+    assert str(file_path) in dummy.saved
