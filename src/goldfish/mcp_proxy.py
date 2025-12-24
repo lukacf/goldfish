@@ -53,10 +53,11 @@ def _get_version() -> str:
 class DaemonConnection:
     """Manages connection to the daemon via Unix socket."""
 
-    def __init__(self, socket_path: Path, project_root: Path):
+    def __init__(self, socket_path: Path, project_root: Path, force_restart: bool = False):
         logger.debug("Creating DaemonConnection to %s", socket_path)
         self.socket_path = socket_path
         self.project_root = project_root
+        self._force_restart = force_restart
         self._ensure_daemon()
 
     def _ensure_daemon(self) -> None:
@@ -64,6 +65,13 @@ class DaemonConnection:
         running, pid = is_daemon_running(self.project_root)
         if running:
             logger.debug("Daemon already running (pid=%d)", pid)
+
+            # Force restart if requested (useful for development)
+            if self._force_restart:
+                logger.info("Force restart requested, restarting daemon...")
+                self._restart_daemon()
+                return
+
             # Check version compatibility
             try:
                 health = self._health_check()
@@ -298,7 +306,8 @@ def _get_connection() -> DaemonConnection:
     global _daemon_socket_path, _project_root
     if not _daemon_socket_path or not _project_root:
         raise GoldfishError("Proxy not initialized")
-    return DaemonConnection(_daemon_socket_path, _project_root)
+    # Don't force restart on subsequent connections, only on initial startup
+    return DaemonConnection(_daemon_socket_path, _project_root, force_restart=False)
 
 
 def _register_proxy_tools() -> None:
@@ -331,12 +340,20 @@ def _register_proxy_tools() -> None:
     logger.info("Registered %d proxy tools", len(original_mcp._tool_manager._tools))
 
 
-def run_proxy(project_root: Path) -> None:
-    """Run the MCP proxy server."""
+def run_proxy(project_root: Path, force_restart: bool = False) -> None:
+    """Run the MCP proxy server.
+
+    Args:
+        project_root: Path to the project root directory.
+        force_restart: If True, restart the daemon even if it's already running.
+            Useful during development to pick up code changes.
+    """
     global _daemon_socket_path, _project_root
 
     setup_logging(component="proxy")
     logger.info("Starting Goldfish MCP proxy for %s", project_root)
+    if force_restart:
+        logger.info("Force restart mode enabled")
 
     try:
         # Validate project is initialized (this will raise if not)
@@ -349,8 +366,8 @@ def run_proxy(project_root: Path) -> None:
         _project_root = project_root
         logger.debug("Using socket path: %s", _daemon_socket_path)
 
-        # Ensure daemon is running
-        conn = DaemonConnection(_daemon_socket_path, project_root)
+        # Ensure daemon is running (restart if force_restart=True)
+        conn = DaemonConnection(_daemon_socket_path, project_root, force_restart=force_restart)
         health = conn._health_check()
         logger.info(
             "Connected to daemon (pid=%s, version=%s)",
