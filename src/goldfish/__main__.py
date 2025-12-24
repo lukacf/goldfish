@@ -53,6 +53,11 @@ def main():
         default=None,
         help="Project root directory (default: auto-discover)",
     )
+    serve_parser.add_argument(
+        "--force-restart",
+        action="store_true",
+        help="Force restart daemon on proxy startup (useful for development)",
+    )
 
     # daemon command - runs the persistent background server
     daemon_parser = subparsers.add_parser("daemon", help="Run persistent daemon server (internal use)")
@@ -128,10 +133,11 @@ def main():
 
     elif args.command == "serve" or args.command is None:
         project_root = _discover_project(getattr(args, "project", None))
+        force_restart = getattr(args, "force_restart", False)
 
         from goldfish.mcp_proxy import run_proxy
 
-        run_proxy(project_root)
+        run_proxy(project_root, force_restart=force_restart)
 
     elif args.command == "daemon":
         # Run the daemon directly (usually spawned by proxy)
