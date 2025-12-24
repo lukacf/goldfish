@@ -170,6 +170,11 @@ stages:
         type: csv
 ```
 
+**Signal aliasing (important):**
+- `signal` is optional. If omitted, it defaults to the input name.
+- Use `signal` to map an input name to a different upstream output name.
+  Example: `X: { from_stage: preprocess, signal: features }`
+
 ### 3. Stage Implementation Pattern
 
 Stage modules follow a consistent pattern:
@@ -247,6 +252,7 @@ def main():
 
 **Tuning flush behavior:**
 - `GOLDFISH_METRICS_FLUSH_THRESHOLD` controls auto-flush (default 100).
+- `GOLDFISH_METRICS_FLUSH_INTERVAL` controls time-based auto-flush in seconds (default 30).
 - `GOLDFISH_METRICS_MAX_NAMES` caps unique metric names per run (default 10000).
 - `GOLDFISH_METRICS_MAX_FUTURE_DRIFT_SECONDS` controls allowed future timestamp drift (default 86400).
 - `GOLDFISH_METRICS_LIVE_SYNC` enables live DB sync for running runs (default true).
