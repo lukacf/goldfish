@@ -110,11 +110,11 @@ class TestPublicMetricsAPI:
         # Remove the env var
         monkeypatch.delenv("GOLDFISH_OUTPUTS_DIR", raising=False)
 
-        # Mock Path.mkdir to avoid actually creating /mnt/outputs
-        with patch("goldfish.metrics.writer.Path.mkdir"):
+        # Mock Path.mkdir and Path.touch to avoid actually creating /mnt/outputs
+        with patch("goldfish.metrics.writer.Path.mkdir"), patch("goldfish.metrics.writer.Path.touch"):
             log_metric("loss", 0.5)
 
-            # Just verify it doesn't crash - actual directory creation is mocked
+            # Just verify it doesn't crash - actual directory/file creation is mocked
 
     def test_idempotent_finish(self, tmp_path, monkeypatch):
         """Test that finish() can be called multiple times safely."""

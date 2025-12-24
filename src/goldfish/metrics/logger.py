@@ -66,6 +66,7 @@ class MetricsLogger:
         workspace: str | None = None,
         stage: str | None = None,
         auto_flush_threshold: int | None = None,
+        auto_flush_interval: float | None = None,
         backend_retry_delay: float | None = None,
     ):
         """Initialize metrics logger.
@@ -78,11 +79,17 @@ class MetricsLogger:
             workspace: Workspace name (for backend tagging)
             stage: Stage name (for backend tagging)
             auto_flush_threshold: Auto-flush after N metrics (default 100)
+            auto_flush_interval: Max seconds between flushes for real-time visibility (default 30)
             backend_retry_delay: Seconds to wait before retrying a failed backend (default 60)
         """
         # LocalWriter always runs
         threshold = 100 if auto_flush_threshold is None else auto_flush_threshold
-        self.local_writer = LocalWriter(outputs_dir=outputs_dir, auto_flush_threshold=threshold)
+        interval = 30.0 if auto_flush_interval is None else auto_flush_interval
+        self.local_writer = LocalWriter(
+            outputs_dir=outputs_dir,
+            auto_flush_threshold=threshold,
+            auto_flush_interval=interval,
+        )
 
         # Backend is optional
         self.backend = backend
