@@ -422,6 +422,50 @@ class TestDaemonConnection:
             # Should have tried to ensure daemon
             assert mock_ensure.call_count >= 1
 
+    def test_force_restart_triggers_restart(self, short_tmp_path):
+        """force_restart=True triggers daemon restart even if running."""
+        from goldfish.mcp_proxy import DaemonConnection
+
+        socket_path = short_tmp_path / "t.sock"
+
+        # Mock is_daemon_running to return True (daemon is running)
+        # Mock _restart_daemon to track calls
+        with (
+            patch("goldfish.mcp_proxy.is_daemon_running", return_value=(True, 12345)),
+            patch.object(DaemonConnection, "_restart_daemon") as mock_restart,
+            patch.object(DaemonConnection, "_health_check"),
+        ):
+            # Create connection with force_restart=True
+            conn = DaemonConnection(socket_path, short_tmp_path, force_restart=True)
+
+            # _restart_daemon should have been called
+            mock_restart.assert_called_once()
+
+    def test_no_force_restart_skips_restart_when_healthy(self, short_tmp_path):
+        """force_restart=False does not restart healthy daemon."""
+        from goldfish.mcp_proxy import DaemonConnection
+
+        socket_path = short_tmp_path / "t.sock"
+
+        # Mock is_daemon_running to return True
+        # Mock _health_check to return matching version
+        with (
+            patch("goldfish.mcp_proxy.is_daemon_running", return_value=(True, 12345)),
+            patch.object(DaemonConnection, "_restart_daemon") as mock_restart,
+            patch.object(
+                DaemonConnection,
+                "_health_check",
+                return_value={"version": "unknown", "protocol_version": "1.0"},
+            ),
+            patch("goldfish.mcp_proxy._get_version", return_value="unknown"),
+            patch("goldfish.mcp_proxy.DAEMON_PROTOCOL_VERSION", "1.0"),
+        ):
+            # Create connection with force_restart=False (default)
+            conn = DaemonConnection(socket_path, short_tmp_path, force_restart=False)
+
+            # _restart_daemon should NOT have been called
+            mock_restart.assert_not_called()
+
 
 class TestGracefulShutdown:
     """Tests for graceful shutdown behavior."""
