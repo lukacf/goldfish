@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -47,13 +48,20 @@ class LocalWriter:
     ...
     """
 
-    def __init__(self, outputs_dir: Path | None = None, auto_flush_threshold: int = 100):
+    def __init__(
+        self,
+        outputs_dir: Path | None = None,
+        auto_flush_threshold: int = 100,
+        auto_flush_interval: float = 30.0,
+    ):
         """Initialize local writer.
 
         Args:
             outputs_dir: Output directory (defaults to GOLDFISH_OUTPUTS_DIR env var)
             auto_flush_threshold: Number of metrics to buffer before auto-flushing
                                   (default: 100, range: 10-10000)
+            auto_flush_interval: Maximum seconds between flushes for real-time visibility
+                                 (default: 30.0). Set to 0 to disable time-based flushing.
         """
         if outputs_dir is None:
             outputs_dir_str = os.environ.get("GOLDFISH_OUTPUTS_DIR", "/mnt/outputs")
@@ -77,6 +85,13 @@ class LocalWriter:
         except OSError as exc:
             raise MetricsInitializationError(f"Failed to create outputs directory: {exc}", self.metrics_dir) from exc
 
+        # Create empty metrics file eagerly so log syncer can detect it
+        # This ensures the file exists even before the first metric is logged/flushed
+        try:
+            self.metrics_file.touch(exist_ok=True)
+        except OSError as exc:
+            raise MetricsInitializationError(f"Failed to create metrics file: {exc}", self.metrics_file) from exc
+
         # Thread safety lock
         self._lock = threading.Lock()
 
@@ -92,6 +107,10 @@ class LocalWriter:
         self._flush_errors: list[str] = []
         self._metrics_lost: int = 0
         self._validation_errors: list[str] = []
+
+        # Time-based auto-flush for real-time visibility
+        self._auto_flush_interval = max(0.0, auto_flush_interval)
+        self._last_flush_time: float = time.time()
 
     def log_metric(
         self,
@@ -162,8 +181,13 @@ class LocalWriter:
         with self._lock:
             self._metrics_buffer.append(metric)
 
-            # Auto-flush if threshold exceeded (inside lock)
-            if len(self._metrics_buffer) >= self._auto_flush_threshold:
+            # Auto-flush if threshold exceeded OR time interval exceeded
+            should_flush = len(self._metrics_buffer) >= self._auto_flush_threshold
+            if not should_flush and self._auto_flush_interval > 0:
+                elapsed = time.time() - self._last_flush_time
+                should_flush = elapsed >= self._auto_flush_interval and len(self._metrics_buffer) > 0
+
+            if should_flush:
                 self._flush_unlocked(raise_on_error=True)
 
         return True
@@ -277,6 +301,7 @@ class LocalWriter:
             if wrote:
                 self._metrics_buffer.clear()
                 self._artifacts.clear()
+                self._last_flush_time = time.time()
             else:
                 # Retain valid entries for retry; drop invalid ones already counted as lost
                 self._metrics_buffer = valid_metrics

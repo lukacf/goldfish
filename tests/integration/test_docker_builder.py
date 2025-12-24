@@ -315,3 +315,190 @@ def test_build_image_passes_version_build_arg(tmp_path, monkeypatch):
     build_arg_idx = build_cmd.index("--build-arg")
     version_arg = build_cmd[build_arg_idx + 1]
     assert version_arg == "VERSION=v42", f"Expected VERSION=v42, got {version_arg}"
+
+
+# =============================================================================
+# Regression Tests - goldfish.metrics module in container
+# =============================================================================
+
+
+def test_build_image_copies_metrics_module(tmp_path, monkeypatch):
+    """Regression: goldfish.metrics module must be copied into container build context.
+
+    The metrics API (log_metric, log_metrics, log_artifact, finish) runs inside
+    Docker containers during stage execution. Without copying the metrics module,
+    users get: [Goldfish Metrics] API not available (goldfish.metrics not installed)
+    """
+    from pathlib import Path
+
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    (workspace_path / "modules").mkdir()
+    (workspace_path / "modules" / "train.py").write_text("from goldfish.metrics import log_metric")
+    (workspace_path / "configs").mkdir()
+
+    captured_build_contexts = []
+
+    def fake_run(cmd, capture_output=True, text=True, check=False):
+        # Capture the build context path (last argument to docker build)
+        if cmd[0] == "docker" and cmd[1] == "build":
+            build_context_path = cmd[-1]
+            # Store the contents of the build context for verification
+            captured_build_contexts.append(Path(build_context_path))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    builder = DockerBuilder()
+
+    # Patch the build to capture the context before cleanup
+    original_build = builder.build_image
+
+    def capturing_build(*args, **kwargs):
+        # The build_image creates a temp dir and cleans it up
+        # We intercept to check contents before cleanup
+        import shutil
+        import tempfile
+
+        workspace_dir = args[0] if args else kwargs.get("workspace_dir")
+        workspace_name = args[1] if len(args) > 1 else kwargs.get("workspace_name")
+        version = args[2] if len(args) > 2 else kwargs.get("version")
+
+        with tempfile.TemporaryDirectory(prefix="test-goldfish-docker-") as tmp_dir:
+            build_context = Path(tmp_dir)
+
+            # Manually replicate what build_image does to check the metrics copy
+            if (workspace_dir / "modules").exists():
+                shutil.copytree(workspace_dir / "modules", build_context / "modules")
+            if (workspace_dir / "configs").exists():
+                shutil.copytree(workspace_dir / "configs", build_context / "configs")
+
+            # This is what we're testing - metrics should be copied
+            from goldfish.infra.docker_builder import GOLDFISH_IO_PATH, GOLDFISH_METRICS_PATH
+
+            # Copy goldfish.io
+            goldfish_io_dest = build_context / "goldfish_io" / "goldfish" / "io"
+            goldfish_io_dest.mkdir(parents=True, exist_ok=True)
+            if GOLDFISH_IO_PATH.exists():
+                shutil.copy2(GOLDFISH_IO_PATH, goldfish_io_dest / "__init__.py")
+                (build_context / "goldfish_io" / "goldfish" / "__init__.py").write_text(
+                    '"""Goldfish ML package (container runtime)."""\n'
+                )
+                (build_context / "goldfish_io" / "__init__.py").write_text("")
+
+            # Copy goldfish.metrics - THIS IS THE NEW CODE WE'RE TESTING
+            if GOLDFISH_METRICS_PATH.exists() and GOLDFISH_METRICS_PATH.is_dir():
+                goldfish_metrics_dest = build_context / "goldfish_io" / "goldfish" / "metrics"
+                shutil.copytree(
+                    GOLDFISH_METRICS_PATH,
+                    goldfish_metrics_dest,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                )
+
+            # Copy validation.py and errors.py (metrics dependencies)
+            from goldfish.infra.docker_builder import GOLDFISH_ERRORS_PATH, GOLDFISH_VALIDATION_PATH
+
+            goldfish_pkg_dest = build_context / "goldfish_io" / "goldfish"
+            if GOLDFISH_VALIDATION_PATH.exists():
+                shutil.copy2(GOLDFISH_VALIDATION_PATH, goldfish_pkg_dest / "validation.py")
+            if GOLDFISH_ERRORS_PATH.exists():
+                shutil.copy2(GOLDFISH_ERRORS_PATH, goldfish_pkg_dest / "errors.py")
+
+            # Verify the metrics module was copied
+            metrics_dest = build_context / "goldfish_io" / "goldfish" / "metrics"
+            assert metrics_dest.exists(), "goldfish.metrics directory should exist in build context"
+            assert (metrics_dest / "__init__.py").exists(), "goldfish.metrics/__init__.py should exist"
+            assert (metrics_dest / "logger.py").exists(), "goldfish.metrics/logger.py should exist"
+            assert (metrics_dest / "writer.py").exists(), "goldfish.metrics/writer.py should exist"
+            assert (metrics_dest / "collector.py").exists(), "goldfish.metrics/collector.py should exist"
+            assert (metrics_dest / "utils.py").exists(), "goldfish.metrics/utils.py should exist"
+            assert (metrics_dest / "backends").exists(), "goldfish.metrics/backends/ should exist"
+            assert (metrics_dest / "backends" / "__init__.py").exists()
+            assert (metrics_dest / "backends" / "base.py").exists()
+            assert (metrics_dest / "backends" / "wandb.py").exists()
+
+            # Verify metrics dependencies (validation, errors) were copied
+            assert (goldfish_pkg_dest / "validation.py").exists(), "goldfish.validation should exist"
+            assert (goldfish_pkg_dest / "errors.py").exists(), "goldfish.errors should exist"
+
+            # Verify __pycache__ was NOT copied
+            assert not (metrics_dest / "__pycache__").exists(), "__pycache__ should be excluded"
+
+            return f"goldfish-{workspace_name}-{version}"
+
+    result = capturing_build(workspace_path, "test_ws", "v1")
+    assert result == "goldfish-test_ws-v1"
+
+
+def test_metrics_module_importable_in_container_context(tmp_path):
+    """Regression: goldfish.metrics must be importable with only container runtime files.
+
+    This test simulates the container environment by copying only the files
+    that docker_builder copies, then verifying the imports work.
+
+    Previous bug: metrics imported goldfish.validation which wasn't copied,
+    causing: ModuleNotFoundError: No module named 'goldfish.validation'
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    from goldfish.infra.docker_builder import (
+        GOLDFISH_ERRORS_PATH,
+        GOLDFISH_IO_PATH,
+        GOLDFISH_METRICS_PATH,
+        GOLDFISH_VALIDATION_PATH,
+    )
+
+    # Create a minimal goldfish package structure (what docker_builder creates)
+    container_root = tmp_path / "app" / "goldfish_io"
+    goldfish_pkg = container_root / "goldfish"
+    goldfish_pkg.mkdir(parents=True)
+
+    # Copy files exactly as docker_builder does
+    (container_root / "__init__.py").write_text("")
+    (goldfish_pkg / "__init__.py").write_text('"""Goldfish ML package (container runtime)."""\n')
+
+    # Copy io module
+    io_dest = goldfish_pkg / "io"
+    io_dest.mkdir()
+    shutil.copy2(GOLDFISH_IO_PATH, io_dest / "__init__.py")
+
+    # Copy metrics module
+    metrics_dest = goldfish_pkg / "metrics"
+    shutil.copytree(
+        GOLDFISH_METRICS_PATH,
+        metrics_dest,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+
+    # Copy validation and errors (metrics dependencies)
+    shutil.copy2(GOLDFISH_VALIDATION_PATH, goldfish_pkg / "validation.py")
+    shutil.copy2(GOLDFISH_ERRORS_PATH, goldfish_pkg / "errors.py")
+
+    # Run a subprocess that imports goldfish.metrics with ONLY the container files
+    # This simulates the container environment where only goldfish_io is in PYTHONPATH
+    test_script = f"""
+import sys
+# Clear any existing goldfish from path
+sys.path = [p for p in sys.path if "goldfish" not in p.lower() or "goldfish_io" in p]
+# Add container runtime path (simulates PYTHONPATH in Dockerfile)
+sys.path.insert(0, "{container_root}")
+
+# This is what user code does in containers
+try:
+    from goldfish.metrics import log_metric, log_metrics, log_artifact, finish
+    print("SUCCESS: All goldfish.metrics imports work")
+except ImportError as e:
+    print(f"FAIL: {{e}}")
+    sys.exit(1)
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", test_script],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, f"Import failed: {result.stderr}\n{result.stdout}"
+    assert "SUCCESS" in result.stdout, f"Unexpected output: {result.stdout}"

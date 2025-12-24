@@ -406,7 +406,8 @@ class StageExecutor:
 
                 # Get signal from that run
                 signals = self.db.list_signals(stage_run_id=source_run_id)
-                signal_name = input_def.name  # Signal name from input definition
+                # Use explicit signal name if specified, otherwise default to input name
+                signal_name = input_def.signal or input_def.name
 
                 signal = None
                 for s in signals:
@@ -415,7 +416,11 @@ class StageExecutor:
                         break
 
                 if not signal:
-                    raise GoldfishError(f"Signal '{signal_name}' not found in stage run {source_run_id}")
+                    available = [s["signal_name"] for s in signals]
+                    raise GoldfishError(
+                        f"Signal '{signal_name}' not found in stage '{input_def.from_stage}' "
+                        f"(run {source_run_id}). Available signals: {available}"
+                    )
 
                 inputs[input_name] = signal["storage_location"]
                 sources[input_name] = {
