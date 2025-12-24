@@ -250,6 +250,13 @@ class MetricsCollector:
             return result, start_offset
 
         if file_size < start_offset:
+            logger.warning(
+                "Metrics file truncated for %s (size=%s < offset=%s); restarting from beginning",
+                stage_run_id,
+                file_size,
+                start_offset,
+            )
+            self._record_error(result, "Metrics file truncated; restarting from beginning")
             start_offset = 0
 
         if file_size == start_offset:

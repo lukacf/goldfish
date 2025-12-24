@@ -210,6 +210,9 @@ class WandBBackend(MetricsBackend):
             raise InvalidArtifactPathError(str(path), "artifact path cannot be a symlink")
 
         artifact_mode = os.environ.get("GOLDFISH_WANDB_ARTIFACT_MODE", "file").strip().lower()
+        if artifact_mode not in {"file", "artifact"}:
+            logger.warning("Invalid GOLDFISH_WANDB_ARTIFACT_MODE '%s', defaulting to 'file'", artifact_mode)
+            artifact_mode = "file"
         if artifact_mode == "artifact":
             artifact_type = os.environ.get("GOLDFISH_WANDB_ARTIFACT_TYPE", "artifact")
             artifact = wandb.Artifact(name=name, type=artifact_type)
