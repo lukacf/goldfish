@@ -447,6 +447,7 @@ class SignalDef(BaseModel):
     name: str
     type: str  # dataset, npy, csv, directory, file
     from_stage: str | None = None  # For inputs: which stage produces this
+    signal: str | None = None  # For from_stage: which output signal to use (defaults to input name)
     dataset: str | None = None  # For dataset type: dataset name
     storage: str | None = None  # gcs, hyperdisk, local (hint)
     format: str | None = None  # Override format detection

@@ -143,7 +143,9 @@ class TestLocalWriter:
             writer.log_metric("loss", float(i))
 
         metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"
-        assert not metrics_file.exists()  # Not flushed yet
+        # File exists (created eagerly) but should be empty - not flushed yet
+        assert metrics_file.exists()
+        assert metrics_file.stat().st_size == 0
 
         # 100th metric should trigger auto-flush
         writer.log_metric("loss", 99.0)
@@ -152,6 +154,53 @@ class TestLocalWriter:
         with open(metrics_file) as f:
             lines = f.readlines()
             assert len(lines) == 100
+
+    def test_time_based_auto_flush(self, tmp_path):
+        """Test that time-based flush triggers after interval expires."""
+        import time
+
+        # Short interval for testing (0.1 seconds)
+        writer = LocalWriter(outputs_dir=tmp_path, auto_flush_interval=0.1)
+
+        # Log 1 metric - won't trigger threshold-based flush (100)
+        writer.log_metric("loss", 0.5)
+
+        metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"
+        # File exists but should be empty - not flushed yet
+        assert metrics_file.stat().st_size == 0
+
+        # Wait for interval to expire
+        time.sleep(0.15)
+
+        # Log another metric - should trigger time-based flush
+        writer.log_metric("loss", 0.4)
+
+        # Now file should have content
+        with open(metrics_file) as f:
+            lines = f.readlines()
+            assert len(lines) == 2
+
+    def test_time_based_flush_disabled(self, tmp_path):
+        """Test that time-based flush can be disabled with interval=0."""
+        import time
+
+        # Disable time-based flush
+        writer = LocalWriter(outputs_dir=tmp_path, auto_flush_interval=0)
+
+        # Log metrics
+        writer.log_metric("loss", 0.5)
+        time.sleep(0.05)
+        writer.log_metric("loss", 0.4)
+
+        metrics_file = tmp_path / ".goldfish" / "metrics.jsonl"
+        # File should still be empty - no time-based flush
+        assert metrics_file.stat().st_size == 0
+
+        # Explicit flush should work
+        writer.flush()
+        with open(metrics_file) as f:
+            lines = f.readlines()
+            assert len(lines) == 2
 
     def test_flush_error_retains_buffer(self, tmp_path):
         """Flush errors should retain the buffer for retry."""

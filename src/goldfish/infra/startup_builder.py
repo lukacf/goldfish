@@ -94,10 +94,31 @@ INSTANCE_NAME=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.int
 INSTANCE_ZONE=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone | awk -F/ '{print $NF}' || echo "unknown")
 PROJECT_ID=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/project/project-id || echo "unknown")
 
+# Final log sync function - called by EXIT trap to ensure errors are captured
+# GCS paths are set by log_syncer_section or build_startup_script
+sync_final_logs() {
+    echo "=== SYNCING FINAL LOGS BEFORE DELETION ==="
+    # Only sync if GCS paths are configured (set by log_syncer_section)
+    if [[ -n "${GCS_STDOUT_PATH:-}" ]]; then
+        echo "Uploading final stdout.log..."
+        timeout 30 gcloud storage cp "${LOCAL_STDOUT:-/tmp/stdout.log}" "$GCS_STDOUT_PATH" --quiet 2>/dev/null || echo "stdout upload failed"
+    fi
+    if [[ -n "${GCS_STDERR_PATH:-}" ]]; then
+        echo "Uploading final stderr.log..."
+        timeout 30 gcloud storage cp "${LOCAL_STDERR:-/tmp/stderr.log}" "$GCS_STDERR_PATH" --quiet 2>/dev/null || echo "stderr upload failed"
+    fi
+    if [[ -n "${GCS_METRICS_PATH:-}" && -f "${LOCAL_METRICS:-/dev/null}" ]]; then
+        echo "Uploading final metrics.jsonl..."
+        timeout 30 gcloud storage cp "$LOCAL_METRICS" "$GCS_METRICS_PATH" --quiet 2>/dev/null || echo "metrics upload failed"
+    fi
+    echo "=== FINAL LOG SYNC COMPLETE ==="
+}
+
 self_delete() {
     echo "=== SELF-DELETING INSTANCE $INSTANCE_NAME in zone $INSTANCE_ZONE ==="
     log_stage "self_delete_begin" || true
-    # Try to sync any remaining logs before deletion
+    # CRITICAL: Sync final logs before deletion to capture any errors
+    sync_final_logs || true
     sync || true
     sleep 2
     # Delete the instance (this terminates the script)
@@ -181,11 +202,18 @@ def watchdog_section(max_runtime_seconds: int) -> str:
     sleep {max_runtime_seconds}
     echo "=== WATCHDOG TIMEOUT REACHED ({max_runtime_seconds}s) - FORCING DELETION ==="
     log_stage "watchdog_timeout" || true
-    # Kill all user processes to trigger the EXIT trap
-    pkill -9 -u root || true
-    sleep 5
-    # If we're still alive, force delete directly
-    gcloud compute instances delete "$INSTANCE_NAME" --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" --quiet 2>/dev/null || shutdown -h now || true
+    # CRITICAL: Delete instance FIRST, before killing processes
+    # Previous bug: pkill -9 -u root killed the watchdog itself before gcloud could run!
+    echo "Deleting instance $INSTANCE_NAME..."
+    gcloud compute instances delete "$INSTANCE_NAME" --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" --quiet 2>/dev/null &
+    DELETE_PID=$!
+    # Give gcloud a head start, then kill docker to stop wasting GPU time
+    sleep 2
+    docker kill $(docker ps -q) 2>/dev/null || true
+    # Wait for delete to complete (or timeout after 60s)
+    timeout 60 tail --pid=$DELETE_PID -f /dev/null 2>/dev/null || true
+    # Fallback: if gcloud delete failed, force shutdown
+    shutdown -h now || true
 ) &
 WATCHDOG_PID=$!
 echo "Watchdog started (PID=$WATCHDOG_PID, timeout={max_runtime_seconds}s)"
@@ -518,6 +546,11 @@ LOCAL_STDOUT=/tmp/stdout.log
 LOCAL_STDERR=/tmp/stderr.log
 LOCAL_METRICS=/mnt/outputs/.goldfish/metrics.jsonl
 LOG_SYNC_INTERVAL={sync_interval}
+
+# Export GCS paths for sync_final_logs() to use in EXIT trap
+GCS_STDOUT_PATH="{gcs_stdout}"
+GCS_STDERR_PATH="{gcs_stderr}"
+GCS_METRICS_PATH="{gcs_metrics}"
 
 start_log_syncer() {{
     (
