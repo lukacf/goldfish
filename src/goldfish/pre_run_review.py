@@ -26,6 +26,45 @@ logger = logging.getLogger(__name__)
 MAX_FILE_SIZE = 100_000  # 100KB per file
 MAX_TOTAL_CONTEXT_SIZE = 500_000  # 500KB total context
 
+
+def escape_for_prompt(text: str) -> str:
+    """Escape special XML/HTML characters in user content for safe prompt inclusion.
+
+    Prevents XML/HTML injection attacks by escaping special characters that could
+    be interpreted as markup. This ensures user-provided content (file contents,
+    descriptions, configs) cannot inject malicious tags into AI prompts.
+
+    The escaping order is important:
+    1. & must be escaped first, otherwise &lt; would become &amp;lt;
+    2. Then < > " ' are escaped
+
+    Args:
+        text: User-provided text that may contain special characters
+
+    Returns:
+        Text with XML special characters escaped:
+        - & -> &amp;
+        - < -> &lt;
+        - > -> &gt;
+        - " -> &quot;
+        - ' -> &#39;
+
+    Examples:
+        >>> escape_for_prompt("if x < 5:")
+        'if x &lt; 5:'
+        >>> escape_for_prompt('name = "value"')
+        'name = &quot;value&quot;'
+    """
+    # Escape & first to avoid double-escaping other entities
+    text = text.replace("&", "&amp;")
+    # Then escape the other special characters
+    text = text.replace("<", "&lt;")
+    text = text.replace(">", "&gt;")
+    text = text.replace('"', "&quot;")
+    text = text.replace("'", "&#39;")
+    return text
+
+
 # Review prompt template
 REVIEW_PROMPT = """You are reviewing an ML experiment before execution. Your job is to catch errors that would waste compute time.
 

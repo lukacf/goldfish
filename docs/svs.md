@@ -626,45 +626,93 @@ Example `stats_json`:
 **Goal:** Consolidate all AI review calls (pre‑run, during‑run, post‑run) behind a single abstraction so we can
 swap Claude Code for Codex CLI (or any other assistant) without rewriting SVS logic.
 
-#### Core Interface
+#### Core Interface (Provider‑Agnostic)
 
 ```python
-class ReviewRequest(BaseModel):
-    phase: Literal["pre_run", "during_run", "post_run"]
+@dataclass
+class ToolPolicy:
+    permission_mode: Literal["plan", "ask", "auto"]
+    allow_tools: list[str] | None = None
+    deny_tools: list[str] | None = None
+    mcp_servers: list[str] | None = None
+
+
+@dataclass
+class AgentRequest:
+    mode: Literal["batch", "interactive"]
     prompt: str
     context: dict[str, Any]
-    tools: Literal["read_only", "container_full"]
-    timeout_seconds: int
-    max_turns: int
+    cwd: str
+    model: str | None = None
+    max_turns: int | None = None
+    output_format: Literal["text", "json"] = "text"
+    tool_policy: ToolPolicy | None = None
+    timeout_seconds: int | None = None
 
 
-class ReviewResult(BaseModel):
-    decision: Literal["OK", "WARN", "BLOCK"]
+@dataclass
+class AgentResult:
+    decision: Literal["approved", "blocked", "warned"] | None
     findings: list[str]
-    raw_response: str
-    provider: str
-    model: str
+    raw_output: str
+    structured_output: dict[str, Any] | None
+    tool_calls: list[dict[str, Any]] | None
     duration_ms: int
+    exit_code: int
 
 
 class AgentProvider(Protocol):
     name: str
-    def run(self, request: ReviewRequest) -> ReviewResult: ...
+    def run(self, request: AgentRequest) -> AgentResult: ...
 ```
 
-#### Built-in Providers
-- **ClaudeCodeProvider** (current): wraps Claude Code Agent SDK with tool access.
-- **CodexCLIProvider** (future): spawns Codex CLI with structured prompt/response.
-- **RemoteAPIProvider**: direct API calls to external LLMs without tools.
-- **NullProvider**: returns OK for tests and air‑gapped environments.
+**Why this shape:** `prompt` is explicit; `context` stays structured; `tool_policy` captures common
+permission controls; `output_format=json` enables machine parsing when supported.
+
+#### Provider Mapping (Common CLI Shapes)
+
+**Claude Code CLI**
+- Mode: `claude -p` (batch) / interactive TUI
+- Output: JSON supported via CLI flags
+- Permissions + tools configured via CLI flags or config
+
+**Codex CLI**
+- Headless example (provided):
+```bash
+codex exec --full-auto --sandbox workspace-write \
+"You are working in a Node.js monorepo with Jest tests and GitHub Actions. \
+Read the repository, run the test suite, identify the minimal change needed \
+to make all tests pass, implement only that change, and stop. Do not refactor \
+unrelated code or files. Keep changes small and surgical."
+```
+
+**Gemini CLI**
+- Interactive and batch use; supports MCP servers
+- Tool access configured via CLI + MCP config
+
+#### Container‑Side Installation (Required for During/Post‑Run Agents)
+
+Bake CLI tools into the container image (no runtime installs):
+
+```dockerfile
+FROM node:20-bullseye
+
+# Install agent CLIs (pin versions in real builds)
+RUN npm install -g \
+  @anthropic-ai/claude-code \
+  @openai/codex \
+  @google/gemini-cli
+```
+
+This makes all providers available inside containers for post‑run and during‑run reviews.
 
 #### Unified Orchestrator
 
 All SVS AI reviews call a single orchestrator:
-- Validates request
 - Builds prompt from shared templates
-- Calls provider
-- Parses structured response into `ReviewResult`
+- Applies ToolPolicy
+- Calls provider adapter (CLI or SDK)
+- Parses response into `AgentResult`
 - Writes audit entry (`svs_reviews`)
 
 #### Configuration
@@ -672,7 +720,7 @@ All SVS AI reviews call a single orchestrator:
 ```yaml
 # goldfish.yaml
 svs:
-  agent_provider: claude_code  # claude_code | codex_cli | remote_api | null
+  agent_provider: claude_code  # claude_code | codex_cli | gemini_cli | null
   agent_model: claude-sonnet-4-5
   agent_timeout: 30
   agent_max_turns: 3
@@ -683,12 +731,11 @@ svs:
 ```
 
 #### Implementation Plan (DRY, minimal churn)
-1. **Extract** current pre‑run review into `ai/providers/claude_code.py`.
-2. **Define** `ReviewRequest/ReviewResult` + `AgentProvider` protocol in `ai/agent.py`.
-3. **Add** a shared `ReviewOrchestrator` used by pre‑run and SVS post‑run.
+1. **Define** `AgentRequest/AgentResult` + `AgentProvider` in `svs/agent.py`.
+2. **Implement** `ClaudeCodeProvider`, `CodexCLIProvider`, `GeminiCLIProvider`, `NullProvider`.
+3. **Add** a shared `ReviewOrchestrator` for pre‑run + post‑run.
 4. **Wire** pre‑run review through the orchestrator (no behavior change).
-5. **Add** container‑side hooks for during/post‑run using the same orchestrator.
-6. **Stub** Codex CLI provider with the same contract for future replacement.
+5. **Add** container‑side post‑run review using the same orchestrator.
 
 **Why this matters:** It eliminates duplicate logic, centralizes prompt/response handling, and makes the
 AI backend swappable without touching SVS logic.

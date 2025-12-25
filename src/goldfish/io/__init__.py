@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from goldfish.io.stats import StatsJob
 from goldfish.metrics import finish as finish_metrics
 from goldfish.metrics import log_artifact, log_metric, log_metrics
 
@@ -195,6 +196,25 @@ def save_output(name: str, data: Any, artifact: bool = False):
 
     else:
         raise ValueError(f"Cannot auto-save format '{fmt}'. Use get_output_path() for manual saving.")
+
+    # Enqueue stats if SVS is enabled
+    from goldfish.io.bootstrap import _get_stats_queue, _svs_enabled
+
+    if _svs_enabled():
+        try:
+            stats_queue = _get_stats_queue()
+            stats_queue.enqueue(
+                StatsJob(
+                    name=name,
+                    path=output_path,
+                    dtype=str(getattr(data, "dtype", "unknown")),
+                )
+            )
+        except Exception as e:
+            # Stats are best-effort; don't fail the stage if enqueuing fails
+            import logging
+
+            logging.getLogger(__name__).warning(f"Failed to enqueue stats for {name}: {e}")
 
     if artifact:
         _mark_as_artifact(name)

@@ -177,6 +177,7 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     error TEXT,
     outcome TEXT,                     -- NULL (unset), 'success', 'bad_results' - semantic result quality
     attempt_num INTEGER,              -- Groups consecutive runs; increments after outcome='success'
+    svs_findings_json TEXT,           -- JSON: SVS post-run findings (stats + AI review)
     FOREIGN KEY (workspace_name, version) REFERENCES workspace_versions(workspace_name, version),
     FOREIGN KEY (stage_version_id) REFERENCES stage_versions(id)
 );
@@ -234,6 +235,7 @@ CREATE TABLE IF NOT EXISTS signal_lineage (
     is_artifact BOOLEAN DEFAULT 0,    -- 1 if marked as permanent artifact
     source_stage_run_id TEXT,         -- Upstream stage run that produced this input
     source_stage_version_id INTEGER,  -- Upstream stage version for lineage tracking
+    stats_json TEXT,                  -- JSON: SVS output statistics (entropy, null_ratio, etc.)
     PRIMARY KEY (stage_run_id, signal_name),
     FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id),
     FOREIGN KEY (consumed_by) REFERENCES stage_runs(id),
@@ -317,3 +319,62 @@ CREATE TABLE IF NOT EXISTS run_artifacts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_artifacts_stage_run ON run_artifacts(stage_run_id);
+
+
+-- =============================================================================
+-- SVS (Semantic Validation System) Tables
+-- =============================================================================
+
+-- SVS Reviews (AI review results for pre-run, during-run, post-run)
+CREATE TABLE IF NOT EXISTS svs_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_run_id TEXT NOT NULL,
+    signal_name TEXT,                     -- NULL for pre-run, signal name for post-run
+    review_type TEXT NOT NULL,            -- 'pre_run' | 'during_run' | 'post_run'
+    model_used TEXT NOT NULL,             -- e.g., 'claude-opus-4-5-20251101'
+    prompt_hash TEXT NOT NULL,            -- SHA256 of prompt for dedup
+    stats_json TEXT,                      -- Input stats for post-run reviews
+    response_text TEXT,                   -- Raw AI response
+    parsed_findings TEXT,                 -- JSON: structured findings
+    decision TEXT NOT NULL,               -- 'approved' | 'blocked' | 'warned'
+    policy_overrides TEXT,                -- JSON: any policy overrides applied
+    reviewed_at TEXT NOT NULL,
+    duration_ms INTEGER,
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_svs_reviews_stage_run ON svs_reviews(stage_run_id);
+CREATE INDEX IF NOT EXISTS idx_svs_reviews_type ON svs_reviews(review_type);
+CREATE INDEX IF NOT EXISTS idx_svs_reviews_decision ON svs_reviews(decision);
+CREATE INDEX IF NOT EXISTS idx_svs_reviews_reviewed_at ON svs_reviews(reviewed_at);
+
+
+-- Failure Patterns (self-learning failure detection heuristics)
+CREATE TABLE IF NOT EXISTS failure_patterns (
+    id TEXT PRIMARY KEY,                  -- UUID
+    symptom TEXT NOT NULL,                -- What went wrong
+    root_cause TEXT NOT NULL,             -- Why it happened
+    detection_heuristic TEXT NOT NULL,    -- How to detect it
+    prevention TEXT NOT NULL,             -- How to prevent it
+    severity TEXT CHECK(severity IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW')),
+    stage_type TEXT,                      -- e.g., 'train', 'preprocess', NULL for all
+    source_run_id TEXT,                   -- Stage run that triggered extraction
+    source_workspace TEXT,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT,
+    occurrence_count INTEGER DEFAULT 1,
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected', 'archived')),
+    confidence TEXT CHECK(confidence IN ('HIGH', 'MEDIUM', 'LOW')),
+    approved_at TEXT,
+    approved_by TEXT,
+    rejection_reason TEXT,
+    manually_edited BOOLEAN DEFAULT 0,
+    enabled BOOLEAN DEFAULT 1,
+    FOREIGN KEY (source_run_id) REFERENCES stage_runs(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_failure_patterns_status ON failure_patterns(status);
+CREATE INDEX IF NOT EXISTS idx_failure_patterns_severity ON failure_patterns(severity);
+CREATE INDEX IF NOT EXISTS idx_failure_patterns_stage_type ON failure_patterns(stage_type);
+CREATE INDEX IF NOT EXISTS idx_failure_patterns_enabled ON failure_patterns(enabled);
+CREATE INDEX IF NOT EXISTS idx_failure_patterns_created ON failure_patterns(created_at)

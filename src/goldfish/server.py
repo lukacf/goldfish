@@ -337,6 +337,16 @@ from goldfish.server_tools.logging_tools import (  # noqa: E402, F401
     search_goldfish_logs,
 )
 from goldfish.server_tools.pipeline_tools import get_pipeline, update_pipeline, validate_pipeline  # noqa: E402, F401
+from goldfish.server_tools.svs_tools import (  # noqa: E402, F401
+    approve_pattern,
+    get_failure_pattern,
+    get_run_svs_findings,
+    get_svs_reviews,
+    list_failure_patterns,
+    reject_pattern,
+    review_pending_patterns,
+    update_pattern,
+)
 from goldfish.server_tools.utility_tools import (  # noqa: E402, F401
     get_audit_log,
     initialize_project,

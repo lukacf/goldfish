@@ -34,6 +34,9 @@ from goldfish.models import (
     StageRunStatus,
 )
 from goldfish.pipeline.manager import PipelineManager
+from goldfish.svs.agent import ClaudeCodeProvider, CodexCLIProvider, GeminiCLIProvider, NullProvider
+from goldfish.svs.manifest import read_svs_manifests
+from goldfish.svs.post_run import run_post_run_review
 from goldfish.utils import parse_optional_datetime
 from goldfish.utils.config_hash import compute_config_hash
 from goldfish.validation import InvalidSourceMetadataError, parse_source_metadata, validate_source_metadata
@@ -448,6 +451,50 @@ class StageExecutor:
 
         return inputs, sources
 
+    def _get_svs_agent(self):
+        """Get the configured SVS agent provider."""
+        provider_name = self.config.svs.agent_provider
+        if provider_name == "claude_code":
+            return ClaudeCodeProvider()
+        elif provider_name == "codex_cli":
+            return CodexCLIProvider()
+        elif provider_name == "gemini_cli":
+            return GeminiCLIProvider()
+        elif provider_name == "null":
+            return NullProvider()
+        return NullProvider()
+
+    def _run_post_run_svs_review(self, stage_run_id: str, backend: str) -> None:
+        """Run AI semantic review of stage outputs after completion."""
+        # Only run if SVS and AI post-run are enabled
+        if not self.config.svs.enabled or not self.config.svs.ai_post_run_enabled:
+            return
+
+        # AI review currently only supported for local backend as it needs direct disk access
+        # for reading outputs. GCE support requires downloading full outputs first.
+        if backend != "local":
+            logger.debug(f"Skipping post-run AI review for {stage_run_id}: backend {backend} not yet supported")
+            return
+
+        outputs_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs"
+
+        # Read intermediate stats manifest to pass to agent
+        # (svs_findings.json hasn't been written yet)
+        manifest_data = read_svs_manifests(outputs_dir)
+        stats = manifest_data.get("stats", {})
+
+        # Run review (this writes svs_findings.json)
+        try:
+            agent = self._get_svs_agent()
+            run_post_run_review(
+                outputs_dir=outputs_dir,
+                stats=stats,
+                config=self.config.svs,
+                agent=agent,
+            )
+        except Exception as e:
+            logger.warning(f"SVS post-run AI review failed for {stage_run_id}: {e}")
+
     def _auto_version(self, workspace: str, stage_name: str, reason: str | None) -> tuple[str, str]:
         """Create automatic version for workspace.
 
@@ -812,6 +859,61 @@ class StageExecutor:
             record("schema.content_type", existing_schema.get("content_type"), incoming_schema.get("content_type"))
 
         return reasons
+
+    def _collect_svs_manifests(self, stage_run_id: str, backend: str) -> None:
+        """Read SVS manifests from container output and sync to database."""
+        # Only collect if SVS is enabled
+        if not self.config.svs.enabled:
+            return
+
+        # Determine outputs directory based on backend
+        if backend == "local":
+            outputs_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs"
+        elif backend == "gce":
+            # For GCE, we need to download the .goldfish directory from GCS
+            if not self.config.gcs or not self.config.gcs.bucket:
+                return
+
+            import tempfile
+
+            temp_dir = Path(tempfile.gettempdir()) / "goldfish_svs" / stage_run_id
+            temp_dir.mkdir(parents=True, exist_ok=True)
+
+            # Goldfish manifests are in outputs/.goldfish/
+            bucket = self.config.gcs.bucket
+            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+            gcs_prefix = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/outputs/.goldfish/"
+
+            # We use a simplified approach: just try to download the two known files
+            for filename in ["svs_stats.json", "svs_findings.json"]:
+                dest = temp_dir / ".goldfish" / filename
+                self._download_metrics_from_gcs(gcs_prefix + filename, dest)
+
+            outputs_dir = temp_dir
+        else:
+            return
+
+        # Read manifests using shared logic
+        manifest_data = read_svs_manifests(outputs_dir)
+
+        # 1. Update signal_lineage with stats
+        for signal_name, stats in manifest_data.get("stats", {}).items():
+            self.db.update_signal_lineage_stats(
+                stage_run_id=stage_run_id,
+                signal_name=signal_name,
+                stats_json=json.dumps(stats),
+            )
+
+        # 2. Update stage_run with findings (stats + AI review)
+        if manifest_data.get("ai_review") or manifest_data.get("stats"):
+            findings = {
+                "stats": manifest_data.get("stats"),
+                "ai_review": manifest_data.get("ai_review"),
+            }
+            self.db.update_stage_run_svs_findings(
+                stage_run_id=stage_run_id,
+                svs_findings_json=json.dumps(findings),
+            )
 
     def _collect_metrics(self, stage_run_id: str, backend: str) -> None:
         """Collect metrics from JSONL and store in database."""
@@ -1241,7 +1343,10 @@ class StageExecutor:
             "GOLDFISH_STAGE": stage_name,
             "GOLDFISH_RUN_ID": stage_run_id,
             "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
-            "GOLDFISH_CONFIG": json.dumps(stage_config),
+            "GOLDFISH_STAGE_CONFIG": json.dumps(stage_config),
+            "GOLDFISH_SVS_STATS_ENABLED": "true"
+            if self.config.svs.enabled and self.config.svs.stats_enabled
+            else "false",
         }
 
         # Add git SHA if available
@@ -1423,6 +1528,18 @@ echo "Stage completed successfully"
         except Exception as e:
             # Log warning but don't fail the run if metrics collection fails
             logger.warning(f"Failed to collect metrics for {stage_run_id}: {e}")
+
+        # Run AI semantic review of outputs
+        try:
+            self._run_post_run_svs_review(stage_run_id, backend)
+        except Exception as e:
+            logger.warning(f"Failed AI post-run review for {stage_run_id}: {e}")
+
+        # Collect SVS manifests (stats + AI findings)
+        try:
+            self._collect_svs_manifests(stage_run_id, backend)
+        except Exception as e:
+            logger.warning(f"Failed to collect SVS manifests for {stage_run_id}: {e}")
 
         with self._metrics_sync_lock:
             self._metrics_sync_state.pop(stage_run_id, None)

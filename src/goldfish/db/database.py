@@ -11,6 +11,7 @@ from typing import Any, TypedDict, cast
 from goldfish.db.types import (
     ArtifactRow,
     AuditRow,
+    FailurePatternRow,
     JobInputWithSource,
     JobRow,
     LineageRow,
@@ -18,6 +19,7 @@ from goldfish.db.types import (
     MetricsSummaryRow,
     SourceRow,
     StageVersionRow,
+    SVSReviewRow,
 )
 from goldfish.errors import DatabaseError
 from goldfish.models import JobStatus, PipelineStatus, StageRunStatus
@@ -100,10 +102,12 @@ class Database:
                 ("stage_version_id", "INTEGER"),  # Links to stage_versions
                 ("outcome", "TEXT"),  # NULL, 'success', 'bad_results' - semantic result quality
                 ("attempt_num", "INTEGER"),  # Groups consecutive runs per stage
+                ("svs_findings_json", "TEXT"),  # SVS post-run findings
             ],
             "signal_lineage": [
                 ("source_stage_run_id", "TEXT"),  # Upstream stage run
                 ("source_stage_version_id", "INTEGER"),  # Upstream stage version
+                ("stats_json", "TEXT"),  # SVS output statistics
             ],
             "run_metrics_summary": [
                 ("last_timestamp", "TEXT"),
@@ -2842,3 +2846,376 @@ class Database:
                 (stage_run_id,),
             ).fetchone()
             return int(result[0]) if result else 0
+
+    # =========================================================================
+    # SVS (Semantic Validation System) CRUD
+    # =========================================================================
+
+    def create_svs_review(
+        self,
+        stage_run_id: str,
+        review_type: str,
+        model_used: str,
+        prompt_hash: str,
+        decision: str,
+        reviewed_at: str,
+        signal_name: str | None = None,
+        stats_json: str | None = None,
+        response_text: str | None = None,
+        parsed_findings: str | None = None,
+        policy_overrides: str | None = None,
+        duration_ms: int | None = None,
+    ) -> int:
+        """Create a new SVS review record.
+
+        Args:
+            stage_run_id: Stage run ID
+            review_type: 'pre_run' | 'during_run' | 'post_run'
+            model_used: Model identifier (e.g., 'claude-opus-4-5-20251101')
+            prompt_hash: SHA256 of prompt for deduplication
+            decision: 'approved' | 'blocked' | 'warned'
+            reviewed_at: ISO timestamp
+            signal_name: Signal name (for post-run reviews)
+            stats_json: JSON string of input statistics
+            response_text: Raw AI response
+            parsed_findings: JSON string of structured findings
+            policy_overrides: JSON string of policy overrides
+            duration_ms: Review duration in milliseconds
+
+        Returns:
+            Review ID
+        """
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO svs_reviews (
+                    stage_run_id, signal_name, review_type, model_used, prompt_hash,
+                    stats_json, response_text, parsed_findings, decision,
+                    policy_overrides, reviewed_at, duration_ms
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stage_run_id,
+                    signal_name,
+                    review_type,
+                    model_used,
+                    prompt_hash,
+                    stats_json,
+                    response_text,
+                    parsed_findings,
+                    decision,
+                    policy_overrides,
+                    reviewed_at,
+                    duration_ms,
+                ),
+            )
+            return cursor.lastrowid or 0
+
+    def get_svs_reviews(
+        self,
+        stage_run_id: str,
+        review_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[SVSReviewRow]:
+        """Get SVS reviews for a stage run.
+
+        Args:
+            stage_run_id: Stage run ID to filter by
+            review_type: Optional review type filter ('pre_run', 'during_run', 'post_run')
+            limit: Maximum number of results (default 100)
+            offset: Number of results to skip (default 0)
+
+        Returns:
+            List of SVSReviewRow dicts
+        """
+        with self._conn() as conn:
+            query = "SELECT * FROM svs_reviews WHERE stage_run_id = ?"
+            params: list = [stage_run_id]
+
+            if review_type:
+                query += " AND review_type = ?"
+                params.append(review_type)
+
+            query += " ORDER BY reviewed_at DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+
+            rows = conn.execute(query, params).fetchall()
+            return [cast(SVSReviewRow, dict(row)) for row in rows]
+
+    def get_svs_review(self, review_id: int) -> SVSReviewRow | None:
+        """Get a single SVS review by ID.
+
+        Args:
+            review_id: Review ID
+
+        Returns:
+            SVSReviewRow or None if not found
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM svs_reviews WHERE id = ?",
+                (review_id,),
+            ).fetchone()
+            return cast(SVSReviewRow, dict(row)) if row else None
+
+    def create_failure_pattern(
+        self,
+        pattern_id: str,
+        symptom: str,
+        root_cause: str,
+        detection_heuristic: str,
+        prevention: str,
+        created_at: str,
+        severity: str | None = None,
+        stage_type: str | None = None,
+        source_run_id: str | None = None,
+        source_workspace: str | None = None,
+        confidence: str | None = None,
+        status: str = "pending",
+    ) -> str:
+        """Create a new failure pattern.
+
+        Args:
+            pattern_id: UUID for the pattern
+            symptom: What went wrong
+            root_cause: Why it happened
+            detection_heuristic: How to detect it
+            prevention: How to prevent it
+            created_at: ISO timestamp
+            severity: CRITICAL | HIGH | MEDIUM | LOW
+            stage_type: Stage type filter (e.g., 'train', 'preprocess')
+            source_run_id: Stage run that triggered extraction
+            source_workspace: Workspace where pattern was discovered
+            confidence: HIGH | MEDIUM | LOW
+            status: Pattern status (pending, approved, rejected, archived)
+
+        Returns:
+            Pattern ID
+        """
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO failure_patterns (
+                    id, symptom, root_cause, detection_heuristic, prevention,
+                    created_at, severity, stage_type, source_run_id, source_workspace,
+                    confidence, status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    pattern_id,
+                    symptom,
+                    root_cause,
+                    detection_heuristic,
+                    prevention,
+                    created_at,
+                    severity,
+                    stage_type,
+                    source_run_id,
+                    source_workspace,
+                    confidence,
+                    status,
+                ),
+            )
+            return pattern_id
+
+    def get_failure_pattern(self, pattern_id: str) -> FailurePatternRow | None:
+        """Get a single failure pattern by ID.
+
+        Args:
+            pattern_id: Pattern ID
+
+        Returns:
+            FailurePatternRow or None if not found
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM failure_patterns WHERE id = ?",
+                (pattern_id,),
+            ).fetchone()
+            return cast(FailurePatternRow, dict(row)) if row else None
+
+    def list_failure_patterns(
+        self,
+        status: str | None = None,
+        stage_type: str | None = None,
+        severity: str | None = None,
+        enabled: bool | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[FailurePatternRow]:
+        """List failure patterns with optional filters.
+
+        Args:
+            status: Filter by status (pending, approved, rejected, archived)
+            stage_type: Filter by stage type
+            severity: Filter by severity (CRITICAL, HIGH, MEDIUM, LOW)
+            enabled: Filter by enabled status
+            limit: Maximum number of results (default 100)
+            offset: Number of results to skip (default 0)
+
+        Returns:
+            List of FailurePatternRow dicts
+        """
+        with self._conn() as conn:
+            query = "SELECT * FROM failure_patterns WHERE 1=1"
+            params: list = []
+
+            if status:
+                query += " AND status = ?"
+                params.append(status)
+            if stage_type:
+                query += " AND stage_type = ?"
+                params.append(stage_type)
+            if severity:
+                query += " AND severity = ?"
+                params.append(severity)
+            if enabled is not None:
+                query += " AND enabled = ?"
+                params.append(1 if enabled else 0)
+
+            query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+
+            rows = conn.execute(query, params).fetchall()
+            return [cast(FailurePatternRow, dict(row)) for row in rows]
+
+    def count_failure_patterns(
+        self,
+        status: str | None = None,
+        stage_type: str | None = None,
+        severity: str | None = None,
+        enabled: bool | None = None,
+    ) -> int:
+        """Count failure patterns matching filters.
+
+        Args:
+            status: Filter by status
+            stage_type: Filter by stage type
+            severity: Filter by severity
+            enabled: Filter by enabled status
+
+        Returns:
+            Total count of matching patterns
+        """
+        with self._conn() as conn:
+            query = "SELECT COUNT(*) FROM failure_patterns WHERE 1=1"
+            params: list = []
+
+            if status:
+                query += " AND status = ?"
+                params.append(status)
+            if stage_type:
+                query += " AND stage_type = ?"
+                params.append(stage_type)
+            if severity:
+                query += " AND severity = ?"
+                params.append(severity)
+            if enabled is not None:
+                query += " AND enabled = ?"
+                params.append(1 if enabled else 0)
+
+            result = conn.execute(query, params).fetchone()
+            return int(result[0]) if result else 0
+
+    def update_failure_pattern(self, pattern_id: str, **updates: Any) -> bool:
+        """Update failure pattern fields.
+
+        Args:
+            pattern_id: Pattern ID
+            **updates: Fields to update (status, approved_at, approved_by, etc.)
+
+        Returns:
+            True if updated, False if not found
+        """
+        if not updates:
+            return False
+
+        # Build dynamic SET clause
+        fields = []
+        params: list = []
+        for key, value in updates.items():
+            fields.append(f"{key} = ?")
+            params.append(value)
+
+        params.append(pattern_id)
+        query = f"UPDATE failure_patterns SET {', '.join(fields)} WHERE id = ?"
+
+        with self._conn() as conn:
+            cursor = conn.execute(query, params)
+            return cursor.rowcount > 0
+
+    def increment_pattern_occurrence(self, pattern_id: str, last_seen_at: str) -> bool:
+        """Increment occurrence count and update last seen timestamp.
+
+        Args:
+            pattern_id: Pattern ID
+            last_seen_at: ISO timestamp of last occurrence
+
+        Returns:
+            True if updated, False if not found
+        """
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE failure_patterns
+                SET occurrence_count = occurrence_count + 1, last_seen_at = ?
+                WHERE id = ?
+                """,
+                (last_seen_at, pattern_id),
+            )
+            return cursor.rowcount > 0
+
+    def update_signal_lineage_stats(
+        self,
+        stage_run_id: str,
+        signal_name: str,
+        stats_json: str,
+    ) -> bool:
+        """Update stats_json for a signal in lineage.
+
+        Args:
+            stage_run_id: Stage run ID
+            signal_name: Signal name
+            stats_json: JSON string of statistics
+
+        Returns:
+            True if updated, False if not found
+        """
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE signal_lineage
+                SET stats_json = ?
+                WHERE stage_run_id = ? AND signal_name = ?
+                """,
+                (stats_json, stage_run_id, signal_name),
+            )
+            return cursor.rowcount > 0
+
+    def update_stage_run_svs_findings(
+        self,
+        stage_run_id: str,
+        svs_findings_json: str,
+    ) -> bool:
+        """Update svs_findings_json for a stage run.
+
+        Args:
+            stage_run_id: Stage run ID
+            svs_findings_json: JSON string of SVS findings
+
+        Returns:
+            True if updated, False if not found
+        """
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE stage_runs
+                SET svs_findings_json = ?
+                WHERE id = ?
+                """,
+                (svs_findings_json, stage_run_id),
+            )
+            return cursor.rowcount > 0

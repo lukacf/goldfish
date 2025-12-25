@@ -5,6 +5,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from goldfish.svs.config import SVSConfig
+
 
 class StateMdConfig(BaseModel):
     """STATE.md configuration."""
@@ -140,6 +142,7 @@ def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
         "gce": list(GCEConfig.model_fields.keys()),
         "pre_run_review": list(PreRunReviewConfig.model_fields.keys()),
         "metrics": list(MetricsConfig.model_fields.keys()),
+        "svs": list(SVSConfig.model_fields.keys()),
     }
 
     top_level_fields = [
@@ -154,6 +157,7 @@ def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
         "gce",
         "pre_run_review",
         "metrics",
+        "svs",
         "invariants",
     ]
 
@@ -189,6 +193,7 @@ class GoldfishConfig(BaseModel):
     gce: GCEConfig | None = None
     pre_run_review: PreRunReviewConfig = Field(default_factory=PreRunReviewConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    svs: SVSConfig = Field(default_factory=SVSConfig)
     invariants: list[str] = Field(default_factory=list)
 
     @classmethod
@@ -293,5 +298,6 @@ def generate_default_config(project_name: str, dev_repo_path: str = "../{project
         state_md=StateMdConfig(),
         audit=AuditConfig(),
         jobs=JobsConfig(),
+        svs=SVSConfig(),
         invariants=[],
     )
