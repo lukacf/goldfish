@@ -249,7 +249,10 @@ class SourceInfo(BaseModel):
     size_bytes: int | None = None
     status: SourceStatus = SourceStatus.AVAILABLE
     metadata: dict | None = None
-    metadata_status: Literal["ok", "missing", "invalid", "future"] = "missing"
+    metadata_status: Literal["ok", "missing", "invalid", "future"] = Field(
+        default="missing",
+        description=("Metadata validation status: ok (valid), missing, invalid, or future (newer schema_version)."),
+    )
 
 
 class SourceLineage(BaseModel):
