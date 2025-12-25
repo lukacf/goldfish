@@ -310,6 +310,7 @@ _MAX_FEATURE_TEMPLATE_LENGTH = 256
 _MAX_FEATURE_SAMPLE_VALUES = 100
 _MAX_CONTENT_TYPE_LENGTH = 256
 _ALLOWED_SOURCE_FORMATS = {"npy", "npz", "csv", "file"}
+_ALLOWED_CSV_DELIMITERS = {",", ";", "|", "\t", ":"}
 _ALLOWED_TENSOR_ROLES = {
     "features",
     "labels",
@@ -633,11 +634,9 @@ def _validate_source_section(source: dict[str, Any]) -> str:
         delimiter = format_params.get("delimiter")
         if not isinstance(delimiter, str) or len(delimiter) != 1:
             raise InvalidSourceMetadataError("delimiter must be a single character", field="source.format_params")
-        if delimiter.strip() == "":
-            raise InvalidSourceMetadataError("delimiter cannot be whitespace", field="source.format_params")
-        if not delimiter.isprintable():
+        if delimiter not in _ALLOWED_CSV_DELIMITERS:
             raise InvalidSourceMetadataError(
-                "delimiter must be a printable character",
+                f"delimiter must be one of {sorted(_ALLOWED_CSV_DELIMITERS)}",
                 field="source.format_params",
             )
 

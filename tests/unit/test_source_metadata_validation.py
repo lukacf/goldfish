@@ -131,6 +131,15 @@ def test_validate_source_metadata_rejects_control_delimiter() -> None:
         validate_source_metadata(metadata)
 
 
+def test_validate_source_metadata_rejects_unknown_delimiter() -> None:
+    """CSV delimiter must be in the allowlist."""
+    metadata = _valid_csv_metadata()
+    metadata["source"]["format_params"]["delimiter"] = "'"
+
+    with pytest.raises(InvalidSourceMetadataError, match="delimiter"):
+        validate_source_metadata(metadata)
+
+
 def test_validate_source_metadata_rejects_feature_names_mismatch() -> None:
     """Feature names count must match last dimension."""
     metadata = _valid_npy_metadata()
@@ -181,6 +190,19 @@ def test_validate_source_metadata_allows_unknown_size_bytes() -> None:
     metadata["source"]["size_bytes"] = None
 
     validate_source_metadata(metadata)
+
+
+def test_validate_source_metadata_rejects_none_feature_names_for_nonscalar() -> None:
+    """feature_names.none is only allowed for scalar shapes."""
+    metadata = _valid_npy_metadata()
+    metadata["schema"]["arrays"]["features"]["shape"] = [10, 3]
+    metadata["schema"]["arrays"]["features"]["feature_names"] = {
+        "kind": "none",
+        "reason": "invalid for non-scalar",
+    }
+
+    with pytest.raises(InvalidSourceMetadataError, match="scalar"):
+        validate_source_metadata(metadata)
 
 
 def test_validate_source_metadata_rejects_unknown_fields() -> None:

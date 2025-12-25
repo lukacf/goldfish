@@ -47,6 +47,14 @@ from goldfish.validation import (
 logger = logging.getLogger("goldfish.server")
 
 
+def _truncate_for_error(value: str | None, limit: int = 120) -> str | None:
+    if value is None:
+        return None
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "..."
+
+
 @mcp.tool()
 def list_sources(
     status: str | None = None,
@@ -243,8 +251,12 @@ def register_source(
 
     if description != metadata.get("description"):
         raise InvalidSourceMetadataError(
-            f"description '{description}' does not match metadata.description '{metadata.get('description')}'",
+            "tool description must match metadata.description exactly",
             field="description",
+            details={
+                "provided": _truncate_for_error(description),
+                "in_metadata": _truncate_for_error(metadata.get("description")),
+            },
         )
 
     metadata_format = metadata.get("source", {}).get("format")
@@ -482,8 +494,12 @@ def promote_artifact(
 
         if description is not None and description != metadata_description:
             raise InvalidSourceMetadataError(
-                f"description '{description}' does not match metadata.description '{metadata_description}'",
+                "tool description must match metadata.description exactly",
                 field="description",
+                details={
+                    "provided": _truncate_for_error(description),
+                    "in_metadata": _truncate_for_error(metadata_description),
+                },
             )
         if format is not None and format != metadata_format:
             raise InvalidSourceMetadataError(
@@ -633,8 +649,12 @@ def register_dataset(
 
     if description != metadata.get("description"):
         raise InvalidSourceMetadataError(
-            f"description '{description}' does not match metadata.description '{metadata.get('description')}'",
+            "tool description must match metadata.description exactly",
             field="description",
+            details={
+                "provided": _truncate_for_error(description),
+                "in_metadata": _truncate_for_error(metadata.get("description")),
+            },
         )
 
     source_format = metadata.get("source", {}).get("format")

@@ -702,6 +702,7 @@ class StageExecutor:
 
                 metadata = output_meta
                 description = metadata.get("description")
+                # size_bytes may be None for stage outputs (unknown at authoring time).
                 size_bytes = metadata.get("source", {}).get("size_bytes")
 
                 if existing:

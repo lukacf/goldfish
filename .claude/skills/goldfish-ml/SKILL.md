@@ -100,7 +100,7 @@ CSV requires `format_params`:
 ```
 
 Rules:
-- `delimiter` must be a single printable character (no control chars).
+- `delimiter` must be a single character from: `, ; | \\t :`.
 
 **Directory sources are rejected.**
 

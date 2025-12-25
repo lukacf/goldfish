@@ -69,7 +69,7 @@ For `format=csv`, an extra `format_params` object is required:
 
 Rules:
 - `delimiter` must be a single-character string.
-- `delimiter` must be a printable character (no control chars).
+- `delimiter` must be one of: `, ; | \\t :`
 
 ---
 
