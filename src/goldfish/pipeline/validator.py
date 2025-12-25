@@ -4,11 +4,16 @@ Validates pipeline configuration without launching.
 """
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from goldfish.db.database import Database
 from goldfish.pipeline.parser import PipelineNotFoundError, PipelineParser
+from goldfish.svs.contract import merge_stage_config, validate_stage_contracts
+
+if TYPE_CHECKING:
+    from goldfish.config import GoldfishConfig
 
 
 def validate_pipeline_run(
@@ -18,6 +23,7 @@ def validate_pipeline_run(
     stages: list[str] | None,
     pipeline_name: str | None,
     inputs_override: dict,
+    config: GoldfishConfig | None = None,
 ) -> dict:
     """Validate a pipeline run without actually launching.
 
@@ -28,6 +34,7 @@ def validate_pipeline_run(
         stages: Specific stages to run (or None for all)
         pipeline_name: Pipeline file name (or None for default)
         inputs_override: Input overrides that skip validation
+        config: Full project configuration (optional)
 
     Returns:
         dict with:
@@ -100,6 +107,26 @@ def validate_pipeline_run(
                     yaml.safe_load(f)
             except yaml.YAMLError as e:
                 errors.append(f"Stage '{stage_name}': config YAML error - {e}")
+
+        # 2b. SVS Contract Validation (if SVS enabled)
+        if config and config.svs.enabled:
+            # Load and merge config to resolve params
+            merged_config = merge_stage_config(
+                stage_name=stage_name,
+                workspace_path=workspace_path,
+                runtime_overrides=None,  # No overrides in dry-run
+            )
+
+            # Convert Pydantic model to dict for SVS contract validator
+            # (SignalDef is used by parser, but svs.contract expects dict)
+            stage_def_dict = {
+                "name": stage_def.name,
+                "outputs": {name: sig.model_dump() for name, sig in stage_def.outputs.items()},
+            }
+
+            contract_errors = validate_stage_contracts(stage_def_dict, merged_config)
+            for err in contract_errors:
+                errors.append(f"Stage '{stage_name}' contract: {err}")
 
         # Check inputs
         for input_name, input_def in stage_def.inputs.items():

@@ -8,17 +8,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from goldfish.models import ReviewIssue, ReviewSeverity, RunReason, RunReview
+from goldfish.svs.agent import (
+    ClaudeCodeProvider,
+    CodexCLIProvider,
+    GeminiCLIProvider,
+    NullProvider,
+    ReviewRequest,
+    ToolPolicy,
+)
 
 if TYPE_CHECKING:
     from goldfish.config import PreRunReviewConfig
     from goldfish.db.database import Database
+    from goldfish.svs.config import SVSConfig
 
 logger = logging.getLogger(__name__)
 
@@ -139,11 +147,12 @@ STAGE_SECTION_TEMPLATE = """
 
 
 class PreRunReviewer:
-    """Reviews experiment runs before execution using Claude Agent SDK."""
+    """Reviews experiment runs before execution using unified agent abstraction."""
 
     def __init__(
         self,
         config: PreRunReviewConfig,
+        svs_config: SVSConfig,
         workspace_path: Path,
         dev_repo_path: Path,
         db: Database | None = None,
@@ -152,14 +161,29 @@ class PreRunReviewer:
 
         Args:
             config: Pre-run review configuration
+            svs_config: SVS configuration (for agent settings)
             workspace_path: Path to the user's workspace (slot)
             dev_repo_path: Path to the dev repository
             db: Database for looking up last successful run
         """
         self.config = config
+        self.svs_config = svs_config
         self.workspace_path = workspace_path
         self.dev_repo_path = dev_repo_path
         self.db = db
+
+    def _get_agent(self):
+        """Get the configured SVS agent provider."""
+        provider_name = self.svs_config.agent_provider
+        if provider_name == "claude_code":
+            return ClaudeCodeProvider()
+        elif provider_name == "codex_cli":
+            return CodexCLIProvider()
+        elif provider_name == "gemini_cli":
+            return GeminiCLIProvider()
+        elif provider_name == "null":
+            return NullProvider()
+        return NullProvider()
 
     async def review(
         self,
@@ -179,38 +203,19 @@ class PreRunReviewer:
         """
         start_time = time.time()
 
-        # Load .env lazily (not at module import)
-        try:
-            from dotenv import load_dotenv
-
-            load_dotenv()
-        except ImportError:
-            pass  # dotenv is optional
-
-        # Check if API key is available
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            logger.warning("ANTHROPIC_API_KEY not set, skipping pre-run review")
-            return RunReview(
-                approved=True,
-                summary="Review skipped: ANTHROPIC_API_KEY not configured",
-                full_review="",
-                reviewed_stages=stages,
-            )
-
         # Gather context
         pipeline_yaml = self._read_pipeline_yaml()
         stage_sections = self._build_stage_sections(stages)
         run_reason_text = reason.to_markdown() if reason else "No reason provided"
 
-        # Build prompt
+        # Build prompt with escaped content
         prompt = REVIEW_PROMPT.format(
-            workspace=self.workspace_path.name,
-            stages_to_run=", ".join(stages),
-            pipeline_yaml=pipeline_yaml,
-            run_reason=run_reason_text,
-            diff_text=diff_text or "No changes (first run or diff unavailable)",
-            stage_sections=stage_sections,
+            workspace=escape_for_prompt(self.workspace_path.name),
+            stages_to_run=escape_for_prompt(", ".join(stages)),
+            pipeline_yaml=escape_for_prompt(pipeline_yaml),
+            run_reason=escape_for_prompt(run_reason_text),
+            diff_text=escape_for_prompt(diff_text or "No changes (first run or diff unavailable)"),
+            stage_sections=stage_sections,  # Content within sections is already escaped by _build_stage_sections
         )
 
         # Enforce total context size limit
@@ -219,20 +224,35 @@ class PreRunReviewer:
             # Truncate with indication that content was cut
             prompt = prompt[: MAX_TOTAL_CONTEXT_SIZE - 100] + "\n\n[... context truncated due to size limit ...]"
 
-        # Call Claude Agent SDK with timeout
+        # Call the agent provider
         try:
-            review_text = await asyncio.wait_for(
-                self._call_claude(prompt),
-                timeout=self.config.timeout_seconds,
+            agent = self._get_agent()
+
+            # Pre-run tools: read-only
+            tool_policy = ToolPolicy(
+                permission_mode="auto",
+                allow_tools=["Read", "Glob", "Grep"],
             )
-        except TimeoutError:
-            logger.error(f"Pre-run review timed out after {self.config.timeout_seconds}s")
-            return RunReview(
-                approved=True,  # Don't block on timeout
-                summary=f"Review timed out after {self.config.timeout_seconds}s",
-                full_review="",
-                reviewed_stages=stages,
+
+            # Build agent request
+            request = ReviewRequest(
+                review_type="pre_run",
+                context={
+                    "cwd": str(self.workspace_path),
+                    "model": self.svs_config.agent_model or self.config.model,
+                    "max_turns": self.config.max_turns,
+                    "timeout_seconds": self.config.timeout_seconds,
+                    "tool_policy": tool_policy,
+                    "prompt": prompt,
+                },
             )
+
+            # run() is sync in the provider, we run it in a thread if needed
+            # but since we are in an async method, we'll wrap it
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, agent.run, request)
+
+            review_text = result.raw_output
         except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
             # Let these propagate - user cancellation should work
             raise
@@ -292,9 +312,9 @@ class PreRunReviewer:
             config_content = self._read_file_safe(config_path, "# No config file")
 
             section = STAGE_SECTION_TEMPLATE.format(
-                stage_name=stage,
-                module_content=module_content,
-                config_content=config_content,
+                stage_name=escape_for_prompt(stage),
+                module_content=escape_for_prompt(module_content),
+                config_content=escape_for_prompt(config_content),
             )
             sections.append(section)
 
@@ -359,35 +379,6 @@ class PreRunReviewer:
         except OSError as e:
             logger.warning(f"OS error reading {file_path}: {e}")
             return default
-
-    async def _call_claude(self, prompt: str) -> str:
-        """Call Claude Agent SDK to perform the review.
-
-        Uses read-only tools (Read, Glob, Grep) so Claude can explore
-        the codebase if needed.
-        """
-        try:
-            from claude_agent_sdk import ClaudeAgentOptions, query
-        except ImportError as e:
-            raise RuntimeError(f"Failed to import claude-agent-sdk: {e}. " "Try: pip install claude-agent-sdk") from e
-
-        options = ClaudeAgentOptions(
-            cwd=str(self.workspace_path),
-            allowed_tools=["Read", "Glob", "Grep"],  # Read-only
-            permission_mode="bypassPermissions",
-            max_turns=self.config.max_turns,
-            model=self.config.model,
-        )
-
-        response_parts: list[str] = []
-        async for message in query(prompt=prompt, options=options):
-            # Extract text from message
-            if hasattr(message, "content") and message.content:
-                for block in message.content:
-                    if hasattr(block, "text") and block.text:
-                        response_parts.append(block.text)
-
-        return "".join(response_parts)
 
     def _parse_review(self, review_text: str, stages: list[str]) -> list[ReviewIssue]:
         """Parse Claude's review text into structured ReviewIssues.
@@ -512,6 +503,7 @@ class PreRunReviewer:
 
 async def review_before_run(
     config: PreRunReviewConfig,
+    svs_config: SVSConfig,
     workspace_path: Path,
     dev_repo_path: Path,
     stages: list[str],
@@ -523,6 +515,7 @@ async def review_before_run(
 
     Args:
         config: Pre-run review configuration
+        svs_config: SVS configuration
         workspace_path: Path to the user's workspace (slot)
         dev_repo_path: Path to the dev repository
         stages: List of stage names to review
@@ -535,6 +528,7 @@ async def review_before_run(
     """
     reviewer = PreRunReviewer(
         config=config,
+        svs_config=svs_config,
         workspace_path=workspace_path,
         dev_repo_path=dev_repo_path,
         db=db,

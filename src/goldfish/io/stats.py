@@ -19,8 +19,15 @@ import queue
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+
+from goldfish.svs.checks.output_checks import (
+    check_entropy,
+    check_null_ratio,
+    check_vocab_utilization,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +41,14 @@ class StatsJob:
         path: Path to the .npy file (reference, NOT raw data)
         dtype: Expected data type (e.g., "float32")
         sample_size: Maximum number of samples to use for stats (default 10000)
+        vocab_size: Optional vocabulary size for token data
     """
 
     name: str
     path: Path
     dtype: str
     sample_size: int = 10000
+    vocab_size: int | None = None
 
 
 class StatsQueue:
@@ -58,7 +67,7 @@ class StatsQueue:
     def __init__(self) -> None:
         """Initialize the stats queue with a background worker thread."""
         self._job_queue: queue.Queue[StatsJob | None] = queue.Queue()
-        self._results: dict[str, dict[str, float] | None] = {}
+        self._results: dict[str, dict[str, Any] | None] = {}
         self._results_lock = threading.Lock()
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -96,7 +105,7 @@ class StatsQueue:
             finally:
                 self._job_queue.task_done()
 
-    def _compute_stats(self, job: StatsJob) -> dict[str, float] | None:
+    def _compute_stats(self, job: StatsJob) -> dict[str, Any] | None:
         """Compute statistics for a single job.
 
         Args:
@@ -128,13 +137,36 @@ class StatsQueue:
                 # Small enough to load
                 sample = arr.flatten()
 
-            # Compute stats on the sample
-            return {
+            # 1. Compute basic descriptive stats
+            stats = {
                 "mean": float(np.mean(sample)),
                 "std": float(np.std(sample)),
                 "min": float(np.min(sample)),
                 "max": float(np.max(sample)),
+                "samples_used": len(sample),
+                "total_elements": total_elements,
             }
+
+            # 2. Compute extended mechanistic stats
+            # Entropy
+            entropy_res = check_entropy(sample, min_entropy=0.0)
+            if entropy_res.details:
+                stats["entropy"] = entropy_res.details["entropy"]
+
+            # Null ratio
+            null_res = check_null_ratio(sample, max_null_ratio=1.0)
+            if null_res.details:
+                stats["null_ratio"] = null_res.details["null_ratio"]
+
+            # Vocab utilization (only if vocab_size provided)
+            if job.vocab_size is not None:
+                vocab_res = check_vocab_utilization(sample, vocab_size=job.vocab_size, min_utilization=0.0)
+                if vocab_res.details:
+                    stats["vocab_utilization"] = vocab_res.details["utilization"]
+                    stats["unique_count"] = vocab_res.details["unique_tokens"]
+
+            return stats
+
         except Exception as e:
             logger.warning(f"Failed to load or process {job.path}: {e}")
             raise
@@ -150,7 +182,7 @@ class StatsQueue:
         """
         self._job_queue.put(job)
 
-    def flush(self, timeout: float = 30.0) -> dict[str, dict[str, float] | None]:
+    def flush(self, timeout: float = 30.0) -> dict[str, dict[str, Any] | None]:
         """Block until all enqueued jobs are processed and return results.
 
         This method waits for the queue to be empty (all jobs processed) up to

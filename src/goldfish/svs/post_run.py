@@ -162,6 +162,7 @@ def _write_findings_file(
         goldfish_dir.mkdir(parents=True, exist_ok=True)
 
         findings_data = {
+            "version": 1,
             "decision": decision,
             "findings": findings,
             "stats": stats,

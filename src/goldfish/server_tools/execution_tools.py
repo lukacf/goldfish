@@ -208,6 +208,7 @@ def run(
 
         workspace_path = workspace_manager.get_workspace_path(workspace_name)
         db = _get_db()
+        config = _get_config()
         return validate_pipeline_run(
             workspace_name=workspace_name,
             workspace_path=workspace_path,
@@ -215,6 +216,7 @@ def run(
             stages=stages,
             pipeline_name=pipeline,
             inputs_override=inputs_override or {},
+            config=config,
         )
 
     # Execute through run_stages

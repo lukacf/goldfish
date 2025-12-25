@@ -100,7 +100,8 @@ class TestSVSConfigValidation:
         """Should accept valid domain values."""
         from goldfish.svs.config import SVSConfig
 
-        for domain in ["default", "nlp", "cv", "tabular", "custom_domain"]:
+        valid_domains = ["default", "nlp_tokenizer", "image_embeddings", "tabular_features"]
+        for domain in valid_domains:
             config = SVSConfig(domain=domain)
             assert config.domain == domain
 
@@ -214,7 +215,7 @@ class TestSVSConfigSerialization:
 
         original = SVSConfig(
             enabled=False,
-            domain="nlp",
+            domain="nlp_tokenizer",
             default_policy="fail",
             agent_timeout=60,
             auto_learn_failures=False,

@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
-from goldfish.db.database import Database
-from goldfish.models import PipelineDef
 from goldfish.pipeline.parser import (
     PipelineNotFoundError,
     PipelineParser,
     PipelineValidationError,
 )
+
+if TYPE_CHECKING:
+    from goldfish.datasets.registry import DatasetRegistry
+    from goldfish.db.database import Database
+    from goldfish.models import PipelineDef
 
 if TYPE_CHECKING:
     from goldfish.datasets.registry import DatasetRegistry
@@ -53,9 +56,8 @@ class PipelineManager:
 
         return self.parser.parse(pipeline_path)
 
-    def validate_pipeline(self, workspace: str, pipeline: str | None = None) -> list[str]:
+    def validate_pipeline(self, workspace: str, pipeline: str | None = None, config: Any = None) -> list[str]:
         """Validate pipeline definition (default pipeline.yaml or pipelines/<name>.yaml)."""
-        pipeline_def = self.get_pipeline(workspace, pipeline)
         workspace_path = self.workspace_manager.get_workspace_path(workspace)
 
         # Create dataset existence checker if registry available
@@ -63,12 +65,22 @@ class PipelineManager:
         if self.dataset_registry is not None:
             registry = self.dataset_registry
 
-            def check_dataset_exists(name: str) -> bool:
+            def dataset_exists_fn(name: str) -> bool:
                 return registry.dataset_exists(name)
 
-            dataset_exists_fn = check_dataset_exists
+        # Build pipeline-run validation context
+        from goldfish.pipeline.validator import validate_pipeline_run
 
-        return self.parser.validate(pipeline_def, workspace_path, dataset_exists_fn)
+        res = validate_pipeline_run(
+            workspace_name=workspace,
+            workspace_path=workspace_path,
+            db=self.db,
+            stages=None,
+            pipeline_name=pipeline,
+            inputs_override={},
+            config=config,
+        )
+        return cast(list[str], res["validation_errors"])
 
     def update_pipeline(self, workspace: str, pipeline_yaml: str, pipeline: str | None = None) -> PipelineDef:
         """Update pipeline.yaml in workspace.

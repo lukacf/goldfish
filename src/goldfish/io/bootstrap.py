@@ -14,10 +14,13 @@ Key guarantees:
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
 import threading
 from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,30 @@ def _get_stats_queue():
         return _stats_queue
 
 
+def _write_stats_manifest(stats: dict[str, dict[str, Any] | None]) -> None:
+    """Write mechanistic stats to .goldfish/svs_stats.json.
+
+    Args:
+        stats: Aggregated stats from StatsQueue
+    """
+    outputs_dir = Path(os.environ.get("GOLDFISH_OUTPUTS_DIR", "/mnt/outputs"))
+    goldfish_dir = outputs_dir / ".goldfish"
+
+    try:
+        goldfish_dir.mkdir(parents=True, exist_ok=True)
+
+        manifest = {
+            "version": 1,
+            "stats": stats or {},
+        }
+
+        manifest_path = goldfish_dir / "svs_stats.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+        logger.debug(f"Wrote SVS stats manifest to {manifest_path}")
+    except Exception as e:
+        logger.error(f"Failed to write SVS stats manifest: {e}")
+
+
 def _svs_finalize() -> None:
     """Flush stats + cleanup. Called once via atexit/finally.
 
@@ -96,8 +123,13 @@ def _svs_finalize() -> None:
     # CRITICAL: Must not raise any exceptions to avoid masking original errors
     try:
         stats_queue = _get_stats_queue()
-        stats_queue.flush(timeout=10.0)
-        logger.debug("SVS stats flushed successfully")
+        # Capture the stats returned from flush()
+        stats = stats_queue.flush(timeout=10.0)
+
+        # Always write the manifest (even if empty stats)
+        _write_stats_manifest(stats)
+
+        logger.debug("SVS stats flushed and manifest written successfully")
     except Exception as e:
         # Log error but NEVER raise - we must not mask original exceptions
         try:

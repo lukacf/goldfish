@@ -4,6 +4,46 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# Domain profile presets
+DOMAIN_PROFILES = {
+    "nlp_tokenizer": {
+        "check_policies": {
+            "entropy": "fail",
+            "vocab_utilization": "warn",
+            "null_ratio": "fail",
+        },
+        "thresholds": {
+            "entropy": {"min": 6.0},
+            "vocab_utilization": {"min": 0.7},
+            "null_ratio": {"max": 0.01},
+        },
+    },
+    "image_embeddings": {
+        "check_policies": {
+            "entropy": "warn",
+            "null_ratio": "fail",
+        },
+        "thresholds": {
+            "entropy": {"min": 8.0},
+            "null_ratio": {"max": 0.001},
+        },
+    },
+    "tabular_features": {
+        "check_policies": {
+            "null_ratio": "fail",
+            "top1_fraction": "warn",
+        },
+        "thresholds": {
+            "null_ratio": {"max": 0.05},
+            "top1_fraction": {"max": 0.5},
+        },
+    },
+    "default": {
+        "check_policies": {},
+        "thresholds": {},
+    },
+}
+
 
 class SVSConfig(BaseModel):
     """Configuration for Semantic Validation System.
@@ -21,7 +61,7 @@ class SVSConfig(BaseModel):
     enabled: bool = True
 
     # Domain and policy settings
-    domain: str = Field(default="default", min_length=1)
+    domain: Literal["default", "nlp_tokenizer", "image_embeddings", "tabular_features"] = "default"
     default_policy: Literal["fail", "warn", "ignore"] = "warn"
     default_enforcement: Literal["blocking", "warning", "silent"] = "warning"
 

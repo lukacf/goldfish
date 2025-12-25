@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Coroutine
@@ -45,6 +46,13 @@ from goldfish.workspace.manager import WorkspaceManager
 logger = logging.getLogger(__name__)
 
 STAGE_LOG_TAIL_FOR_FINALIZE = int(os.getenv("GOLDFISH_FINALIZE_LOG_TAIL", "1000"))
+
+REDACTION_PATTERNS = [
+    (r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s]+", r"\1=[REDACTED]"),
+    (r"(?i)bearer\s+[A-Za-z0-9._-]+", "Bearer [REDACTED]"),
+    (r"sk-[a-zA-Z0-9]{20,}", "[REDACTED_API_KEY]"),
+    (r"ghp_[A-Za-z0-9]{36}", "[REDACTED_GITHUB_TOKEN]"),
+]
 
 
 @dataclass
@@ -799,12 +807,25 @@ class StageExecutor:
 
                     logging.getLogger(__name__).warning("Failed to auto-register artifact %s: %s", source_id, e)
 
+    def _redact_logs(self, logs: str) -> str:
+        """Apply redaction patterns to logs to protect sensitive information."""
+        if not logs:
+            return ""
+
+        redacted = logs
+        for pattern, replacement in REDACTION_PATTERNS:
+            redacted = re.sub(pattern, replacement, redacted)
+        return redacted
+
     def _persist_logs(self, stage_run_id: str, logs: str) -> str:
         """Write logs to local run directory and return path."""
         run_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "logs"
         run_dir.mkdir(parents=True, exist_ok=True)
         log_path = run_dir / "output.log"
-        log_path.write_text(logs or "")
+
+        # Redact logs before persisting
+        redacted_logs = self._redact_logs(logs)
+        log_path.write_text(redacted_logs or "")
         return str(log_path)
 
     @staticmethod
@@ -1549,7 +1570,11 @@ echo "Stage completed successfully"
             status=status,
             completed_at=datetime.now(UTC).isoformat(),
             log_uri=log_uri,
-            error=(logs[-STAGE_LOG_TAIL_FOR_FINALIZE:] if (status == StageRunStatus.FAILED and logs) else None),
+            error=(
+                self._redact_logs(logs[-STAGE_LOG_TAIL_FOR_FINALIZE:])
+                if (status == StageRunStatus.FAILED and logs)
+                else None
+            ),
             progress=StageRunProgress.FINALIZING,
         )
 
@@ -1750,6 +1775,7 @@ echo "Stage completed successfully"
             review = self._run_async_review(
                 review_before_run(
                     config=self.config.pre_run_review,
+                    svs_config=self.config.svs,
                     workspace_path=slot_path,
                     dev_repo_path=self.dev_repo,
                     stages=[stage_name],  # Review the specific stage
