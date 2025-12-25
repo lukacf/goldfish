@@ -403,6 +403,8 @@ def test_metrics_module_importable_in_container_context(tmp_path):
         GOLDFISH_ERRORS_PATH,
         GOLDFISH_IO_PATH,
         GOLDFISH_METRICS_PATH,
+        GOLDFISH_SVS_PATH,
+        GOLDFISH_UTILS_PATH,
         GOLDFISH_VALIDATION_PATH,
     )
 
@@ -415,18 +417,24 @@ def test_metrics_module_importable_in_container_context(tmp_path):
     (container_root / "__init__.py").write_text("")
     (goldfish_pkg / "__init__.py").write_text('"""Goldfish ML package (container runtime)."""\n')
 
-    # Copy io module
-    io_dest = goldfish_pkg / "io"
-    io_dest.mkdir()
-    shutil.copy2(GOLDFISH_IO_PATH, io_dest / "__init__.py")
-
-    # Copy metrics module
-    metrics_dest = goldfish_pkg / "metrics"
-    shutil.copytree(
-        GOLDFISH_METRICS_PATH,
-        metrics_dest,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-    )
+    # Copy io, metrics, svs, utils modules (mirror docker_builder)
+    for subpkg, path in [
+        ("io", GOLDFISH_IO_PATH.parent),
+        ("metrics", GOLDFISH_METRICS_PATH),
+        ("svs", GOLDFISH_SVS_PATH),
+        ("utils", GOLDFISH_UTILS_PATH),
+    ]:
+        if path.exists() and path.is_dir():
+            dest = goldfish_pkg / subpkg
+            shutil.copytree(
+                path,
+                dest,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+        elif path.exists() and path.is_file() and subpkg == "io":
+            dest = goldfish_pkg / "io"
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, dest / "__init__.py")
 
     # Copy validation and errors (metrics dependencies)
     shutil.copy2(GOLDFISH_VALIDATION_PATH, goldfish_pkg / "validation.py")

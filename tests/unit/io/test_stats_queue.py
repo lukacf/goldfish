@@ -131,7 +131,7 @@ class TestStatsQueueMemorySafety:
         queue = StatsQueue()
         paths = []
 
-        start = time.time()
+        jobs = []
         for i in range(10):
             with tempfile.NamedTemporaryFile(suffix=".npy", delete=False) as f:
                 path = Path(f.name)
@@ -139,9 +139,11 @@ class TestStatsQueueMemorySafety:
                 arr = np.random.rand(250, 5000)
                 np.save(path, arr)
                 paths.append(path)
-                job = StatsJob(name=f"big_{i}", path=path, dtype="float32")
-                queue.enqueue(job)
+                jobs.append(StatsJob(name=f"big_{i}", path=path, dtype="float32"))
 
+        start = time.time()
+        for job in jobs:
+            queue.enqueue(job)
         enqueue_time = time.time() - start
 
         # All enqueues should be fast (< 1s total)
