@@ -591,6 +591,80 @@ Example `stats_json`:
 
 ---
 
+### 2.0 Agent Abstraction Layer (DRY + Replaceable Providers)
+
+**Goal:** Consolidate all AI review calls (pre‑run, during‑run, post‑run) behind a single abstraction so we can
+swap Claude Code for Codex CLI (or any other assistant) without rewriting SVS logic.
+
+#### Core Interface
+
+```python
+class ReviewRequest(BaseModel):
+    phase: Literal["pre_run", "during_run", "post_run"]
+    prompt: str
+    context: dict[str, Any]
+    tools: Literal["read_only", "container_full"]
+    timeout_seconds: int
+    max_turns: int
+
+
+class ReviewResult(BaseModel):
+    decision: Literal["OK", "WARN", "BLOCK"]
+    findings: list[str]
+    raw_response: str
+    provider: str
+    model: str
+    duration_ms: int
+
+
+class AgentProvider(Protocol):
+    name: str
+    def run(self, request: ReviewRequest) -> ReviewResult: ...
+```
+
+#### Built-in Providers
+- **ClaudeCodeProvider** (current): wraps Claude Code Agent SDK with tool access.
+- **CodexCLIProvider** (future): spawns Codex CLI with structured prompt/response.
+- **RemoteAPIProvider**: direct API calls to external LLMs without tools.
+- **NullProvider**: returns OK for tests and air‑gapped environments.
+
+#### Unified Orchestrator
+
+All SVS AI reviews call a single orchestrator:
+- Validates request
+- Builds prompt from shared templates
+- Calls provider
+- Parses structured response into `ReviewResult`
+- Writes audit entry (`svs_reviews`)
+
+#### Configuration
+
+```yaml
+# goldfish.yaml
+svs:
+  agent_provider: claude_code  # claude_code | codex_cli | remote_api | null
+  agent_model: claude-sonnet-4-5
+  agent_timeout: 30
+  agent_max_turns: 3
+  agent_tools:
+    pre_run: read_only
+    during_run: container_full
+    post_run: container_full
+```
+
+#### Implementation Plan (DRY, minimal churn)
+1. **Extract** current pre‑run review into `ai/providers/claude_code.py`.
+2. **Define** `ReviewRequest/ReviewResult` + `AgentProvider` protocol in `ai/agent.py`.
+3. **Add** a shared `ReviewOrchestrator` used by pre‑run and SVS post‑run.
+4. **Wire** pre‑run review through the orchestrator (no behavior change).
+5. **Add** container‑side hooks for during/post‑run using the same orchestrator.
+6. **Stub** Codex CLI provider with the same contract for future replacement.
+
+**Why this matters:** It eliminates duplicate logic, centralizes prompt/response handling, and makes the
+AI backend swappable without touching SVS logic.
+
+---
+
 ### 2.1 Dev-Side AI Reviews (Pre-Execution)
 
 **Goal:** Catch issues before compute is wasted.
