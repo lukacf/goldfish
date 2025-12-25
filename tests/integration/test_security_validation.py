@@ -276,6 +276,16 @@ class TestPromoteArtifactUsesValidation:
                     job_id="job-a1b2c3d4",
                     output_name="../../etc/passwd",  # Path traversal attempt
                     source_name="valid_source",
+                    metadata={
+                        "schema_version": 1,
+                        "description": "Model artifact JSON file for validation tests.",
+                        "source": {
+                            "format": "file",
+                            "size_bytes": 123,
+                            "created_at": "2025-12-24T12:00:00Z",
+                        },
+                        "schema": {"kind": "file", "content_type": "application/json"},
+                    },
                     reason="Testing validation works correctly",
                 )
         finally:

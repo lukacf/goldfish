@@ -7,8 +7,6 @@ The registry tracks:
 - Status (available, pending, failed)
 """
 
-from datetime import datetime
-
 from goldfish.db.database import Database
 from goldfish.db.types import SourceRow
 from goldfish.errors import (
@@ -16,7 +14,9 @@ from goldfish.errors import (
     SourceAlreadyExistsError,
     SourceNotFoundError,
 )
-from goldfish.models import SourceInfo, SourceLineage, SourceStatus
+from goldfish.models import SourceInfo, SourceLineage
+from goldfish.sources.conversion import source_row_to_info
+from goldfish.validation import InvalidSourceMetadataError, validate_source_metadata
 
 
 class SourceRegistry:
@@ -40,7 +40,7 @@ class SourceRegistry:
             List of SourceInfo objects
         """
         sources = self.db.list_sources(status=status)
-        return [self._dict_to_source_info(s) for s in sources]
+        return [source_row_to_info(s) for s in sources]
 
     def get_source(self, name: str) -> SourceInfo:
         """Get a source by name.
@@ -57,7 +57,7 @@ class SourceRegistry:
         source = self.db.get_source(name)
         if source is None:
             raise SourceNotFoundError(f"Source not found: {name}")
-        return self._dict_to_source_info(source)
+        return source_row_to_info(source)
 
     def source_exists(self, name: str) -> bool:
         """Check if a source exists.
@@ -75,8 +75,8 @@ class SourceRegistry:
         name: str,
         gcs_location: str,
         description: str,
+        metadata: dict,
         size_bytes: int | None = None,
-        metadata: dict | None = None,
     ) -> SourceInfo:
         """Register a new external data source.
 
@@ -85,7 +85,7 @@ class SourceRegistry:
             gcs_location: GCS path (e.g., "gs://bucket/data/eurusd.csv")
             description: What this data contains
             size_bytes: Optional size in bytes
-            metadata: Optional metadata dict
+            metadata: Required metadata dict
 
         Returns:
             SourceInfo for the created source
@@ -95,6 +95,26 @@ class SourceRegistry:
         """
         if self.db.source_exists(name):
             raise SourceAlreadyExistsError(f"Source '{name}' already exists")
+
+        if metadata is None:
+            raise InvalidSourceMetadataError("metadata is required for new sources")
+
+        validate_source_metadata(metadata)
+
+        if description != metadata.get("description"):
+            raise InvalidSourceMetadataError(
+                f"description '{description}' does not match metadata.description '{metadata.get('description')}'"
+            )
+
+        metadata_size = metadata.get("source", {}).get("size_bytes")
+        if metadata_size is None:
+            raise InvalidSourceMetadataError("metadata.source.size_bytes is required for register_source")
+        if size_bytes is not None and metadata_size != size_bytes:
+            raise InvalidSourceMetadataError(
+                f"size_bytes {size_bytes} does not match metadata.source.size_bytes {metadata_size}"
+            )
+
+        size_bytes = metadata_size
 
         self.db.create_source(
             source_id=name,
@@ -114,6 +134,7 @@ class SourceRegistry:
         output_name: str,
         source_name: str,
         artifact_uri: str,
+        metadata: dict,
         description: str | None = None,
     ) -> tuple[SourceInfo, SourceLineage]:
         """Promote a job artifact to a reusable source.
@@ -126,7 +147,8 @@ class SourceRegistry:
             output_name: Name of the output in job config
             source_name: Name for the new source
             artifact_uri: Base artifact URI from job
-            description: Optional description (defaults to generated)
+            description: Optional description (defaults to metadata.description)
+            metadata: Required metadata dict
 
         Returns:
             Tuple of (SourceInfo, SourceLineage)
@@ -137,12 +159,20 @@ class SourceRegistry:
         if self.db.source_exists(source_name):
             raise SourceAlreadyExistsError(f"Source '{source_name}' already exists")
 
+        if metadata is None:
+            raise InvalidSourceMetadataError("metadata is required for promoted artifacts")
+
+        validate_source_metadata(metadata)
+
+        if description is not None and description != metadata.get("description"):
+            raise InvalidSourceMetadataError(
+                f"description '{description}' does not match metadata.description '{metadata.get('description')}'"
+            )
+
+        description = metadata.get("description")
+
         # Construct GCS location for this output
         gcs_location = f"{artifact_uri.rstrip('/')}/{output_name}/"
-
-        # Generate description if not provided
-        if description is None:
-            description = f"Promoted from job {job_id} output '{output_name}'"
 
         # Create source entry
         self.db.create_source(
@@ -151,6 +181,8 @@ class SourceRegistry:
             gcs_location=gcs_location,
             created_by=f"job:{job_id}",
             description=description,
+            size_bytes=metadata.get("source", {}).get("size_bytes"),
+            metadata=metadata,
         )
 
         # Record lineage from job inputs
@@ -225,12 +257,4 @@ class SourceRegistry:
 
     def _dict_to_source_info(self, source: SourceRow) -> SourceInfo:
         """Convert database source dict to SourceInfo model."""
-        return SourceInfo(
-            name=source["name"],
-            description=source.get("description"),
-            created_at=datetime.fromisoformat(source["created_at"]),
-            created_by=source["created_by"],
-            gcs_location=source["gcs_location"],
-            size_bytes=source.get("size_bytes"),
-            status=SourceStatus(source.get("status", "available")),
-        )
+        return source_row_to_info(source)

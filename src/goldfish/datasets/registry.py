@@ -1,13 +1,14 @@
 """Dataset registry for project-level data sources."""
 
 import subprocess
-from datetime import datetime
 from pathlib import Path
 
 from goldfish.config import GoldfishConfig
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError, SourceAlreadyExistsError, SourceNotFoundError
-from goldfish.models import SourceInfo, SourceStatus
+from goldfish.models import SourceInfo
+from goldfish.sources.conversion import source_row_to_info
+from goldfish.validation import InvalidSourceMetadataError, validate_source_metadata
 
 
 class DatasetRegistry:
@@ -29,7 +30,7 @@ class DatasetRegistry:
         source: str,
         description: str,
         format: str,
-        metadata: dict | None = None,
+        metadata: dict,
         size_bytes: int | None = None,
     ) -> SourceInfo:
         """Register a project-level dataset.
@@ -39,7 +40,7 @@ class DatasetRegistry:
             source: Local path or GCS URL (e.g., "local:/path/to/data.csv" or "gs://bucket/path")
             description: Human-readable description
             format: csv, npy, directory, etc.
-            metadata: Optional metadata dict
+            metadata: Required metadata dict
             size_bytes: Optional size in bytes
 
         Returns:
@@ -53,6 +54,32 @@ class DatasetRegistry:
         if self.db.source_exists(name):
             raise SourceAlreadyExistsError(f"Dataset '{name}' already exists")
 
+        if metadata is None:
+            raise InvalidSourceMetadataError("metadata is required for new datasets")
+
+        validate_source_metadata(metadata)
+
+        if description != metadata.get("description"):
+            raise InvalidSourceMetadataError(
+                f"description '{description}' does not match metadata.description '{metadata.get('description')}'"
+            )
+
+        source_format = metadata.get("source", {}).get("format")
+        if format != source_format:
+            raise InvalidSourceMetadataError(
+                f"format '{format}' does not match metadata.source.format '{source_format}'"
+            )
+
+        metadata_size = metadata.get("source", {}).get("size_bytes")
+        if metadata_size is None:
+            raise InvalidSourceMetadataError("metadata.source.size_bytes is required for register_dataset")
+        if size_bytes is not None and metadata_size != size_bytes:
+            raise InvalidSourceMetadataError(
+                f"size_bytes {size_bytes} does not match metadata.source.size_bytes {metadata_size}"
+            )
+
+        size_bytes = metadata_size
+
         # Parse source location
         if source.startswith("local:"):
             # Upload local file/directory to GCS
@@ -61,10 +88,6 @@ class DatasetRegistry:
                 raise GoldfishError(f"Local source not found: {local_path}")
 
             gcs_location = self._upload_to_gcs(name, local_path)
-
-            # Get size if not provided
-            if size_bytes is None and local_path.is_file():
-                size_bytes = local_path.stat().st_size
 
         elif source.startswith("gs://"):
             # Use GCS path directly
@@ -144,18 +167,7 @@ class DatasetRegistry:
             List of SourceInfo objects
         """
         sources = self.db.list_sources(status=status, created_by="external")
-        return [
-            SourceInfo(
-                name=s["name"],
-                description=s["description"],
-                created_at=datetime.fromisoformat(s["created_at"]),
-                created_by=s["created_by"],
-                gcs_location=s["gcs_location"],
-                size_bytes=s["size_bytes"],
-                status=SourceStatus(s["status"]),
-            )
-            for s in sources
-        ]
+        return [source_row_to_info(source) for source in sources]
 
     def get_dataset(self, name: str) -> SourceInfo:
         """Get dataset details.
@@ -173,15 +185,7 @@ class DatasetRegistry:
         if not source:
             raise SourceNotFoundError(f"Dataset not found: {name}")
 
-        return SourceInfo(
-            name=source["name"],
-            description=source["description"],
-            created_at=datetime.fromisoformat(source["created_at"]),
-            created_by=source["created_by"],
-            gcs_location=source["gcs_location"],
-            size_bytes=source["size_bytes"],
-            status=SourceStatus(source["status"]),
-        )
+        return source_row_to_info(source)
 
     def dataset_exists(self, name: str) -> bool:
         """Check if dataset exists.

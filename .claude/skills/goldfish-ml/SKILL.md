@@ -67,6 +67,115 @@ START: What task?
         └─▶ save_version() → hibernate() (auto-saves)
 ```
 
+## Data Source Metadata (Required, Strict)
+
+All new sources/datasets/artifacts must include **mandatory metadata**.
+Goldfish does **not** infer metadata and treats local vs GCS identically.
+
+### Required Top-Level Structure
+
+```json
+{
+  "schema_version": 1,
+  "description": "Human/LLM description (min 20 chars)",
+  "source": { ... },
+  "schema": { ... }
+}
+```
+
+### Source Section (format/encoding only)
+
+```json
+{
+  "format": "npy|npz|csv|file",
+  "size_bytes": 123456,
+  "created_at": "2025-12-24T12:00:00Z"
+}
+```
+
+CSV requires `format_params`:
+
+```json
+{ "format_params": { "delimiter": "," } }
+```
+
+Rules:
+- `delimiter` must be a single character from: `, ; | \\t :`.
+
+**Directory sources are rejected.**
+
+### Schema Section (meaning/semantics)
+
+Tensor (npy/npz):
+
+```json
+{
+  "kind": "tensor",
+  "arrays": {
+    "features": {
+      "role": "features",
+      "shape": [1000, 768],
+      "dtype": "float32",
+      "feature_names": { "kind": "list", "values": ["f1","f2","..."] }
+    }
+  },
+  "primary_array": "features"
+}
+```
+
+Tabular (csv):
+
+```json
+{
+  "kind": "tabular",
+  "row_count": 100000,
+  "columns": ["col1", "col2"],
+  "dtypes": { "col1": "float32", "col2": "int64" }
+}
+```
+
+File (blob):
+
+```json
+{
+  "kind": "file",
+  "content_type": "application/json"
+}
+```
+
+### Feature names (required)
+
+`feature_names` must be present and use one of:
+
+```json
+{ "kind": "list", "values": ["f1", "f2"] }
+```
+
+```json
+{ "kind": "pattern", "template": "token_{i}", "start": 1, "count": 50000,
+  "sample": ["token_1", "token_2"] }
+```
+
+```json
+{ "kind": "none", "reason": "scalar value" }
+```
+
+### Tools that REQUIRE metadata
+
+- `register_source(..., reason, metadata)`
+- `register_dataset(..., format, metadata)`
+- `promote_artifact(..., reason, metadata)`
+- `update_source_metadata(source_name, metadata, reason)`
+
+Optional tool arguments (must match metadata if provided):
+- `format`
+- `size_bytes`
+  - Must be a positive integer and ≤ 1 PB when known.
+  - May be `null` for stage outputs when the size is unknown at authoring time.
+- `description` (for promote_artifact)
+
+Missing or invalid metadata is rejected.
+
 ## Essential Workflows
 
 ### 1. Starting a New Experiment

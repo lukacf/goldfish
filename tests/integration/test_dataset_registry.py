@@ -9,6 +9,25 @@ from goldfish.errors import GoldfishError
 from goldfish.models import SourceInfo, SourceStatus
 
 
+def _csv_metadata(description: str) -> dict:
+    return {
+        "schema_version": 1,
+        "description": description,
+        "source": {
+            "format": "csv",
+            "size_bytes": 1234,
+            "created_at": "2025-12-24T12:00:00Z",
+            "format_params": {"delimiter": ","},
+        },
+        "schema": {
+            "kind": "tabular",
+            "row_count": 2,
+            "columns": ["col1", "col2"],
+            "dtypes": {"col1": "int64", "col2": "int64"},
+        },
+    }
+
+
 class TestRegisterDataset:
     """Test dataset registration."""
 
@@ -27,14 +46,15 @@ class TestRegisterDataset:
             source = registry.register_dataset(
                 name="test_data",
                 source=f"local:{local_file}",
-                description="Test dataset",
+                description="Test dataset for registry integration tests",
                 format="csv",
+                metadata=_csv_metadata("Test dataset for registry integration tests"),
             )
 
         # Verify source was created
         assert source.name == "test_data"
         assert source.gcs_location == "gs://test-bucket/datasets/test_data"
-        assert source.description == "Test dataset"
+        assert source.description == "Test dataset for registry integration tests"
         assert source.status == SourceStatus.AVAILABLE
 
     def test_register_dataset_with_gcs_source(self, test_db, test_config):
@@ -44,8 +64,9 @@ class TestRegisterDataset:
         source = registry.register_dataset(
             name="remote_data",
             source="gs://my-bucket/data/file.csv",
-            description="Remote dataset",
+            description="Remote dataset for registry integration tests",
             format="csv",
+            metadata=_csv_metadata("Remote dataset for registry integration tests"),
         )
 
         assert source.name == "remote_data"
@@ -60,8 +81,9 @@ class TestRegisterDataset:
         registry.register_dataset(
             name="duplicate",
             source="gs://bucket/data.csv",
-            description="First",
+            description="First dataset for list tests",
             format="csv",
+            metadata=_csv_metadata("First dataset for list tests"),
         )
 
         # Try to register duplicate
@@ -71,8 +93,9 @@ class TestRegisterDataset:
             registry.register_dataset(
                 name="duplicate",
                 source="gs://bucket/data2.csv",
-                description="Second",
+                description="Second dataset for list tests",
                 format="csv",
+                metadata=_csv_metadata("Second dataset for list tests"),
             )
 
     def test_register_dataset_with_metadata(self, test_db, test_config):
@@ -82,13 +105,28 @@ class TestRegisterDataset:
         source = registry.register_dataset(
             name="data_with_meta",
             source="gs://bucket/data.csv",
-            description="Test",
+            description="Test dataset with metadata storage",
             format="csv",
-            metadata={"rows": 1000, "columns": 5},
+            metadata=_csv_metadata("Test dataset with metadata storage"),
         )
 
         # Verify metadata stored (it's JSON in DB)
         assert source.name == "data_with_meta"
+
+    def test_register_dataset_requires_metadata(self, test_db, test_config):
+        """register_dataset should reject missing metadata."""
+        from goldfish.validation import InvalidSourceMetadataError
+
+        registry = DatasetRegistry(db=test_db, config=test_config)
+
+        with pytest.raises(InvalidSourceMetadataError, match="metadata"):
+            registry.register_dataset(
+                name="missing_meta",
+                source="gs://bucket/data.csv",
+                description="Missing metadata should be rejected here",
+                format="csv",
+                metadata=None,
+            )
 
     def test_register_dataset_requires_gcs_config(self, test_db, temp_dir):
         """register_dataset should raise error if GCS not configured."""
@@ -116,8 +154,9 @@ class TestRegisterDataset:
             registry.register_dataset(
                 name="test",
                 source=f"local:{local_file}",
-                description="Test",
+                description="Test dataset for gcs config requirement",
                 format="csv",
+                metadata=_csv_metadata("Test dataset for gcs config requirement"),
             )
 
 
@@ -135,9 +174,27 @@ class TestListDatasets:
         registry = DatasetRegistry(db=test_db, config=test_config)
 
         # Register multiple datasets
-        registry.register_dataset("data1", "gs://bucket/data1.csv", "First", "csv")
-        registry.register_dataset("data2", "gs://bucket/data2.csv", "Second", "csv")
-        registry.register_dataset("data3", "gs://bucket/data3.csv", "Third", "csv")
+        registry.register_dataset(
+            "data1",
+            "gs://bucket/data1.csv",
+            "First dataset for listing",
+            "csv",
+            metadata=_csv_metadata("First dataset for listing"),
+        )
+        registry.register_dataset(
+            "data2",
+            "gs://bucket/data2.csv",
+            "Second dataset for listing",
+            "csv",
+            metadata=_csv_metadata("Second dataset for listing"),
+        )
+        registry.register_dataset(
+            "data3",
+            "gs://bucket/data3.csv",
+            "Third dataset for listing",
+            "csv",
+            metadata=_csv_metadata("Third dataset for listing"),
+        )
 
         datasets = registry.list_datasets()
         assert len(datasets) == 3
@@ -155,7 +212,13 @@ class TestDatasetExists:
         """dataset_exists should return True for registered dataset."""
         registry = DatasetRegistry(db=test_db, config=test_config)
 
-        registry.register_dataset("existing", "gs://bucket/data.csv", "Test", "csv")
+        registry.register_dataset(
+            "existing",
+            "gs://bucket/data.csv",
+            "Test dataset for existence checks",
+            "csv",
+            metadata=_csv_metadata("Test dataset for existence checks"),
+        )
 
         assert registry.dataset_exists("existing") is True
 
@@ -176,16 +239,16 @@ class TestGetDataset:
         registry.register_dataset(
             "test_data",
             "gs://bucket/data.csv",
-            "Test dataset",
+            "Test dataset for get_dataset response",
             "csv",
-            metadata={"key": "value"},
+            metadata=_csv_metadata("Test dataset for get_dataset response"),
         )
 
         dataset = registry.get_dataset("test_data")
         assert isinstance(dataset, SourceInfo)
         assert dataset.name == "test_data"
         assert dataset.gcs_location == "gs://bucket/data.csv"
-        assert dataset.description == "Test dataset"
+        assert dataset.description == "Test dataset for get_dataset response"
 
     def test_get_dataset_raises_on_not_found(self, test_db, test_config):
         """get_dataset should raise SourceNotFoundError for missing dataset."""

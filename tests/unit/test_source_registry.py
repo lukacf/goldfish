@@ -56,6 +56,8 @@ class TestSourceRegistryBasics:
         assert sources[0].name == "test_data"
         assert sources[0].description == "Test dataset"
         assert sources[0].status == SourceStatus.AVAILABLE
+        assert sources[0].metadata is None
+        assert sources[0].metadata_status == "missing"
 
     def test_list_sources_with_status_filter(self):
         """list_sources should pass status filter to database."""
@@ -108,6 +110,8 @@ class TestGetSource:
         assert isinstance(source, SourceInfo)
         assert source.name == "test_data"
         assert source.gcs_location == "gs://bucket/data/test.csv"
+        assert source.metadata is None
+        assert source.metadata_status == "missing"
 
     def test_get_source_not_found(self):
         """get_source should raise SourceNotFoundError for missing source."""
@@ -130,22 +134,52 @@ class TestRegisterSource:
         mock_db.get_source.return_value = {
             "id": "new_data",
             "name": "new_data",
-            "description": "New dataset",
+            "description": "New dataset for registry tests",
             "created_at": "2025-12-05T10:00:00+00:00",
             "created_by": "external",
             "gcs_location": "gs://bucket/data/new.csv",
             "size_bytes": 2048,
             "status": "available",
-            "metadata": {"format": "csv"},
+            "metadata": {
+                "schema_version": 1,
+                "description": "New dataset for registry tests",
+                "source": {
+                    "format": "csv",
+                    "size_bytes": 2048,
+                    "created_at": "2025-12-24T12:00:00Z",
+                    "format_params": {"delimiter": ","},
+                },
+                "schema": {
+                    "kind": "tabular",
+                    "row_count": 2,
+                    "columns": ["a", "b"],
+                    "dtypes": {"a": "int64", "b": "int64"},
+                },
+            },
         }
 
         registry = SourceRegistry(db=mock_db)
         source = registry.register_source(
             name="new_data",
             gcs_location="gs://bucket/data/new.csv",
-            description="New dataset",
+            description="New dataset for registry tests",
             size_bytes=2048,
-            metadata={"format": "csv"},
+            metadata={
+                "schema_version": 1,
+                "description": "New dataset for registry tests",
+                "source": {
+                    "format": "csv",
+                    "size_bytes": 2048,
+                    "created_at": "2025-12-24T12:00:00Z",
+                    "format_params": {"delimiter": ","},
+                },
+                "schema": {
+                    "kind": "tabular",
+                    "row_count": 2,
+                    "columns": ["a", "b"],
+                    "dtypes": {"a": "int64", "b": "int64"},
+                },
+            },
         )
 
         # Verify create_source was called with correct params
@@ -154,14 +188,30 @@ class TestRegisterSource:
             name="new_data",
             gcs_location="gs://bucket/data/new.csv",
             created_by="external",
-            description="New dataset",
+            description="New dataset for registry tests",
             size_bytes=2048,
-            metadata={"format": "csv"},
+            metadata={
+                "schema_version": 1,
+                "description": "New dataset for registry tests",
+                "source": {
+                    "format": "csv",
+                    "size_bytes": 2048,
+                    "created_at": "2025-12-24T12:00:00Z",
+                    "format_params": {"delimiter": ","},
+                },
+                "schema": {
+                    "kind": "tabular",
+                    "row_count": 2,
+                    "columns": ["a", "b"],
+                    "dtypes": {"a": "int64", "b": "int64"},
+                },
+            },
         )
 
         # Verify returned SourceInfo
         assert isinstance(source, SourceInfo)
         assert source.name == "new_data"
+        assert source.metadata_status == "ok"
 
     def test_register_source_already_exists(self):
         """register_source should raise SourceAlreadyExistsError if source exists."""
@@ -174,7 +224,23 @@ class TestRegisterSource:
             registry.register_source(
                 name="duplicate",
                 gcs_location="gs://bucket/data/dup.csv",
-                description="Duplicate",
+                description="Duplicate dataset for registry tests",
+                metadata={
+                    "schema_version": 1,
+                    "description": "Duplicate dataset for registry tests",
+                    "source": {
+                        "format": "csv",
+                        "size_bytes": 123,
+                        "created_at": "2025-12-24T12:00:00Z",
+                        "format_params": {"delimiter": ","},
+                    },
+                    "schema": {
+                        "kind": "tabular",
+                        "row_count": 1,
+                        "columns": ["a"],
+                        "dtypes": {"a": "int64"},
+                    },
+                },
             )
 
         # Should not call create_source
