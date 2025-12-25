@@ -319,3 +319,34 @@ class TestStatsQueueEdgeCases:
         assert elapsed < 0.5, "Zero timeout should return immediately"
         # Results may be empty if job didn't complete
         path.unlink()
+
+    def test_flush_uses_proper_join_semantics(self) -> None:
+        """Flush should use queue.join() not poll on unfinished_tasks.
+
+        This test verifies that flush properly waits for task_done() calls,
+        not just checks unfinished_tasks count (which is racy).
+        """
+        queue = StatsQueue()
+        paths = []
+
+        # Enqueue jobs rapidly
+        for i in range(10):
+            with tempfile.NamedTemporaryFile(suffix=".npy", delete=False) as f:
+                path = Path(f.name)
+                arr = np.array([float(i)] * 100)
+                np.save(path, arr)
+                paths.append(path)
+                job = StatsJob(name=f"job_{i}", path=path, dtype="float32")
+                queue.enqueue(job)
+
+        # Flush with reasonable timeout - should get all results
+        results = queue.flush(timeout=5.0)
+
+        # ALL jobs should be processed - no race-lost results
+        assert len(results) == 10, f"Expected 10 results, got {len(results)}"
+        for i in range(10):
+            assert f"job_{i}" in results
+            assert results[f"job_{i}"]["mean"] == pytest.approx(float(i))
+
+        for path in paths:
+            path.unlink()

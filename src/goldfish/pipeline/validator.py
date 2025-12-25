@@ -4,7 +4,7 @@ Validates pipeline configuration without launching.
 """
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import yaml
 
@@ -23,7 +23,7 @@ def validate_pipeline_run(
     stages: list[str] | None,
     pipeline_name: str | None,
     inputs_override: dict,
-    config: "GoldfishConfig" | None = None,
+    config: Optional["GoldfishConfig"] = None,
 ) -> dict:
     """Validate a pipeline run without actually launching.
 

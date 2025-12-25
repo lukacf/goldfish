@@ -186,7 +186,7 @@ class StatsQueue:
         """Block until all enqueued jobs are processed and return results.
 
         This method waits for the queue to be empty (all jobs processed) up to
-        the specified timeout. It uses queue.join() semantics.
+        the specified timeout. Uses proper queue.join() semantics for correctness.
 
         Args:
             timeout: Maximum time to wait in seconds (0 = return immediately)
@@ -203,20 +203,17 @@ class StatsQueue:
                 self._results.clear()
             return results
 
-        # Wait for queue to be empty (all jobs processed)
-        try:
-            # Use a loop with short timeouts to handle timeout properly
-            remaining = timeout
-            check_interval = 0.1
-            while remaining > 0:
-                if self._job_queue.unfinished_tasks == 0:
-                    break
-                wait_time = min(check_interval, remaining)
-                # Sleep instead of join with timeout to allow partial results
-                threading.Event().wait(wait_time)
-                remaining -= wait_time
-        except Exception:
-            pass
+        # Use proper queue.join() semantics with timeout
+        # Wrap join() in a thread since queue.join() doesn't support timeout directly
+        done_event = threading.Event()
+
+        def join_with_signal() -> None:
+            self._job_queue.join()  # Blocks until all task_done() calls
+            done_event.set()
+
+        join_thread = threading.Thread(target=join_with_signal, daemon=True)
+        join_thread.start()
+        done_event.wait(timeout=timeout)
 
         # Return accumulated results and clear for next flush
         with self._results_lock:

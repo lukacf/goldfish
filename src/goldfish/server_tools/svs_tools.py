@@ -187,6 +187,17 @@ def approve_pattern(db: Database, pattern_id: str, approved_by: str | None = Non
     # Approve (idempotent - handles already approved)
     manager.approve_pattern(pattern_id, approved_by=approved_by)
 
+    # Audit log
+    db.log_audit(
+        operation="approve_pattern",
+        reason=f"Approved failure pattern {pattern_id}",
+        details={
+            "pattern_id": pattern_id,
+            "approved_by": approved_by,
+            "symptom": pattern.get("symptom", "")[:100],
+        },
+    )
+
     return {
         "success": True,
         "pattern_id": pattern_id,
@@ -226,6 +237,17 @@ def reject_pattern(db: Database, pattern_id: str, reason: str) -> dict:
         }
 
     manager.reject_pattern(pattern_id, reason=reason)
+
+    # Audit log
+    db.log_audit(
+        operation="reject_pattern",
+        reason=f"Rejected failure pattern {pattern_id}: {reason[:100]}",
+        details={
+            "pattern_id": pattern_id,
+            "rejection_reason": reason,
+            "symptom": pattern.get("symptom", "")[:100],
+        },
+    )
 
     return {
         "success": True,
@@ -268,6 +290,16 @@ def update_pattern(db: Database, pattern_id: str, **kwargs: Any) -> dict:
 
     # Update
     manager.update_pattern(pattern_id, **kwargs)
+
+    # Audit log
+    db.log_audit(
+        operation="update_pattern",
+        reason=f"Updated failure pattern {pattern_id}",
+        details={
+            "pattern_id": pattern_id,
+            "updated_fields": list(kwargs.keys()),
+        },
+    )
 
     return {
         "success": True,
@@ -413,13 +445,29 @@ def review_pending_patterns(db: Database, dry_run: bool = True) -> dict:
 
     # Apply if not dry run
     if not dry_run:
+        approved_count = 0
+        rejected_count = 0
         for pattern_id, rec in recommendations.items():
             action = rec.get("action")
             if action == "approve":
                 manager.approve_pattern(pattern_id, approved_by="ai_librarian")
+                approved_count += 1
             elif action == "reject":
                 reason = rec.get("reason", "Rejected by AI librarian")
                 manager.reject_pattern(pattern_id, reason=reason)
+                rejected_count += 1
+
+        # Audit log for batch review
+        db.log_audit(
+            operation="review_pending_patterns",
+            reason=f"AI librarian reviewed {len(pending)} patterns",
+            details={
+                "patterns_reviewed": len(pending),
+                "approved_count": approved_count,
+                "rejected_count": rejected_count,
+                "actions": actions,
+            },
+        )
 
     return {
         "success": True,

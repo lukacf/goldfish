@@ -11,9 +11,11 @@ from goldfish.errors import GoldfishError
 # Paths to goldfish runtime modules (relative to this file)
 GOLDFISH_IO_PATH = Path(__file__).parent.parent / "io" / "__init__.py"
 GOLDFISH_METRICS_PATH = Path(__file__).parent.parent / "metrics"
-# Metrics depends on validation and errors modules
+GOLDFISH_SVS_PATH = Path(__file__).parent.parent / "svs"
+# Metrics and SVS depend on validation, errors, and utils modules
 GOLDFISH_VALIDATION_PATH = Path(__file__).parent.parent / "validation.py"
 GOLDFISH_ERRORS_PATH = Path(__file__).parent.parent / "errors.py"
+GOLDFISH_UTILS_PATH = Path(__file__).parent.parent / "utils"
 
 # Default base image when none specified (backwards compatibility)
 DEFAULT_BASE_IMAGE = "python:3.11-slim"
@@ -192,12 +194,27 @@ CMD ["/bin/bash"]
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
                 )
 
-            # Copy goldfish.validation and goldfish.errors (metrics dependencies)
+            # Copy goldfish.svs module into build context
+            if GOLDFISH_SVS_PATH.exists() and GOLDFISH_SVS_PATH.is_dir():
+                goldfish_svs_dest = build_context / "goldfish_io" / "goldfish" / "svs"
+                shutil.copytree(
+                    GOLDFISH_SVS_PATH,
+                    goldfish_svs_dest,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                )
+
+            # Copy goldfish.validation, goldfish.errors, and goldfish.utils (metrics/SVS dependencies)
             goldfish_pkg_dest = build_context / "goldfish_io" / "goldfish"
             if GOLDFISH_VALIDATION_PATH.exists():
                 shutil.copy2(GOLDFISH_VALIDATION_PATH, goldfish_pkg_dest / "validation.py")
             if GOLDFISH_ERRORS_PATH.exists():
                 shutil.copy2(GOLDFISH_ERRORS_PATH, goldfish_pkg_dest / "errors.py")
+            if GOLDFISH_UTILS_PATH.exists() and GOLDFISH_UTILS_PATH.is_dir():
+                shutil.copytree(
+                    GOLDFISH_UTILS_PATH,
+                    goldfish_pkg_dest / "utils",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                )
 
             # Generate Dockerfile in build context (not workspace)
             dockerfile_content = self.generate_dockerfile(workspace_dir, base_image=base_image)

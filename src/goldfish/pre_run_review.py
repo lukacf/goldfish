@@ -250,9 +250,20 @@ class PreRunReviewer:
             # run() is sync in the provider, we run it in a thread if needed
             # but since we are in an async method, we'll wrap it
             loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(None, agent.run, request)
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, agent.run, request),
+                timeout=self.config.timeout_seconds,
+            )
 
             review_text = result.raw_output
+        except TimeoutError:
+            logger.error(f"Pre-run review timed out after {self.config.timeout_seconds}s")
+            return RunReview(
+                approved=True,  # Don't block on timeout
+                summary=f"Review timed out after {self.config.timeout_seconds}s",
+                full_review="",
+                reviewed_stages=stages,
+            )
         except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
             # Let these propagate - user cancellation should work
             raise

@@ -451,7 +451,7 @@ class TestReviewTimeoutHandling:
 
     @pytest.mark.asyncio
     async def test_review_timeout_approves_and_continues(self, tmp_path: Path) -> None:
-        """Timeout should approve the run to avoid blocking."""
+        """review_before_run timeouts should approve the run to avoid blocking."""
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         dev_repo = tmp_path / "dev"
@@ -459,7 +459,8 @@ class TestReviewTimeoutHandling:
 
         (workspace / "pipeline.yaml").write_text("stages: []")
 
-        config = PreRunReviewConfig(enabled=True, timeout_seconds=1)
+        # Set a very short timeout
+        config = PreRunReviewConfig(enabled=True, timeout_seconds=0.1)
         svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
@@ -472,7 +473,7 @@ class TestReviewTimeoutHandling:
         def slow_run(request):
             import time
 
-            time.sleep(2)  # More than timeout_seconds
+            time.sleep(2)  # Much more than timeout_seconds
             from goldfish.svs.agent import AgentResult
 
             return AgentResult(decision="approved", raw_output="OK")
