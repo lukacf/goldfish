@@ -249,7 +249,7 @@ class SourceInfo(BaseModel):
     size_bytes: int | None = None
     status: SourceStatus = SourceStatus.AVAILABLE
     metadata: dict | None = None
-    metadata_status: Literal["ok", "missing", "invalid"] = "missing"
+    metadata_status: Literal["ok", "missing", "invalid", "future"] = "missing"
 
 
 class SourceLineage(BaseModel):

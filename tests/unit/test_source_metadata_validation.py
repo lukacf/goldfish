@@ -2,7 +2,7 @@
 
 import pytest
 
-from goldfish.validation import InvalidSourceMetadataError, validate_source_metadata
+from goldfish.validation import InvalidSourceMetadataError, parse_source_metadata, validate_source_metadata
 
 
 def _valid_npy_metadata() -> dict:
@@ -184,6 +184,19 @@ def test_validate_source_metadata_rejects_unknown_fields() -> None:
         validate_source_metadata(metadata)
 
 
+def test_validate_source_metadata_aggregates_errors() -> None:
+    """Multiple issues should be reported in a single error."""
+    with pytest.raises(InvalidSourceMetadataError) as exc_info:
+        validate_source_metadata({})
+
+    details = exc_info.value.details
+    assert details["count"] >= 3
+    fields = {error["field"] for error in details["errors"]}
+    assert "schema_version" in fields
+    assert "description" in fields
+    assert "source" in fields
+
+
 def test_validate_source_metadata_accepts_npz() -> None:
     """NPZ metadata with multiple arrays should pass."""
     metadata = _valid_npy_metadata()
@@ -222,6 +235,16 @@ def test_validate_source_metadata_rejects_large_feature_name_entry(monkeypatch) 
 
     with pytest.raises(InvalidSourceMetadataError, match="feature_names.values"):
         validate_source_metadata(metadata)
+
+
+def test_parse_source_metadata_future_version() -> None:
+    """schema_version > 1 should be treated as future."""
+    metadata = _valid_npy_metadata()
+    metadata["schema_version"] = 2
+
+    parsed, status = parse_source_metadata(metadata)
+    assert status == "future"
+    assert parsed == metadata
 
 
 def test_validate_source_metadata_rejects_feature_count_limit(monkeypatch) -> None:

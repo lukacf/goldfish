@@ -27,10 +27,13 @@ from goldfish.errors import GoldfishError
 class ValidationError(GoldfishError):
     """Base class for validation errors."""
 
-    def __init__(self, message: str, value: str, field: str):
+    def __init__(self, message: str, value: str, field: str, details: dict | None = None):
         self.value = value
         self.field = field
-        super().__init__(message)
+        error_details = {"field": field, "value": value}
+        if details:
+            error_details.update(details)
+        super().__init__(message, error_details)
 
 
 class InvalidWorkspaceNameError(ValidationError):
@@ -113,11 +116,12 @@ class InvalidOutputNameError(ValidationError):
 class InvalidSourceMetadataError(ValidationError):
     """Source metadata is invalid."""
 
-    def __init__(self, reason: str, field: str = "metadata"):
+    def __init__(self, reason: str, field: str = "metadata", details: dict | None = None):
         super().__init__(
             f"Invalid source metadata: {reason}",
             value=str(reason),
             field=field,
+            details=details,
         )
 
 
@@ -409,46 +413,99 @@ def validate_source_metadata(metadata: dict[str, Any]) -> None:
         InvalidSourceMetadataError: If metadata fails validation
     """
     if not isinstance(metadata, dict):
-        raise InvalidSourceMetadataError("metadata must be a JSON object")
+        raise InvalidSourceMetadataError("metadata must be a JSON object", field="metadata")
 
-    _validate_metadata_size(metadata)
-    _validate_metadata_structure_limits(metadata)
+    errors: list[InvalidSourceMetadataError] = []
 
-    _validate_exact_keys(metadata, {"schema_version", "description", "source", "schema"}, "metadata")
+    def record_error(exc: InvalidSourceMetadataError) -> None:
+        errors.append(exc)
+
+    try:
+        _validate_metadata_size(metadata)
+    except InvalidSourceMetadataError as exc:
+        record_error(exc)
+
+    try:
+        _validate_metadata_structure_limits(metadata)
+    except InvalidSourceMetadataError as exc:
+        record_error(exc)
+
+    expected_top = {"schema_version", "description", "source", "schema"}
+    missing = expected_top - metadata.keys()
+    extra = metadata.keys() - expected_top
+    if missing:
+        record_error(
+            InvalidSourceMetadataError(
+                f"metadata missing required fields: {', '.join(sorted(missing))}",
+                field="metadata",
+            )
+        )
+    if extra:
+        record_error(
+            InvalidSourceMetadataError(
+                f"metadata has unexpected fields: {', '.join(sorted(extra))}",
+                field="metadata",
+            )
+        )
 
     schema_version = metadata.get("schema_version")
     if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version != 1:
-        raise InvalidSourceMetadataError("schema_version must be 1", field="schema_version")
+        record_error(InvalidSourceMetadataError("schema_version must be 1", field="schema_version"))
 
     description = metadata.get("description")
     if not isinstance(description, str):
-        raise InvalidSourceMetadataError("description must be a string", field="description")
-    if len(description.strip()) < _MIN_SOURCE_DESCRIPTION_LENGTH:
-        raise InvalidSourceMetadataError(
-            f"description must be at least {_MIN_SOURCE_DESCRIPTION_LENGTH} characters",
-            field="description",
-        )
-    if len(description) > _MAX_SOURCE_DESCRIPTION_LENGTH:
-        raise InvalidSourceMetadataError(
-            f"description must be at most {_MAX_SOURCE_DESCRIPTION_LENGTH} characters",
-            field="description",
-        )
+        record_error(InvalidSourceMetadataError("description must be a string", field="description"))
+    else:
+        if len(description.strip()) < _MIN_SOURCE_DESCRIPTION_LENGTH:
+            record_error(
+                InvalidSourceMetadataError(
+                    f"description must be at least {_MIN_SOURCE_DESCRIPTION_LENGTH} characters",
+                    field="description",
+                )
+            )
+        if len(description) > _MAX_SOURCE_DESCRIPTION_LENGTH:
+            record_error(
+                InvalidSourceMetadataError(
+                    f"description must be at most {_MAX_SOURCE_DESCRIPTION_LENGTH} characters",
+                    field="description",
+                )
+            )
 
     source = metadata.get("source")
+    source_format: str | None = None
     if not isinstance(source, dict):
-        raise InvalidSourceMetadataError("source must be an object", field="source")
-    source_format = _validate_source_section(source)
+        record_error(InvalidSourceMetadataError("source must be an object", field="source"))
+    else:
+        try:
+            source_format = _validate_source_section(source)
+        except InvalidSourceMetadataError as exc:
+            record_error(exc)
 
     schema = metadata.get("schema")
     if not isinstance(schema, dict):
-        raise InvalidSourceMetadataError("schema must be an object", field="schema")
-    _validate_schema_section(schema, source_format)
+        record_error(InvalidSourceMetadataError("schema must be an object", field="schema"))
+    elif source_format:
+        try:
+            _validate_schema_section(schema, source_format)
+        except InvalidSourceMetadataError as exc:
+            record_error(exc)
+
+    if errors:
+        summaries = [f"{exc.field}: {exc.message}" for exc in errors]
+        raise InvalidSourceMetadataError(
+            f"{len(errors)} validation errors: " + "; ".join(summaries),
+            field="metadata",
+            details={
+                "count": len(errors),
+                "errors": [{"field": exc.field, "message": exc.message, "value": exc.value} for exc in errors],
+            },
+        )
 
 
 def parse_source_metadata(raw: str | dict[str, Any] | None) -> tuple[dict[str, Any] | None, str]:
     """Parse metadata from DB and return (metadata, status).
 
-    Status values: "ok", "missing", "invalid".
+    Status values: "ok", "missing", "invalid", "future".
     """
     if raw is None:
         return None, "missing"
@@ -467,6 +524,12 @@ def parse_source_metadata(raw: str | dict[str, Any] | None) -> tuple[dict[str, A
 
     if not isinstance(parsed, dict):
         return None, "invalid"
+
+    schema_version = parsed.get("schema_version")
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        return None, "invalid"
+    if schema_version > 1:
+        return parsed, "future"
 
     try:
         validate_source_metadata(parsed)

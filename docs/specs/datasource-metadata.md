@@ -30,6 +30,8 @@ All new sources must include metadata with this exact structure:
 ### Rules
 
 - `schema_version` must be `1`.
+  - Newer versions are treated as **future** on read (metadata_status="future")
+    and require a Goldfish upgrade to validate.
 - `description` is required, min length 20 characters.
 - `source` describes **format/encoding** only.
 - `schema` describes **meaning** of the data.
@@ -221,7 +223,7 @@ update_source_metadata(source_name, metadata, reason)
 
 ```python
 metadata: dict | None
-metadata_status: Literal["ok", "missing", "invalid"]
+metadata_status: Literal["ok", "missing", "invalid", "future"]
 ```
 
 ### Tools
