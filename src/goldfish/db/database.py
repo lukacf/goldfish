@@ -19,19 +19,11 @@ from goldfish.db.types import (
     SourceRow,
     StageVersionRow,
 )
+from goldfish.errors import DatabaseError
 from goldfish.models import JobStatus, PipelineStatus, StageRunStatus
 
 # Load schema from file
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
-
-
-class DatabaseError(Exception):
-    """Database operation failed."""
-
-    def __init__(self, message: str, operation: str = ""):
-        self.message = message
-        self.operation = operation
-        super().__init__(message)
 
 
 class Database:
@@ -44,6 +36,7 @@ class Database:
         except (OSError, PermissionError) as e:
             raise DatabaseError(
                 f"Cannot create database directory at '{db_path.parent}': {e}",
+                path=str(db_path),
                 operation="init",
             ) from e
         # For existing databases, run migrations FIRST to add missing columns,
@@ -74,6 +67,7 @@ class Database:
         except (OSError, FileNotFoundError) as e:
             raise DatabaseError(
                 f"Cannot read database schema file: {e}",
+                path=str(SCHEMA_PATH),
                 operation="init_schema",
             ) from e
 
@@ -83,6 +77,7 @@ class Database:
         except sqlite3.Error as e:
             raise DatabaseError(
                 f"Cannot initialize database schema: {e}",
+                path=str(self.db_path),
                 operation="init_schema",
             ) from e
 
@@ -431,6 +426,26 @@ class Database:
             # Fallback to name lookup
             row = conn.execute("SELECT * FROM sources WHERE name = ?", (source_id_or_name,)).fetchone()
             return cast(SourceRow, dict(row)) if row else None
+
+    def update_source_metadata(
+        self,
+        source_id_or_name: str,
+        metadata: dict[str, Any],
+        description: str | None = None,
+        size_bytes: int | None = None,
+    ) -> None:
+        """Update metadata (and related fields) for a source."""
+        metadata_json = json.dumps(metadata)
+
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE sources
+                SET metadata = ?, description = ?, size_bytes = ?
+                WHERE id = ? OR name = ?
+                """,
+                (metadata_json, description, size_bytes, source_id_or_name, source_id_or_name),
+            )
 
     def count_sources(
         self,

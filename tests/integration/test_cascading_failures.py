@@ -294,6 +294,16 @@ class TestPromoteArtifactCascadingFailures:
                         job_id="completed-job",
                         output_name="model",
                         source_name="promoted-model",
+                        metadata={
+                            "schema_version": 1,
+                            "description": "Model artifact file for cascading failure test.",
+                            "source": {
+                                "format": "file",
+                                "size_bytes": 123,
+                                "created_at": "2025-12-24T12:00:00Z",
+                            },
+                            "schema": {"kind": "file", "content_type": "application/json"},
+                        },
                         reason="Testing source creation failure",
                     )
 

@@ -36,6 +36,7 @@ from goldfish.models import (
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.utils import parse_optional_datetime
 from goldfish.utils.config_hash import compute_config_hash
+from goldfish.validation import InvalidSourceMetadataError, parse_source_metadata, validate_source_metadata
 from goldfish.workspace.manager import WorkspaceManager
 
 logger = logging.getLogger(__name__)
@@ -667,6 +668,7 @@ class StageExecutor:
                         "storage_location": storage_location,
                         "from_stage_ref": f"{stage_name}/{output_name}",
                         "is_artifact": bool(output_def.artifact),
+                        "metadata": getattr(output_def, "metadata", None),
                     }
                 )
 
@@ -687,27 +689,50 @@ class StageExecutor:
                 except Exception:
                     existing = None
 
-                metadata: dict[str, Any] | None = None
+                output_meta = output.get("metadata")
+                if output_meta is None:
+                    logger.warning("Skipping auto-registration for %s: missing metadata", source_id)
+                    continue
+
                 try:
-                    meta_str = existing.get("metadata") if existing else None
-                    if meta_str:
-                        metadata = json.loads(meta_str)
-                except Exception:
-                    metadata = None
-                if metadata is None:
-                    metadata = {}
-                metadata["produced_by_stage_run_id"] = stage_run_id
+                    validate_source_metadata(output_meta)
+                except InvalidSourceMetadataError as exc:
+                    logger.warning("Skipping auto-registration for %s: %s", source_id, exc.message)
+                    continue
+
+                metadata = output_meta
+                description = metadata.get("description")
+                # size_bytes may be None for stage outputs (unknown at authoring time).
+                size_bytes = metadata.get("source", {}).get("size_bytes")
+
+                if existing:
+                    existing_meta, status = parse_source_metadata(existing.get("metadata"))
+                    if status == "ok" and existing_meta is not None:
+                        mismatch_reasons = self._metadata_mismatch_reasons(existing_meta, metadata)
+                        if mismatch_reasons:
+                            logger.warning(
+                                "Skipping auto-registration for %s: metadata mismatch (%s)",
+                                source_id,
+                                "; ".join(mismatch_reasons),
+                            )
+                            continue
 
                 try:
                     if existing:
                         with self.db._conn() as conn:
                             conn.execute(
-                                "UPDATE sources SET gcs_location=?, created_by=?, status=?, metadata=? WHERE id=?",
+                                """
+                                UPDATE sources
+                                SET gcs_location=?, created_by=?, status=?, metadata=?, description=?, size_bytes=?
+                                WHERE id=?
+                                """,
                                 (
                                     output["storage_location"],
                                     f"stage:{stage_run_id}",
                                     "available",
                                     json.dumps(metadata),
+                                    description,
+                                    size_bytes,
                                     source_id,
                                 ),
                             )
@@ -718,7 +743,8 @@ class StageExecutor:
                             name=source_name,
                             gcs_location=gcs_loc,
                             created_by=f"stage:{stage_run_id}",
-                            description=f"Artifact from {stage_run_id}",
+                            description=description,
+                            size_bytes=size_bytes,
                             metadata=metadata,
                         )
                 except Exception as e:
@@ -733,6 +759,59 @@ class StageExecutor:
         log_path = run_dir / "output.log"
         log_path.write_text(logs or "")
         return str(log_path)
+
+    @staticmethod
+    def _metadata_mismatch_reasons(existing: dict[str, Any], incoming: dict[str, Any]) -> list[str]:
+        """Return human-readable reasons why metadata is incompatible."""
+        reasons: list[str] = []
+
+        def record(path: str, existing_value: Any, incoming_value: Any) -> None:
+            if existing_value != incoming_value:
+                reasons.append(f"{path} {existing_value!r} != {incoming_value!r}")
+
+        record("schema_version", existing.get("schema_version"), incoming.get("schema_version"))
+
+        existing_source = existing.get("source", {})
+        incoming_source = incoming.get("source", {})
+        record("source.format", existing_source.get("format"), incoming_source.get("format"))
+        existing_size = existing_source.get("size_bytes")
+        incoming_size = incoming_source.get("size_bytes")
+        if existing_size is not None:
+            record("source.size_bytes", existing_size, incoming_size)
+
+        existing_schema = existing.get("schema", {})
+        incoming_schema = incoming.get("schema", {})
+        existing_kind = existing_schema.get("kind")
+        incoming_kind = incoming_schema.get("kind")
+        record("schema.kind", existing_kind, incoming_kind)
+        if existing_kind != incoming_kind:
+            return reasons
+
+        if existing_kind == "tensor":
+            record(
+                "schema.primary_array",
+                existing_schema.get("primary_array"),
+                incoming_schema.get("primary_array"),
+            )
+            existing_arrays = existing_schema.get("arrays", {}) or {}
+            incoming_arrays = incoming_schema.get("arrays", {}) or {}
+            if set(existing_arrays.keys()) != set(incoming_arrays.keys()):
+                reasons.append("schema.arrays keys mismatch")
+                return reasons
+            for name in existing_arrays:
+                existing_arr = existing_arrays.get(name, {})
+                incoming_arr = incoming_arrays.get(name, {})
+                record(f"schema.arrays.{name}.role", existing_arr.get("role"), incoming_arr.get("role"))
+                record(f"schema.arrays.{name}.dtype", existing_arr.get("dtype"), incoming_arr.get("dtype"))
+                record(f"schema.arrays.{name}.shape", existing_arr.get("shape"), incoming_arr.get("shape"))
+        elif existing_kind == "tabular":
+            record("schema.columns", existing_schema.get("columns"), incoming_schema.get("columns"))
+            record("schema.dtypes", existing_schema.get("dtypes"), incoming_schema.get("dtypes"))
+            record("schema.row_count", existing_schema.get("row_count"), incoming_schema.get("row_count"))
+        elif existing_kind == "file":
+            record("schema.content_type", existing_schema.get("content_type"), incoming_schema.get("content_type"))
+
+        return reasons
 
     def _collect_metrics(self, stage_run_id: str, backend: str) -> None:
         """Collect metrics from JSONL and store in database."""

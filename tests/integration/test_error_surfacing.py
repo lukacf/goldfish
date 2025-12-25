@@ -251,6 +251,13 @@ class TestDatabaseErrors:
         # Should mention the path
         assert "blocking" in error_msg or str(blocking_file) in error_msg, f"Expected path in error: {error_msg}"
 
+    def test_database_error_accepts_positional_operation(self):
+        """DatabaseError should accept legacy positional operation argument."""
+        from goldfish.errors import DatabaseError
+
+        err = DatabaseError("boom", "init")
+        assert err.details.get("operation") == "init"
+
     def test_job_not_found_includes_job_id(self, temp_dir):
         """JobNotFoundError should include the job ID."""
         from goldfish.db.database import Database

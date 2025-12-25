@@ -100,7 +100,7 @@ class ProjectNotInitializedError(GoldfishError):
 class DatabaseError(GoldfishError):
     """Database operation failed."""
 
-    def __init__(self, message: str, path: str | None = None, operation: str | None = None):
+    def __init__(self, message: str, operation: str | None = None, *, path: str | None = None):
         details = {}
         if path:
             details["path"] = path
