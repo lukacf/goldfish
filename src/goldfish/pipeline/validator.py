@@ -23,7 +23,7 @@ def validate_pipeline_run(
     stages: list[str] | None,
     pipeline_name: str | None,
     inputs_override: dict,
-    config: GoldfishConfig | None = None,
+    config: "GoldfishConfig" | None = None,
 ) -> dict:
     """Validate a pipeline run without actually launching.
 

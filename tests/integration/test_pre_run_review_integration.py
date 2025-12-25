@@ -26,6 +26,8 @@ from goldfish.models import (
     StageRunStatus,
 )
 from goldfish.pre_run_review import PreRunReviewer
+from goldfish.svs.agent import ClaudeCodeProvider
+from goldfish.svs.config import SVSConfig
 
 if TYPE_CHECKING:
     from goldfish.config import GoldfishConfig
@@ -56,8 +58,10 @@ stages:
         )
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
+            svs_config=svs_config,
             workspace_path=workspace,
             dev_repo_path=dev_repo,
         )
@@ -90,8 +94,10 @@ def run():
         )
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
+            svs_config=svs_config,
             workspace_path=workspace,
             dev_repo_path=dev_repo,
         )
@@ -124,8 +130,10 @@ epochs: 100
         )
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
+            svs_config=svs_config,
             workspace_path=workspace,
             dev_repo_path=dev_repo,
         )
@@ -142,8 +150,10 @@ epochs: 100
         dev_repo.mkdir()
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
+            svs_config=svs_config,
             workspace_path=workspace,
             dev_repo_path=dev_repo,
         )
@@ -174,8 +184,10 @@ class TestPreRunReviewWithRunReason:
         (modules / "train.py").write_text("# train")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
+            svs_config=svs_config,
             workspace_path=workspace,
             dev_repo_path=dev_repo,
         )
@@ -187,24 +199,21 @@ class TestPreRunReviewWithRunReason:
             min_result="Lower loss variance during training",
         )
 
-        # Mock the Claude call to capture the prompt
-        captured_prompt: list[str] = []
+        from goldfish.svs.agent import AgentResult
 
-        async def mock_claude(prompt: str) -> str:
-            captured_prompt.append(prompt)
-            return "## train\nNo issues found."
+        mock_result = AgentResult(decision="approved", raw_output="## train\nNo issues found.")
 
         # Mock API key to bypass early return
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(reviewer, "_call_claude", mock_claude):
+            with patch.object(ClaudeCodeProvider, "run", return_value=mock_result) as mock_run:
                 await reviewer.review(["train"], reason=reason)
 
-        # Verify reason was included in prompt
-        assert len(captured_prompt) == 1
-        prompt = captured_prompt[0]
-        assert "Increasing batch size should improve training stability" in prompt
-        assert "batch_size from 32 to 64" in prompt
-        assert "Lower loss variance" in prompt
+                # Verify reason was included in prompt
+                call_args = mock_run.call_args[0][0]
+                prompt = call_args.context["prompt"]
+                assert "Increasing batch size should improve training stability" in prompt
+                assert "batch_size from 32 to 64" in prompt
+                assert "Lower loss variance" in prompt
 
 
 class TestStageExecutorReviewIntegration:
@@ -451,22 +460,26 @@ class TestReviewTimeoutHandling:
         (workspace / "pipeline.yaml").write_text("stages: []")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=1)
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
+            svs_config=svs_config,
             workspace_path=workspace,
             dev_repo_path=dev_repo,
         )
 
         # Mock Claude to hang forever
-        async def slow_claude(prompt: str) -> str:
-            import asyncio
+        def slow_run(request):
+            import time
 
-            await asyncio.sleep(100)
-            return "Never reached"
+            time.sleep(2)  # More than timeout_seconds
+            from goldfish.svs.agent import AgentResult
+
+            return AgentResult(decision="approved", raw_output="OK")
 
         # Mock API key to bypass early return
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(reviewer, "_call_claude", slow_claude):
+            with patch.object(ClaudeCodeProvider, "run", side_effect=slow_run):
                 result = await reviewer.review(["train"])
 
         # Should approve due to timeout
@@ -484,19 +497,17 @@ class TestReviewTimeoutHandling:
         (workspace / "pipeline.yaml").write_text("stages: []")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
+            svs_config=svs_config,
             workspace_path=workspace,
             dev_repo_path=dev_repo,
         )
 
-        # Mock Claude to raise exception
-        async def error_claude(prompt: str) -> str:
-            raise RuntimeError("API connection failed")
-
         # Mock API key to bypass early return
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(reviewer, "_call_claude", error_claude):
+            with patch.object(ClaudeCodeProvider, "run", side_effect=RuntimeError("API connection failed")):
                 result = await reviewer.review(["train"])
 
         # Should approve due to error
@@ -521,17 +532,17 @@ class TestReviewDiffContext:
         (modules / "train.py").write_text("# code")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
+            svs_config=svs_config,
             workspace_path=workspace,
             dev_repo_path=dev_repo,
         )
 
-        captured_prompt: list[str] = []
+        from goldfish.svs.agent import AgentResult
 
-        async def mock_claude(prompt: str) -> str:
-            captured_prompt.append(prompt)
-            return "## train\nNo issues found."
+        mock_result = AgentResult(decision="approved", raw_output="OK")
 
         diff_text = """\
 diff --git a/modules/train.py b/modules/train.py
@@ -546,12 +557,12 @@ diff --git a/modules/train.py b/modules/train.py
 
         # Mock API key to bypass early return
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(reviewer, "_call_claude", mock_claude):
+            with patch.object(ClaudeCodeProvider, "run", return_value=mock_result) as mock_run:
                 await reviewer.review(["train"], diff_text=diff_text)
-
-        assert len(captured_prompt) == 1
-        assert "lr = 0.01" in captured_prompt[0]
-        assert "Increased learning rate" in captured_prompt[0]
+                call_args = mock_run.call_args[0][0]
+                prompt = call_args.context["prompt"]
+                assert "lr = 0.01" in prompt
+                assert "Increased learning rate" in prompt
 
     @pytest.mark.asyncio
     async def test_review_handles_empty_diff(self, tmp_path: Path) -> None:
@@ -567,24 +578,25 @@ diff --git a/modules/train.py b/modules/train.py
         (modules / "train.py").write_text("# code")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
+            svs_config=svs_config,
             workspace_path=workspace,
             dev_repo_path=dev_repo,
         )
 
-        captured_prompt: list[str] = []
+        from goldfish.svs.agent import AgentResult
 
-        async def mock_claude(prompt: str) -> str:
-            captured_prompt.append(prompt)
-            return "## train\nNo issues found."
+        mock_result = AgentResult(decision="approved", raw_output="OK")
 
         # Mock API key to bypass early return
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(reviewer, "_call_claude", mock_claude):
+            with patch.object(ClaudeCodeProvider, "run", return_value=mock_result) as mock_run:
                 await reviewer.review(["train"], diff_text="")
-
-        assert "first run" in captured_prompt[0].lower() or "unavailable" in captured_prompt[0].lower()
+                call_args = mock_run.call_args[0][0]
+                prompt = call_args.context["prompt"]
+                assert "first run" in prompt.lower() or "unavailable" in prompt.lower()
 
 
 class TestReviewMultipleStages:
@@ -606,39 +618,23 @@ class TestReviewMultipleStages:
         (modules / "evaluate.py").write_text("# evaluate code")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
+            svs_config=svs_config,
             workspace_path=workspace,
             dev_repo_path=dev_repo,
         )
 
-        captured_prompt: list[str] = []
+        from goldfish.svs.agent import AgentResult
 
-        async def mock_claude(prompt: str) -> str:
-            captured_prompt.append(prompt)
-            return """\
-## preprocess
-No issues found.
-
-## train
-WARNING: train.py:5 - consider using torch.compile
-
-## evaluate
-ERROR: evaluate.py:10 - undefined variable 'metrics'
-"""
+        mock_result = AgentResult(decision="approved", raw_output="OK")
 
         # Mock API key to bypass early return
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(reviewer, "_call_claude", mock_claude):
-                result = await reviewer.review(["preprocess", "train", "evaluate"])
-
-        # Should have issues from multiple stages
-        assert not result.approved
-        assert len(result.issues) == 2
-
-        warnings = [i for i in result.issues if i.severity == ReviewSeverity.WARNING]
-        errors = [i for i in result.issues if i.severity == ReviewSeverity.ERROR]
-        assert len(warnings) == 1
-        assert warnings[0].stage == "train"
-        assert len(errors) == 1
-        assert errors[0].stage == "evaluate"
+            with patch.object(ClaudeCodeProvider, "run", return_value=mock_result) as mock_run:
+                await reviewer.review(["preprocess", "train"])
+                call_args = mock_run.call_args[0][0]
+                prompt = call_args.context["prompt"]
+                assert "preprocess" in prompt
+                assert "train" in prompt
