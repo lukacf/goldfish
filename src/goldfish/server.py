@@ -317,6 +317,7 @@ from goldfish.server_tools.data_tools import (  # noqa: E402, F401
     promote_artifact,
     register_dataset,
     register_source,
+    update_source_metadata,
 )
 from goldfish.server_tools.execution_tools import (  # noqa: E402, F401
     cancel,

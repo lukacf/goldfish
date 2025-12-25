@@ -64,3 +64,4 @@ htmlcov/
 .coverage
 workspaces/
 goldfish.yaml
+docs/a_real_project_issues_example.md

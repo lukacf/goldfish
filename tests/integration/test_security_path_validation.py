@@ -15,6 +15,20 @@ def get_tool_fn(tool):
     return tool.fn if hasattr(tool, "fn") else tool
 
 
+def valid_file_metadata() -> dict:
+    """Return valid file metadata for promote_artifact tests."""
+    return {
+        "schema_version": 1,
+        "description": "Model artifact JSON file for validation tests.",
+        "source": {
+            "format": "file",
+            "size_bytes": 123,
+            "created_at": "2025-12-24T12:00:00Z",
+        },
+        "schema": {"kind": "file", "content_type": "application/json"},
+    }
+
+
 class TestLogUriPathTraversal:
     """Tests that log_uri is validated before file read."""
 
@@ -150,6 +164,7 @@ class TestArtifactUriValidation:
                     job_id="job-a1b2c3d4",
                     output_name="model",
                     source_name="promoted_model",
+                    metadata=valid_file_metadata(),
                     reason="Testing path traversal rejection",
                 )
         finally:
@@ -206,6 +221,7 @@ class TestArtifactUriValidation:
                     job_id="job-b2c3d4e5",
                     output_name="model",
                     source_name="promoted_model",
+                    metadata=valid_file_metadata(),
                     reason="Testing non-GCS URI rejection",
                 )
         finally:
@@ -261,6 +277,7 @@ class TestArtifactUriValidation:
                 job_id="job-c3d4e5f6",
                 output_name="model",
                 source_name="promoted_model",
+                metadata=valid_file_metadata(),
                 reason="Testing valid GCS URI acceptance",
             )
             assert result.success

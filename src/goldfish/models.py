@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -247,6 +248,11 @@ class SourceInfo(BaseModel):
     gcs_location: str
     size_bytes: int | None = None
     status: SourceStatus = SourceStatus.AVAILABLE
+    metadata: dict | None = None
+    metadata_status: Literal["ok", "missing", "invalid", "future"] = Field(
+        default="missing",
+        description=("Metadata validation status: ok (valid), missing, invalid, or future (newer schema_version)."),
+    )
 
 
 class SourceLineage(BaseModel):
@@ -271,6 +277,14 @@ class PromoteArtifactResponse(BaseModel):
     success: bool
     source: SourceInfo
     lineage: SourceLineage
+    state_md: str
+
+
+class UpdateSourceMetadataResponse(BaseModel):
+    """Response from update_source_metadata() tool."""
+
+    success: bool
+    source: SourceInfo
     state_md: str
 
 
@@ -452,6 +466,7 @@ class SignalDef(BaseModel):
     storage: str | None = None  # gcs, hyperdisk, local (hint)
     format: str | None = None  # Override format detection
     artifact: bool | None = False  # Mark output as artifact for auto-registration
+    metadata: dict | None = None  # Optional source metadata for outputs
 
 
 class StageDef(BaseModel):
