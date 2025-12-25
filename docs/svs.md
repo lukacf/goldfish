@@ -103,21 +103,35 @@ stats_json TEXT  -- JSON: {entropy, null_ratio, unique_count, min, max, mean, st
 
 ---
 
-### 2. Schema Authority
+### 2. Schema as Contract, Metadata as Observation
 
-**Decision:** Pipeline.yaml is authoritative for **structure**. Datasource metadata is authoritative for **semantics**.  
-Outputs (produced by stages) are validated **against pipeline schema**, then must emit metadata compatible with that schema.
+**Decision:** `pipeline.yaml` schema is the **contract (law)** for signals.  
+Datasource metadata is the **observed reality** of registered artifacts.
 
 **Validation hierarchy:**
-1. Pipeline defines signal name/type → REQUIRED (structural)
-2. Registered inputs (datasets/sources) must provide metadata → AUTHORITATIVE for semantics
-3. Stage outputs are checked against pipeline schema → AUTHORITATIVE for outputs
-4. Output metadata (emitted post-run) must be **compatible** with pipeline schema
+1. **Pipeline schema** defines the signal contract (structure) → authoritative.
+2. **Registered input metadata** must be **compatible** with the input contract (if defined).  
+   If metadata is missing (legacy), SVS warns and skips contract verification.
+3. **Stage outputs** must satisfy the output contract at `save_output` time.
+4. **Output metadata** (emitted post-run) is recorded as observation and must remain compatible with the contract.
 
-**Compatibility rule:** For a given output:
+**Compatibility rule:** For a given signal:
 - `type` must align (`npy` ↔ `tensor`, `csv` ↔ `tabular`, `file` ↔ `file`)
 - `schema.kind` must match expected kind
-- `shape`/`dtype` checks apply if defined in pipeline schema
+- `shape`/`dtype` checks apply if defined in the contract
+
+**Contract resolution (config-aware):**
+Contracts may reference config parameters for dynamic shapes, e.g. `"{embedding_dim}"`.
+Resolution rules:
+- Values are resolved from the stage config **for the current run** (including overrides).
+- Missing or non‑numeric values → validation error.
+- Preflight and runtime must resolve the **same** config to avoid drift.
+
+**Preflight contract check:**
+`validate_pipeline` performs a structural compatibility pass:
+- Resolve all schemas with the run config.
+- Ensure upstream output schema is compatible with downstream input schema.
+- Fail fast on mismatches (no container build).
 
 ---
 
@@ -134,7 +148,7 @@ invalidate a passing mechanistic check unless policy explicitly allows blocking.
 **Override rule:** Mechanistic failures always take precedence. AI feedback can only escalate or warn, never bypass a failed law.
 
 **Missing metadata policy:**
-- If input metadata is missing (legacy sources), SVS runs **structural checks only** and emits a warning.
+- If input metadata is missing (legacy sources), SVS **skips contract compatibility checks** and emits a warning.
 - Semantic checks that require metadata are skipped with reason `metadata_missing`.
 - For outputs, metadata is generated post-run from computed stats; absence does not block mechanistic checks.
 
@@ -418,16 +432,17 @@ Missing metrics → check skipped with reason `missing_metric`.
 
 ### 1.1 Output Schema Validation
 
-Extend `pipeline.yaml`:
+Extend `pipeline.yaml` (the **contract** for this signal):
 
 ```yaml
 stages:
   - name: tokenize
+    config: configs/tokenize.yaml
     outputs:
       tokens:
         type: npy
         schema:
-          shape: ["*"]  # Variable length 1D array
+          shape: [null, "{vocab_size}"]  # Variable rows, fixed columns from config
           dtype: int32
           checks:
             # Vocabulary health
@@ -457,8 +472,9 @@ stages:
 def save_output(name: str, data: np.ndarray, **kwargs) -> None:
     """Save output with automatic validation."""
 
-    # Load expected schema from pipeline.yaml
+    # Load expected schema from pipeline.yaml (contract)
     schema = _load_output_schema(name)
+    schema = _resolve_schema_params(schema, config=_load_stage_config())
 
     if schema:
         # Run mechanistic checks (shape/dtype + schema checks)
