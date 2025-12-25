@@ -330,9 +330,17 @@ SVS feedback is surfaced via existing **run status** tools, alongside metrics an
     "check": "loss_divergence",
     "summary": "Loss > 10x warmup baseline"
   },
-  "counts": {"ok": 8, "warn": 2, "block": 0}
+  "counts": {"ok": 8, "warn": 2, "block": 0},
+  "history": [
+    {"phase": "during_run", "severity": "WARN", "check": "grad_explosion", "summary": "grad_norm=150 > 100", "step": 300},
+    {"phase": "during_run", "severity": "WARN", "check": "loss_divergence", "summary": "Loss > 10x warmup baseline", "step": 500}
+  ]
 }
 ```
+
+**History notes:**
+- Only WARN and BLOCK findings are stored (OK findings are just counted)
+- `step` present for during-run checks, absent for post-run
 
 ---
 
