@@ -9,12 +9,12 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                        DEV-SIDE (Pre-Execution)                  │
 ├─────────────────────────────────────────────────────────────────┤
-│  ┌──────────────────┐  ┌──────────────────┐  ┌───────────────┐ │
-│  │ Pre-Run Review   │  │ Config Review    │  │ Data Gen      │ │
-│  │ (Code + Logic)   │  │ (Coherence)      │  │ Review        │ │
-│  └────────┬─────────┘  └────────┬─────────┘  └───────┬───────┘ │
-│           │                     │                     │         │
-│           └─────────────────────┴─────────────────────┘         │
+│  ┌──────────────────┐  ┌──────────────────┐                   │
+│  │ Pre-Run Review   │  │ Config Review    │                   │
+│  │ (Code + Logic)   │  │ (Coherence)      │                   │
+│  └────────┬─────────┘  └────────┬─────────┘                   │
+│           │                     │                               │
+│           └─────────────────────┴─────────────────────          │
 │                                 │                                │
 │                           Claude Agent                           │
 │                    (Read-only workspace access)                  │
@@ -119,6 +119,20 @@ Outputs (produced by stages) are validated **against pipeline schema**, then mus
 - `schema.kind` must match expected kind
 - `shape`/`dtype` checks apply if defined in pipeline schema
 
+---
+
+### 3. Hierarchy of Truth (Law vs Judgment)
+
+**Level 0 — Mechanistic Checks (Law):**  
+Defined in `pipeline.yaml` and enforced at runtime. If a mechanistic check is **blocking**, it **always** blocks execution.  
+AI reviews cannot override these failures.
+
+**Level 1 — AI / Knowledge Checks (Judgment):**  
+Derived from domain docs and failure pattern knowledge base. These produce **WARN/BLOCK** recommendations, but do not
+invalidate a passing mechanistic check unless policy explicitly allows blocking.
+
+**Override rule:** Mechanistic failures always take precedence. AI feedback can only escalate or warn, never bypass a failed law.
+
 **Missing metadata policy:**
 - If input metadata is missing (legacy sources), SVS runs **structural checks only** and emits a warning.
 - Semantic checks that require metadata are skipped with reason `metadata_missing`.
@@ -126,7 +140,7 @@ Outputs (produced by stages) are validated **against pipeline schema**, then mus
 
 ---
 
-### 3. Failure Policy (WARN/FAIL/SKIP) + Enforcement Mode
+### 4. Failure Policy (WARN/FAIL/SKIP) + Enforcement Mode
 
 **Decision:** Three-tier policy with separate **enforcement mode**.  
 Pre-run is always blocking; during-run and post-run are controlled by enforcement.
@@ -177,7 +191,7 @@ stages:
 
 ---
 
-### 4. Large Data Handling
+### 5. Large Data Handling
 
 **Decision:** Reservoir sampling (k=10000) computed IN CONTAINER before upload.
 
@@ -198,7 +212,7 @@ the check is recorded as `skipped` with a reason and does not fail the stage.
 
 ---
 
-### 5. AI Trust Boundary
+### 6. AI Trust Boundary
 
 **Decision:** Claude agents are trusted and receive full data access inside the container.
 
@@ -209,7 +223,7 @@ the check is recorded as `skipped` with a reason and does not fail the stage.
 
 ---
 
-### 6. Cost/Latency Control
+### 7. Cost/Latency Control
 
 **Decision:** Stats computation ALWAYS runs. AI review rate-limited with circuit breaker.
 
@@ -241,7 +255,7 @@ svs:
 
 ---
 
-### 7. Triple Validation Phases (Pre/During/Post)
+### 8. Triple Validation Phases (Pre/During/Post)
 
 | Phase | When | Authority | Purpose |
 |-------|------|-----------|---------|
@@ -256,7 +270,7 @@ svs:
 
 ---
 
-### 8. Domain-Specific Checks
+### 9. Domain-Specific Checks
 
 **Decision:** Domain profiles in `goldfish.yaml` + per-output overrides in `pipeline.yaml`.
 
@@ -284,7 +298,7 @@ If profile is incompatible (e.g., `nlp_tokenizer` on `tabular`), SVS raises a co
 
 ---
 
-### 9. Reproducibility
+### 10. Reproducibility
 
 **Decision:** Full audit logging in `svs_reviews` table.
 
@@ -309,7 +323,7 @@ CREATE TABLE svs_reviews (
 
 ---
 
-### 10. SVS Feedback Transport (Core System)
+### 11. SVS Feedback Transport (Core System)
 
 **Decision:** SVS is part of the core runtime. There is no separate streaming system.
 SVS feedback is surfaced via existing **run status** tools, alongside metrics and logs.
@@ -344,7 +358,7 @@ SVS feedback is surfaced via existing **run status** tools, alongside metrics an
 
 ---
 
-### 11. Credential Exposure in Logs
+### 12. Credential Exposure in Logs
 
 **Decision:** Log redaction at collection time in `_finalize_stage_run()`.
 
@@ -361,7 +375,7 @@ REDACTION_PATTERNS = [
 
 ---
 
-### 12. Check Definition Contracts
+### 13. Check Definition Contracts
 
 **Output checks (post-stage):**
 
@@ -400,7 +414,7 @@ Missing metrics → check skipped with reason `missing_metric`.
 
 **Where:** Runs in container at stage I/O boundaries (built into `goldfish.io`)
 
-**What it catches:** 40% of MLM issues (schema violations, distribution anomalies)
+**What it catches:** schema violations, distribution anomalies
 
 ### 1.1 Output Schema Validation
 
@@ -587,7 +601,7 @@ Example `stats_json`:
 
 **Where:** Three environments (dev-side pre-run, container-side during-run, container-side post-stage)
 
-**What it catches:** Additional 50% of MLM issues (semantic coherence, hypothesis alignment, domain violations)
+**What it catches:** semantic coherence, hypothesis alignment, domain violations
 
 ---
 
@@ -672,9 +686,10 @@ AI backend swappable without touching SVS logic.
 **Priority order:**
 1. **Pre-run code review** (2.1.1) - HIGH: Catches syntax, config, logic bugs
 2. **Config coherence review** - MEDIUM: Catches conflicts, deprecated params
-3. **Data generator review** - LOW: De-prioritized (see note below)
 
-> **Note on Data Generator Review:** Static code review of generators (asking an LLM to read `generate_data.py` and guess if it produces "fat tails") is prone to hallucination. The proof is in the pudding, not the recipe. Rely 90% on **Mechanistic Output Checks** (Layer 1) and **Container-Side AI Review** (Layer 2.2) which see actual data. Data generator review is optional and advisory-only.
+**Principle:** Pre-run review focuses on **code and configuration coherence** only. It does **not** attempt to infer
+statistical properties of generated data from source code. Those judgments belong to mechanistic output checks and
+container-side AI reviews that see real artifacts.
 
 #### 2.1.1 Enhanced Pre-Run Code Review (Extend existing)
 
@@ -1023,7 +1038,6 @@ User: run("workspace", stages=["tokenize", "train"])
   ├─► DEV-SIDE AI REVIEWS (parallel)
   │   ├─► Pre-run code review
   │   ├─► Config coherence review
-  │   └─► Data generator review (if using generated data)
   │
   ├─► All approved?
   │   ├─ NO → Return review with errors, block execution
