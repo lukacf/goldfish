@@ -78,7 +78,8 @@ class GCEConfig(BaseModel):
 
     # Optional: Artifact Registry URL for Docker images
     # Example: "us-docker.pkg.dev/{project_id}/goldfish"
-    artifact_registry: str | None = Field(default=None, alias="image_uri")
+    artifact_registry: str | None = Field(default=None)
+    image_uri: str | None = Field(default=None)  # Alias for artifact_registry
 
     # Optional: global zone preferences (applies to all profiles)
     zones: list[str] | None = None
@@ -115,6 +116,11 @@ class GCEConfig(BaseModel):
         if self.project:
             return self.project
         raise ValueError("GCE config requires project_id or project")
+
+    @property
+    def effective_artifact_registry(self) -> str | None:
+        """Get artifact registry URL from either field."""
+        return self.artifact_registry or self.image_uri
 
     @property
     def effective_profile_overrides(self) -> dict[str, dict] | None:

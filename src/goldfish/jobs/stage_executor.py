@@ -116,7 +116,7 @@ class StageExecutor:
             gce_gpu_preference = config.gce.gpu_preference
 
             # Resolve artifact_registry from config or auto-generate from project
-            self.artifact_registry = config.gce.artifact_registry
+            self.artifact_registry = config.gce.effective_artifact_registry
             if not self.artifact_registry and gce_project:
                 self.artifact_registry = f"us-docker.pkg.dev/{gce_project}/goldfish"
                 logger.info(f"Auto-generated artifact_registry: {self.artifact_registry}")
