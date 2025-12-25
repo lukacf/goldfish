@@ -53,7 +53,8 @@ All new sources must include metadata with this exact structure:
 
 - `format` must be one of: `npy`, `npz`, `csv`, `file`.
 - `directory` is **not allowed** (explicitly rejected).
-- `size_bytes` must be a positive integer.
+- `size_bytes` must be a positive integer when known.
+- `size_bytes` may be `null` for stage outputs when the size is unknown at authoring time.
 - `created_at` must be ISO‑8601 UTC with `Z` suffix.
 
 ### CSV-specific source parameters
@@ -179,6 +180,10 @@ Applied to:
 - `promote_artifact(...)`
 
 No exceptions.
+
+Additional rule:
+- `register_source` and `register_dataset` require `metadata.source.size_bytes` to be present (non-null).
+- `promote_artifact` may accept `metadata.source.size_bytes = null` when size is unknown at authoring time.
 
 ---
 

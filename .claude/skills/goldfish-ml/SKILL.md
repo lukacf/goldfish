@@ -170,7 +170,8 @@ File (blob):
 Optional tool arguments (must match metadata if provided):
 - `format`
 - `size_bytes`
-  - Must be a positive integer and ≤ 1 PB.
+  - Must be a positive integer and ≤ 1 PB when known.
+  - May be `null` for stage outputs when the size is unknown at authoring time.
 - `description` (for promote_artifact)
 
 Missing or invalid metadata is rejected.

@@ -250,6 +250,12 @@ def register_source(
     metadata_format = metadata.get("source", {}).get("format")
     metadata_size = metadata.get("source", {}).get("size_bytes")
 
+    if metadata_size is None:
+        raise InvalidSourceMetadataError(
+            "metadata.source.size_bytes is required for register_source",
+            field="source.size_bytes",
+        )
+
     if format is not None and format != metadata_format:
         raise InvalidSourceMetadataError(
             f"format '{format}' does not match metadata.source.format '{metadata_format}'",
@@ -632,13 +638,18 @@ def register_dataset(
         )
 
     source_format = metadata.get("source", {}).get("format")
+    metadata_size = metadata.get("source", {}).get("size_bytes")
+    if metadata_size is None:
+        raise InvalidSourceMetadataError(
+            "metadata.source.size_bytes is required for register_dataset",
+            field="source.size_bytes",
+        )
     if format != source_format:
         raise InvalidSourceMetadataError(
             f"format '{format}' does not match metadata.source.format '{source_format}'",
             field="format",
         )
 
-    metadata_size = metadata.get("source", {}).get("size_bytes")
     if size_bytes is not None and metadata_size != size_bytes:
         raise InvalidSourceMetadataError(
             f"size_bytes {size_bytes} does not match metadata.source.size_bytes {metadata_size}",

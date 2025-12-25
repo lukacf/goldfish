@@ -773,7 +773,10 @@ class StageExecutor:
         existing_source = existing.get("source", {})
         incoming_source = incoming.get("source", {})
         record("source.format", existing_source.get("format"), incoming_source.get("format"))
-        record("source.size_bytes", existing_source.get("size_bytes"), incoming_source.get("size_bytes"))
+        existing_size = existing_source.get("size_bytes")
+        incoming_size = incoming_source.get("size_bytes")
+        if existing_size is not None:
+            record("source.size_bytes", existing_size, incoming_size)
 
         existing_schema = existing.get("schema", {})
         incoming_schema = incoming.get("schema", {})

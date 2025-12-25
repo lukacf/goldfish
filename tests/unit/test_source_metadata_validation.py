@@ -175,6 +175,14 @@ def test_validate_source_metadata_rejects_invalid_created_at() -> None:
         validate_source_metadata(metadata)
 
 
+def test_validate_source_metadata_allows_unknown_size_bytes() -> None:
+    """size_bytes can be null when unknown (e.g., stage outputs)."""
+    metadata = _valid_npy_metadata()
+    metadata["source"]["size_bytes"] = None
+
+    validate_source_metadata(metadata)
+
+
 def test_validate_source_metadata_rejects_unknown_fields() -> None:
     """Unknown fields should be rejected for strict schema."""
     metadata = _valid_npy_metadata()

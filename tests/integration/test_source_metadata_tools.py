@@ -42,6 +42,12 @@ def _valid_csv_metadata() -> dict:
     }
 
 
+def _valid_csv_metadata_missing_size() -> dict:
+    metadata = _valid_csv_metadata()
+    metadata["source"]["size_bytes"] = None
+    return metadata
+
+
 class TestSourceMetadataTools:
     """Test metadata enforcement in MCP tools."""
 
@@ -128,6 +134,47 @@ class TestSourceMetadataTools:
         finally:
             server.reset_server()
 
+    def test_register_source_requires_size_bytes(self, temp_dir):
+        """register_source should reject missing size_bytes."""
+        from goldfish import server
+
+        db = Database(temp_dir / "test.db")
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path="../test-dev",
+            state_md=StateMdConfig(),
+            audit=AuditConfig(min_reason_length=15),
+            jobs=JobsConfig(),
+        )
+        state_manager = StateManager(temp_dir / "STATE.md", config)
+
+        server.configure_server(
+            project_root=temp_dir,
+            config=config,
+            db=db,
+            workspace_manager=MagicMock(),
+            state_manager=state_manager,
+            job_launcher=MagicMock(),
+            job_tracker=MagicMock(),
+            pipeline_manager=MagicMock(),
+            dataset_registry=MagicMock(),
+            stage_executor=MagicMock(),
+            pipeline_executor=MagicMock(),
+        )
+
+        try:
+            register_fn = server.register_source.fn if hasattr(server.register_source, "fn") else server.register_source
+            with pytest.raises(InvalidSourceMetadataError, match="size_bytes"):
+                register_fn(
+                    name="csv_v1",
+                    gcs_path="gs://bucket/data.csv",
+                    description=_valid_csv_metadata_missing_size()["description"],
+                    reason="Registering without size bytes should fail",
+                    metadata=_valid_csv_metadata_missing_size(),
+                )
+        finally:
+            server.reset_server()
+
     def test_register_dataset_rejects_size_bytes_mismatch(self, temp_dir):
         """register_dataset should enforce size_bytes matching."""
         from goldfish import server
@@ -171,6 +218,49 @@ class TestSourceMetadataTools:
                     format="file",
                     metadata=_valid_file_metadata(),
                     size_bytes=999,
+                )
+        finally:
+            server.reset_server()
+
+    def test_register_dataset_requires_size_bytes(self, temp_dir):
+        """register_dataset should reject missing size_bytes."""
+        from goldfish import server
+
+        db = Database(temp_dir / "test.db")
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path="../test-dev",
+            state_md=StateMdConfig(),
+            audit=AuditConfig(min_reason_length=15),
+            jobs=JobsConfig(),
+        )
+        state_manager = StateManager(temp_dir / "STATE.md", config)
+
+        server.configure_server(
+            project_root=temp_dir,
+            config=config,
+            db=db,
+            workspace_manager=MagicMock(),
+            state_manager=state_manager,
+            job_launcher=MagicMock(),
+            job_tracker=MagicMock(),
+            pipeline_manager=MagicMock(),
+            dataset_registry=MagicMock(),
+            stage_executor=MagicMock(),
+            pipeline_executor=MagicMock(),
+        )
+
+        try:
+            register_fn = (
+                server.register_dataset.fn if hasattr(server.register_dataset, "fn") else server.register_dataset
+            )
+            with pytest.raises(InvalidSourceMetadataError, match="size_bytes"):
+                register_fn(
+                    name="dataset_missing_size",
+                    source="gs://bucket/data.csv",
+                    description=_valid_csv_metadata_missing_size()["description"],
+                    format="csv",
+                    metadata=_valid_csv_metadata_missing_size(),
                 )
         finally:
             server.reset_server()

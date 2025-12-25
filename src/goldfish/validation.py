@@ -613,13 +613,14 @@ def _validate_source_section(source: dict[str, Any]) -> str:
         raise InvalidSourceMetadataError(f"unsupported source format '{fmt}'", field="source.format")
 
     size_bytes = source.get("size_bytes")
-    if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes <= 0:
-        raise InvalidSourceMetadataError("source.size_bytes must be a positive integer", field="source.size_bytes")
-    if size_bytes > _MAX_SOURCE_SIZE_BYTES:
-        raise InvalidSourceMetadataError(
-            f"source.size_bytes exceeds {_MAX_SOURCE_SIZE_BYTES}",
-            field="source.size_bytes",
-        )
+    if size_bytes is not None:
+        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes <= 0:
+            raise InvalidSourceMetadataError("source.size_bytes must be a positive integer", field="source.size_bytes")
+        if size_bytes > _MAX_SOURCE_SIZE_BYTES:
+            raise InvalidSourceMetadataError(
+                f"source.size_bytes exceeds {_MAX_SOURCE_SIZE_BYTES}",
+                field="source.size_bytes",
+            )
 
     created_at = source.get("created_at")
     _validate_utc_isoformat(created_at, field="source.created_at")

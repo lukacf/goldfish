@@ -107,6 +107,8 @@ class SourceRegistry:
             )
 
         metadata_size = metadata.get("source", {}).get("size_bytes")
+        if metadata_size is None:
+            raise InvalidSourceMetadataError("metadata.source.size_bytes is required for register_source")
         if size_bytes is not None and metadata_size != size_bytes:
             raise InvalidSourceMetadataError(
                 f"size_bytes {size_bytes} does not match metadata.source.size_bytes {metadata_size}"
