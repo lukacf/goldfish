@@ -309,7 +309,88 @@ CREATE TABLE svs_reviews (
 
 ---
 
-### 10. Credential Exposure in Logs
+### 10. Real-time SVS Event Streaming (Container → Dev)
+
+**Goal:** Continuous updates from container-side SVS so the dev‑side Claude can poll in near‑real‑time,
+mirroring Metrics API behavior.
+
+**Decision:** Container writes an **append‑only JSONL stream**; dev side incrementally syncs it (byte offset),
+stores events, and exposes a pollable MCP tool.
+
+#### 10.1 Container-side stream
+
+**Location (inside container):**
+```
+/mnt/outputs/.goldfish/svs/events.jsonl
+```
+
+**Event schema (JSONL):**
+```json
+{
+  "ts": "2025-12-25T10:32:07Z",
+  "stage_run_id": "stage-abc123",
+  "phase": "pre_run|during_run|post_run",
+  "severity": "OK|WARN|BLOCK",
+  "check": "entropy|loss_divergence|schema_mismatch|ai_review",
+  "summary": "Entropy 2.9 < min 6.0",
+  "details": {"metric": "entropy", "value": 2.9, "threshold": 6.0}
+}
+```
+
+Notes:
+- Events are **append-only** and ordered by `ts`.
+- `details` is optional and may be truncated for size.
+
+#### 10.2 Dev-side sync (same pattern as Metrics)
+
+**Local backend (dev machine):**
+```
+dev-repo/.goldfish/runs/<stage_run_id>/outputs/.goldfish/svs/events.jsonl
+```
+
+**GCE backend:**
+```
+gs://<bucket>/runs/<stage_run_id>/logs/svs.jsonl
+```
+
+The StageExecutor incrementally syncs the stream using byte offsets,
+identical to metrics live sync. The sync is triggered by polling tools.
+
+#### 10.3 Storage on dev side
+
+Two layers:
+1. **Event stream (raw):** persisted JSONL for audit/debug.
+2. **Event table (queryable):** insert each event into `svs_events`.
+
+```sql
+CREATE TABLE svs_events (
+    id INTEGER PRIMARY KEY,
+    stage_run_id TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    check TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    details_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id)
+);
+
+CREATE INDEX idx_svs_events_stage_run ON svs_events(stage_run_id);
+CREATE INDEX idx_svs_events_phase ON svs_events(phase);
+```
+
+#### 10.4 Polling API
+
+**MCP tool:** `get_svs_events(run_id, cursor=None, limit=200)`
+- Triggers sync if the run is active.
+- Returns events + `next_cursor` (byte offset).
+- Same cursor semantics as `get_logs` and metrics.
+
+**Purpose:** Dev‑side Claude can poll every few seconds for new SVS signals.
+
+---
+
+### 11. Credential Exposure in Logs
 
 **Decision:** Log redaction at collection time in `_finalize_stage_run()`.
 
@@ -326,7 +407,7 @@ REDACTION_PATTERNS = [
 
 ---
 
-### 11. Check Definition Contracts
+### 12. Check Definition Contracts
 
 **Output checks (post-stage):**
 
@@ -942,6 +1023,7 @@ User: run("workspace", stages=["tokenize", "train"])
         │     │   └─ PASS → continue
         │     │
         │     ├─► Compute stats (reservoir sampling) → signal_lineage.stats_json
+        │     ├─► Emit SVS event → events.jsonl (streamed to dev)
         │     │
         │     └─► AI OUTPUT REVIEW (if enabled)
         │         ├─► Query DB for patterns → generate markdown
@@ -1011,6 +1093,10 @@ svs:
   review_max_turns: 3
   rate_limit_per_hour: 60
 
+  # SVS event streaming (container → dev)
+  stream_enabled: true
+  stream_interval_seconds: 5
+
   # Self-learning
   auto_learn_failures: true
 ```
@@ -1061,6 +1147,21 @@ CREATE INDEX idx_svs_reviews_type ON svs_reviews(review_type);
 
 -- Failure patterns (already documented above)
 CREATE TABLE failure_patterns (...);
+
+-- SVS events (real-time stream)
+CREATE TABLE svs_events (
+    id INTEGER PRIMARY KEY,
+    stage_run_id TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    check TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    details_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id)
+);
+
+CREATE INDEX idx_svs_events_stage_run ON svs_events(stage_run_id);
 ```
 
 ---
