@@ -260,6 +260,21 @@ class TestPreRunReviewerReview:
                 assert "no issues" in review.summary.lower()
 
     @pytest.mark.asyncio
+    async def test_review_uses_review_result_response_text(self, reviewer: PreRunReviewer) -> None:
+        """Review should use ReviewResult.response_text when provided."""
+        from goldfish.svs.agent import ReviewResult
+
+        mock_result = ReviewResult(
+            decision="approved",
+            findings=[],
+            response_text="## train\nNo issues found.",
+        )
+        with patch.object(ClaudeCodeProvider, "run", return_value=mock_result):
+            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+                review = await reviewer.review(["train"])
+                assert review.full_review.startswith("## train")
+
+    @pytest.mark.asyncio
     async def test_review_with_errors_not_approved(self, reviewer: PreRunReviewer) -> None:
         """Review with errors is not approved."""
         from goldfish.svs.agent import AgentResult

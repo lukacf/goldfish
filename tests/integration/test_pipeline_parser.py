@@ -302,3 +302,165 @@ stages:
         errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
 
         assert errors == []
+
+
+class TestPreflightContractValidation:
+    """Test SVS preflight contract validation integration.
+
+    Validates that pipeline parser checks output schemas during preflight:
+    - Shape/rank consistency validation
+    - Config param resolution in schemas
+    - Upstream/downstream schema compatibility
+    """
+
+    def test_validate_catches_shape_rank_mismatch(self, temp_dir):
+        """Should catch when shape dimensions don't match declared rank."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text("""
+name: test_pipeline
+stages:
+  - name: preprocess
+    outputs:
+      embeddings:
+        type: npy
+        schema:
+          shape: [1000, 256, 10]
+          rank: 2
+""")
+
+        # Create files
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "preprocess.py").write_text("def main(): pass")
+        (configs_dir / "preprocess.yaml").write_text("batch_size: 32")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        # Should detect shape/rank mismatch
+        assert any("shape" in err.lower() and "rank" in err.lower() for err in errors)
+
+    def test_validate_catches_missing_schema_param(self, temp_dir):
+        """Should catch when schema references missing config param."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text("""
+name: test_pipeline
+stages:
+  - name: train
+    outputs:
+      predictions:
+        type: npy
+        schema:
+          shape: [null, "{vocab_size}"]
+          rank: 2
+""")
+
+        # Create files - note: vocab_size NOT in config
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text("hidden_dim: 256")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        # Should detect missing config param
+        assert any("vocab_size" in err for err in errors)
+
+    def test_validate_passes_valid_schema(self, temp_dir):
+        """Should pass validation when schema is valid."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text("""
+name: test_pipeline
+stages:
+  - name: train
+    outputs:
+      embeddings:
+        type: npy
+        schema:
+          shape: [1000, 256]
+          rank: 2
+""")
+
+        # Create files
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text("batch_size: 32")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        # Should pass - no shape/rank mismatch errors
+        assert not any("shape" in err.lower() and "rank" in err.lower() for err in errors)
+
+    def test_validate_resolves_param_in_schema(self, temp_dir):
+        """Should resolve {param} in schema from config."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text("""
+name: test_pipeline
+stages:
+  - name: train
+    outputs:
+      predictions:
+        type: npy
+        schema:
+          shape: [null, "{vocab_size}"]
+          rank: 2
+""")
+
+        # Create files WITH vocab_size in config
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text("vocab_size: 15034")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        # Should pass - param was resolved
+        assert not any("vocab_size" in err for err in errors)
+
+    def test_validate_resolves_param_from_pipeline_defaults(self, temp_dir):
+        """Should resolve {param} from pipeline.yaml defaults section."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text("""
+name: test_pipeline
+stages:
+  - name: train
+    defaults:
+      vocab_size: 15034
+    outputs:
+      predictions:
+        type: npy
+        schema:
+          shape: [null, "{vocab_size}"]
+          rank: 2
+""")
+
+        # Create files without vocab_size (should come from defaults)
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text("batch_size: 32")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        # Should pass - param was resolved from defaults
+        assert not any("vocab_size" in err for err in errors)

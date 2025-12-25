@@ -9,14 +9,27 @@ Also provides heartbeat functionality for job health monitoring.
 
 import importlib.util
 import json
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Any
 
-from goldfish.io.stats import StatsJob
 from goldfish.metrics import finish as finish_metrics
 from goldfish.metrics import log_artifact, log_metric, log_metrics
+
+logger = logging.getLogger(__name__)
+
+_StatsJob: type[Any] | None
+# Stats are optional in container images; allow graceful degradation if missing
+try:
+    from goldfish.io.stats import StatsJob as _StatsJob
+
+    _HAS_STATS = True
+except Exception:
+    _StatsJob = None
+    _HAS_STATS = False
+_WARNED_MISSING_STATS = False
 
 # Heartbeat configuration
 HEARTBEAT_DIR = ".goldfish"
@@ -201,20 +214,24 @@ def save_output(name: str, data: Any, artifact: bool = False):
     from goldfish.io.bootstrap import _get_stats_queue, _svs_enabled
 
     if _svs_enabled():
-        try:
-            stats_queue = _get_stats_queue()
-            stats_queue.enqueue(
-                StatsJob(
-                    name=name,
-                    path=output_path,
-                    dtype=str(getattr(data, "dtype", "unknown")),
+        global _WARNED_MISSING_STATS
+        if not _HAS_STATS or _StatsJob is None:
+            if not _WARNED_MISSING_STATS:
+                logger.warning("SVS stats unavailable: goldfish.io.stats missing in container image")
+                _WARNED_MISSING_STATS = True
+        else:
+            try:
+                stats_queue = _get_stats_queue()
+                stats_queue.enqueue(
+                    _StatsJob(
+                        name=name,
+                        path=output_path,
+                        dtype=str(getattr(data, "dtype", "unknown")),
+                    )
                 )
-            )
-        except Exception as e:
-            # Stats are best-effort; don't fail the stage if enqueuing fails
-            import logging
-
-            logging.getLogger(__name__).warning(f"Failed to enqueue stats for {name}: {e}")
+            except Exception as e:
+                # Stats are best-effort; don't fail the stage if enqueuing fails
+                logger.warning(f"Failed to enqueue stats for {name}: {e}")
 
     if artifact:
         _mark_as_artifact(name)

@@ -467,6 +467,7 @@ class SignalDef(BaseModel):
     format: str | None = None  # Override format detection
     artifact: bool | None = False  # Mark output as artifact for auto-registration
     metadata: dict | None = None  # Optional source metadata for outputs
+    output_schema: dict | None = Field(default=None, alias="schema")  # SVS schema
 
 
 class StageDef(BaseModel):

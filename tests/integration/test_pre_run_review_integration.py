@@ -459,8 +459,8 @@ class TestReviewTimeoutHandling:
 
         (workspace / "pipeline.yaml").write_text("stages: []")
 
-        # Set a very short timeout
-        config = PreRunReviewConfig(enabled=True, timeout_seconds=0.1)
+        # Set a short integer timeout
+        config = PreRunReviewConfig(enabled=True, timeout_seconds=1)
         svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,

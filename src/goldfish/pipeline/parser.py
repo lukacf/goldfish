@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from goldfish.errors import GoldfishError
 from goldfish.models import PipelineDef, SignalDef, StageDef
+from goldfish.svs.contract import merge_stage_config, validate_stage_contracts
 
 
 class PipelineValidationError(GoldfishError):
@@ -176,6 +177,19 @@ class PipelineParser:
                 errors.append(f"Module not found for stage '{stage.name}': {module_path}")
             if not config_path.exists():
                 errors.append(f"Config not found for stage '{stage.name}': {config_path}")
+
+            # SVS Preflight: Validate output schemas with config resolution
+            stage_config = merge_stage_config(stage.name, workspace_path)
+            stage_def_dict = {
+                "outputs": {
+                    name: {"schema": output_def.output_schema}
+                    for name, output_def in stage.outputs.items()
+                    if output_def.output_schema
+                }
+            }
+            contract_errors = validate_stage_contracts(stage_def_dict, stage_config)
+            for err in contract_errors:
+                errors.append(f"Stage '{stage.name}': {err}")
 
             # Validate inputs
             for input_name, input_def in stage.inputs.items():

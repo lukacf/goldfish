@@ -174,47 +174,38 @@ CMD ["/bin/bash"]
 
             # Copy goldfish.io module into build context
             # This creates a goldfish/io package structure so `from goldfish.io import ...` works
-            goldfish_io_dest = build_context / "goldfish_io" / "goldfish" / "io"
-            goldfish_io_dest.mkdir(parents=True, exist_ok=True)
-            if GOLDFISH_IO_PATH.exists():
-                shutil.copy2(GOLDFISH_IO_PATH, goldfish_io_dest / "__init__.py")
-                # Create parent __init__.py for package structure
-                (build_context / "goldfish_io" / "goldfish" / "__init__.py").write_text(
-                    '"""Goldfish ML package (container runtime)."""\n'
-                )
-                (build_context / "goldfish_io" / "__init__.py").write_text("")
-
-            # Copy goldfish.metrics module into build context
-            # This enables `from goldfish.metrics import log_metric, log_metrics, ...`
-            if GOLDFISH_METRICS_PATH.exists() and GOLDFISH_METRICS_PATH.is_dir():
-                goldfish_metrics_dest = build_context / "goldfish_io" / "goldfish" / "metrics"
-                shutil.copytree(
-                    GOLDFISH_METRICS_PATH,
-                    goldfish_metrics_dest,
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-                )
-
-            # Copy goldfish.svs module into build context
-            if GOLDFISH_SVS_PATH.exists() and GOLDFISH_SVS_PATH.is_dir():
-                goldfish_svs_dest = build_context / "goldfish_io" / "goldfish" / "svs"
-                shutil.copytree(
-                    GOLDFISH_SVS_PATH,
-                    goldfish_svs_dest,
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-                )
-
-            # Copy goldfish.validation, goldfish.errors, and goldfish.utils (metrics/SVS dependencies)
             goldfish_pkg_dest = build_context / "goldfish_io" / "goldfish"
+            goldfish_pkg_dest.mkdir(parents=True, exist_ok=True)
+            # Parent __init__.py for goldfish package
+            (goldfish_pkg_dest / "__init__.py").write_text('"""Goldfish ML package (container runtime)."""\n')
+            # Top-level __init__.py for goldfish_io directory
+            (build_context / "goldfish_io" / "__init__.py").write_text("")
+
+            # Copy goldfish sub-packages
+            for subpkg, path in [
+                ("io", GOLDFISH_IO_PATH.parent),
+                ("metrics", GOLDFISH_METRICS_PATH),
+                ("svs", GOLDFISH_SVS_PATH),
+                ("utils", GOLDFISH_UTILS_PATH),
+            ]:
+                if path.exists() and path.is_dir():
+                    dest = goldfish_pkg_dest / subpkg
+                    shutil.copytree(
+                        path,
+                        dest,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                    )
+                elif path.exists() and path.is_file() and subpkg == "io":
+                    # Special case for goldfish.io if it's just __init__.py
+                    dest = goldfish_pkg_dest / "io"
+                    dest.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, dest / "__init__.py")
+
+            # Copy goldfish.validation and goldfish.errors (top-level modules in goldfish package)
             if GOLDFISH_VALIDATION_PATH.exists():
                 shutil.copy2(GOLDFISH_VALIDATION_PATH, goldfish_pkg_dest / "validation.py")
             if GOLDFISH_ERRORS_PATH.exists():
                 shutil.copy2(GOLDFISH_ERRORS_PATH, goldfish_pkg_dest / "errors.py")
-            if GOLDFISH_UTILS_PATH.exists() and GOLDFISH_UTILS_PATH.is_dir():
-                shutil.copytree(
-                    GOLDFISH_UTILS_PATH,
-                    goldfish_pkg_dest / "utils",
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-                )
 
             # Generate Dockerfile in build context (not workspace)
             dockerfile_content = self.generate_dockerfile(workspace_dir, base_image=base_image)

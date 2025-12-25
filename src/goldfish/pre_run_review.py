@@ -255,7 +255,10 @@ class PreRunReviewer:
                 timeout=self.config.timeout_seconds,
             )
 
-            review_text = result.raw_output
+            raw_response = getattr(result, "response_text", None)
+            if not raw_response:
+                raw_response = getattr(result, "raw_output", "")
+            review_text = raw_response if isinstance(raw_response, str) else ""
         except TimeoutError:
             logger.error(f"Pre-run review timed out after {self.config.timeout_seconds}s")
             return RunReview(

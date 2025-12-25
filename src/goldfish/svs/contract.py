@@ -78,7 +78,16 @@ def merge_stage_config(
             pipeline_data = yaml.safe_load(f)
             if pipeline_data and "stages" in pipeline_data:
                 stages = pipeline_data["stages"]
-                if stage_name in stages:
+                # Handle both list format [{name: x, ...}] and dict format {x: {...}}
+                if isinstance(stages, list):
+                    for stage_def in stages:
+                        if stage_def.get("name") == stage_name:
+                            if "defaults" in stage_def:
+                                defaults = stage_def["defaults"]
+                                if defaults:
+                                    result.update(defaults)
+                            break
+                elif isinstance(stages, dict) and stage_name in stages:
                     stage_def = stages[stage_name]
                     if "defaults" in stage_def:
                         defaults = stage_def["defaults"]

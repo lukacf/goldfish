@@ -37,6 +37,7 @@ from goldfish.models import (
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.svs.agent import ClaudeCodeProvider, CodexCLIProvider, GeminiCLIProvider, NullProvider
 from goldfish.svs.manifest import read_svs_manifests
+from goldfish.svs.patterns.extractor import extract_failure_pattern
 from goldfish.svs.post_run import run_post_run_review
 from goldfish.utils import parse_optional_datetime
 from goldfish.utils.config_hash import compute_config_hash
@@ -1561,6 +1562,23 @@ echo "Stage completed successfully"
             self._collect_svs_manifests(stage_run_id, backend)
         except Exception as e:
             logger.warning(f"Failed to collect SVS manifests for {stage_run_id}: {e}")
+
+        # Extract failure pattern for self-learning (only on failure)
+        if status == StageRunStatus.FAILED and self.config.svs.enabled and self.config.svs.auto_learn_failures:
+            try:
+                # Get error from logs (last 500 chars for the error message)
+                error_msg = logs[-500:] if logs else "Unknown error"
+                agent = self._get_svs_agent()
+                extract_failure_pattern(
+                    db=self.db,
+                    stage_run_id=stage_run_id,
+                    error=error_msg,
+                    logs=logs,
+                    agent=agent,
+                )
+            except Exception as e:
+                # Pattern extraction failure should never block finalization
+                logger.warning(f"Failed to extract failure pattern for {stage_run_id}: {e}")
 
         with self._metrics_sync_lock:
             self._metrics_sync_state.pop(stage_run_id, None)

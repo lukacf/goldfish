@@ -377,4 +377,5 @@ CREATE INDEX IF NOT EXISTS idx_failure_patterns_status ON failure_patterns(statu
 CREATE INDEX IF NOT EXISTS idx_failure_patterns_severity ON failure_patterns(severity);
 CREATE INDEX IF NOT EXISTS idx_failure_patterns_stage_type ON failure_patterns(stage_type);
 CREATE INDEX IF NOT EXISTS idx_failure_patterns_enabled ON failure_patterns(enabled);
-CREATE INDEX IF NOT EXISTS idx_failure_patterns_created ON failure_patterns(created_at)
+CREATE INDEX IF NOT EXISTS idx_failure_patterns_created ON failure_patterns(created_at);
+CREATE INDEX IF NOT EXISTS idx_failure_patterns_source_run ON failure_patterns(source_run_id)

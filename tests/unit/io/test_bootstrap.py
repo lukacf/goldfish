@@ -13,6 +13,8 @@ Tests verify:
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -20,6 +22,7 @@ import pytest
 from goldfish.io.bootstrap import (
     _reset_finalized_flag,
     _svs_finalize,
+    _write_stats_manifest,
     run_stage_with_svs,
 )
 
@@ -127,7 +130,10 @@ class TestRunStageWithSVSGuarantees:
         """If finalize fails, original exception should still propagate."""
         module_main = Mock(side_effect=RuntimeError("Original error"))
 
-        with patch("goldfish.io.bootstrap._svs_finalize", side_effect=Exception("Finalize error")):
+        with (
+            patch("goldfish.io.bootstrap._svs_finalize", side_effect=Exception("Finalize error")),
+            patch("goldfish.io.bootstrap.atexit.register"),  # Prevent mock from registering with atexit
+        ):
             # Original exception should propagate (not finalize error)
             with pytest.raises(RuntimeError, match="Original error"):
                 run_stage_with_svs(module_main)
@@ -204,6 +210,24 @@ class TestSVSFinalize:
 
             # Should log the error
             assert mock_logger.error.called or mock_logger.warning.called
+
+
+class TestSVSStatsManifest:
+    """Test SVS stats manifest writing."""
+
+    def test_write_stats_manifest_writes_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Should write svs_stats.json with version and stats."""
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(tmp_path))
+
+        stats = {"features": {"mean": 1.0, "std": 0.5}}
+        _write_stats_manifest(stats)
+
+        manifest_path = tmp_path / ".goldfish" / "svs_stats.json"
+        assert manifest_path.exists()
+
+        data = json.loads(manifest_path.read_text())
+        assert data["version"] == 1
+        assert data["stats"] == stats
 
 
 class TestAtexitIntegration:
