@@ -71,8 +71,11 @@ class TestPatternExtractionOnFailure:
     """Test that pattern extraction is called on stage failure."""
 
     def test_pattern_extraction_called_on_failed_stage(self, executor_with_mocks, test_db):
-        """Should call extract_failure_pattern when stage fails."""
+        """Should call extract_failure_pattern when stage fails and auto_learn_failures enabled."""
         stage_run_id = _create_failed_stage_run(test_db)
+
+        # Enable auto_learn_failures (opt-in feature)
+        executor_with_mocks.config.svs.auto_learn_failures = True
 
         with (
             patch("goldfish.svs.patterns.extractor.extract_failure_pattern") as mock_extract,
@@ -91,8 +94,11 @@ class TestPatternExtractionOnFailure:
         assert "logs" in call_args.kwargs or len(call_args.args) >= 4
 
     def test_pattern_extraction_not_called_on_success(self, executor_with_mocks, test_db):
-        """Should NOT call extract_failure_pattern when stage succeeds."""
+        """Should NOT call extract_failure_pattern when stage succeeds (even with auto_learn enabled)."""
         stage_run_id = _create_failed_stage_run(test_db)
+
+        # Enable auto_learn_failures to verify it's skipped due to success, not config
+        executor_with_mocks.config.svs.auto_learn_failures = True
 
         # Mock _record_output_signals to avoid actual execution
         executor_with_mocks._record_output_signals = MagicMock()
@@ -106,12 +112,12 @@ class TestPatternExtractionOnFailure:
 
         mock_extract.assert_not_called()
 
-    def test_pattern_extraction_respects_auto_learn_disabled(self, executor_with_mocks, test_db):
-        """Should NOT extract patterns when auto_learn_failures is disabled."""
+    def test_pattern_extraction_disabled_by_default(self, executor_with_mocks, test_db):
+        """Should NOT extract patterns by default (auto_learn_failures is opt-in)."""
         stage_run_id = _create_failed_stage_run(test_db)
 
-        # Disable auto_learn_failures
-        executor_with_mocks.config.svs.auto_learn_failures = False
+        # Verify default is False (opt-in)
+        assert executor_with_mocks.config.svs.auto_learn_failures is False
 
         with (
             patch("goldfish.svs.patterns.extractor.extract_failure_pattern") as mock_extract,
@@ -123,10 +129,11 @@ class TestPatternExtractionOnFailure:
         mock_extract.assert_not_called()
 
     def test_pattern_extraction_respects_svs_disabled(self, executor_with_mocks, test_db):
-        """Should NOT extract patterns when SVS is disabled."""
+        """Should NOT extract patterns when SVS is disabled (even with auto_learn enabled)."""
         stage_run_id = _create_failed_stage_run(test_db)
 
-        # Disable SVS entirely
+        # Enable auto_learn but disable SVS entirely
+        executor_with_mocks.config.svs.auto_learn_failures = True
         executor_with_mocks.config.svs.enabled = False
 
         with (
@@ -146,6 +153,9 @@ class TestPatternExtractionErrorHandling:
         """Errors in pattern extraction should be logged but not raise."""
         stage_run_id = _create_failed_stage_run(test_db)
 
+        # Enable auto_learn_failures to test error handling
+        executor_with_mocks.config.svs.auto_learn_failures = True
+
         with (
             patch("goldfish.svs.patterns.extractor.extract_failure_pattern") as mock_extract,
             patch.object(executor_with_mocks, "_run_post_run_svs_review"),
@@ -164,6 +174,9 @@ class TestPatternExtractionErrorHandling:
     def test_rate_limit_error_logged_but_not_raised(self, executor_with_mocks, test_db):
         """Rate limit errors should be handled gracefully."""
         stage_run_id = _create_failed_stage_run(test_db)
+
+        # Enable auto_learn_failures to test error handling
+        executor_with_mocks.config.svs.auto_learn_failures = True
 
         from goldfish.svs.patterns.extractor import RateLimitExceededError
 
@@ -188,6 +201,9 @@ class TestPatternExtractionWithAgent:
     def test_uses_configured_agent_provider(self, executor_with_mocks, test_db):
         """Should use the configured agent provider for extraction."""
         stage_run_id = _create_failed_stage_run(test_db)
+
+        # Enable auto_learn_failures to test agent provider passing
+        executor_with_mocks.config.svs.auto_learn_failures = True
 
         with (
             patch("goldfish.svs.patterns.extractor.extract_failure_pattern") as mock_extract,
