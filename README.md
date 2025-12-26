@@ -1,6 +1,6 @@
 # Goldfish
 
-**ML Experimentation Platform for AI Agents**
+**ML experimentation platform for AI‑assisted workflows**
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![MCP Compatible](https://img.shields.io/badge/MCP-compatible-green.svg)](https://modelcontextprotocol.io/)
@@ -13,47 +13,46 @@
 
 ## The Problem
 
-AI agents are increasingly capable of writing ML code, but they struggle with the **stateful, iterative nature of ML research**:
+You can ask an AI agent to write ML code, but real experiments are **stateful and long‑running**:
 
-- Experiments span hours or days — longer than a single conversation
-- Data provenance must be tracked across dozens of pipeline runs
-- Reproducibility requires exact versioning of code, data, and configuration
-- Context is lost when conversations are summarized or restarted
+- Runs last hours or days.
+- Provenance (data/code/config) must be exact.
+- Iteration requires comparing many versions.
+- Context is lost when the agent restarts.
 
 ## The Solution
 
-Goldfish gives AI agents the infrastructure to conduct **real ML research**:
+Goldfish is the **backend** your AI agent uses to run ML experiments reliably.  
+You (human) describe the goal; the **agent** calls Goldfish MCP tools to do the work.
 
+**You (human):**
 ```
-You: "Implement and compare three attention mechanisms for protein
-      structure prediction: standard self-attention, axial attention,
-      and linear attention. Use the CASP14 dataset."
-
-AI Agent + Goldfish:
-  1. Creates isolated workspace for the experiment
-  2. Registers CASP14 dataset with lineage tracking
-  3. Defines pipeline: preprocess → train → evaluate
-  4. Implements each attention variant as a stage
-  5. Runs experiments in containers
-  6. Versions everything (code, config, outputs)
-  7. Compares results with full provenance
-  8. Can resume after any interruption
+“Compare three attention variants on CASP14. Use axial as baseline.”
 ```
 
-The agent writes pure ML code. Goldfish handles versioning, execution, and state.
+**Your agent + Goldfish:**
+1. Creates a workspace
+2. Registers datasets with metadata
+3. Writes `pipeline.yaml` + stage modules
+4. Runs stages in containers
+5. Versions code + config automatically
+6. Tracks lineage and metrics
+
+Goldfish handles execution, versioning, lineage, and validation. The agent writes ML code.
 
 ---
 
 ## Key Features
 
-- **Pre-Run Review** — Claude reviews your code before execution to catch bugs early
-- **Pipeline Workflows** — Define ML workflows as YAML, run stages individually or end-to-end
-- **Workspace Isolation** — Each experiment is fully isolated; run multiple experiments in parallel
-- **Automatic Versioning** — Every run creates an immutable snapshot for reproducibility
-- **Data Lineage** — Track the complete journey: raw data → features → models → metrics
-- **SVS (Semantic Validation)** — Optional schema contracts and output stats checks to catch silent failures
-- **Infrastructure Abstraction** — The agent sees ML concepts; containers and storage are hidden
-- **Context Recovery** — STATE.md regenerates automatically so agents can resume after interruption
+- **Workspace Isolation** — Each experiment runs in its own sandboxed workspace
+- **Pipeline Workflows** — YAML‑defined stages with typed signals
+- **Automatic Versioning** — Every run produces an immutable version tag
+- **Data Lineage** — Full provenance from datasets → features → models → metrics
+- **Validation System** — Schema contracts + output stats (optional, fail or warn)
+- **Metrics + Logs** — Structured metrics + live logs for long runs
+- **Pre‑Run Review** — Automated code review before execution (part of validation)
+- **Infrastructure Abstraction** — Containers + storage are hidden from the agent
+- **Context Recovery** — STATE.md helps agents resume after restarts
 
 ---
 
@@ -165,6 +164,9 @@ The agent writes pure ML code. Goldfish handles containerization, input mounting
 
 Goldfish tracks every signal — you always know exactly which data produced which results.
 
+**Dataset registration requires metadata** (format, schema, size, etc.).  
+See `docs/specs/datasource-metadata.md` for the required schema.
+
 ### Pre-Run Review = Automatic Bug Detection
 
 Before executing any stage, Goldfish automatically reviews your code using Claude to catch errors before wasting compute time:
@@ -230,11 +232,9 @@ Requires `ANTHROPIC_API_KEY` environment variable. Skips review if not set.
 
 ---
 
-## Quick Start
+## Quick Start (Human + Agent)
 
-### 1. Install Goldfish
-
-**Option A: From Git (recommended for development)**
+### 1) Install + run Goldfish (human)
 
 ```bash
 git clone https://github.com/lukacf/goldfish.git
@@ -242,56 +242,34 @@ cd goldfish
 pip install -e ".[dev]"
 ```
 
-**Option B: From PyPI**
-
-```bash
-pip install goldfish-mcp
-```
-
-### 2. Initialize a Project
-
+Initialize a project in your ML repo:
 ```bash
 cd my-ml-project
 goldfish init
 ```
 
-This creates:
-- `.goldfish/` — Internal state and tracking database
-- `goldfish.yaml` — Project configuration
-- `pipeline.yaml` — Default pipeline template
-- `modules/` — Directory for stage implementations
+### 2) Connect your AI agent (human)
 
-### 3. Add to Claude Code
-
-**Local installation:**
-
+Example with Claude Code:
 ```bash
 claude mcp add goldfish -- uv run --directory /path/to/goldfish goldfish serve
 ```
 
-**From Git:**
-
-```bash
-claude mcp add goldfish -- uvx --from git+https://github.com/lukacf/goldfish goldfish serve
-```
-
-Goldfish automatically uses the current working directory as the project root — no path configuration needed.
-
-### 4. Start Experimenting
+### 3) Ask the agent to run an experiment (human)
 
 ```
-You: "Create a workspace for testing axial attention on protein folding"
-
-Agent: I'll create a workspace for the axial attention experiment.
-
-       [calls create_workspace("axial_attention", goal="...")]
-       [calls mount("axial_attention", "w1")]
-
-       Workspace 'axial_attention' created and mounted to slot w1.
-
-       I'll set up the initial pipeline structure with preprocessing,
-       training, and evaluation stages...
+“Create a workspace and run a baseline LSTM on sales_v1.”
 ```
+
+The agent will call tools like:
+```
+create_workspace("lstm_baseline", goal="Baseline LSTM")
+mount("w1", "lstm_baseline")
+register_dataset(... metadata ...)
+run("w1", stages=["train"], reason={...})
+```
+
+You do not run those tools manually — the agent does.
 
 ---
 
