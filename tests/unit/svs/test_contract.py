@@ -475,3 +475,37 @@ class TestValidateStageContracts:
         assert len(errors) >= 1
         # Should mention the missing param or resolution failure
         assert any("embedding_dim" in err.lower() or "param" in err.lower() for err in errors)
+
+
+class TestValidateOutputDataAgainstSchema:
+    """Tests for validate_output_data_against_schema with JSON outputs."""
+
+    def test_accepts_json_dict(self):
+        """JSON schema should accept dict outputs."""
+        from goldfish.svs.contract import validate_output_data_against_schema
+
+        schema = {"kind": "json"}
+        data = {"key": "value"}
+
+        errors = validate_output_data_against_schema("output", schema, data)
+        assert errors == []
+
+    def test_accepts_json_list(self):
+        """JSON schema should accept list outputs (e.g., list of dicts)."""
+        from goldfish.svs.contract import validate_output_data_against_schema
+
+        schema = {"kind": "json"}
+        data = [{"id": 1}, {"id": 2}]
+
+        errors = validate_output_data_against_schema("output", schema, data)
+        assert errors == []
+
+    def test_rejects_json_scalar(self):
+        """JSON schema should reject non-dict/list outputs."""
+        from goldfish.svs.contract import validate_output_data_against_schema
+
+        schema = {"kind": "json"}
+        data = "not-json-object"
+
+        errors = validate_output_data_against_schema("output", schema, data)
+        assert errors

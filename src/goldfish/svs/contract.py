@@ -91,6 +91,13 @@ def validate_output_data_against_schema(
     kind = schema.get("kind")
     context = f"Output '{output_name}'"
 
+    # JSON schema validation (dict or list outputs)
+    if kind == "json":
+        if isinstance(data, dict | list):
+            return errors
+        errors.append(f"{context}: expected JSON object or list")
+        return errors
+
     # Tabular schema validation
     if kind == "tabular" or "columns" in schema or "dtypes" in schema:
         if not hasattr(data, "columns"):
@@ -449,6 +456,15 @@ def validate_cross_stage_shapes(pipeline: PipelineDef, workspace_path: Path) -> 
                 continue
 
             _validate_schema_types(expected_schema, f"{stage.name}.{input_name}", errors)
+
+            source_kind = source_schema.get("kind")
+            expected_kind = expected_schema.get("kind")
+            if source_kind and expected_kind and source_kind != expected_kind:
+                errors.append(
+                    f"Stage '{stage.name}' input '{input_name}': schema.kind mismatch "
+                    f"({source_kind} != {expected_kind})"
+                )
+                continue
 
             # Compare dtype if both defined
             source_dtype = source_schema.get("dtype")

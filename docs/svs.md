@@ -116,8 +116,8 @@ Datasource metadata is the **observed reality** of registered artifacts.
 4. **Output metadata** (emitted post-run) is recorded as observation and must remain compatible with the contract.
 
 **Compatibility rule:** For a given signal:
-- `type` must align (`npy` ↔ `tensor`, `csv` ↔ `tabular`, `file` ↔ `file`)
-- `schema.kind` must match expected kind
+- `type` must align (`npy` ↔ `tensor`, `csv` ↔ `tabular`, `file` ↔ `json|file`)
+- `schema.kind` must match expected kind (`tensor`, `tabular`, `json`)
 - `shape`/`dtype` checks apply if defined in the contract
 
 **Tensor array enforcement (inputs):**
@@ -468,6 +468,18 @@ stages:
 
         svs:  # Policy overrides for this output
           entropy: warn  # Don't fail, just warn
+```
+
+For JSON-heavy stages (lists/dicts), use `schema.kind: json` and `type: file`:
+
+```yaml
+stages:
+  - name: render_json
+    outputs:
+      records:
+        type: file
+        schema:
+          kind: json  # Accepts dict or list outputs
 ```
 
 **Implementation:**
