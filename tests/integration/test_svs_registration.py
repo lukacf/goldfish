@@ -1,5 +1,7 @@
 """Integration test for SVS MCP tool registration."""
 
+import inspect
+
 import pytest
 
 
@@ -11,7 +13,11 @@ async def test_svs_tools_registered_on_server():
 
     # FastMCP stores tools in its internal registry
     # Use _list_tools() which is the standard way to inspect a FastMCP instance
-    tools = await mcp._list_tools()
+    sig = inspect.signature(mcp._list_tools)
+    if len(sig.parameters) > 0:
+        tools = await mcp._list_tools(None)
+    else:
+        tools = await mcp._list_tools()
     tool_names = [tool.name for tool in tools]
 
     expected_svs_tools = [
