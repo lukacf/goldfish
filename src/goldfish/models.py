@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -474,6 +474,7 @@ class StageDef(BaseModel):
     """Definition of a pipeline stage."""
 
     name: str
+    config_schema: dict[str, Any] | None = None
     inputs: dict[str, SignalDef] = Field(default_factory=dict)
     outputs: dict[str, SignalDef] = Field(default_factory=dict)
 

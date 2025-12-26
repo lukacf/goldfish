@@ -748,11 +748,37 @@ AI backend swappable without touching SVS logic.
 
 **Priority order:**
 1. **Pre-run code review** (2.1.1) - HIGH: Catches syntax, config, logic bugs
-2. **Config coherence review** - MEDIUM: Catches conflicts, deprecated params
+2. **Config coherence review** - MEDIUM: Catches conflicts, deprecated params, type mismatches
 
 **Principle:** Pre-run review focuses on **code and configuration coherence** only. It does **not** attempt to infer
 statistical properties of generated data from source code. Those judgments belong to mechanistic output checks and
 container-side AI reviews that see real artifacts.
+
+### 2.1.2 Mechanistic Config Schema Validation (Preflight)
+
+SVS can validate **config value types** deterministically at pipeline-parse time.
+Declare per-stage config expectations in `config_schema` (optional):
+
+```yaml
+stages:
+  - name: train
+    config_schema:
+      num_epochs: int
+      lr: float
+      use_amp: bool
+      optimizer: str
+      scheduler:
+        type: str
+        required: true
+```
+
+**Rules:**
+- If `config_schema` is present, SVS validates the resolved stage config.
+- `required: true` makes the key mandatory.
+- Types supported: `int`, `float` (ints allowed), `number`, `bool`, `str`, `list`, `dict`.
+- Missing non-required keys are skipped (no error).
+
+This is **mechanistic** (no AI), fast, and runs during pipeline validation.
 
 #### 2.1.1 Enhanced Pre-Run Code Review (Extend existing)
 

@@ -535,3 +535,63 @@ stages:
         errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
 
         assert any("shape[1]" in err and "int" in err.lower() for err in errors)
+
+    def test_validate_config_schema_type_mismatch(self, temp_dir):
+        """Should reject config values that don't match config_schema types."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text(
+            """
+name: test_pipeline
+stages:
+  - name: train
+    config_schema:
+      num_epochs: int
+    outputs:
+      model:
+        type: directory
+"""
+        )
+
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text('num_epochs: "10"')
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        assert any("num_epochs" in err and "int" in err.lower() for err in errors)
+
+    def test_validate_config_schema_required_missing(self, temp_dir):
+        """Should reject missing required config values."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text(
+            """
+name: test_pipeline
+stages:
+  - name: train
+    config_schema:
+      num_epochs:
+        type: int
+        required: true
+    outputs:
+      model:
+        type: directory
+"""
+        )
+
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text("batch_size: 32")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        assert any("num_epochs" in err and "required" in err.lower() for err in errors)

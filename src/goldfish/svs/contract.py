@@ -24,6 +24,60 @@ def _is_wildcard_dim(value: Any) -> bool:
     return value is None or value == -1
 
 
+def _get_config_value(stage_config: dict[str, Any], key: str) -> tuple[bool, Any]:
+    """Resolve dotted config key into stage config."""
+    current: Any = stage_config
+    for part in key.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return False, None
+        current = current[part]
+    return True, current
+
+
+def _validate_config_schema(stage_name: str, config_schema: dict[str, Any], stage_config: dict[str, Any]) -> list[str]:
+    """Validate stage config values against declared schema."""
+    errors: list[str] = []
+
+    type_map: dict[str, tuple[type, ...]] = {
+        "int": (int,),
+        "float": (float, int),
+        "number": (int, float),
+        "bool": (bool,),
+        "str": (str,),
+        "list": (list,),
+        "dict": (dict,),
+    }
+
+    for key, spec in config_schema.items():
+        required = False
+        expected_type = spec
+        if isinstance(spec, dict):
+            expected_type = spec.get("type")
+            required = bool(spec.get("required", False))
+
+        if not isinstance(expected_type, str) or expected_type not in type_map:
+            errors.append(f"Stage '{stage_name}': config_schema '{key}' has invalid type '{expected_type}'")
+            continue
+
+        found, value = _get_config_value(stage_config, key)
+        if not found:
+            if required:
+                errors.append(f"Stage '{stage_name}': config param '{key}' is required but missing")
+            continue
+
+        allowed_types = type_map[expected_type]
+        if expected_type in ("int", "float", "number") and isinstance(value, bool):
+            errors.append(f"Stage '{stage_name}': config param '{key}' must be {expected_type}, got bool")
+            continue
+
+        if not isinstance(value, allowed_types):
+            errors.append(
+                f"Stage '{stage_name}': config param '{key}' must be {expected_type}, got {type(value).__name__}"
+            )
+
+    return errors
+
+
 def _validate_schema_types(schema: dict[str, Any], output_name: str, errors: list[str]) -> None:
     """Validate schema value types (shape dims, rank)."""
     if "rank" in schema:
@@ -290,3 +344,12 @@ def validate_cross_stage_shapes(pipeline: PipelineDef, workspace_path: Path) -> 
                         )
 
     return errors
+
+
+def validate_stage_config_schema(
+    stage_name: str, config_schema: dict[str, Any] | None, stage_config: dict[str, Any]
+) -> list[str]:
+    """Public entry point for config schema validation."""
+    if not config_schema:
+        return []
+    return _validate_config_schema(stage_name, config_schema, stage_config)
