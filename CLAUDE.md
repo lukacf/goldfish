@@ -75,7 +75,7 @@ MCP Client (Claude) ─── JSON-RPC ───▶ server.py
                     ┌─────────────────────┼─────────────────────┐
                     ▼                     ▼                     ▼
              server_tools/*         context.py            db/database.py
-             (39 MCP tools)      (ServerContext DI)         (SQLite)
+             (40+ MCP tools)     (ServerContext DI)         (SQLite)
                     │                     │
         ┌───────────┼───────────┐         │
         ▼           ▼           ▼         ▼
@@ -460,7 +460,7 @@ import logging; logging.basicConfig(level=logging.DEBUG)
 | **Data** | `datasets/registry.py`, `sources/registry.py` |
 | **State** | `state/state_md.py` (per-workspace + global STATE.md) |
 | **IO** | `io/__init__.py` (container load_input/save_output) |
-| **Tools** | `server_tools/*.py` (39 MCP tools) |
+| **Tools** | `server_tools/*.py` (40+ MCP tools) |
 
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: goldfish-ml
-description: This skill should be used when working with Goldfish ML, an MCP server for AI-driven machine learning experimentation. Use this skill when the user asks to create workspaces, run ML pipelines, manage datasets, track experiment lineage, or conduct any ML experimentation workflow. Goldfish provides 39 MCP tools for workspace management, pipeline execution, data management, and provenance tracking.
+description: This skill should be used when working with Goldfish ML, an MCP server for AI-driven machine learning experimentation. Use this skill when the user asks to create workspaces, run ML pipelines, manage datasets, track experiment lineage, or conduct any ML experimentation workflow. Goldfish provides 40+ MCP tools for workspace management, pipeline execution, data management, and provenance tracking.
 ---
 
 # Goldfish ML
@@ -380,6 +380,40 @@ def main():
   returns all and may include a warning for very large runs.
 - Optional `workspace=` parameter on both tools enforces run ownership.
 
+### 4.5 SVS (Schema Contracts + Output Stats)
+
+SVS is optional but core: it enforces **output contracts** and computes
+lightweight **output stats** for silent-failure detection.
+
+**Output contract (pipeline.yaml):**
+```yaml
+stages:
+  - name: preprocess
+    outputs:
+      features:
+        type: npy
+        schema:
+          kind: tensor
+          shape: [null, 768]
+          dtype: float32
+```
+
+**JSON-heavy outputs** (lists/dicts) use `kind: json`:
+```yaml
+outputs:
+  records:
+    type: file
+    schema:
+      kind: json  # accepts dict or list
+```
+
+**Enforcement mode** (goldfish.yaml):
+```yaml
+svs:
+  default_enforcement: warning  # "blocking" or "warning"
+```
+When in `warning` mode, contract mismatches log a warning and continue.
+
 ### 5. Monitoring Runs
 
 ```
@@ -579,10 +613,8 @@ status()  # Recover orientation: slots, jobs, STATE.md
 
 ## Resources
 
-Detailed documentation is available in the references directory:
+Project docs in this repo:
 
-- `references/config_reference.md` - **goldfish.yaml schema and GCE/GCS setup**
-- `references/tools_reference.md` - Complete tool API documentation
-- `references/pipeline_guide.md` - Pipeline YAML specification
-- `references/stage_authoring.md` - Stage module development guide
-- `references/end_to_end_example.md` - Complete worked example from scratch
+- `docs/svs.md` - SVS design + enforcement semantics
+- `docs/specs/datasource-metadata.md` - Mandatory metadata schema for sources/datasets
+- `docs/a_real_project_issues_example.md` - Real-world failure examples used in SVS

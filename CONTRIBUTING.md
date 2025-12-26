@@ -138,7 +138,14 @@ goldfish/
 │   │   └── state_md.py           # STATE.md generation
 │   │
 │   ├── io/                       # Container IO library
-│   │   └── __init__.py           # load_input/save_output
+│   │   ├── __init__.py           # load_input/save_output
+│   │   └── stats.py              # SVS stats collection (container-side)
+│   │
+│   ├── svs/                      # Semantic Validation System
+│   │   ├── contract.py           # Schema-as-contract validation
+│   │   ├── agent.py              # Agent abstraction (Claude/Codex/Gemini)
+│   │   ├── post_run.py           # Post-run AI review
+│   │   └── patterns/             # Failure pattern extraction/management
 │   │
 │   └── server_tools/             # MCP tool definitions
 │       ├── __init__.py
@@ -147,9 +154,10 @@ goldfish/
 │       ├── data_tools.py         # 9 data tools
 │       ├── pipeline_tools.py     # 4 pipeline tools
 │       ├── lineage_tools.py      # 3 lineage tools
+│       ├── svs_tools.py          # SVS tooling (patterns, reviews)
 │       └── utility_tools.py      # 4 utility tools
 │
-├── tests/                        # Test suite (601 tests)
+├── tests/                        # Test suite (700+ tests)
 │   ├── conftest.py               # Shared fixtures
 │   ├── unit/                     # Fast unit tests (<100ms each)
 │   ├── integration/              # Component tests (real DB/git)

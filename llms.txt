@@ -5,7 +5,7 @@
 Key concepts for LLMs working on this codebase:
 - All infrastructure (Docker, GCS, GCE) is hidden from the MCP client
 - STATE.md provides context recovery after conversation summarization
-- 39 MCP tools organized into: workspace, execution, data, pipeline, lineage, utility
+- 40+ MCP tools organized into: workspace, execution, data, pipeline, lineage, utility, SVS
 - Security: input validation, path traversal protection, Docker sandboxing, git error translation
 
 ## Primary Documentation
@@ -13,6 +13,7 @@ Key concepts for LLMs working on this codebase:
 - [CLAUDE.md](CLAUDE.md): Complete guide for AI assistants developing on this codebase. Contains architecture, patterns, commands, security model, and gotchas.
 - [README.md](README.md): Project overview, quick start, and feature summary.
 - [CONTRIBUTING.md](CONTRIBUTING.md): Development setup, architecture deep-dive, testing, and code style.
+- [docs/svs.md](docs/svs.md): Semantic Validation System (schema contracts + checks).
 
 ## Source Code Reference
 
@@ -30,6 +31,7 @@ Key concepts for LLMs working on this codebase:
 - [src/goldfish/jobs/pipeline_executor.py](src/goldfish/jobs/pipeline_executor.py): Pipeline orchestration
 - [src/goldfish/pipeline/parser.py](src/goldfish/pipeline/parser.py): YAML parsing and validation
 - [src/goldfish/db/database.py](src/goldfish/db/database.py): All database operations
+- [src/goldfish/svs/](src/goldfish/svs/): Semantic Validation System (contracts, agents, patterns)
 
 ## MCP Tools
 

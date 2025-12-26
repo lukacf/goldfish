@@ -51,6 +51,7 @@ The agent writes pure ML code. Goldfish handles versioning, execution, and state
 - **Workspace Isolation** — Each experiment is fully isolated; run multiple experiments in parallel
 - **Automatic Versioning** — Every run creates an immutable snapshot for reproducibility
 - **Data Lineage** — Track the complete journey: raw data → features → models → metrics
+- **SVS (Semantic Validation)** — Optional schema contracts and output stats checks to catch silent failures
 - **Infrastructure Abstraction** — The agent sees ML concepts; containers and storage are hidden
 - **Context Recovery** — STATE.md regenerates automatically so agents can resume after interruption
 
@@ -362,6 +363,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#configuration-reference) for all options.
 | [README.md](README.md) | This file — overview and quick start |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, architecture, contribution guide |
 | [CLAUDE.md](CLAUDE.md) | Instructions for AI agents working on this codebase |
+| [docs/svs.md](docs/svs.md) | SVS design and behavior (schema contracts + checks) |
 | [llms.txt](llms.txt) | Machine-readable documentation index |
 
 ---
