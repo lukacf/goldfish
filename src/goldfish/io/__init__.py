@@ -197,7 +197,16 @@ def save_output(name: str, data: Any, artifact: bool = False):
 
         errors = validate_output_data_against_schema(name, schema, data)
         if errors:
-            raise GoldfishError(f"Output '{name}' schema mismatch: " + "; ".join(errors))
+            from goldfish.io.bootstrap import _load_svs_config
+
+            svs_config = _load_svs_config()
+            enforcement = "silent" if not svs_config.enabled else svs_config.default_enforcement
+            message = f"Output '{name}' schema mismatch: " + "; ".join(errors)
+
+            if enforcement == "blocking":
+                raise GoldfishError(message)
+            if enforcement == "warning":
+                logger.warning(message)
 
     output_path = _get_outputs_dir() / name
     output_path.parent.mkdir(parents=True, exist_ok=True)

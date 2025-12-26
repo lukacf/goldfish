@@ -213,8 +213,10 @@ class TestSaveOutput:
             }
         }
 
+        svs_config = {"default_enforcement": "blocking"}
         env = {
             "GOLDFISH_STAGE_CONFIG": json.dumps(config),
+            "GOLDFISH_SVS_CONFIG": json.dumps(svs_config),
             "GOLDFISH_OUTPUTS_DIR": str(temp_dir / "outputs"),
         }
         with patch.dict(os.environ, env):
@@ -241,10 +243,43 @@ class TestSaveOutput:
 
         env = {
             "GOLDFISH_STAGE_CONFIG": json.dumps(config),
+            "GOLDFISH_SVS_CONFIG": json.dumps({"default_enforcement": "blocking"}),
             "GOLDFISH_OUTPUTS_DIR": str(temp_dir / "outputs"),
         }
         with patch.dict(os.environ, env):
             save_output("results", test_array)
+
+    def test_save_output_warns_on_schema_mismatch_when_warning(self, temp_dir, caplog):
+        """save_output should warn (not raise) when enforcement is warning."""
+        from goldfish.io import save_output
+
+        test_array = np.zeros((2, 3), dtype=np.float32)
+
+        config = {
+            "outputs": {
+                "results": {
+                    "format": "npy",
+                    "schema": {
+                        "shape": [2, 2],
+                        "dtype": "float32",
+                    },
+                }
+            }
+        }
+
+        svs_config = {"default_enforcement": "warning"}
+        env = {
+            "GOLDFISH_STAGE_CONFIG": json.dumps(config),
+            "GOLDFISH_SVS_CONFIG": json.dumps(svs_config),
+            "GOLDFISH_OUTPUTS_DIR": str(temp_dir / "outputs"),
+        }
+
+        with patch.dict(os.environ, env):
+            save_output("results", test_array)
+
+        output_path = temp_dir / "outputs" / "results.npy"
+        assert output_path.exists()
+        assert any("schema mismatch" in rec.message for rec in caplog.records)
 
 
 class TestGetPaths:

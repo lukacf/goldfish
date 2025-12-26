@@ -17,6 +17,7 @@ for backward compatibility with existing SVS code.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -26,6 +27,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from goldfish.errors import GoldfishError
 
+logger = logging.getLogger("goldfish.svs.agent")
 # =============================================================================
 # Full Agent Abstraction (per SVS spec 2.0)
 # =============================================================================
@@ -424,7 +426,7 @@ class ClaudeCodeProvider:
     name: str = "claude_code"
 
     def __init__(self, binary: str | None = None) -> None:
-        self.binary = binary or os.environ.get("GOLDFISH_CLAUDE_CLI_BIN", "claude")
+        self.binary: str = binary or os.environ.get("GOLDFISH_CLAUDE_CLI_BIN") or "claude"
 
     def run(self, request: ReviewRequest) -> ReviewResult:
         agent_request = _coerce_agent_request(request)
@@ -482,7 +484,7 @@ class CodexCLIProvider:
     name: str = "codex_cli"
 
     def __init__(self, binary: str | None = None) -> None:
-        self.binary = binary or os.environ.get("GOLDFISH_CODEX_CLI_BIN", "codex")
+        self.binary: str = binary or os.environ.get("GOLDFISH_CODEX_CLI_BIN") or "codex"
 
     def run(self, request: ReviewRequest) -> ReviewResult:
         agent_request = _coerce_agent_request(request)
@@ -536,7 +538,7 @@ class GeminiCLIProvider:
     name: str = "gemini_cli"
 
     def __init__(self, binary: str | None = None) -> None:
-        self.binary = binary or os.environ.get("GOLDFISH_GEMINI_CLI_BIN", "gemini")
+        self.binary: str = binary or os.environ.get("GOLDFISH_GEMINI_CLI_BIN") or "gemini"
 
     def run(self, request: ReviewRequest) -> ReviewResult:
         agent_request = _coerce_agent_request(request)
@@ -581,14 +583,31 @@ class GeminiCLIProvider:
         )
 
 
+def _binary_available(binary: str) -> bool:
+    """Check if a CLI binary is available on PATH."""
+    return shutil.which(binary) is not None
+
+
 def get_agent_provider(provider_name: str) -> AgentProvider:
     """Return an AgentProvider instance for the given name."""
     if provider_name == "claude_code":
-        return ClaudeCodeProvider()
+        claude_provider = ClaudeCodeProvider()
+        if not _binary_available(claude_provider.binary):
+            logger.warning("Claude CLI not found; falling back to NullProvider")
+            return NullProvider()
+        return claude_provider
     if provider_name == "codex_cli":
-        return CodexCLIProvider()
+        codex_provider = CodexCLIProvider()
+        if not _binary_available(codex_provider.binary):
+            logger.warning("Codex CLI not found; falling back to NullProvider")
+            return NullProvider()
+        return codex_provider
     if provider_name == "gemini_cli":
-        return GeminiCLIProvider()
+        gemini_provider = GeminiCLIProvider()
+        if not _binary_available(gemini_provider.binary):
+            logger.warning("Gemini CLI not found; falling back to NullProvider")
+            return NullProvider()
+        return gemini_provider
     if provider_name == "null":
         return NullProvider()
     return NullProvider()

@@ -270,6 +270,7 @@ from goldfish.server_tools.svs_tools import (  # noqa: E402, F401
     get_run_svs_findings,
     get_svs_reviews,
     list_failure_patterns,
+    register_svs_tools,
     reject_pattern,
     review_pending_patterns,
     update_pattern,
@@ -281,6 +282,9 @@ from goldfish.server_tools.utility_tools import (  # noqa: E402, F401
     reload_config,
     status,
 )
+
+# Explicitly register SVS MCP tools (avoid import side effects)
+register_svs_tools()
 
 # Re-export all tools for backward compatibility with existing code
 from goldfish.server_tools.workspace_tools import (  # noqa: E402, F401

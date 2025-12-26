@@ -5,7 +5,9 @@ Provides MCP tools for managing failure patterns and SVS reviews.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from goldfish.errors import GoldfishError
@@ -13,6 +15,8 @@ from goldfish.svs.patterns.manager import FailurePatternManager
 
 if TYPE_CHECKING:
     from goldfish.db.database import Database
+    from goldfish.svs.agent import AgentProvider
+    from goldfish.svs.config import SVSConfig
 
 logger = logging.getLogger("goldfish.server")
 
@@ -57,20 +61,97 @@ def _validate_limit_offset(limit: int | None, offset: int | None) -> tuple[int, 
     return limit, offset
 
 
-def librarian_review_patterns(patterns: list[dict]) -> dict[str, dict]:
-    """AI librarian review of patterns (stub for testing).
-
-    In production, this calls the AI agent to review patterns.
-    Tests will mock this function.
+def librarian_review_patterns(
+    patterns: list[dict],
+    *,
+    agent: AgentProvider | None = None,
+    config: SVSConfig | None = None,
+) -> dict[str, dict]:
+    """AI librarian review of patterns.
 
     Args:
         patterns: List of pattern dicts to review
+        agent: Optional AgentProvider override (useful for tests)
+        config: Optional SVSConfig override (useful for tests)
 
     Returns:
         Dict mapping pattern_id to action recommendation
     """
-    # Stub - should be mocked in tests
-    return {}
+    if not patterns:
+        return {}
+
+    if config is None:
+        from goldfish.server_core import _get_config
+
+        config = _get_config().svs
+
+    if agent is None:
+        from goldfish.svs.agent import get_agent_provider
+
+        agent = get_agent_provider(config.agent_provider)
+
+    prompt = (
+        "You are an AI librarian reviewing failure patterns. For each pattern, decide:\n"
+        "- action: approve | reject | skip\n"
+        "- confidence: high | medium | low\n"
+        "- reason: short justification\n\n"
+        "Return ONLY valid JSON mapping pattern_id -> {action, confidence, reason}.\n\n"
+        f"Patterns:\n{json.dumps(patterns, indent=2)}\n"
+    )
+
+    from goldfish.svs.agent import ReviewRequest
+
+    request = ReviewRequest(
+        review_type="pattern_review",
+        context={
+            "prompt": prompt,
+            "output_format": "json",
+            "model": config.agent_model,
+            "timeout_seconds": config.agent_timeout,
+            "max_turns": config.agent_max_turns,
+        },
+    )
+
+    try:
+        result = agent.run(request)
+    except Exception as exc:
+        logger.warning("Librarian agent failed: %s", exc)
+        return {}
+
+    raw = getattr(result, "response_text", None) or getattr(result, "raw_output", "")
+    raw_text = raw if isinstance(raw, str) else str(raw)
+    parsed = None
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                parsed = None
+
+    if not isinstance(parsed, dict):
+        logger.warning("Librarian agent returned unparseable recommendations")
+        return {}
+
+    valid_ids = {p.get("id") for p in patterns if isinstance(p, dict)}
+    recommendations: dict[str, dict] = {}
+    for pattern_id, rec in parsed.items():
+        if pattern_id not in valid_ids or not isinstance(rec, dict):
+            continue
+        action = str(rec.get("action", "skip")).lower()
+        if action not in {"approve", "reject", "skip"}:
+            action = "skip"
+        confidence = str(rec.get("confidence", "low")).lower()
+        reason = rec.get("reason")
+        recommendations[str(pattern_id)] = {
+            "action": action,
+            "confidence": confidence,
+            "reason": reason,
+        }
+
+    return recommendations
 
 
 def list_failure_patterns(
@@ -523,8 +604,15 @@ def _review_to_dict(review: Any) -> dict:
 # =============================================================================
 
 
-def _register_mcp_tools() -> None:
-    """Register MCP tools with server. Called when server imports this module."""
+_SVS_TOOLS_REGISTERED = False
+
+
+def register_svs_tools() -> None:
+    """Register MCP tools with server (explicit call from server.py)."""
+    global _SVS_TOOLS_REGISTERED
+    if _SVS_TOOLS_REGISTERED:
+        return
+    _SVS_TOOLS_REGISTERED = True
     # Import from server_core to avoid circular import
     from goldfish.server_core import _get_db, mcp
 
@@ -604,7 +692,3 @@ def _register_mcp_tools() -> None:
     def review_pending_patterns_tool(dry_run: bool = True) -> dict:
         """Batch review pending patterns using AI librarian."""
         return review_pending_patterns(_get_db(), dry_run)
-
-
-# Register tools on import
-_register_mcp_tools()
