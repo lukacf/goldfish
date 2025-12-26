@@ -9,11 +9,42 @@ This module provides three core functions:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from goldfish.errors import ConfigParamNotFoundError
+
+if TYPE_CHECKING:
+    from goldfish.models import PipelineDef
+
+
+def _is_wildcard_dim(value: Any) -> bool:
+    """Return True if a shape dimension is a wildcard."""
+    return value is None or value == -1
+
+
+def _validate_schema_types(schema: dict[str, Any], output_name: str, errors: list[str]) -> None:
+    """Validate schema value types (shape dims, rank)."""
+    if "rank" in schema:
+        rank = schema.get("rank")
+        if not isinstance(rank, int):
+            errors.append(f"Output '{output_name}': rank must be int, got {type(rank).__name__}")
+        elif rank < 0:
+            errors.append(f"Output '{output_name}': rank must be >= 0")
+
+    if "shape" in schema:
+        shape = schema.get("shape")
+        if not isinstance(shape, list):
+            errors.append(f"Output '{output_name}': shape must be a list")
+            return
+        for idx, dim in enumerate(shape):
+            if _is_wildcard_dim(dim):
+                continue
+            if not isinstance(dim, int):
+                errors.append(f"Output '{output_name}': shape[{idx}] must be int or null, got {type(dim).__name__}")
+            elif dim < 0:
+                errors.append(f"Output '{output_name}': shape[{idx}] must be >= 0 or -1")
 
 
 def resolve_config_params(value: Any, stage_config: dict[str, Any]) -> Any:
@@ -152,6 +183,8 @@ def validate_stage_contracts(stage_def: dict[str, Any], stage_config: dict[str, 
             errors.append(f"Output '{output_name}': schema references missing config param '{param}'")
             continue
 
+        _validate_schema_types(resolved_schema, output_name, errors)
+
         # Validate shape/rank consistency
         if "shape" in resolved_schema and "rank" in resolved_schema:
             shape = resolved_schema["shape"]
@@ -164,5 +197,96 @@ def validate_stage_contracts(stage_def: dict[str, Any], stage_config: dict[str, 
                         f"Output '{output_name}': shape/rank mismatch - "
                         f"shape has {actual_rank} dimensions but rank is {rank}"
                     )
+
+    return errors
+
+
+def validate_cross_stage_shapes(pipeline: PipelineDef, workspace_path: Path) -> list[str]:
+    """Validate schema compatibility across connected stages.
+
+    Resolves schemas with per-stage configs, then compares shapes and dtypes
+    for connected signals.
+
+    Args:
+        pipeline: Parsed pipeline definition
+        workspace_path: Workspace path for config resolution
+
+    Returns:
+        List of error strings (empty list = valid)
+    """
+    errors: list[str] = []
+
+    # Resolve output schemas per stage
+    output_schemas: dict[tuple[str, str], dict[str, Any]] = {}
+    for stage in pipeline.stages:
+        stage_config = merge_stage_config(stage.name, workspace_path)
+        for signal_name, output_def in stage.outputs.items():
+            schema = output_def.output_schema
+            if not schema:
+                continue
+            try:
+                resolved_schema = resolve_config_params(schema, stage_config)
+            except ConfigParamNotFoundError as e:
+                param = e.details["param"]
+                errors.append(f"Stage '{stage.name}' output '{signal_name}': missing config param '{param}'")
+                continue
+            _validate_schema_types(resolved_schema, f"{stage.name}.{signal_name}", errors)
+            output_schemas[(stage.name, signal_name)] = resolved_schema
+
+    # Compare input schemas to upstream output schemas
+    for stage in pipeline.stages:
+        stage_config = merge_stage_config(stage.name, workspace_path)
+        for input_name, input_def in stage.inputs.items():
+            if not input_def.from_stage:
+                continue
+            if not input_def.output_schema:
+                continue
+
+            source_name = input_def.signal or input_name
+            source_key = (input_def.from_stage, source_name)
+            source_schema = output_schemas.get(source_key)
+            if source_schema is None:
+                errors.append(
+                    f"Stage '{stage.name}' input '{input_name}': "
+                    f"source schema missing for '{input_def.from_stage}.{source_name}'"
+                )
+                continue
+
+            try:
+                expected_schema = resolve_config_params(input_def.output_schema, stage_config)
+            except ConfigParamNotFoundError as e:
+                param = e.details["param"]
+                errors.append(f"Stage '{stage.name}' input '{input_name}': missing config param '{param}'")
+                continue
+
+            _validate_schema_types(expected_schema, f"{stage.name}.{input_name}", errors)
+
+            # Compare dtype if both defined
+            source_dtype = source_schema.get("dtype")
+            expected_dtype = expected_schema.get("dtype")
+            if source_dtype is not None and expected_dtype is not None and source_dtype != expected_dtype:
+                errors.append(
+                    f"Stage '{stage.name}' input '{input_name}': dtype mismatch "
+                    f"({source_dtype} != {expected_dtype})"
+                )
+
+            # Compare shapes (allow wildcards)
+            source_shape = source_schema.get("shape")
+            expected_shape = expected_schema.get("shape")
+            if isinstance(source_shape, list) and isinstance(expected_shape, list):
+                if len(source_shape) != len(expected_shape):
+                    errors.append(
+                        f"Stage '{stage.name}' input '{input_name}': shape rank mismatch "
+                        f"({len(source_shape)} != {len(expected_shape)})"
+                    )
+                    continue
+                for idx, (src_dim, exp_dim) in enumerate(zip(source_shape, expected_shape, strict=False)):
+                    if _is_wildcard_dim(src_dim) or _is_wildcard_dim(exp_dim):
+                        continue
+                    if src_dim != exp_dim:
+                        errors.append(
+                            f"Stage '{stage.name}' input '{input_name}': shape[{idx}] mismatch "
+                            f"({src_dim} != {exp_dim})"
+                        )
 
     return errors

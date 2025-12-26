@@ -464,3 +464,74 @@ stages:
 
         # Should pass - param was resolved from defaults
         assert not any("vocab_size" in err for err in errors)
+
+    def test_validate_cross_stage_shape_mismatch(self, temp_dir):
+        """Should detect cross-stage shape mismatch."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text(
+            """
+name: test_pipeline
+stages:
+  - name: preprocess
+    outputs:
+      embeddings:
+        type: npy
+        schema:
+          shape: [null, "{dim}"]
+          rank: 2
+  - name: train
+    inputs:
+      X:
+        from_stage: preprocess
+        signal: embeddings
+        type: npy
+        schema:
+          shape: [null, "{dim}"]
+          rank: 2
+"""
+        )
+
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "preprocess.py").write_text("def main(): pass")
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "preprocess.yaml").write_text("dim: 512")
+        (configs_dir / "train.yaml").write_text("dim: 256")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        assert any("shape[1]" in err for err in errors)
+
+    def test_validate_rejects_non_int_shape_param(self, temp_dir):
+        """Should reject non-int config param used in shape."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text(
+            """
+name: test_pipeline
+stages:
+  - name: train
+    outputs:
+      embeddings:
+        type: npy
+        schema:
+          shape: [null, "{dim}"]
+          rank: 2
+"""
+        )
+
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text('dim: "512"')
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        assert any("shape[1]" in err and "int" in err.lower() for err in errors)

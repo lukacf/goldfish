@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from goldfish.errors import GoldfishError
 from goldfish.models import PipelineDef, SignalDef, StageDef
-from goldfish.svs.contract import merge_stage_config, validate_stage_contracts
+from goldfish.svs.contract import merge_stage_config, validate_cross_stage_shapes, validate_stage_contracts
 
 
 class PipelineValidationError(GoldfishError):
@@ -243,6 +243,9 @@ class PipelineParser:
             for output_name, output_def in stage.outputs.items():
                 signal_ref = f"{stage.name}.{output_name}"
                 available_signals[signal_ref] = output_def
+
+        # Cross-stage schema compatibility (inputs vs upstream outputs)
+        errors.extend(validate_cross_stage_shapes(pipeline, workspace_path))
 
         # Check for circular dependencies (basic check)
         # More sophisticated check would require topological sort
