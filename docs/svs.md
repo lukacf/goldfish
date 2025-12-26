@@ -1242,8 +1242,8 @@ svs:
   review_max_turns: 3
   rate_limit_per_hour: 60
 
-  # Self-learning
-  auto_learn_failures: true
+  # Self-learning (opt-in: uses AI to extract failure patterns from failed runs)
+  auto_learn_failures: false
 ```
 
 **Environment variable overrides:**

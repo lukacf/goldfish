@@ -79,11 +79,11 @@ class TestSVSConfigDefaults:
         assert config.rate_limit_per_hour == 60
 
     def test_default_auto_learn_failures(self):
-        """Auto-learn failures should be enabled by default (full implementation)."""
+        """Auto-learn failures should be disabled by default (opt-in feature)."""
         from goldfish.svs.config import SVSConfig
 
         config = SVSConfig()
-        assert config.auto_learn_failures is True
+        assert config.auto_learn_failures is False
 
 
 class TestSVSConfigValidation:

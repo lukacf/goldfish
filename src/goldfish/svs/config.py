@@ -79,8 +79,8 @@ class SVSConfig(BaseModel):
     agent_max_turns: int = Field(default=3, ge=1)
     rate_limit_per_hour: int = Field(default=60, ge=0)
 
-    # Self-learning
-    auto_learn_failures: bool = True
+    # Self-learning (opt-in: uses AI to extract failure patterns from failed runs)
+    auto_learn_failures: bool = False
 
     @field_validator("domain")
     @classmethod
