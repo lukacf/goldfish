@@ -479,6 +479,93 @@ stages:
 
         manager.hibernate(slot="w1", reason="Done with module detection test")
 
+    def test_dry_run_catches_dataset_schema_mismatch(self, e2e_setup):
+        """dry_run should catch dataset metadata/schema mismatch."""
+        from goldfish.pipeline.validator import validate_pipeline_run
+
+        manager = e2e_setup["manager"]
+        project_root = e2e_setup["project_root"]
+        db = e2e_setup["db"]
+        config = e2e_setup["config"]
+
+        manager.create_workspace(
+            name="dry-run-schema", goal="Test schema mismatch", reason="Testing schema mismatch detection"
+        )
+        manager.mount(workspace="dry-run-schema", slot="w1", reason="Testing schema mismatch detection")
+
+        slot_path = project_root / "workspaces" / "w1"
+
+        (slot_path / "pipeline.yaml").write_text("""
+name: dry-run-schema-test
+stages:
+  - name: train
+    inputs:
+      data:
+        type: dataset
+        dataset: tokens_v1
+        schema:
+          kind: tensor
+          arrays:
+            X_train:
+              shape: [10, 3]
+              dtype: float32
+          primary_array: X_train
+    outputs:
+      model: {type: directory}
+""")
+
+        (slot_path / "modules").mkdir(exist_ok=True)
+        (slot_path / "modules" / "train.py").write_text("# Train module")
+
+        metadata = {
+            "schema_version": 1,
+            "description": "Dataset metadata for dry run schema test.",
+            "source": {
+                "format": "npz",
+                "size_bytes": 1234,
+                "created_at": "2025-12-24T12:00:00Z",
+            },
+            "schema": {
+                "kind": "tensor",
+                "arrays": {
+                    "price_changes_train": {
+                        "role": "features",
+                        "shape": [10, 3],
+                        "dtype": "float32",
+                        "feature_names": {"kind": "list", "values": ["f1", "f2", "f3"]},
+                    }
+                },
+                "primary_array": "price_changes_train",
+            },
+        }
+
+        db.create_source(
+            source_id="tokens_v1",
+            name="tokens_v1",
+            gcs_location="gs://bucket/datasets/tokens_v1",
+            created_by="external",
+            description="Tokens dataset",
+            size_bytes=1234,
+            metadata=metadata,
+        )
+
+        manager.save_version(slot="w1", message="Add pipeline for schema mismatch test")
+
+        result = validate_pipeline_run(
+            workspace_name="dry-run-schema",
+            workspace_path=slot_path,
+            db=db,
+            stages=["train"],
+            pipeline_name=None,
+            inputs_override={},
+            config=config,
+        )
+
+        assert result["valid"] is False
+        assert any("schema mismatch" in err or "missing array" in err for err in result["validation_errors"])
+
+        manager.hibernate(slot="w1", reason="Done with schema mismatch test")
+
     def test_dry_run_valid_pipeline(self, e2e_setup):
         """dry_run returns valid=True for correct pipeline."""
         from goldfish.pipeline.validator import validate_pipeline_run

@@ -5,14 +5,18 @@ import json
 import logging
 import os
 import re
+import subprocess
 import threading
 import time
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from google.cloud.storage import Client as GCSClient
 
 import yaml
 
@@ -35,9 +39,8 @@ from goldfish.models import (
     StageRunStatus,
 )
 from goldfish.pipeline.manager import PipelineManager
-from goldfish.svs.agent import ClaudeCodeProvider, CodexCLIProvider, GeminiCLIProvider, NullProvider
+from goldfish.svs.contract import resolve_config_params, validate_input_schema_against_metadata
 from goldfish.svs.manifest import read_svs_manifests
-from goldfish.svs.patterns.extractor import extract_failure_pattern
 from goldfish.svs.post_run import run_post_run_review
 from goldfish.utils import parse_optional_datetime
 from goldfish.utils.config_hash import compute_config_hash
@@ -142,7 +145,7 @@ class StageExecutor:
         # Live metrics sync state (per run)
         self._metrics_sync_state: dict[str, _MetricsSyncState] = {}
         self._metrics_sync_lock = threading.Lock()
-        self._gcs_client = None
+        self._gcs_client: GCSClient | None = None
         self._gcs_client_lock = threading.Lock()
 
     def run_stage(
@@ -188,6 +191,9 @@ class StageExecutor:
         Returns:
             StageRunInfo with status and review (if review blocked the run)
         """
+        # Ensure GCS is configured and reachable for GCE runs
+        self._ensure_gcs_access(operation="run_stage")
+
         # 1. Auto-version workspace (returns version and git SHA)
         version, git_sha = self._auto_version(workspace, stage_name, reason)
 
@@ -302,10 +308,15 @@ class StageExecutor:
             # Build output config with format info
             output_configs = {}
             for output_name, output_def in stage.outputs.items():
-                output_configs[output_name] = {
+                output_config = {
                     "format": output_def.format or output_def.type,
                     "type": output_def.type,
                 }
+                if output_def.output_schema:
+                    # Resolve config params in schema before passing to container
+                    resolved_schema = resolve_config_params(output_def.output_schema, stage_config)
+                    output_config["schema"] = resolved_schema
+                output_configs[output_name] = output_config
 
             self._launch_container(
                 stage_run_id,
@@ -449,6 +460,23 @@ class StageExecutor:
                 if input_def.dataset is None:
                     raise GoldfishError(f"Input '{input_name}' is type 'dataset' but no dataset specified")
                 dataset = self.dataset_registry.get_dataset(input_def.dataset)
+                if input_def.output_schema:
+                    if getattr(dataset, "metadata_status", None) == "ok" and getattr(dataset, "metadata", None):
+                        metadata = dataset.metadata
+                        assert metadata is not None  # Checked above
+                        schema_errors = validate_input_schema_against_metadata(
+                            input_name=input_name,
+                            input_schema=input_def.output_schema,
+                            metadata=metadata,
+                        )
+                        if schema_errors:
+                            raise GoldfishError(f"Input '{input_name}' schema mismatch: " + "; ".join(schema_errors))
+                    else:
+                        logger.warning(
+                            "Skipping input schema check for '%s': metadata %s",
+                            input_name,
+                            getattr(dataset, "metadata_status", "missing"),
+                        )
                 inputs[input_name] = dataset.gcs_location
                 sources[input_name] = {
                     "source_type": "dataset",
@@ -462,16 +490,9 @@ class StageExecutor:
 
     def _get_svs_agent(self):
         """Get the configured SVS agent provider."""
-        provider_name = self.config.svs.agent_provider
-        if provider_name == "claude_code":
-            return ClaudeCodeProvider()
-        elif provider_name == "codex_cli":
-            return CodexCLIProvider()
-        elif provider_name == "gemini_cli":
-            return GeminiCLIProvider()
-        elif provider_name == "null":
-            return NullProvider()
-        return NullProvider()
+        from goldfish.svs.agent import get_agent_provider
+
+        return get_agent_provider(self.config.svs.agent_provider)
 
     def _run_post_run_svs_review(self, stage_run_id: str, backend: str) -> None:
         """Run AI semantic review of stage outputs after completion."""
@@ -486,6 +507,12 @@ class StageExecutor:
             return
 
         outputs_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs"
+
+        # If container-side review already wrote findings, skip host-side review
+        findings_path = outputs_dir / ".goldfish" / "svs_findings.json"
+        if findings_path.exists():
+            logger.debug("Skipping host post-run review for %s: findings already present", stage_run_id)
+            return
 
         # Read intermediate stats manifest to pass to agent
         # (svs_findings.json hasn't been written yet)
@@ -981,8 +1008,12 @@ class StageExecutor:
 
         Returns True if download succeeded, False if the object doesn't exist.
         """
-        client = self._get_gcs_client()
+        client, client_error = self._get_gcs_client()
         if client is None:
+            if self._download_metrics_from_gcs_cli(gcs_path, destination):
+                return True
+            if client_error:
+                logger.warning("GCS client unavailable for metrics download: %s", client_error)
             return False
 
         try:
@@ -1003,29 +1034,55 @@ class StageExecutor:
             blob.reload()
         except NotFound:
             return False
+        except Exception as exc:
+            if self._download_metrics_from_gcs_cli(gcs_path, destination):
+                return True
+            logger.warning("Failed to access metrics in GCS: %s", exc)
+            return False
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         try:
             blob.download_to_filename(str(destination))
         except Exception as exc:
+            if self._download_metrics_from_gcs_cli(gcs_path, destination):
+                return True
             logger.warning("Failed to download metrics from GCS: %s", exc)
             return False
         return True
 
-    def _get_gcs_client(self):
+    def _get_gcs_client(self) -> tuple["GCSClient | None", str | None]:
         if self._gcs_client is not None:
-            return self._gcs_client
+            return self._gcs_client, None
 
         with self._gcs_client_lock:
             if self._gcs_client is not None:
-                return self._gcs_client
+                return self._gcs_client, None
             try:
                 from google.cloud import storage
             except Exception as exc:
-                logger.warning("google-cloud-storage not available: %s", exc)
-                return None
-            self._gcs_client = storage.Client()
-            return self._gcs_client
+                return None, f"google-cloud-storage not available: {exc}"
+            try:
+                self._gcs_client = storage.Client()
+            except Exception as exc:
+                return None, f"GCS credentials unavailable: {exc}"
+            return self._gcs_client, None
+
+    def _ensure_gcs_access(self, operation: str) -> None:
+        if self.config.jobs.backend != "gce":
+            return
+        if not self.config.gcs or not self.config.gcs.bucket:
+            raise GoldfishError(
+                f"GCE backend requires gcs.bucket for {operation}. "
+                "Set gcs.bucket in goldfish.yaml or GOLDFISH_GCS_BUCKET."
+            )
+        client, client_error = self._get_gcs_client()
+        if client is None:
+            raise GoldfishError(f"GCS access unavailable for {operation}: {client_error}")
+        try:
+            bucket = client.bucket(self.config.gcs.bucket)
+            bucket.exists()
+        except Exception as exc:
+            raise GoldfishError(f"GCS access check failed for {operation}: {exc}") from exc
 
     def _metrics_live_sync_enabled(self) -> bool:
         value = os.getenv("GOLDFISH_METRICS_LIVE_SYNC", "1").strip().lower()
@@ -1047,21 +1104,61 @@ class StageExecutor:
                 self._metrics_sync_state[stage_run_id] = state
             return state
 
-    def _sync_metrics_file_from_gcs(self, gcs_path: str, state: _MetricsSyncState) -> tuple[Path | None, int]:
+    def _download_metrics_from_gcs_cli(self, gcs_path: str, destination: Path) -> bool:
+        """Download metrics.jsonl from GCS using gcloud/gsutil CLI (fallback)."""
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            cmd = ["gcloud", "storage", "cp", gcs_path, str(destination)]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                return True
+        except Exception as exc:
+            logger.debug("gcloud storage cp failed: %s", exc)
+
+        try:
+            cmd = ["gsutil", "cp", gcs_path, str(destination)]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                return True
+        except Exception as exc:
+            logger.debug("gsutil cp failed: %s", exc)
+
+        return False
+
+    def _sync_metrics_file_from_gcs(
+        self, gcs_path: str, state: _MetricsSyncState
+    ) -> tuple[Path | None, int, str | None]:
         """Append new bytes from GCS metrics.jsonl into a local temp file."""
-        client = self._get_gcs_client()
+        client, client_error = self._get_gcs_client()
         if client is None:
-            return None, state.offset
+            local_path = state.temp_path
+            if local_path is None:
+                import tempfile
+
+                temp_dir = (
+                    Path(tempfile.gettempdir())
+                    / "goldfish_metrics_live"
+                    / gcs_path.replace("gs://", "").replace("/", "_")
+                )
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                local_path = temp_dir / "metrics.jsonl"
+                state.temp_path = local_path
+
+            if self._download_metrics_from_gcs_cli(gcs_path, local_path):
+                return local_path, state.offset, None
+            if client_error:
+                return None, state.offset, f"Live metrics sync skipped: {client_error}"
+            return None, state.offset, "Live metrics sync skipped: GCS client unavailable and CLI download failed."
 
         try:
             from google.api_core.exceptions import NotFound
         except Exception as exc:
             logger.warning("google-cloud-storage not available for live metrics sync: %s", exc)
-            return None, state.offset
+            return None, state.offset, "Live metrics sync skipped: google-cloud-storage unavailable."
 
         if not gcs_path.startswith("gs://"):
             logger.warning("Invalid GCS path: %s", gcs_path)
-            return None, state.offset
+            return None, state.offset, "Live metrics sync skipped: invalid GCS path."
 
         bucket_name, blob_path = gcs_path[5:].split("/", 1)
         bucket = client.bucket(bucket_name)
@@ -1070,7 +1167,19 @@ class StageExecutor:
         try:
             blob.reload()
         except NotFound:
-            return None, state.offset
+            return None, state.offset, None
+        except Exception as exc:
+            import tempfile
+
+            temp_dir = (
+                Path(tempfile.gettempdir()) / "goldfish_metrics_live" / gcs_path.replace("gs://", "").replace("/", "_")
+            )
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            fallback_path = temp_dir / "metrics.jsonl"
+            if self._download_metrics_from_gcs_cli(gcs_path, fallback_path):
+                state.temp_path = fallback_path
+                return fallback_path, state.offset, None
+            return None, state.offset, f"Live metrics sync failed: {exc}"
 
         size = blob.size or 0
         local_path = state.temp_path
@@ -1095,40 +1204,43 @@ class StageExecutor:
                 local_path.unlink()
 
         if size == state.offset:
-            return local_path, state.offset
+            return local_path, state.offset, None
 
         try:
             data = blob.download_as_bytes(start=state.offset)
         except Exception as exc:
+            if self._download_metrics_from_gcs_cli(gcs_path, local_path):
+                return local_path, state.offset, None
             logger.warning("Failed to download metrics bytes from GCS: %s", exc)
-            return local_path, state.offset
+            return local_path, state.offset, f"Live metrics sync failed: {exc}"
 
         if data:
             local_path.parent.mkdir(parents=True, exist_ok=True)
             with open(local_path, "ab") as f:
                 f.write(data)
 
-        return local_path, state.offset
+        return local_path, state.offset, None
 
-    def sync_metrics_if_running(self, stage_run_id: str) -> None:
+    def sync_metrics_if_running(self, stage_run_id: str) -> list[str]:
         """Best-effort incremental metrics sync for running stages."""
+        warnings: list[str] = []
         if not self._metrics_live_sync_enabled():
-            return
+            return warnings
 
         row = self.db.get_stage_run(stage_run_id)
         if not row or row.get("status") != StageRunStatus.RUNNING:
             with self._metrics_sync_lock:
                 self._metrics_sync_state.pop(stage_run_id, None)
-            return
+            return warnings
 
         state = self._get_metrics_sync_state(stage_run_id)
         if not state.sync_lock.acquire(blocking=False):
-            return
+            return warnings
         try:
             interval = self._metrics_live_sync_interval()
             now = time.time()
             if now - state.last_sync < interval:
-                return
+                return warnings
 
             backend = row.get("backend_type") or self.config.jobs.backend
             metrics_file: Path | None = None
@@ -1140,16 +1252,21 @@ class StageExecutor:
                 )
             elif backend == "gce":
                 if not self.config.gcs or not self.config.gcs.bucket:
-                    return
+                    warnings.append(
+                        "Live metrics sync skipped: gcs.bucket not configured for GCE backend.",
+                    )
+                    return warnings
                 bucket = self.config.gcs.bucket
                 bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
                 gcs_path = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/metrics.jsonl"
-                metrics_file, start_offset = self._sync_metrics_file_from_gcs(gcs_path, state)
+                metrics_file, start_offset, sync_warning = self._sync_metrics_file_from_gcs(gcs_path, state)
+                if sync_warning:
+                    warnings.append(sync_warning)
             else:
-                return
+                return warnings
 
             if metrics_file is None or not metrics_file.exists():
-                return
+                return warnings
 
             from goldfish.metrics.collector import MetricsCollector
 
@@ -1167,6 +1284,7 @@ class StageExecutor:
             state.last_sync = now
         finally:
             state.sync_lock.release()
+        return warnings
 
     def _build_docker_image(self, workspace: str, version: str, profile_name: str | None = None) -> str:
         """Build Docker image for this run.
@@ -1366,9 +1484,14 @@ class StageExecutor:
             "GOLDFISH_RUN_ID": stage_run_id,
             "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
             "GOLDFISH_STAGE_CONFIG": json.dumps(stage_config),
+            "GOLDFISH_SVS_CONFIG": json.dumps(self.config.svs.model_dump()),
             "GOLDFISH_SVS_STATS_ENABLED": "true"
             if self.config.svs.enabled and self.config.svs.stats_enabled
             else "false",
+            # Ensure agent CLIs write config in a writable home directory
+            "HOME": "/app",
+            "XDG_CONFIG_HOME": "/app/.config",
+            "XDG_CACHE_HOME": "/app/.cache",
         }
 
         # Add git SHA if available
@@ -1400,10 +1523,8 @@ class StageExecutor:
             run_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id
             run_dir.mkdir(parents=True, exist_ok=True)
 
-            # Create inputs and outputs directories
-            inputs_dir = run_dir / "inputs"
+            # Create outputs directory (inputs are mounted directly from source)
             outputs_dir = run_dir / "outputs"
-            inputs_dir.mkdir(exist_ok=True)
             outputs_dir.mkdir(exist_ok=True)
 
             # Generate entrypoint script
@@ -1412,7 +1533,11 @@ set -euo pipefail
 
 echo "Running stage: {stage_name}"
 cd /app
-python -m modules.{stage_name}
+python - <<'PY'
+from goldfish.io.bootstrap import run_module_with_svs
+import sys
+sys.exit(run_module_with_svs("modules.{stage_name}"))
+PY
 
 echo "Stage completed successfully"
 """
@@ -1424,9 +1549,9 @@ echo "Stage completed successfully"
                 entrypoint_script=entrypoint_script,
                 stage_config=stage_config,
                 work_dir=run_dir,
-                inputs_dir=inputs_dir,
                 outputs_dir=outputs_dir,
                 goldfish_env=goldfish_env,
+                input_paths=inputs,  # Mount inputs directly from source locations
             )
 
         elif backend == "gce":
@@ -1463,7 +1588,11 @@ set -euo pipefail
 
 echo "Running stage: {stage_name}"
 cd /app
-python -m modules.{stage_name}
+python - <<'PY'
+from goldfish.io.bootstrap import run_module_with_svs
+import sys
+sys.exit(run_module_with_svs("modules.{stage_name}"))
+PY
 
 echo "Stage completed successfully"
 """,
@@ -1565,20 +1694,34 @@ echo "Stage completed successfully"
 
         # Extract failure pattern for self-learning (only on failure)
         if status == StageRunStatus.FAILED and self.config.svs.enabled and self.config.svs.auto_learn_failures:
-            try:
-                # Get error from logs (last 500 chars for the error message)
-                error_msg = logs[-500:] if logs else "Unknown error"
-                agent = self._get_svs_agent()
-                extract_failure_pattern(
-                    db=self.db,
-                    stage_run_id=stage_run_id,
-                    error=error_msg,
-                    logs=logs,
-                    agent=agent,
-                )
-            except Exception as e:
-                # Pattern extraction failure should never block finalization
-                logger.warning(f"Failed to extract failure pattern for {stage_run_id}: {e}")
+            import threading
+
+            from goldfish.svs.agent import get_agent_provider
+            from goldfish.svs.patterns.extractor import extract_failure_pattern
+
+            error_msg = logs[-500:] if logs else "Unknown error"
+            agent = get_agent_provider(self.config.svs.agent_provider)
+
+            def _extract_pattern() -> None:
+                try:
+                    logger.info(f"Starting pattern extraction for {stage_run_id}")
+                    pattern = extract_failure_pattern(
+                        db=self.db,
+                        stage_run_id=stage_run_id,
+                        error=error_msg,
+                        logs=logs,
+                        agent=agent,
+                    )
+                    if pattern:
+                        logger.info(f"Created pattern {pattern.id}: {pattern.symptom[:50]}...")
+                    else:
+                        logger.info(f"No pattern extracted for {stage_run_id}")
+                except Exception as e:
+                    logger.warning(f"Pattern extraction failed for {stage_run_id}: {e}")
+
+            thread = threading.Thread(target=_extract_pattern, daemon=True)
+            thread.start()
+            logger.info(f"Started background pattern extraction for {stage_run_id}")
 
         with self._metrics_sync_lock:
             self._metrics_sync_state.pop(stage_run_id, None)
@@ -1595,6 +1738,13 @@ echo "Stage completed successfully"
             ),
             progress=StageRunProgress.FINALIZING,
         )
+
+        # Clean up container after finalization (local backend only)
+        if backend == "local":
+            try:
+                self.local_executor.remove_container(stage_run_id)
+            except Exception:
+                pass  # Container may already be removed
 
     def wait_for_completion(self, stage_run_id: str, poll_interval: int = 5, timeout: int = 3600) -> str:
         """Wait for stage run to complete.
@@ -1645,6 +1795,10 @@ echo "Stage completed successfully"
                     return status
 
                 elif status == "not_found":
+                    # Grace period for container startup - Docker may not have created it yet
+                    if elapsed < 10:
+                        time.sleep(0.5)
+                        continue
                     raise GoldfishError(f"Container {stage_run_id} not found")
 
                 else:

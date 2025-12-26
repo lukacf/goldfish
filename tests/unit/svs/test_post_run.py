@@ -427,6 +427,42 @@ class TestRunPostRunReviewFindingsFile:
         assert "stats" in data
         assert data["stats"] == stats
 
+    def test_findings_file_merges_existing_findings(self, tmp_path: Path):
+        """Post-run review should merge with existing findings instead of overwriting."""
+        import json
+
+        from goldfish.svs.post_run import run_post_run_review
+
+        config = SVSConfig(ai_post_run_enabled=True)
+        agent = NullProvider()
+        agent.configure_response("approved", findings=["NOTE: Post-run review ok"])
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        goldfish_dir = outputs_dir / ".goldfish"
+        goldfish_dir.mkdir()
+
+        existing = {
+            "version": 1,
+            "decision": "warned",
+            "findings": ["WARNING: NaN detected during training"],
+            "stats": {"signal": {"mean": 1.0}},
+        }
+        (goldfish_dir / "svs_findings.json").write_text(json.dumps(existing))
+
+        run_post_run_review(
+            outputs_dir=outputs_dir,
+            stats={"file_count": 3},
+            config=config,
+            agent=agent,
+        )
+
+        data = json.loads((goldfish_dir / "svs_findings.json").read_text())
+        assert "WARNING: NaN detected during training" in data.get("findings", [])
+        assert "NOTE: Post-run review ok" in data.get("findings", [])
+        assert data.get("decision") == "warned"
+        assert data.get("stats", {}).get("file_count") == 3
+
     def test_findings_file_contains_duration(self, tmp_path: Path):
         """Findings file should contain duration_ms."""
         import json

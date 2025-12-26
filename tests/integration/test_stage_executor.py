@@ -11,6 +11,30 @@ from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.models import PipelineDef, SignalDef, StageDef, StageRunStatus
 
 
+def _tensor_dataset_metadata(array_name: str, shape: list[int], dtype: str) -> dict:
+    return {
+        "schema_version": 1,
+        "description": "Tensor dataset metadata for stage executor tests.",
+        "source": {
+            "format": "npz",
+            "size_bytes": 1234,
+            "created_at": "2025-12-24T12:00:00Z",
+        },
+        "schema": {
+            "kind": "tensor",
+            "arrays": {
+                array_name: {
+                    "role": "features",
+                    "shape": shape,
+                    "dtype": dtype,
+                    "feature_names": {"kind": "list", "values": ["f1", "f2", "f3"]},
+                }
+            },
+            "primary_array": array_name,
+        },
+    }
+
+
 class TestInputResolution:
     """Test resolving stage inputs (datasets, signals, overrides)."""
 
@@ -54,6 +78,101 @@ class TestInputResolution:
         # Verify source metadata
         assert sources["raw_data"]["source_type"] == "dataset"
         assert sources["raw_data"]["dataset_name"] == "eurusd_raw_v3"
+
+    def test_resolve_dataset_input_rejects_schema_mismatch(self, test_db, test_config):
+        """Should reject dataset input when contract schema mismatches metadata."""
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = PipelineDef(
+            name="test_pipeline",
+            stages=[
+                StageDef(
+                    name="preprocess",
+                    inputs={
+                        "raw_data": SignalDef(
+                            name="raw_data",
+                            type="dataset",
+                            dataset="tokens_v1",
+                            schema={
+                                "kind": "tensor",
+                                "arrays": {
+                                    "X_train": {"shape": [10, 3], "dtype": "float32"},
+                                },
+                                "primary_array": "X_train",
+                            },
+                        )
+                    },
+                    outputs={},
+                )
+            ],
+        )
+
+        dataset_registry = MagicMock()
+        dataset_registry.get_dataset.return_value = MagicMock(
+            gcs_location="gs://bucket/datasets/tokens_v1",
+            metadata=_tensor_dataset_metadata("price_changes_train", [10, 3], "float32"),
+            metadata_status="ok",
+        )
+
+        executor = StageExecutor(
+            db=test_db,
+            config=test_config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=pipeline_manager,
+            project_root=Path("/tmp"),
+            dataset_registry=dataset_registry,
+        )
+
+        stage = pipeline_manager.get_pipeline.return_value.stages[0]
+        with pytest.raises(GoldfishError, match="schema mismatch"):
+            executor._resolve_inputs("test_workspace", stage)
+
+    def test_resolve_dataset_input_allows_schema_match(self, test_db, test_config):
+        """Should allow dataset input when contract schema matches metadata."""
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = PipelineDef(
+            name="test_pipeline",
+            stages=[
+                StageDef(
+                    name="preprocess",
+                    inputs={
+                        "raw_data": SignalDef(
+                            name="raw_data",
+                            type="dataset",
+                            dataset="tokens_v1",
+                            schema={
+                                "kind": "tensor",
+                                "arrays": {
+                                    "price_changes_train": {"shape": [None, 3], "dtype": "float32"},
+                                },
+                                "primary_array": "price_changes_train",
+                            },
+                        )
+                    },
+                    outputs={},
+                )
+            ],
+        )
+
+        dataset_registry = MagicMock()
+        dataset_registry.get_dataset.return_value = MagicMock(
+            gcs_location="gs://bucket/datasets/tokens_v1",
+            metadata=_tensor_dataset_metadata("price_changes_train", [10, 3], "float32"),
+            metadata_status="ok",
+        )
+
+        executor = StageExecutor(
+            db=test_db,
+            config=test_config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=pipeline_manager,
+            project_root=Path("/tmp"),
+            dataset_registry=dataset_registry,
+        )
+
+        stage = pipeline_manager.get_pipeline.return_value.stages[0]
+        inputs, sources = executor._resolve_inputs("test_workspace", stage)
+        assert inputs["raw_data"] == "gs://bucket/datasets/tokens_v1"
+        assert sources["raw_data"]["source_type"] == "dataset"
 
     def test_resolve_signal_input_from_previous_stage(self, test_db, test_config):
         """Should resolve signal inputs from previous stage runs."""
@@ -354,6 +473,79 @@ class TestStageExecution:
 
         # Verify container was launched
         executor._launch_container.assert_called_once()
+
+    def test_launch_container_uses_svs_bootstrap_wrapper(self, test_db, test_config, temp_dir):
+        """Entry point should run module via SVS bootstrap wrapper."""
+        config = test_config.model_copy(deep=True)
+        config.jobs.backend = "local"
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+            dataset_registry=None,
+        )
+
+        captured: dict[str, str] = {}
+
+        def _capture_launch(**kwargs):
+            captured["entrypoint_script"] = kwargs.get("entrypoint_script", "")
+
+        executor.local_executor.launch_container = MagicMock(side_effect=_capture_launch)
+
+        executor._launch_container(
+            stage_run_id="stage-boot123",
+            workspace="test_workspace",
+            stage_name="train",
+            image_tag="goldfish-test",
+            inputs={},
+            input_configs={},
+            output_configs={},
+            user_config={},
+        )
+
+        script = captured.get("entrypoint_script", "")
+        assert "goldfish.io.bootstrap" in script
+        assert "run_module_with_svs" in script
+
+    def test_launch_container_sets_home_env_for_agent_cli(self, test_db, test_config, temp_dir):
+        """Goldfish should set HOME/XDG paths so agent CLIs can write config."""
+        config = test_config.model_copy(deep=True)
+        config.jobs.backend = "local"
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+            dataset_registry=None,
+        )
+
+        captured: dict[str, dict[str, str]] = {}
+
+        def _capture_launch(**kwargs):
+            captured["goldfish_env"] = kwargs.get("goldfish_env", {})
+
+        executor.local_executor.launch_container = MagicMock(side_effect=_capture_launch)
+
+        executor._launch_container(
+            stage_run_id="stage-home123",
+            workspace="test_workspace",
+            stage_name="train",
+            image_tag="goldfish-test",
+            inputs={},
+            input_configs={},
+            output_configs={},
+            user_config={},
+        )
+
+        env = captured.get("goldfish_env", {})
+        assert env.get("HOME") == "/app"
+        assert env.get("XDG_CONFIG_HOME") == "/app/.config"
+        assert env.get("XDG_CACHE_HOME") == "/app/.cache"
 
 
 class TestStageVersioning:

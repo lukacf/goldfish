@@ -215,6 +215,9 @@ def extract_failure_pattern(
         RateLimitExceededError: If rate limit is exceeded
         PatternExtractionError: If extraction fails for other reasons
     """
+    logger.info(f"Starting failure pattern extraction for {stage_run_id}")
+    logger.debug(f"Error preview: {error[:200] if error else 'none'}")
+
     # 1. Check rate limit
     _check_rate_limit(db)
 
@@ -226,14 +229,32 @@ def extract_failure_pattern(
 
     # 4. Call agent
     try:
+        prompt = (
+            "You are analyzing a failed ML stage run. Return ONLY the following lines:\n"
+            "SYMPTOM: <what went wrong>\n"
+            "ROOT_CAUSE: <why it happened>\n"
+            "DETECTION: <how to detect it>\n"
+            "PREVENTION: <how to prevent it>\n"
+            "SEVERITY: CRITICAL|HIGH|MEDIUM|LOW\n"
+            "CONFIDENCE: HIGH|MEDIUM|LOW\n"
+            "\n"
+            "Context:\n"
+            f"Stage: {stage_name}\n"
+            f"Error: {error}\n"
+            f"Logs:\n{truncated_logs}\n"
+        )
         request = ReviewRequest(
             review_type="pattern_extraction",
             context={
+                "prompt": prompt,
+                "output_format": "text",
                 "error": error,
                 "logs": truncated_logs,
                 "stage_run_id": stage_run_id,
                 "workspace": workspace_name,
                 "stage_type": stage_name,
+                "timeout_seconds": 120,  # 2-minute timeout for pattern extraction
+                "max_turns": 1,  # Single turn - just analyze and respond
             },
         )
         result = agent.run(request)
@@ -241,11 +262,19 @@ def extract_failure_pattern(
         logger.warning(f"Agent failed during pattern extraction: {e}")
         return None
 
-    # 5. Parse findings
-    parsed = _parse_findings(result.findings)
+    # 5. Parse findings from raw response text (not result.findings which only has ERROR/WARNING/NOTE)
+    # Split response text into lines for parsing
+    logger.info(
+        f"Agent returned for {stage_run_id}: decision={result.decision}, response_len={len(result.response_text) if result.response_text else 0}"
+    )
+    response_lines = result.response_text.splitlines() if result.response_text else []
+    parsed = _parse_findings(response_lines)
+    logger.debug(f"Parsed fields: {list(parsed.keys())}")
 
     if not parsed.get("SYMPTOM"):
-        logger.warning("Agent did not return valid SYMPTOM in findings")
+        logger.warning(
+            f"Agent did not return valid SYMPTOM in response. Raw output: {result.response_text[:500] if result.response_text else 'empty'}"
+        )
         return None
 
     symptom = parsed["SYMPTOM"]
@@ -259,6 +288,7 @@ def extract_failure_pattern(
     existing = _find_duplicate(db, symptom)
     if existing:
         # Update occurrence count
+        logger.info(f"Found existing pattern {existing['id']}, incrementing occurrence count")
         db.increment_pattern_occurrence(
             existing["id"],
             datetime.now(UTC).isoformat(),
@@ -279,6 +309,7 @@ def extract_failure_pattern(
     # 7. Create new pattern
     pattern_id = f"fp-{str(uuid.uuid4())[:8]}"
     created_at = datetime.now(UTC).isoformat()
+    logger.info(f"Creating new failure pattern {pattern_id}: {symptom[:50]}...")
 
     db.create_failure_pattern(
         pattern_id=pattern_id,

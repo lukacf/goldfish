@@ -25,7 +25,7 @@ from goldfish.models import (
     SourceLineage,
     UpdateSourceMetadataResponse,
 )
-from goldfish.server import (
+from goldfish.server_core import (
     _get_config,
     _get_dataset_registry,
     _get_db,

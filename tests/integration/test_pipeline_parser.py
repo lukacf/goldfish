@@ -119,8 +119,8 @@ stages:
         assert len(errors) > 0
         assert any("preprocess.py" in err for err in errors)
 
-    def test_validate_checks_config_exists(self, temp_dir):
-        """Should validate that config files exist."""
+    def test_validate_config_files_are_optional(self, temp_dir):
+        """Config files are optional - validation should pass without them."""
         # Create pipeline
         pipeline_yaml = temp_dir / "pipeline.yaml"
         pipeline_yaml.write_text("""
@@ -135,15 +135,15 @@ stages:
         modules_dir.mkdir()
         configs_dir.mkdir()
 
-        # Create module but not config
+        # Create module but not config - configs are optional
         (modules_dir / "preprocess.py").write_text("def main(): pass")
 
         parser = PipelineParser()
         pipeline = parser.parse(pipeline_yaml)
         errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
 
-        assert len(errors) > 0
-        assert any("preprocess.yaml" in err for err in errors)
+        # Config files are optional - validation should pass
+        assert len(errors) == 0
 
     def test_validate_passes_when_files_exist(self, temp_dir):
         """Should pass validation when all files exist."""
@@ -505,6 +505,71 @@ stages:
         errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
 
         assert any("shape[1]" in err for err in errors)
+
+    def test_validate_dataset_schema_mismatch(self, temp_dir):
+        """Should detect dataset metadata mismatch against input schema."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text(
+            """
+name: test_pipeline
+stages:
+  - name: train
+    inputs:
+      data:
+        type: dataset
+        dataset: tokens_v1
+        schema:
+          kind: tensor
+          arrays:
+            X_train:
+              shape: [10, 3]
+              dtype: float32
+          primary_array: X_train
+    outputs:
+      model: {type: directory}
+"""
+        )
+
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text("batch_size: 32")
+
+        metadata = {
+            "schema_version": 1,
+            "description": "Dataset metadata for parser test.",
+            "source": {
+                "format": "npz",
+                "size_bytes": 1234,
+                "created_at": "2025-12-24T12:00:00Z",
+            },
+            "schema": {
+                "kind": "tensor",
+                "arrays": {
+                    "price_changes_train": {
+                        "role": "features",
+                        "shape": [10, 3],
+                        "dtype": "float32",
+                        "feature_names": {"kind": "list", "values": ["f1", "f2", "f3"]},
+                    }
+                },
+                "primary_array": "price_changes_train",
+            },
+        }
+
+        def dataset_exists_fn(name: str) -> bool:
+            return name == "tokens_v1"
+
+        def dataset_metadata_fn(name: str):
+            return metadata, "ok"
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn, dataset_metadata_fn)
+
+        assert any("missing array" in err for err in errors)
 
     def test_validate_rejects_non_int_shape_param(self, temp_dir):
         """Should reject non-int config param used in shape."""

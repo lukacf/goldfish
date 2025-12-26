@@ -24,6 +24,141 @@ def _is_wildcard_dim(value: Any) -> bool:
     return value is None or value == -1
 
 
+def _compare_shapes(
+    expected_shape: list[Any] | None,
+    actual_shape: list[Any] | None,
+    context: str,
+    errors: list[str],
+) -> None:
+    """Compare shapes with wildcard support."""
+    if expected_shape is None:
+        return
+    if not isinstance(expected_shape, list):
+        errors.append(f"{context}: expected shape must be a list")
+        return
+    if not isinstance(actual_shape, list):
+        errors.append(f"{context}: metadata shape missing or invalid")
+        return
+    if len(expected_shape) != len(actual_shape):
+        errors.append(f"{context}: shape rank mismatch ({len(expected_shape)} != {len(actual_shape)})")
+        return
+    for idx, (exp_dim, act_dim) in enumerate(zip(expected_shape, actual_shape, strict=False)):
+        if _is_wildcard_dim(exp_dim):
+            continue
+        if exp_dim != act_dim:
+            errors.append(f"{context}: shape[{idx}] mismatch ({exp_dim} != {act_dim})")
+
+
+def _compare_dtype(expected_dtype: str | None, actual_dtype: str | None, context: str, errors: list[str]) -> None:
+    if expected_dtype is None:
+        return
+    if not isinstance(actual_dtype, str):
+        errors.append(f"{context}: metadata dtype missing or invalid")
+        return
+    if expected_dtype != actual_dtype:
+        errors.append(f"{context}: dtype mismatch ({expected_dtype} != {actual_dtype})")
+
+
+def _extract_tensor_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return the array-level schema for tensor outputs."""
+    arrays = schema.get("arrays")
+    if not isinstance(arrays, dict) or not arrays:
+        return schema
+    primary = schema.get("primary_array")
+    if isinstance(primary, str) and primary in arrays:
+        result: dict[str, Any] = arrays[primary]
+        return result
+    # Fall back to first array definition
+    first_val: dict[str, Any] = next(iter(arrays.values()))
+    return first_val
+
+
+def validate_output_data_against_schema(
+    output_name: str,
+    schema: dict[str, Any],
+    data: Any,
+) -> list[str]:
+    """Validate output data against a schema contract.
+
+    Supports tensor schemas (shape/dtype) and tabular schemas (columns/dtypes).
+    Returns a list of error strings; empty list means valid.
+    """
+    errors: list[str] = []
+
+    if not isinstance(schema, dict) or not schema:
+        return errors
+
+    kind = schema.get("kind")
+    context = f"Output '{output_name}'"
+
+    # Tabular schema validation
+    if kind == "tabular" or "columns" in schema or "dtypes" in schema:
+        if not hasattr(data, "columns"):
+            errors.append(f"{context}: expected tabular data with columns")
+            return errors
+
+        expected_columns = schema.get("columns")
+        if expected_columns is not None:
+            if not isinstance(expected_columns, list):
+                errors.append(f"{context}: schema.columns must be a list")
+            else:
+                actual_columns = list(data.columns)
+                if expected_columns != actual_columns:
+                    errors.append(f"{context}: columns mismatch")
+
+        expected_dtypes = schema.get("dtypes")
+        if expected_dtypes is not None:
+            if not isinstance(expected_dtypes, dict):
+                errors.append(f"{context}: schema.dtypes must be an object")
+            else:
+                actual_dtypes = {}
+                try:
+                    actual_dtypes = {col: str(dtype) for col, dtype in data.dtypes.items()}
+                except Exception:
+                    errors.append(f"{context}: unable to read tabular dtypes")
+                for col, expected_dtype in expected_dtypes.items():
+                    actual_dtype = actual_dtypes.get(col)
+                    if actual_dtype is None:
+                        errors.append(f"{context}: column '{col}' dtype missing")
+                    elif expected_dtype != actual_dtype:
+                        errors.append(f"{context}: column '{col}' dtype mismatch ({expected_dtype} != {actual_dtype})")
+
+        return errors
+
+    # Tensor schema validation
+    tensor_schema = schema if kind != "tensor" else _extract_tensor_schema(schema)
+    expected_shape = tensor_schema.get("shape")
+    expected_dtype = tensor_schema.get("dtype")
+
+    actual_shape = None
+    if hasattr(data, "shape"):
+        try:
+            actual_shape = list(data.shape)
+        except Exception:
+            actual_shape = None
+    elif expected_shape is not None:
+        errors.append(f"{context}: data missing shape attribute")
+
+    actual_dtype = None
+    if hasattr(data, "dtype"):
+        try:
+            actual_dtype = str(data.dtype)
+        except Exception:
+            actual_dtype = None
+    elif expected_dtype is not None:
+        errors.append(f"{context}: data missing dtype attribute")
+
+    _compare_shapes(expected_shape, actual_shape, context, errors)
+    _compare_dtype(expected_dtype, actual_dtype, context, errors)
+
+    if "rank" in schema and isinstance(actual_shape, list):
+        expected_rank = schema.get("rank")
+        if isinstance(expected_rank, int) and len(actual_shape) != expected_rank:
+            errors.append(f"{context}: rank mismatch ({len(actual_shape)} != {expected_rank})")
+
+    return errors
+
+
 def _get_config_value(stage_config: dict[str, Any], key: str) -> tuple[bool, Any]:
     """Resolve dotted config key into stage config."""
     current: Any = stage_config
@@ -341,6 +476,88 @@ def validate_cross_stage_shapes(pipeline: PipelineDef, workspace_path: Path) -> 
                         errors.append(
                             f"Stage '{stage.name}' input '{input_name}': shape[{idx}] mismatch "
                             f"({src_dim} != {exp_dim})"
+                        )
+
+    return errors
+
+
+def validate_input_schema_against_metadata(
+    input_name: str,
+    input_schema: dict[str, Any],
+    metadata: dict[str, Any],
+) -> list[str]:
+    """Validate an input schema contract against registered metadata."""
+    errors: list[str] = []
+
+    if not isinstance(metadata, dict):
+        return [f"Input '{input_name}': metadata missing or invalid"]
+
+    meta_schema = metadata.get("schema")
+    if not isinstance(meta_schema, dict):
+        return [f"Input '{input_name}': metadata schema missing"]
+
+    expected_kind = input_schema.get("kind")
+    actual_kind = meta_schema.get("kind")
+    if expected_kind and expected_kind != actual_kind:
+        errors.append(f"Input '{input_name}': schema.kind mismatch ({expected_kind} != {actual_kind})")
+
+    if actual_kind == "tensor":
+        meta_arrays = meta_schema.get("arrays")
+        if not isinstance(meta_arrays, dict):
+            errors.append(f"Input '{input_name}': metadata arrays missing for tensor schema")
+            return errors
+
+        expected_arrays = input_schema.get("arrays")
+        if isinstance(expected_arrays, dict):
+            for array_name, expected_array in expected_arrays.items():
+                if array_name not in meta_arrays:
+                    errors.append(f"Input '{input_name}': missing array '{array_name}' in metadata")
+                    continue
+                if not isinstance(expected_array, dict):
+                    errors.append(f"Input '{input_name}': expected array '{array_name}' must be an object")
+                    continue
+                actual_array = meta_arrays.get(array_name, {})
+                context = f"Input '{input_name}' array '{array_name}'"
+                _compare_shapes(expected_array.get("shape"), actual_array.get("shape"), context, errors)
+                _compare_dtype(expected_array.get("dtype"), actual_array.get("dtype"), context, errors)
+            return errors
+
+        # Fallback: compare against primary array using top-level shape/dtype
+        primary = meta_schema.get("primary_array")
+        if isinstance(primary, str) and primary in meta_arrays:
+            actual_array = meta_arrays[primary]
+            context = f"Input '{input_name}' primary array '{primary}'"
+            _compare_shapes(input_schema.get("shape"), actual_array.get("shape"), context, errors)
+            _compare_dtype(input_schema.get("dtype"), actual_array.get("dtype"), context, errors)
+        else:
+            errors.append(f"Input '{input_name}': metadata primary_array missing for tensor schema")
+
+    elif actual_kind == "tabular":
+        expected_columns = input_schema.get("columns")
+        if expected_columns is not None:
+            meta_columns = meta_schema.get("columns")
+            if not isinstance(expected_columns, list):
+                errors.append(f"Input '{input_name}': expected columns must be a list")
+            elif not isinstance(meta_columns, list):
+                errors.append(f"Input '{input_name}': metadata columns missing for tabular schema")
+            else:
+                if expected_columns != meta_columns:
+                    errors.append(f"Input '{input_name}': columns mismatch")
+        expected_dtypes = input_schema.get("dtypes")
+        if expected_dtypes is not None:
+            meta_dtypes = meta_schema.get("dtypes")
+            if not isinstance(expected_dtypes, dict):
+                errors.append(f"Input '{input_name}': expected dtypes must be an object")
+            elif not isinstance(meta_dtypes, dict):
+                errors.append(f"Input '{input_name}': metadata dtypes missing for tabular schema")
+            else:
+                for col, dtype in expected_dtypes.items():
+                    actual_dtype = meta_dtypes.get(col)
+                    if actual_dtype is None:
+                        errors.append(f"Input '{input_name}': column '{col}' missing in metadata dtypes")
+                    elif dtype != actual_dtype:
+                        errors.append(
+                            f"Input '{input_name}': column '{col}' dtype mismatch ({dtype} != {actual_dtype})"
                         )
 
     return errors

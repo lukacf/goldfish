@@ -58,11 +58,11 @@ class TestSVSConfigDefaults:
         assert config.agent_provider == "claude_code"
 
     def test_default_agent_timeout(self):
-        """Default agent timeout should be 30 seconds."""
+        """Default agent timeout should be 120 seconds."""
         from goldfish.svs.config import SVSConfig
 
         config = SVSConfig()
-        assert config.agent_timeout == 30
+        assert config.agent_timeout == 120
 
     def test_default_agent_max_turns(self):
         """Default max turns should be 3."""

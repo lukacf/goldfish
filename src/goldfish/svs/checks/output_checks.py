@@ -9,26 +9,12 @@ These checks run on output data to catch common data quality issues:
 All checks are mechanistic (no AI) and return structured results.
 """
 
-from dataclasses import dataclass
-
 import numpy as np
 
+from goldfish.svs.checks.result import CheckResult
 
-@dataclass
-class CheckResult:
-    """Result from a data quality check.
-
-    Attributes:
-        check: Name of the check that was run
-        status: "passed" | "failed" | "warning"
-        message: Human-readable description of the result
-        details: Optional dictionary with metric values and context
-    """
-
-    check: str
-    status: str  # "passed" | "failed" | "warning"
-    message: str
-    details: dict | None = None
+# Re-export for backwards compatibility
+__all__ = ["CheckResult", "check_entropy", "check_null_ratio", "check_top_k_concentration", "check_vocab_utilization"]
 
 
 def _safe_isnan(data: np.ndarray) -> np.ndarray:

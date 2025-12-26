@@ -176,7 +176,7 @@ class MetricsLogger:
         """Write a during-run SVS finding to svs_findings.json manifest."""
         findings_path = self.local_writer.metrics_dir / "svs_findings.json"
 
-        findings_data: dict[str, Any] = {"version": 1, "history": []}
+        findings_data: dict[str, Any] = {"version": 1, "history": [], "findings": []}
         if findings_path.exists():
             try:
                 import json
@@ -199,8 +199,29 @@ class MetricsLogger:
             findings_data["history"] = []
         findings_data["history"].append(new_finding)
 
-        # Update latest finding summary
-        findings_data["latest"] = new_finding
+        # Append to findings list (string form for compatibility)
+        findings_line = f"{severity}: [during_run] {check_name} at step {step} - {summary}"
+        findings_list = findings_data.get("findings")
+        if not isinstance(findings_list, list):
+            findings_list = []
+        findings_list.append(findings_line)
+        findings_data["findings"] = findings_list
+
+        # Update decision based on severity (escalate only)
+        severity_map = {
+            "BLOCK": "blocked",
+            "ERROR": "blocked",
+            "WARN": "warned",
+            "WARNING": "warned",
+        }
+        new_decision = severity_map.get(severity, "approved")
+        current_decision = findings_data.get("decision") or "approved"
+        if new_decision == "blocked":
+            findings_data["decision"] = "blocked"
+        elif new_decision == "warned" and current_decision != "blocked":
+            findings_data["decision"] = "warned"
+        else:
+            findings_data.setdefault("decision", current_decision)
 
         try:
             import json
@@ -214,22 +235,25 @@ class MetricsLogger:
         if not self._svs_enabled or step is None:
             return
 
-        # 1. Cheap NaN/Inf check on every call
-        health_res = check_metric_health(name, value, step)
-        if health_res.status == "failed":
-            logger.warning(f"SVS ALERT: {health_res.message}")
-            self._write_svs_finding(health_res.check, "BLOCK", health_res.message, step)
+        try:
+            # 1. Cheap NaN/Inf check on every call
+            health_res = check_metric_health(name, value, step)
+            if health_res.status == "failed":
+                logger.warning(f"SVS ALERT: {health_res.message}")
+                self._write_svs_finding(health_res.check, "BLOCK", health_res.message, step)
 
-        # 2. Expensive checks (divergence) every N steps
-        if name == "loss" or name.endswith("/loss"):
-            self._loss_history.append(value)
+            # 2. Expensive checks (divergence) every N steps
+            if name == "loss" or name.endswith("/loss"):
+                self._loss_history.append(value)
 
-            if step >= self._last_svs_check_step + self._svs_check_interval:
-                divergence_res = check_loss_divergence(self._loss_history)
-                if divergence_res.status == "failed":
-                    logger.warning(f"SVS ALERT: {divergence_res.message}")
-                    self._write_svs_finding(divergence_res.check, "WARN", divergence_res.message, step)
-                self._last_svs_check_step = step
+                if step >= self._last_svs_check_step + self._svs_check_interval:
+                    divergence_res = check_loss_divergence(self._loss_history)
+                    if divergence_res.status == "failed":
+                        logger.warning(f"SVS ALERT: {divergence_res.message}")
+                        self._write_svs_finding(divergence_res.check, "WARN", divergence_res.message, step)
+                    self._last_svs_check_step = step
+        except Exception as exc:
+            logger.debug("SVS training check failed: %s", exc)
 
     def log_metric(
         self,
@@ -246,12 +270,15 @@ class MetricsLogger:
             step: Optional step/epoch number
             timestamp: Optional timestamp - ISO 8601 string or Unix float
         """
+        # Perform during-run SVS checks
+        try:
+            self._check_training_health(name, value, step)
+        except Exception as exc:
+            logger.debug("SVS health check error: %s", exc)
+
         # Always write to local; skip backend if local rejected the metric
         if not self.local_writer.log_metric(name, value, step, timestamp):
             return
-
-        # Perform during-run SVS checks
-        self._check_training_health(name, value, step)
 
         # Try backend if configured
         self._ensure_backend_initialized()

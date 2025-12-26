@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import math
 
-from goldfish.svs.checks.output_checks import CheckResult
+from goldfish.svs.checks.result import CheckResult
 
 
 def check_metric_health(name: str, value: float, step: int) -> CheckResult:

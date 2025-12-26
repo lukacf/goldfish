@@ -9,8 +9,15 @@ from typing import TYPE_CHECKING, Optional
 import yaml
 
 from goldfish.db.database import Database
+from goldfish.errors import ConfigParamNotFoundError
 from goldfish.pipeline.parser import PipelineNotFoundError, PipelineParser
-from goldfish.svs.contract import merge_stage_config, validate_stage_contracts
+from goldfish.svs.contract import (
+    merge_stage_config,
+    resolve_config_params,
+    validate_input_schema_against_metadata,
+    validate_stage_contracts,
+)
+from goldfish.validation import parse_source_metadata
 
 if TYPE_CHECKING:
     from goldfish.config import GoldfishConfig
@@ -60,6 +67,10 @@ def validate_pipeline_run(
 
         pipeline_def = parser.parse(pipeline_path)
         all_stages = [s.name for s in pipeline_def.stages]
+
+        # Run full pipeline validation including cross-stage schema checks
+        validation_errors = parser.validate(pipeline_def, workspace_path)
+        errors.extend(validation_errors)
 
         # Determine which stages to run
         if stages:
@@ -139,6 +150,31 @@ def validate_pipeline_run(
                 dataset = db.get_source(input_def.dataset)
                 if not dataset:
                     errors.append(f"Stage '{stage_name}': dataset '{input_def.dataset}' not found")
+                elif config and config.svs.enabled and input_def.output_schema:
+                    metadata, status = parse_source_metadata(dataset.get("metadata"))
+                    if status == "ok" and metadata:
+                        merged_config = merge_stage_config(
+                            stage_name=stage_name,
+                            workspace_path=workspace_path,
+                            runtime_overrides=None,
+                        )
+                        try:
+                            resolved_schema = resolve_config_params(input_def.output_schema, merged_config)
+                        except ConfigParamNotFoundError as e:
+                            param = e.details.get("param")
+                            errors.append(f"Stage '{stage_name}' input '{input_name}': missing config param '{param}'")
+                        else:
+                            schema_errors = validate_input_schema_against_metadata(
+                                input_name=input_name,
+                                input_schema=resolved_schema,
+                                metadata=metadata,
+                            )
+                            for err in schema_errors:
+                                errors.append(f"Stage '{stage_name}': {err}")
+                    elif status != "ok":
+                        warnings.append(
+                            f"Stage '{stage_name}' input '{input_name}': metadata {status}, skipping schema check"
+                        )
 
             # Check from_stage inputs
             if input_def.from_stage:

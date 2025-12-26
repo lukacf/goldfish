@@ -236,7 +236,7 @@ class GoldfishConfig(BaseModel):
                 data["gcs"] = {"bucket": gcs_bucket}
 
         try:
-            return cls(**data)
+            config = cls(**data)
         except ValidationError as e:
             # Extract the most useful error info with suggestions for typos
             from goldfish.validation import format_unknown_field_error
@@ -257,6 +257,8 @@ class GoldfishConfig(BaseModel):
 
                 raise GoldfishError(f"Invalid configuration: {field} - {msg}") from e
             raise GoldfishError("Invalid configuration: validation failed") from e
+
+        return config
 
     def save(self, project_root: Path) -> None:
         """Save configuration to goldfish.yaml."""

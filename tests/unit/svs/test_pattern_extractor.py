@@ -145,6 +145,48 @@ class TestExtractFailurePatternBasics:
         assert pattern.source_workspace == "test-workspace"
         assert pattern.stage_type == "train"
 
+    def test_extractor_provides_structured_prompt(self, test_db: Database):
+        """Extractor should provide prompt that requests SYMPTOM/ROOT_CAUSE lines."""
+
+        class CapturingProvider:
+            name = "capture"
+
+            def __init__(self) -> None:
+                self.last_request: ReviewRequest | None = None
+
+            def run(self, request: ReviewRequest) -> ReviewResult:
+                self.last_request = request
+                return ReviewResult(
+                    decision="approved",
+                    findings=[
+                        "SYMPTOM: Test",
+                        "ROOT_CAUSE: Test",
+                        "DETECTION: Test",
+                        "PREVENTION: Test",
+                        "SEVERITY: MEDIUM",
+                        "CONFIDENCE: MEDIUM",
+                    ],
+                    response_text="ok",
+                    duration_ms=1,
+                )
+
+        agent = CapturingProvider()
+        stage_run_id = "stage-train002"
+        self._insert_stage_run(test_db, stage_run_id, "test-workspace", "train")
+
+        extract_failure_pattern(
+            db=test_db,
+            stage_run_id=stage_run_id,
+            error="RuntimeError: CUDA out of memory",
+            logs="RuntimeError: CUDA out of memory",
+            agent=agent,
+        )
+
+        assert agent.last_request is not None
+        prompt = agent.last_request.context.get("prompt", "")
+        assert "SYMPTOM:" in prompt
+        assert "ROOT_CAUSE:" in prompt
+
     def test_extracts_pattern_from_preprocessing_failure(self, test_db: Database):
         """Should extract pattern from preprocessing stage failure."""
         agent = NullProvider()

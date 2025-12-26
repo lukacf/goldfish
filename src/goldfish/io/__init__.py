@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from goldfish.errors import GoldfishError
 from goldfish.metrics import finish as finish_metrics
 from goldfish.metrics import log_artifact, log_metric, log_metrics
 
@@ -100,8 +101,14 @@ def load_input(name: str, format: str | None = None) -> Any:
     if "loader" in input_config:
         return _run_custom_loader(name, input_config["loader"])
 
-    # Get input path (Goldfish pre-downloads to this location)
+    # Get input path - prefer /mnt/inputs mount, fall back to config location
     input_path = _get_inputs_dir() / name
+
+    # For local execution, use location from config if mount doesn't exist
+    if not input_path.exists() and not input_path.with_suffix(".npy").exists():
+        location = input_config.get("location")
+        if location:
+            input_path = Path(location)
 
     # Auto-load based on format
     fmt = format or input_config.get("format", "file")
@@ -180,6 +187,17 @@ def save_output(name: str, data: Any, artifact: bool = False):
 
     if not output_config:
         raise ValueError(f"Output '{name}' not defined in stage config")
+
+    # Enforce output schema contract (SVS law) when provided
+    schema = output_config.get("schema")
+    if schema:
+        if isinstance(data, Path):
+            raise GoldfishError(f"Output '{name}' schema validation requires in-memory data, got Path")
+        from goldfish.svs.contract import validate_output_data_against_schema
+
+        errors = validate_output_data_against_schema(name, schema, data)
+        if errors:
+            raise GoldfishError(f"Output '{name}' schema mismatch: " + "; ".join(errors))
 
     output_path = _get_outputs_dir() / name
     output_path.parent.mkdir(parents=True, exist_ok=True)

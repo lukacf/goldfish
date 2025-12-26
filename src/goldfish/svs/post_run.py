@@ -161,15 +161,46 @@ def _write_findings_file(
         goldfish_dir = outputs_dir / ".goldfish"
         goldfish_dir.mkdir(parents=True, exist_ok=True)
 
-        findings_data = {
-            "version": 1,
-            "decision": decision,
-            "findings": findings,
-            "stats": stats,
-            "duration_ms": duration_ms,
-        }
-
         findings_path = goldfish_dir / "svs_findings.json"
+        findings_data: dict = {"version": 1, "findings": [], "stats": {}}
+        if findings_path.exists():
+            try:
+                findings_data = json.loads(findings_path.read_text())
+            except Exception:
+                findings_data = {"version": 1, "findings": [], "stats": {}}
+
+        # Merge findings list
+        existing_findings = findings_data.get("findings")
+        if not isinstance(existing_findings, list):
+            existing_findings = []
+        merged_findings = existing_findings + [f for f in findings if f not in existing_findings]
+
+        # Escalate decision only (blocked > warned > approved)
+        severity_rank = {"approved": 0, "warned": 1, "blocked": 2}
+        existing_decision = findings_data.get("decision") or "approved"
+        new_decision = decision or "approved"
+        merged_decision = (
+            existing_decision
+            if severity_rank.get(existing_decision, 0) >= severity_rank.get(new_decision, 0)
+            else new_decision
+        )
+
+        # Merge stats (post-run overrides existing)
+        merged_stats = findings_data.get("stats")
+        if not isinstance(merged_stats, dict):
+            merged_stats = {}
+        merged_stats.update(stats or {})
+
+        findings_data.update(
+            {
+                "version": 1,
+                "decision": merged_decision,
+                "findings": merged_findings,
+                "stats": merged_stats,
+                "duration_ms": duration_ms,
+            }
+        )
+
         findings_path.write_text(json.dumps(findings_data, indent=2))
     except OSError as e:
         logger.warning("Failed to write svs_findings.json: %s", e)

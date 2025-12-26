@@ -2,8 +2,10 @@ import subprocess
 
 import pytest
 
+from goldfish.config import GoldfishConfig
 from goldfish.errors import GoldfishError
 from goldfish.infra.docker_builder import DockerBuilder
+from goldfish.svs.config import SVSConfig
 
 
 def test_push_image_validates_registry_url():
@@ -39,6 +41,63 @@ def test_push_image_auth_failure(monkeypatch):
 # =============================================================================
 # Regression Tests - Dockerfile must use --chown for non-root containers
 # =============================================================================
+
+
+def test_dockerfile_installs_claude_cli_when_svs_enabled(tmp_path):
+    """SVS post-run review requires Claude CLI inside the container."""
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    (workspace_path / "modules").mkdir()
+    (workspace_path / "modules" / "train.py").write_text("# test module")
+    (workspace_path / "configs").mkdir()
+
+    config = GoldfishConfig(project_name="test", dev_repo_path=".")
+    config = config.model_copy(
+        update={
+            "svs": SVSConfig(
+                enabled=True,
+                ai_post_run_enabled=True,
+                agent_provider="claude_code",
+            )
+        }
+    )
+    builder = DockerBuilder(config)
+
+    dockerfile = builder.generate_dockerfile(
+        workspace_dir=workspace_path,
+        base_image="python:3.11-slim",
+    )
+
+    assert "@anthropic-ai/claude-code" in dockerfile
+    assert "npm install -g" in dockerfile
+
+
+def test_dockerfile_skips_agent_cli_when_svs_disabled(tmp_path):
+    """Do not install agent CLI when SVS is disabled."""
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    (workspace_path / "modules").mkdir()
+    (workspace_path / "modules" / "train.py").write_text("# test module")
+    (workspace_path / "configs").mkdir()
+
+    config = GoldfishConfig(project_name="test", dev_repo_path=".")
+    config = config.model_copy(
+        update={
+            "svs": SVSConfig(
+                enabled=False,
+                ai_post_run_enabled=True,
+                agent_provider="claude_code",
+            )
+        }
+    )
+    builder = DockerBuilder(config)
+
+    dockerfile = builder.generate_dockerfile(
+        workspace_dir=workspace_path,
+        base_image="python:3.11-slim",
+    )
+
+    assert "@anthropic-ai/claude-code" not in dockerfile
 
 
 def test_dockerfile_copy_uses_chown(tmp_path):
@@ -129,11 +188,12 @@ def test_dockerfile_pythonpath_includes_modules_dir(tmp_path):
     ), f"PYTHONPATH must include /app/modules for sibling imports: {pythonpath_line}"
 
 
-def test_dockerfile_nvidia_ngc_no_chown(tmp_path):
-    """NVIDIA NGC images run as root, so COPY should NOT use --chown.
+def test_dockerfile_nvidia_ngc_uses_chown_for_local_compat(tmp_path):
+    """NVIDIA NGC images use --chown for local execution compatibility.
 
-    Unlike Jupyter images which run as non-root user (jovyan), NVIDIA NGC
-    containers run as root and don't need the user switching or chown flags.
+    All images use --chown=1000:100 to ensure the local executor (which runs
+    as uid 1000 for security) can read the files. Root users in NGC images
+    can still read files owned by uid 1000.
     """
     workspace_path = tmp_path / "workspace"
     workspace_path.mkdir()
@@ -150,14 +210,14 @@ def test_dockerfile_nvidia_ngc_no_chown(tmp_path):
         base_image="nvcr.io/nvidia/pytorch:24.01-py3",
     )
 
-    # COPY commands should NOT have --chown for NGC images
+    # All COPY commands should have --chown for local execution compatibility
     copy_lines = [line for line in dockerfile.split("\n") if line.strip().startswith("COPY")]
     assert len(copy_lines) >= 4  # goldfish_io, modules, configs, loaders
 
     for line in copy_lines:
-        assert "--chown" not in line, f"NGC image COPY should NOT have --chown: {line}"
+        assert "--chown=1000:100" in line, f"COPY should have --chown for local compat: {line}"
 
-    # Should NOT have USER root / USER 1000 switching
+    # Should NOT have USER root / USER 1000 switching (NGC runs as root)
     assert "USER root" not in dockerfile
     assert "USER 1000" not in dockerfile
 

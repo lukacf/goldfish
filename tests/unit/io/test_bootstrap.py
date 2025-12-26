@@ -23,6 +23,7 @@ from goldfish.io.bootstrap import (
     _reset_finalized_flag,
     _svs_finalize,
     _write_stats_manifest,
+    run_module_with_svs,
     run_stage_with_svs,
 )
 
@@ -62,6 +63,16 @@ class TestRunStageWithSVSBasics:
             run_stage_with_svs(module_main)
 
         module_main.assert_called_once()
+
+    def test_run_module_with_svs_executes_module(self) -> None:
+        """run_module_with_svs should execute module via runpy."""
+        with (
+            patch("goldfish.io.bootstrap.runpy.run_module") as mock_run_module,
+            patch("goldfish.io.bootstrap._svs_finalize"),
+        ):
+            run_module_with_svs("modules.example")
+
+        mock_run_module.assert_called_once_with("modules.example", run_name="__main__")
 
     def test_finalize_called_on_success(self) -> None:
         """Should call _svs_finalize when module_main succeeds."""
@@ -211,6 +222,29 @@ class TestSVSFinalize:
             # Should log the error
             assert mock_logger.error.called or mock_logger.warning.called
 
+    def test_finalize_runs_post_run_review_when_enabled(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Should run post-run review after stats flush when enabled."""
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(tmp_path))
+        monkeypatch.setenv(
+            "GOLDFISH_SVS_CONFIG",
+            json.dumps({"enabled": True, "ai_post_run_enabled": True, "agent_provider": "null"}),
+        )
+
+        with (
+            patch("goldfish.io.bootstrap._svs_enabled", return_value=True),
+            patch("goldfish.io.bootstrap._get_stats_queue") as mock_get_queue,
+            patch("goldfish.io.bootstrap._get_agent_provider") as mock_get_agent,
+            patch("goldfish.io.bootstrap._run_post_run_review") as mock_review,
+        ):
+            mock_queue = Mock()
+            mock_queue.flush.return_value = {"features": {"mean": 1.0}}
+            mock_get_queue.return_value = mock_queue
+            mock_get_agent.return_value = Mock()
+
+            _svs_finalize()
+
+            assert mock_review.called
+
 
 class TestSVSStatsManifest:
     """Test SVS stats manifest writing."""
@@ -308,6 +342,7 @@ class TestRunStageWithSVSEdgeCases:
         with (
             patch("goldfish.io.bootstrap._svs_enabled", return_value=True),
             patch("goldfish.io.bootstrap._get_stats_queue") as mock_get_queue,
+            patch("goldfish.io.bootstrap._run_post_run_review"),  # Skip slow AI review
         ):
             mock_queue = Mock()
             # Simulate timeout by taking too long

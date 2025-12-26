@@ -14,7 +14,7 @@ from goldfish.models import (
     LogThoughtResponse,
     StatusResponse,
 )
-from goldfish.server import (
+from goldfish.server_core import (
     _get_config,
     _get_db,
     _get_state_manager,

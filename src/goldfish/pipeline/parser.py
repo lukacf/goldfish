@@ -7,11 +7,13 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from goldfish.errors import GoldfishError
+from goldfish.errors import ConfigParamNotFoundError, GoldfishError
 from goldfish.models import PipelineDef, SignalDef, StageDef
 from goldfish.svs.contract import (
     merge_stage_config,
+    resolve_config_params,
     validate_cross_stage_shapes,
+    validate_input_schema_against_metadata,
     validate_stage_config_schema,
     validate_stage_contracts,
 )
@@ -150,6 +152,7 @@ class PipelineParser:
         pipeline: PipelineDef,
         workspace_path: Path,
         dataset_exists_fn: Callable[[str], bool] | None = None,
+        dataset_metadata_fn: Callable[[str], tuple[dict | None, str] | None] | None = None,
     ) -> list[str]:
         """Validate pipeline definition.
 
@@ -164,6 +167,7 @@ class PipelineParser:
             pipeline: Pipeline definition
             workspace_path: Path to workspace directory
             dataset_exists_fn: Optional function to check if dataset exists
+            dataset_metadata_fn: Optional function returning (metadata, status) for dataset
 
         Returns:
             List of validation error messages (empty if valid)
@@ -174,14 +178,11 @@ class PipelineParser:
         available_signals: dict[str, SignalDef] = {}
 
         for stage in pipeline.stages:
-            # Check stage files exist
+            # Check module file exists (required)
             module_path = workspace_path / "modules" / f"{stage.name}.py"
-            config_path = workspace_path / "configs" / f"{stage.name}.yaml"
-
             if not module_path.exists():
                 errors.append(f"Module not found for stage '{stage.name}': {module_path}")
-            if not config_path.exists():
-                errors.append(f"Config not found for stage '{stage.name}': {config_path}")
+            # Note: Config files (configs/{stage}.yaml) are optional - merge_stage_config handles them
 
             # SVS Preflight: Resolve config and validate types (if declared)
             stage_config = merge_stage_config(stage.name, workspace_path)
@@ -241,6 +242,26 @@ class PipelineParser:
                         errors.append(
                             f"Stage '{stage.name}' input '{input_name}': dataset '{input_def.dataset}' not found"
                         )
+                    elif input_def.output_schema and dataset_metadata_fn:
+                        dataset_meta = dataset_metadata_fn(input_def.dataset)
+                        if dataset_meta:
+                            metadata, status = dataset_meta
+                            if status == "ok" and metadata:
+                                try:
+                                    resolved_schema = resolve_config_params(input_def.output_schema, stage_config)
+                                except ConfigParamNotFoundError as e:
+                                    param = e.details["param"]
+                                    errors.append(
+                                        f"Stage '{stage.name}' input '{input_name}': missing config param '{param}'"
+                                    )
+                                else:
+                                    schema_errors = validate_input_schema_against_metadata(
+                                        input_name=input_name,
+                                        input_schema=resolved_schema,
+                                        metadata=metadata,
+                                    )
+                                    for err in schema_errors:
+                                        errors.append(f"Stage '{stage.name}': {err}")
                 else:
                     # Input must be either dataset or from_stage
                     errors.append(

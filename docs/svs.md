@@ -120,6 +120,11 @@ Datasource metadata is the **observed reality** of registered artifacts.
 - `schema.kind` must match expected kind
 - `shape`/`dtype` checks apply if defined in the contract
 
+**Tensor array enforcement (inputs):**
+- If the input contract declares `schema.arrays`, each named array must exist in the registered metadata.
+- For each declared array, `shape` and `dtype` are checked (wildcards allowed).
+- If the input contract uses a flat `shape`/`dtype` (no arrays), it is checked against the metadata `primary_array`.
+
 **Contract resolution (config-aware):**
 Contracts may reference config parameters for dynamic shapes, e.g. `"{embedding_dim}"`.
 Resolution rules:
@@ -131,6 +136,7 @@ Resolution rules:
 `validate_pipeline` performs a structural compatibility pass:
 - Resolve all schemas with the run config.
 - Ensure upstream output schema is compatible with downstream input schema.
+- If dataset inputs declare `schema`, compare against registered metadata (when available).
 - Fail fast on mismatches (no container build).
 
 ---

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from goldfish.errors import SourceNotFoundError
 from goldfish.pipeline.parser import (
     PipelineNotFoundError,
     PipelineParser,
@@ -112,6 +113,7 @@ class PipelineManager:
 
             # Validate structure
             dataset_exists_fn = None
+            dataset_metadata_fn = None
             if self.dataset_registry is not None:
                 registry = self.dataset_registry
 
@@ -120,7 +122,16 @@ class PipelineManager:
 
                 dataset_exists_fn = check_dataset_exists
 
-            errors = self.parser.validate(pipeline_obj, workspace_path, dataset_exists_fn)
+                def check_dataset_metadata(name: str):
+                    try:
+                        dataset = registry.get_dataset(name)
+                    except SourceNotFoundError:
+                        return None
+                    return dataset.metadata, dataset.metadata_status
+
+                dataset_metadata_fn = check_dataset_metadata
+
+            errors = self.parser.validate(pipeline_obj, workspace_path, dataset_exists_fn, dataset_metadata_fn)
             if errors:
                 raise PipelineValidationError("Pipeline validation failed:\n" + "\n".join(f"  - {e}" for e in errors))
 

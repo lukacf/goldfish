@@ -17,6 +17,7 @@ import atexit
 import json
 import logging
 import os
+import runpy
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -99,6 +100,40 @@ def _write_stats_manifest(stats: dict[str, dict[str, Any] | None]) -> None:
         logger.error(f"Failed to write SVS stats manifest: {e}")
 
 
+def _load_svs_config():
+    """Load SVSConfig from environment (best-effort)."""
+    from goldfish.svs.config import SVSConfig
+
+    config_json = os.environ.get("GOLDFISH_SVS_CONFIG")
+    if not config_json:
+        return SVSConfig()
+    try:
+        return SVSConfig.model_validate_json(config_json)
+    except Exception as exc:
+        logger.warning(f"Failed to parse GOLDFISH_SVS_CONFIG: {exc}")
+        return SVSConfig()
+
+
+def _get_agent_provider(provider_name: str):
+    """Instantiate an SVS agent provider by name."""
+    from goldfish.svs.agent import get_agent_provider
+
+    return get_agent_provider(provider_name)
+
+
+def _run_post_run_review(stats: dict[str, dict[str, Any] | None]) -> None:
+    """Run post-run AI review inside container (best-effort)."""
+    from goldfish.svs.post_run import run_post_run_review
+
+    config = _load_svs_config()
+    if not config.enabled or not config.ai_post_run_enabled:
+        return
+
+    outputs_dir = Path(os.environ.get("GOLDFISH_OUTPUTS_DIR", "/mnt/outputs"))
+    agent = _get_agent_provider(config.agent_provider)
+    run_post_run_review(outputs_dir=outputs_dir, stats=stats, config=config, agent=agent)
+
+
 def _svs_finalize() -> None:
     """Flush stats + cleanup. Called once via atexit/finally.
 
@@ -128,6 +163,12 @@ def _svs_finalize() -> None:
 
         # Always write the manifest (even if empty stats)
         _write_stats_manifest(stats)
+
+        # Run post-run AI review inside container (best-effort)
+        try:
+            _run_post_run_review(stats)
+        except Exception as e:
+            logger.error(f"Failed to run post-run review: {e}")
 
         logger.debug("SVS stats flushed and manifest written successfully")
     except Exception as e:
@@ -188,3 +229,12 @@ def run_stage_with_svs(module_main: Callable[[], int | None]) -> int:
         except Exception:
             # Swallow any finalize errors to preserve original exception
             pass
+
+
+def run_module_with_svs(module_name: str) -> int:
+    """Run a Python module via runpy with SVS finalization."""
+
+    def _run_module() -> None:
+        runpy.run_module(module_name, run_name="__main__")
+
+    return run_stage_with_svs(_run_module)

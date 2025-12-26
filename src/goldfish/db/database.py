@@ -154,6 +154,18 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_workspace ON pipeline_runs(workspace_name);
                 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status);
 
+                -- run_metrics_summary table and indexes (for older DBs)
+                CREATE TABLE IF NOT EXISTS run_metrics_summary (
+                    stage_run_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    min_value REAL,
+                    max_value REAL,
+                    last_value REAL,
+                    last_timestamp TEXT,
+                    count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (stage_run_id, name),
+                    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+                );
                 CREATE INDEX IF NOT EXISTS idx_run_metrics_summary_name ON run_metrics_summary(name);
                 CREATE INDEX IF NOT EXISTS idx_run_metrics_summary_stage_name
                     ON run_metrics_summary(stage_run_id, name);
@@ -199,6 +211,24 @@ class Database:
             # Version 3: Add CASCADE DELETE to metrics tables
             # Required because SQLite can't modify foreign key constraints
             if current_version < 3:
+                # Recovery: handle failed migration where run_metrics was dropped but _new wasn't renamed
+                run_metrics_exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='run_metrics'"
+                ).fetchone()
+                run_metrics_new_exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='run_metrics_new'"
+                ).fetchone()
+
+                if not run_metrics_exists and run_metrics_new_exists:
+                    # Complete the failed migration
+                    conn.executescript(
+                        """
+                        ALTER TABLE run_metrics_new RENAME TO run_metrics;
+                        CREATE INDEX IF NOT EXISTS idx_run_metrics_stage_run ON run_metrics(stage_run_id);
+                        CREATE INDEX IF NOT EXISTS idx_run_metrics_name ON run_metrics(stage_run_id, name);
+                        """
+                    )
+
                 # Check if run_metrics already has CASCADE DELETE
                 fk_info = conn.execute("PRAGMA foreign_key_list(run_metrics)").fetchall()
                 has_cascade = any("CASCADE" in str(fk["on_delete"] if fk["on_delete"] else "") for fk in fk_info)
@@ -209,6 +239,10 @@ class Database:
                         """
                         -- Temporarily disable foreign keys
                         PRAGMA foreign_keys = OFF;
+
+                        -- Drop any leftover temp tables from failed migrations
+                        DROP TABLE IF EXISTS run_metrics_new;
+                        DROP TABLE IF EXISTS run_metrics_summary_new;
 
                         -- Create new table with CASCADE DELETE
                         CREATE TABLE run_metrics_new (

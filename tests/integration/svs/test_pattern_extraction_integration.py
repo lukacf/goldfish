@@ -75,7 +75,7 @@ class TestPatternExtractionOnFailure:
         stage_run_id = _create_failed_stage_run(test_db)
 
         with (
-            patch("goldfish.jobs.stage_executor.extract_failure_pattern") as mock_extract,
+            patch("goldfish.svs.patterns.extractor.extract_failure_pattern") as mock_extract,
             patch.object(executor_with_mocks, "_run_post_run_svs_review"),
             patch.object(executor_with_mocks, "_collect_svs_manifests"),
         ):
@@ -98,7 +98,7 @@ class TestPatternExtractionOnFailure:
         executor_with_mocks._record_output_signals = MagicMock()
 
         with (
-            patch("goldfish.jobs.stage_executor.extract_failure_pattern") as mock_extract,
+            patch("goldfish.svs.patterns.extractor.extract_failure_pattern") as mock_extract,
             patch.object(executor_with_mocks, "_run_post_run_svs_review"),
             patch.object(executor_with_mocks, "_collect_svs_manifests"),
         ):
@@ -114,7 +114,7 @@ class TestPatternExtractionOnFailure:
         executor_with_mocks.config.svs.auto_learn_failures = False
 
         with (
-            patch("goldfish.jobs.stage_executor.extract_failure_pattern") as mock_extract,
+            patch("goldfish.svs.patterns.extractor.extract_failure_pattern") as mock_extract,
             patch.object(executor_with_mocks, "_run_post_run_svs_review"),
             patch.object(executor_with_mocks, "_collect_svs_manifests"),
         ):
@@ -130,7 +130,7 @@ class TestPatternExtractionOnFailure:
         executor_with_mocks.config.svs.enabled = False
 
         with (
-            patch("goldfish.jobs.stage_executor.extract_failure_pattern") as mock_extract,
+            patch("goldfish.svs.patterns.extractor.extract_failure_pattern") as mock_extract,
             patch.object(executor_with_mocks, "_run_post_run_svs_review"),
             patch.object(executor_with_mocks, "_collect_svs_manifests"),
         ):
@@ -147,7 +147,7 @@ class TestPatternExtractionErrorHandling:
         stage_run_id = _create_failed_stage_run(test_db)
 
         with (
-            patch("goldfish.jobs.stage_executor.extract_failure_pattern") as mock_extract,
+            patch("goldfish.svs.patterns.extractor.extract_failure_pattern") as mock_extract,
             patch.object(executor_with_mocks, "_run_post_run_svs_review"),
             patch.object(executor_with_mocks, "_collect_svs_manifests"),
         ):
@@ -168,7 +168,7 @@ class TestPatternExtractionErrorHandling:
         from goldfish.svs.patterns.extractor import RateLimitExceededError
 
         with (
-            patch("goldfish.jobs.stage_executor.extract_failure_pattern") as mock_extract,
+            patch("goldfish.svs.patterns.extractor.extract_failure_pattern") as mock_extract,
             patch.object(executor_with_mocks, "_run_post_run_svs_review"),
             patch.object(executor_with_mocks, "_collect_svs_manifests"),
         ):
@@ -190,7 +190,7 @@ class TestPatternExtractionWithAgent:
         stage_run_id = _create_failed_stage_run(test_db)
 
         with (
-            patch("goldfish.jobs.stage_executor.extract_failure_pattern") as mock_extract,
+            patch("goldfish.svs.patterns.extractor.extract_failure_pattern") as mock_extract,
             patch.object(executor_with_mocks, "_run_post_run_svs_review"),
             patch.object(executor_with_mocks, "_collect_svs_manifests"),
         ):

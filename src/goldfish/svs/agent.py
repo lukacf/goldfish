@@ -260,7 +260,9 @@ class NullProvider:
         Returns:
             ReviewResult with configured decision and findings
         """
-        response_text = f"NullProvider: {self._decision} for {request.review_type} review"
+        # Include findings in response_text so parsers can extract them
+        findings_text = "\n".join(self._findings) if self._findings else ""
+        response_text = f"NullProvider: {self._decision} for {request.review_type} review\n{findings_text}"
         return ReviewResult(
             decision=self._decision,
             findings=self._findings,
@@ -577,3 +579,16 @@ class GeminiCLIProvider:
             response_text=raw_output,
             duration_ms=duration_ms,
         )
+
+
+def get_agent_provider(provider_name: str) -> AgentProvider:
+    """Return an AgentProvider instance for the given name."""
+    if provider_name == "claude_code":
+        return ClaudeCodeProvider()
+    if provider_name == "codex_cli":
+        return CodexCLIProvider()
+    if provider_name == "gemini_cli":
+        return GeminiCLIProvider()
+    if provider_name == "null":
+        return NullProvider()
+    return NullProvider()

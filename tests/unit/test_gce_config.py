@@ -69,6 +69,7 @@ class TestGCEConfig:
             config_data = {
                 "project_name": "test-project",
                 "dev_repo_path": "../test-dev",
+                "jobs": {"backend": "local"},
                 "gce": {
                     "project_id": "my-gcp-project",
                     "gpu_preference": ["h100", "a100"],

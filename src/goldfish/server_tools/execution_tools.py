@@ -29,7 +29,7 @@ from goldfish.models import (
     StageRunInfo,
     StageRunStatus,
 )
-from goldfish.server import (
+from goldfish.server_core import (
     _get_config,
     _get_db,
     _get_pipeline_executor,
@@ -692,11 +692,13 @@ def get_run_metrics(
         raise GoldfishError(f"Run {run_id} does not belong to workspace {workspace}")
 
     # Opportunistic live sync for running runs (best-effort, non-blocking)
+    sync_warnings: list[str] = []
     if row.get("status") == StageRunStatus.RUNNING:
         try:
-            _get_stage_executor().sync_metrics_if_running(run_id)
+            sync_warnings = _get_stage_executor().sync_metrics_if_running(run_id)
         except Exception as exc:
             logger.debug("Live metrics sync failed for %s: %s", run_id, exc)
+            sync_warnings = ["Live metrics sync failed: unexpected error. Check server logs for details."]
 
     # Get total count first (for pagination info) - separate query
     total_metrics = db.count_run_metrics(run_id, metric_name=metric_name, metric_prefix=metric_prefix)
@@ -755,6 +757,7 @@ def get_run_metrics(
     ]
 
     warnings: list[str] = []
+    warnings.extend(sync_warnings)
     if limit is None and total_metrics > UNBOUNDED_METRICS_WARNING:
         warnings.append(f"Request returned {total_metrics} metrics. Consider using limit/offset for large runs.")
     if artifact_limit is None and total_artifacts > UNBOUNDED_ARTIFACTS_WARNING:

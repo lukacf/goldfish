@@ -525,8 +525,8 @@ def _review_to_dict(review: Any) -> dict:
 
 def _register_mcp_tools() -> None:
     """Register MCP tools with server. Called when server imports this module."""
-    # Import from server only when called (avoid circular import at module level)
-    from goldfish.server import _get_db, mcp
+    # Import from server_core to avoid circular import
+    from goldfish.server_core import _get_db, mcp
 
     @mcp.tool()
     def list_failure_patterns_tool(
