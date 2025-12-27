@@ -9,12 +9,12 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                        DEV-SIDE (Pre-Execution)                  │
 ├─────────────────────────────────────────────────────────────────┤
-│  ┌──────────────────┐  ┌──────────────────┐  ┌───────────────┐ │
-│  │ Pre-Run Review   │  │ Config Review    │  │ Data Gen      │ │
-│  │ (Code + Logic)   │  │ (Coherence)      │  │ Review        │ │
-│  └────────┬─────────┘  └────────┬─────────┘  └───────┬───────┘ │
-│           │                     │                     │         │
-│           └─────────────────────┴─────────────────────┘         │
+│  ┌──────────────────┐  ┌──────────────────┐                   │
+│  │ Pre-Run Review   │  │ Config Review    │                   │
+│  │ (Code + Logic)   │  │ (Coherence)      │                   │
+│  └────────┬─────────┘  └────────┬─────────┘                   │
+│           │                     │                               │
+│           └─────────────────────┴─────────────────────          │
 │                                 │                                │
 │                           Claude Agent                           │
 │                    (Read-only workspace access)                  │
@@ -81,82 +81,105 @@ stats_json TEXT  -- JSON: {entropy, null_ratio, unique_count, min, max, mean, st
 **Stats schema (versioned):**
 ```json
 {
-  "stats_version": 1,
-  "computed_at": "2025-12-25T10:32:07Z",
-  "samples_used": 10000,
-  "shape": [1000, 768],
-  "dtype": "float32",
-  "metrics": {
-    "entropy": 9.06,
-    "null_ratio": 0.0,
-    "unique_count": 12709,
-    "min": 0,
-    "max": 15033,
-    "mean": 7234.5,
-    "std": 4102.3
-  },
-  "skipped_checks": {
-    "compression_ratio": "unsupported for dtype float32"
+  "version": 1,
+  "stats": {
+    "tokens": {
+      "mean": 7234.5,
+      "std": 4102.3,
+      "min": 0,
+      "max": 15033,
+      "samples_used": 10000,
+      "total_elements": 319274163,
+      "entropy": 9.06,
+      "null_ratio": 0.0,
+      "vocab_utilization": 0.84,
+      "unique_count": 12709
+    }
   }
 }
 ```
 
 ---
 
-### 2. Schema Authority
+### 2. Schema as Contract, Metadata as Observation
 
-**Decision:** Pipeline.yaml is authoritative for **structure**. Datasource metadata is authoritative for **semantics**.  
-Outputs (produced by stages) are validated **against pipeline schema**, then must emit metadata compatible with that schema.
+**Decision:** `pipeline.yaml` schema is the **contract (law)** for signals.  
+Datasource metadata is the **observed reality** of registered artifacts.
 
 **Validation hierarchy:**
-1. Pipeline defines signal name/type → REQUIRED (structural)
-2. Registered inputs (datasets/sources) must provide metadata → AUTHORITATIVE for semantics
-3. Stage outputs are checked against pipeline schema → AUTHORITATIVE for outputs
-4. Output metadata (emitted post-run) must be **compatible** with pipeline schema
+1. **Pipeline schema** defines the signal contract (structure) → authoritative.
+2. **Registered input metadata** must be **compatible** with the input contract (if defined).  
+   If metadata is missing (legacy), SVS warns and skips contract verification.
+3. **Stage outputs** must satisfy the output contract at `save_output` time.
+4. **Output metadata** (emitted post-run) is recorded as observation and must remain compatible with the contract.
 
-**Compatibility rule:** For a given output:
-- `type` must align (`npy` ↔ `tensor`, `csv` ↔ `tabular`, `file` ↔ `file`)
-- `schema.kind` must match expected kind
-- `shape`/`dtype` checks apply if defined in pipeline schema
+**Schema tag required:** Every input and output must include a `schema` field.  
+Use `schema: null` only when you truly cannot define a contract yet; Goldfish emits a **non‑blocking runtime warning**
+to strongly encourage adding a real schema.
+
+**Compatibility rule:** For a given signal:
+- `type` must align (`npy` ↔ `tensor`, `csv` ↔ `tabular`, `file` ↔ `json|file`)
+- `schema.kind` must match expected kind (`tensor`, `tabular`, `json`)
+- `shape`/`dtype` checks apply if defined in the contract
+
+**Tensor array enforcement (inputs):**
+- If the input contract declares `schema.arrays`, each named array must exist in the registered metadata.
+- For each declared array, `shape` and `dtype` are checked (wildcards allowed).
+- If the input contract uses a flat `shape`/`dtype` (no arrays), it is checked against the metadata `primary_array`.
+
+**Contract resolution (config-aware):**
+Contracts may reference config parameters for dynamic shapes, e.g. `"{embedding_dim}"`.
+Resolution rules:
+- Values are resolved from the stage config **for the current run** (including overrides).
+- Missing or non‑numeric values → validation error.
+- Preflight and runtime must resolve the **same** config to avoid drift.
+
+**Preflight contract check:**
+`validate_pipeline` performs a structural compatibility pass:
+- Resolve all schemas with the run config.
+- Ensure upstream output schema is compatible with downstream input schema.
+- If dataset inputs declare `schema`, compare against registered metadata (when available).
+- Fail fast on mismatches (no container build).
+
+---
+
+### 3. Hierarchy of Truth (Law vs Judgment)
+
+**Level 0 — Mechanistic Checks (Law):**  
+Defined in `pipeline.yaml` and enforced at runtime. If a mechanistic check is **blocking**, it **always** blocks execution.  
+AI reviews cannot override these failures.
+
+**Level 1 — AI / Knowledge Checks (Judgment):**  
+Derived from domain docs and failure pattern knowledge base. These produce **WARN/BLOCK** recommendations, but do not
+invalidate a passing mechanistic check unless policy explicitly allows blocking.
+
+**Override rule:** Mechanistic failures always take precedence. AI feedback can only escalate or warn, never bypass a failed law.
 
 **Missing metadata policy:**
-- If input metadata is missing (legacy sources), SVS runs **structural checks only** and emits a warning.
+- If input metadata is missing (legacy sources), SVS **skips contract compatibility checks** and emits a warning.
 - Semantic checks that require metadata are skipped with reason `metadata_missing`.
 - For outputs, metadata is generated post-run from computed stats; absence does not block mechanistic checks.
 
 ---
 
-### 3. Failure Policy (WARN/FAIL/SKIP) + Enforcement Mode
+### 4. Failure Policy (WARN/FAIL/SKIP) + Enforcement Mode
 
-**Decision:** Three-tier policy with separate **enforcement mode**.  
-Pre-run is always blocking; during-run and post-run are controlled by enforcement.
+**Decision:** Separate **policy** (how checks are scored) from **enforcement** (what happens on failure).
+
+- `default_policy`: fail | warn | ignore (applies to mechanistic checks)
+- `default_enforcement`: blocking | warning | silent (applies to schema contract enforcement)
+
+Pre‑run AI review blocks only when the agent returns `blocked`; warnings never block.
 
 ```yaml
-# goldfish.yaml (project level defaults)
+# goldfish.yaml (project‑level defaults)
 svs:
   enabled: true
-  default_policy: fail
-  default_enforcement: warning  # NEW: "blocking" | "warning"
-  enforcement_warmup_runs: 10   # NEW: Stay in warning mode for first N runs
-  check_policies:
-    entropy: fail
-    null_ratio: fail
-    compression_ratio: warn
-
-# pipeline.yaml (per-stage/output overrides)
-stages:
-  - name: tokenize
-    outputs:
-      tokens:
-        type: npy
-        schema:
-          checks:
-            entropy: {min: 6.0}
-          enforcement: warning  # NEW: Override for this output
-        svs:
-          entropy: skip
-          reason: "BPE produces uniform distribution"
+  default_policy: warn
+  default_enforcement: warning
 ```
+
+Per‑stage overrides are not currently supported.
 
 **Enforcement vs Policy:**
 - **Policy** (fail/warn/skip): What severity to assign when check fails
@@ -168,16 +191,15 @@ stages:
 | entropy=5.9, threshold=6.0 | fail | blocking | Raise error, stop run |
 | entropy=5.9, threshold=6.0 | warn | * | Log WARNING, continue run |
 
-**Warm-up workflow:**
-1. New pipeline starts with `enforcement: warning` (default for post-run)
-2. After `enforcement_warmup_runs` successful runs, prompt user to harden
-3. User explicitly sets `enforcement: blocking` when confident
+**Recommended workflow:**
+1. Start with `default_enforcement: warning` (default)
+2. Switch to `blocking` only when you are confident in the schema contract
 
-**Rationale:** Don't kill a 48-hour run because entropy was 5.9 instead of 6.0. Validate thresholds in warning mode first.
+**Rationale:** Don’t kill a 48‑hour run because of a minor anomaly. Start in warning mode.
 
 ---
 
-### 4. Large Data Handling
+### 5. Large Data Handling
 
 **Decision:** Reservoir sampling (k=10000) computed IN CONTAINER before upload.
 
@@ -198,7 +220,7 @@ the check is recorded as `skipped` with a reason and does not fail the stage.
 
 ---
 
-### 5. AI Trust Boundary
+### 6. AI Trust Boundary
 
 **Decision:** Claude agents are trusted and receive full data access inside the container.
 
@@ -209,9 +231,9 @@ the check is recorded as `skipped` with a reason and does not fail the stage.
 
 ---
 
-### 6. Cost/Latency Control
+### 7. Cost/Latency Control
 
-**Decision:** Stats computation ALWAYS runs. AI review rate-limited with circuit breaker.
+**Decision:** Stats computation runs by default (can be disabled). AI review is rate‑limited.
 
 ```yaml
 # goldfish.yaml
@@ -221,27 +243,19 @@ svs:
   # Pre-run
   ai_pre_run_enabled: true
 
-  # During-run
-  during_run_enabled: true
-  during_run_check_interval: 100  # Check every N steps
-  during_run_auto_stop: false     # Auto-stop on critical alerts
-  during_run_ai_review: false     # AI review during training (expensive)
-  during_run_ai_checkpoint_interval: 5  # AI review every N checkpoints
-
   # Post-run
   ai_post_run_enabled: true
-  ai_validation_stages: artifacts_only  # all | artifacts_only | critical_only
 
   # Limits
+  agent_timeout: 120
   rate_limit_per_hour: 60
-  timeout_seconds: 30
 ```
 
-**Circuit breaker:** 3 consecutive AI failures → disable for 10 minutes
+During‑run checks are **user‑invoked helper functions** (no automatic scheduling).
 
 ---
 
-### 7. Triple Validation Phases (Pre/During/Post)
+### 8. Triple Validation Phases (Pre/During/Post)
 
 | Phase | When | Authority | Purpose |
 |-------|------|-----------|---------|
@@ -256,7 +270,7 @@ svs:
 
 ---
 
-### 8. Domain-Specific Checks
+### 9. Domain-Specific Checks
 
 **Decision:** Domain profiles in `goldfish.yaml` + per-output overrides in `pipeline.yaml`.
 
@@ -272,6 +286,10 @@ stages:
   - name: tokenize
     outputs:
       tokens:
+        type: npy
+        schema:
+          shape: [null, "{vocab_size}"]
+          dtype: int32
         svs:
           domain: nlp_tokenizer
           entropy: 8.0  # Further customize
@@ -284,7 +302,7 @@ If profile is incompatible (e.g., `nlp_tokenizer` on `tabular`), SVS raises a co
 
 ---
 
-### 9. Reproducibility
+### 10. Reproducibility
 
 **Decision:** Full audit logging in `svs_reviews` table.
 
@@ -309,7 +327,7 @@ CREATE TABLE svs_reviews (
 
 ---
 
-### 10. SVS Feedback Transport (Core System)
+### 11. SVS Feedback Transport (Core System)
 
 **Decision:** SVS is part of the core runtime. There is no separate streaming system.
 SVS feedback is surfaced via existing **run status** tools, alongside metrics and logs.
@@ -330,13 +348,21 @@ SVS feedback is surfaced via existing **run status** tools, alongside metrics an
     "check": "loss_divergence",
     "summary": "Loss > 10x warmup baseline"
   },
-  "counts": {"ok": 8, "warn": 2, "block": 0}
+  "counts": {"ok": 8, "warn": 2, "block": 0},
+  "history": [
+    {"phase": "during_run", "severity": "WARN", "check": "grad_explosion", "summary": "grad_norm=150 > 100", "step": 300},
+    {"phase": "during_run", "severity": "WARN", "check": "loss_divergence", "summary": "Loss > 10x warmup baseline", "step": 500}
+  ]
 }
 ```
 
+**History notes:**
+- Only WARN and BLOCK findings are stored (OK findings are just counted)
+- `step` present for during-run checks, absent for post-run
+
 ---
 
-### 11. Credential Exposure in Logs
+### 12. Credential Exposure in Logs
 
 **Decision:** Log redaction at collection time in `_finalize_stage_run()`.
 
@@ -353,7 +379,7 @@ REDACTION_PATTERNS = [
 
 ---
 
-### 12. Check Definition Contracts
+### 13. Check Definition Contracts
 
 **Output checks (post-stage):**
 
@@ -361,30 +387,25 @@ REDACTION_PATTERNS = [
 - All checks operate on sampled data (reservoir sampling).
 - Checks declare prerequisites (dtype support, required metadata).
 - If prerequisites are not met, the check is recorded as `skipped` with a reason.
-  - Example: `compression_ratio` requires raw bytes; if unavailable, it is skipped.
+  - Example: checks require numeric samples; non‑numeric outputs are skipped.
 
 | Check | Definition | Computation | Default Threshold |
 |-------|------------|-------------|-------------------|
-| `entropy` | Shannon entropy of discretized values | `scipy.stats.entropy(histogram, base=2)` | WARN if <6, FAIL if <3 |
-| `vocab_utilization` | Fraction of vocab indices used | `len(unique) / vocab_size` | WARN if <0.7 |
-| `compression_ratio` | Uncompressed / gzip-compressed size | `len(raw_bytes) / len(gzip(raw_bytes))` | WARN if <1.5 or >10 |
-| `null_ratio` | Fraction of NaN/None values | `np.isnan(sample).mean()` | WARN if >0.01, FAIL if >0.1 |
-| `unique_count` | Distinct values in sample | `len(np.unique(sample))` | Context-dependent |
-| `top1_fraction` | Most common value frequency | `max(counts)/N` | WARN if >0.05 |
-| `top10_fraction` | Top-10 values frequency | `sum(top10)/N` | WARN if >0.20 |
+| `entropy` | Shannon entropy of values | `scipy.stats.entropy(histogram, base=2)` | Informational (no hard threshold) |
+| `null_ratio` | Fraction of NaN/None values | `np.isnan(sample).mean()` | Informational |
+| `vocab_utilization` | Fraction of vocab indices used | `len(unique) / vocab_size` | Informational (requires vocab_size) |
+| `unique_count` | Distinct values in sample | `len(np.unique(sample))` | Informational (requires vocab_size) |
+| `basic_stats` | mean/std/min/max | `np.mean/std/min/max` | Always computed |
 
 **Training checks (during-run):**
 
 | Check | Definition | Computation | Default Threshold |
 |-------|------------|-------------|-------------------|
-| `loss_nan` | Loss became NaN/Inf | `np.isnan(loss) or np.isinf(loss)` | CRITICAL (auto-stop) |
-| `loss_divergence` | Loss exploded after warmup | `loss > 10 * loss_at_step_100` | CRITICAL if step > 500 |
-| `grad_explosion` | Gradient norm too high | `grad_norm > threshold` | WARN if >100, CRITICAL if >1000 |
-| `lr_sanity` | Learning rate invalid | `lr <= 0 or lr > 1` | CRITICAL |
-| `loss_plateau` | Loss hasn't improved | `best_loss unchanged for N steps` | WARN after 1000 steps |
+| `metric_health` | Metric became NaN/Inf | `np.isnan(x) or np.isinf(x)` | Emits a finding (helper function) |
+| `loss_divergence` | Loss spike over window | `last / min(prev)` | Emits a finding (helper function) |
+| `grad_explosion` | Gradient norm too high | `grad_norm > threshold` | Emits a finding (helper function) |
 
-**Prerequisites:** During-run checks require metric names defined in `svs.metric_names`.
-Missing metrics → check skipped with reason `missing_metric`.
+**Note:** During‑run checks are user‑invoked helpers. There is no global metric naming contract.
 
 ---
 
@@ -392,39 +413,39 @@ Missing metrics → check skipped with reason `missing_metric`.
 
 **Where:** Runs in container at stage I/O boundaries (built into `goldfish.io`)
 
-**What it catches:** 40% of MLM issues (schema violations, distribution anomalies)
+**What it catches:** schema violations, distribution anomalies
 
 ### 1.1 Output Schema Validation
 
-Extend `pipeline.yaml`:
+Extend `pipeline.yaml` (the **contract** for this signal):
 
 ```yaml
 stages:
   - name: tokenize
+    config: configs/tokenize.yaml
     outputs:
       tokens:
         type: npy
         schema:
-          shape: ["*"]  # Variable length 1D array
+          shape: [null, "{vocab_size}"]  # Variable rows, fixed columns from config
           dtype: int32
-          checks:
-            # Vocabulary health
-            vocab_size: {min: 10, max: 100000}
-            vocab_utilization: {min: 0.7}  # 70%+ tokens used
-
-            # Information content
-            entropy: {min: 6.0}  # bits
-            top1_fraction: {max: 0.05}  # No single token >5%
-            top10_fraction: {max: 0.20}
-
-            # Compression (for BPE outputs)
-            compression_ratio: {min: 1.5, max: 10.0}
-
-            # Distribution
-            class_balance: {max_class: 0.6}  # No class >60%
-
         svs:  # Policy overrides for this output
           entropy: warn  # Don't fail, just warn
+```
+
+SVS **enforces schema contracts** (shape/dtype) and records output stats.
+Stat thresholds are interpreted by AI reviews; there is no hard threshold enforcement today.
+
+For JSON-heavy stages (lists/dicts), use `schema.kind: json` and `type: file`:
+
+```yaml
+stages:
+  - name: render_json
+    outputs:
+      records:
+        type: file
+        schema:
+          kind: json  # Accepts dict or list outputs
 ```
 
 **Implementation:**
@@ -435,8 +456,9 @@ stages:
 def save_output(name: str, data: np.ndarray, **kwargs) -> None:
     """Save output with automatic validation."""
 
-    # Load expected schema from pipeline.yaml
+    # Load expected schema from pipeline.yaml (contract)
     schema = _load_output_schema(name)
+    schema = _resolve_schema_params(schema, config=_load_stage_config())
 
     if schema:
         # Run mechanistic checks (shape/dtype + schema checks)
@@ -462,14 +484,13 @@ def save_output(name: str, data: np.ndarray, **kwargs) -> None:
     _record_output_metadata(name, stats)  # Stored in signal_lineage.stats_json
 ```
 
-**What this catches from MLM log:**
+**What this records from MLM log:**
 
-| Issue | Check |
-|-------|-------|
-| Entry 1 (sine waves) | `entropy: {min: 6.0}` → 3.2 bits = FAIL |
-| Entry 6 (dead market) | `std < 1e-9` → zero variance = FAIL |
-| Entry 34 (98% neutral) | `max_class: 0.6` → 98% > 60% = FAIL |
-| Entry 50 (no compression) | `compression_ratio: {min: 1.5}` → 1.02 = FAIL |
+| Issue | Stat |
+|-------|------|
+| Entry 1 (sine waves) | `entropy` ≈ 3.2 bits (very low) |
+| Entry 6 (dead market) | `std` ≈ 0.0 (zero variance) |
+| Entry 34 (neutral collapse) | `vocab_utilization` low |
 
 ---
 
@@ -478,35 +499,30 @@ def save_output(name: str, data: np.ndarray, **kwargs) -> None:
 **NEW: Catch divergence before wasting hours of compute.**
 
 ```python
-# In training loop (via goldfish.io.log_metric)
-def log_metric(name: str, value: float, step: int):
-    _record_metric(name, value, step)
+# In training loop (user code opts in)
+from goldfish.svs.checks.training_checks import check_metric_health, check_loss_divergence
 
-    # Periodic during-run validation
-    if step % DURING_RUN_CHECK_INTERVAL == 0:
-        alerts = check_training_health(metrics_so_far)
-        if alerts.has_critical:
-            if os.environ.get("GOLDFISH_AUTO_STOP") == "1":
-                raise TrainingDivergenceError(alerts.summary)
-            else:
-                logger.warning(f"DURING-RUN ALERT: {alerts.summary}")
+loss_history = []
+for step, loss in train_loop():
+    loss_history.append(loss)
+
+    # Per-step: cheap check
+    if result := check_metric_health("loss", loss, step):
+        log_metric("svs_alert", 1, step=step)
+
+    # Checkpoint: more expensive checks
+    if step % 1000 == 0:
+        if result := check_loss_divergence(loss_history):
+            log_metric("svs_divergence", 1, step=step)
 ```
 
 **Mechanistic during-run checks:**
-- Loss NaN/Inf detection → immediate stop
-- Loss divergence (loss > 10x initial after warmup) → stop
-- Gradient explosion (grad_norm > threshold) → warn or stop
-- Learning rate sanity (lr went negative or exploded) → stop
+- Loss NaN/Inf detection → emits a finding
+- Loss divergence (loss > 10x initial after warmup) → emits a finding
+- Gradient explosion (grad_norm > threshold) → emits a finding
+- Learning rate sanity (lr went negative or exploded) → emits a finding
 
-**Metric naming contract (configurable):**
-```yaml
-svs:
-  metric_names:
-    loss: "loss"
-    grad_norm: "grad_norm"
-    lr: "learning_rate"
-```
-If a required metric name is missing, the corresponding check is skipped and recorded as `missing_metric`.
+During‑run checks are **helper functions**. SVS does not auto‑stop runs; you decide how to react.
 
 ---
 
@@ -557,19 +573,16 @@ signal_lineage (
 Example `stats_json`:
 ```json
 {
-  "computed_at": "2025-12-25T10:32:07Z",
-  "samples_used": 10000,
-  "shape": [113643935],
-  "vocab_size": 15034,
-  "vocab_used": 12709,
-  "vocab_utilization": 0.847,
-  "entropy": 9.06,
-  "compression_ratio": 2.71,
-  "null_ratio": 0.0,
+  "mean": 7234.5,
+  "std": 4102.3,
   "min": 0,
   "max": 15033,
-  "mean": 7234.5,
-  "std": 4102.3
+  "samples_used": 10000,
+  "total_elements": 113643935,
+  "entropy": 9.06,
+  "null_ratio": 0.0,
+  "vocab_utilization": 0.847,
+  "unique_count": 12709
 }
 ```
 
@@ -577,9 +590,127 @@ Example `stats_json`:
 
 ## Layer 2: AI-Powered Semantic Validation
 
-**Where:** Three environments (dev-side pre-run, container-side during-run, container-side post-stage)
+**Where:** Pre‑run (host) and post‑run (container). During‑run checks are helper functions; there is no
+automatic during‑run AI review in the current implementation.
 
-**What it catches:** Additional 50% of MLM issues (semantic coherence, hypothesis alignment, domain violations)
+**What it catches:** semantic coherence, hypothesis alignment, domain violations
+
+---
+
+### 2.0 Agent Abstraction Layer (DRY + Replaceable Providers)
+
+**Goal:** Consolidate AI review calls behind a single abstraction so we can swap Claude Code for Codex CLI
+(or any other assistant) without rewriting SVS logic. (During‑run AI review is reserved for future.)
+
+#### Core Interface (Provider‑Agnostic)
+
+```python
+@dataclass
+class ToolPolicy:
+    permission_mode: Literal["plan", "ask", "auto"]
+    allow_tools: list[str] | None = None
+    deny_tools: list[str] | None = None
+    mcp_servers: list[str] | None = None
+
+
+@dataclass
+class AgentRequest:
+    mode: Literal["batch", "interactive"]
+    prompt: str
+    context: dict[str, Any]
+    cwd: str
+    model: str | None = None
+    max_turns: int | None = None
+    output_format: Literal["text", "json"] = "text"
+    tool_policy: ToolPolicy | None = None
+    timeout_seconds: int | None = None
+
+
+@dataclass
+class AgentResult:
+    decision: Literal["approved", "blocked", "warned"] | None
+    findings: list[str]
+    raw_output: str
+    structured_output: dict[str, Any] | None
+    tool_calls: list[dict[str, Any]] | None
+    duration_ms: int
+    exit_code: int
+
+
+class AgentProvider(Protocol):
+    name: str
+    def run(self, request: AgentRequest) -> AgentResult: ...
+```
+
+**Why this shape:** `prompt` is explicit; `context` stays structured; `tool_policy` captures common
+permission controls; `output_format=json` enables machine parsing when supported.
+
+#### Provider Mapping (Common CLI Shapes)
+
+**Claude Code CLI**
+- Mode: `claude -p` (batch) / interactive TUI
+- Output: JSON supported via CLI flags
+- Permissions + tools configured via CLI flags or config
+
+**Codex CLI**
+- Headless example (provided):
+```bash
+codex exec --full-auto --sandbox workspace-write \
+"You are working in a Node.js monorepo with Jest tests and GitHub Actions. \
+Read the repository, run the test suite, identify the minimal change needed \
+to make all tests pass, implement only that change, and stop. Do not refactor \
+unrelated code or files. Keep changes small and surgical."
+```
+
+**Gemini CLI**
+- Interactive and batch use; supports MCP servers
+- Tool access configured via CLI + MCP config
+
+#### Container‑Side Installation (Required for During/Post‑Run Agents)
+
+Bake CLI tools into the container image (no runtime installs):
+
+```dockerfile
+FROM node:20-bullseye
+
+# Install agent CLIs (pin versions in real builds)
+RUN npm install -g \
+  @anthropic-ai/claude-code \
+  @openai/codex \
+  @google/gemini-cli
+```
+
+This makes all providers available inside containers for post‑run and during‑run reviews.
+
+#### Unified Orchestrator
+
+All SVS AI reviews call a single orchestrator:
+- Builds prompt from shared templates
+- Applies ToolPolicy
+- Calls provider adapter (CLI or SDK)
+- Parses response into `AgentResult`
+- Writes audit entry (`svs_reviews`)
+
+#### Configuration
+
+```yaml
+# goldfish.yaml
+svs:
+  agent_provider: claude_code  # claude_code | codex_cli | gemini_cli | null
+  agent_model: null
+  agent_timeout: 120
+  agent_max_turns: 3
+```
+
+#### Implementation Plan (DRY, minimal churn)
+1. **Define** `AgentRequest/AgentResult` + `AgentProvider` in `svs/agent.py`.
+2. **Implement** `ClaudeCodeProvider`, `CodexCLIProvider`, `GeminiCLIProvider`, `NullProvider`.
+3. **Add** a shared `ReviewOrchestrator` for pre‑run + post‑run.
+4. **Wire** pre‑run review through the orchestrator (no behavior change).
+5. **Add** container‑side post‑run review using the same orchestrator.
+
+**Why this matters:** It eliminates duplicate logic, centralizes prompt/response handling, and makes the
+AI backend swappable without touching SVS logic.
 
 ---
 
@@ -589,10 +720,37 @@ Example `stats_json`:
 
 **Priority order:**
 1. **Pre-run code review** (2.1.1) - HIGH: Catches syntax, config, logic bugs
-2. **Config coherence review** - MEDIUM: Catches conflicts, deprecated params
-3. **Data generator review** - LOW: De-prioritized (see note below)
+2. **Config coherence review** - MEDIUM: Catches conflicts, deprecated params, type mismatches
 
-> **Note on Data Generator Review:** Static code review of generators (asking an LLM to read `generate_data.py` and guess if it produces "fat tails") is prone to hallucination. The proof is in the pudding, not the recipe. Rely 90% on **Mechanistic Output Checks** (Layer 1) and **Container-Side AI Review** (Layer 2.2) which see actual data. Data generator review is optional and advisory-only.
+**Principle:** Pre-run review focuses on **code and configuration coherence** only. It does **not** attempt to infer
+statistical properties of generated data from source code. Those judgments belong to mechanistic output checks and
+container-side AI reviews that see real artifacts.
+
+### 2.1.2 Mechanistic Config Schema Validation (Preflight)
+
+SVS can validate **config value types** deterministically at pipeline-parse time.
+Declare per-stage config expectations in `config_schema` (optional):
+
+```yaml
+stages:
+  - name: train
+    config_schema:
+      num_epochs: int
+      lr: float
+      use_amp: bool
+      optimizer: str
+      scheduler:
+        type: str
+        required: true
+```
+
+**Rules:**
+- If `config_schema` is present, SVS validates the resolved stage config.
+- `required: true` makes the key mandatory.
+- Types supported: `int`, `float` (ints allowed), `number`, `bool`, `str`, `list`, `dict`.
+- Missing non-required keys are skipped (no error).
+
+This is **mechanistic** (no AI), fast, and runs during pipeline validation.
 
 #### 2.1.1 Enhanced Pre-Run Code Review (Extend existing)
 
@@ -645,6 +803,8 @@ Use ERROR for blocking issues, WARNING for concerns, NOTE for suggestions.
 ### 2.2 Container-Side AI Reviews
 
 #### 2.2.1 During-Run AI Review (Optional, Expensive)
+
+**Status:** Reserved for future wiring. Current implementation only runs pre‑run and post‑run AI reviews.
 
 Triggered after every N checkpoints for long training runs:
 
@@ -778,6 +938,9 @@ CREATE INDEX idx_failure_patterns_status ON failure_patterns(status);
 ---
 
 ### 2.4 Self-Learning System
+
+**Experimental:** The self-learning loop is opt‑in and disabled by default.  
+Enable with `svs.auto_learn_failures: true` if you want auto‑extraction.
 
 After every failed run, extract learnings and **store in database with pending status**:
 
@@ -941,7 +1104,6 @@ User: run("workspace", stages=["tokenize", "train"])
   ├─► DEV-SIDE AI REVIEWS (parallel)
   │   ├─► Pre-run code review
   │   ├─► Config coherence review
-  │   └─► Data generator review (if using generated data)
   │
   ├─► All approved?
   │   ├─ NO → Return review with errors, block execution
@@ -999,60 +1161,32 @@ svs:
   domain: default
 
   # Default policy for all checks
-  default_policy: fail  # fail | warn | skip
+  default_policy: warn  # fail | warn | ignore
+  default_enforcement: warning  # blocking | warning | silent
 
-  # Per-check policy overrides
-  check_policies:
-    entropy: fail
-    null_ratio: fail
-    compression_ratio: warn
-    vocab_utilization: warn
+  # Post-run stats (mechanistic, container-side)
+  stats_enabled: true
 
-  # Mechanistic validation (always on when svs.enabled)
-  enforce_output_schemas: true
-  enforce_tool_contracts: true
-
-  # Metric naming contract for during-run checks
-  metric_names:
-    loss: "loss"
-    grad_norm: "grad_norm"
-    lr: "learning_rate"
-
-  # Pre-run AI validation
+  # AI reviews
   ai_pre_run_enabled: true
-  ai_config_review: false
-  ai_data_gen_review: false
-
-  # During-run validation
-  during_run_enabled: true
-  during_run_check_interval: 100  # Check every N steps
-  during_run_auto_stop: false     # Auto-stop on critical alerts
-  during_run_ai_review: false     # AI review during training (expensive)
-
-  # Post-run AI validation
   ai_post_run_enabled: true
-  ai_validation_stages: artifacts_only  # all | artifacts_only | critical_only
 
-  # AI model settings
-  review_model: claude-sonnet-4-5
-  review_timeout: 30
-  review_max_turns: 3
+  # Agent settings
+  agent_provider: claude_code  # claude_code | codex_cli | gemini_cli | null
+  agent_model: null
+  agent_timeout: 120
+  agent_max_turns: 3
   rate_limit_per_hour: 60
 
-  # Self-learning
-  auto_learn_failures: true
+  # Self-learning (EXPERIMENTAL, opt-in)
+  auto_learn_failures: false  # Default: disabled
 ```
 
-**Environment variable overrides:**
+SVS is enabled by default. To opt out entirely:
 
-```bash
-# Enable all AI reviews
-export GOLDFISH_AI_REVIEW_ENABLED=1
-
-# Or selective
-export GOLDFISH_AI_PRE_RUN=1
-export GOLDFISH_AI_POST_STAGE=1
-export GOLDFISH_AUTO_STOP=1  # Enable during-run auto-stop
+```yaml
+svs:
+  enabled: false
 ```
 
 ---

@@ -15,7 +15,7 @@ def mock_server_imports():
     with patch.dict(
         sys.modules,
         {
-            "goldfish.server": MagicMock(
+            "goldfish.server_core": MagicMock(
                 _get_config=MagicMock(),
                 _get_db=MagicMock(),
                 _get_pipeline_executor=MagicMock(),

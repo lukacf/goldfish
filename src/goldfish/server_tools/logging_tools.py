@@ -6,7 +6,7 @@ Provides tools for searching centralized logs via VictoriaLogs.
 import logging
 
 from goldfish.logging.service import LOGSQL_GUIDE, search_logs_sync
-from goldfish.server import mcp
+from goldfish.server_core import mcp
 
 logger = logging.getLogger("goldfish.server")
 

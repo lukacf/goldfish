@@ -9,13 +9,30 @@ Also provides heartbeat functionality for job health monitoring.
 
 import importlib.util
 import json
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Any
 
+from goldfish.errors import GoldfishError
 from goldfish.metrics import finish as finish_metrics
 from goldfish.metrics import log_artifact, log_metric, log_metrics
+
+logger = logging.getLogger(__name__)
+
+_StatsJob: type[Any] | None
+# Stats are optional in container images; allow graceful degradation if missing
+try:
+    from goldfish.io.stats import StatsJob as _StatsJob
+
+    _HAS_STATS = True
+except Exception:
+    _StatsJob = None
+    _HAS_STATS = False
+_WARNED_MISSING_STATS = False
+_WARNED_NULL_SCHEMA_INPUTS: set[str] = set()
+_WARNED_NULL_SCHEMA_OUTPUTS: set[str] = set()
 
 # Heartbeat configuration
 HEARTBEAT_DIR = ".goldfish"
@@ -53,6 +70,67 @@ def _get_outputs_dir() -> Path:
     return Path(os.environ.get("GOLDFISH_OUTPUTS_DIR", "/mnt/outputs"))
 
 
+def _load_directory_for_validation(dir_path: Path, schema: dict[str, Any]) -> Any:
+    """Load directory contents for schema validation.
+
+    For tensor schemas with arrays, loads NPZ files and returns a dict-like
+    object that can be validated against the schema.
+
+    Args:
+        dir_path: Path to the output directory
+        schema: Schema definition from pipeline.yaml
+
+    Returns:
+        Dict-like object for validation, or None if validation should be skipped
+    """
+    kind = schema.get("kind")
+    arrays = schema.get("arrays")
+
+    # Only handle tensor schemas with explicit array definitions
+    if kind != "tensor" or not isinstance(arrays, dict):
+        logger.warning(
+            "Directory output with schema kind='%s' - skipping validation (only tensor+arrays supported)",
+            kind,
+        )
+        return None
+
+    if np is None:
+        logger.warning("NumPy not available - skipping directory schema validation")
+        return None
+
+    # Look for NPZ files in the directory
+    npz_files = list(dir_path.glob("*.npz"))
+    if not npz_files:
+        # Also check for individual .npy files
+        npy_files = list(dir_path.glob("*.npy"))
+        if npy_files:
+            # Load individual npy files into a dict
+            result = {}
+            for npy_file in npy_files:
+                array_name = npy_file.stem
+                if array_name in arrays:
+                    result[array_name] = np.load(npy_file)
+            if result:
+                return result
+        logger.warning(
+            "No NPZ or NPY files found in directory '%s' - skipping schema validation",
+            dir_path,
+        )
+        return None
+
+    # Load the first NPZ file (typically there's one main one like events.npz)
+    npz_path = npz_files[0]
+    if len(npz_files) > 1:
+        logger.debug("Multiple NPZ files found, using '%s' for validation", npz_path.name)
+
+    try:
+        # np.load returns NpzFile which is dict-like (supports __getitem__, keys())
+        return np.load(npz_path, allow_pickle=False)
+    except Exception as e:
+        logger.warning("Failed to load NPZ '%s' for validation: %s", npz_path, e)
+        return None
+
+
 def load_input(name: str, format: str | None = None) -> Any:
     """Load input signal or dataset.
 
@@ -82,12 +160,27 @@ def load_input(name: str, format: str | None = None) -> Any:
     if not input_config:
         raise ValueError(f"Input '{name}' not defined in stage config")
 
+    # Schema is required; null schema emits a warning (non-blocking)
+    if "schema" in input_config and input_config.get("schema") is None:
+        if name not in _WARNED_NULL_SCHEMA_INPUTS:
+            logger.warning(
+                "Input '%s': schema is null; contract validation skipped (recommended to define schema).",
+                name,
+            )
+            _WARNED_NULL_SCHEMA_INPUTS.add(name)
+
     # Check for custom loader
     if "loader" in input_config:
         return _run_custom_loader(name, input_config["loader"])
 
-    # Get input path (Goldfish pre-downloads to this location)
+    # Get input path - prefer /mnt/inputs mount, fall back to config location
     input_path = _get_inputs_dir() / name
+
+    # For local execution, use location from config if mount doesn't exist
+    if not input_path.exists() and not input_path.with_suffix(".npy").exists():
+        location = input_config.get("location")
+        if location:
+            input_path = Path(location)
 
     # Auto-load based on format
     fmt = format or input_config.get("format", "file")
@@ -167,6 +260,39 @@ def save_output(name: str, data: Any, artifact: bool = False):
     if not output_config:
         raise ValueError(f"Output '{name}' not defined in stage config")
 
+    # Enforce output schema contract (SVS law) when provided
+    schema = output_config.get("schema")
+    if schema is None:
+        if name not in _WARNED_NULL_SCHEMA_OUTPUTS:
+            logger.warning(
+                "Output '%s': schema is null; contract validation skipped (recommended to define schema).",
+                name,
+            )
+            _WARNED_NULL_SCHEMA_OUTPUTS.add(name)
+    if schema:
+        validation_data = data
+        # For directory outputs with tensor schemas, load NPZ files for validation
+        if isinstance(data, Path) and data.is_dir():
+            validation_data = _load_directory_for_validation(data, schema)
+        elif isinstance(data, Path):
+            raise GoldfishError(f"Output '{name}' schema validation requires in-memory data, got Path")
+
+        if validation_data is not None:
+            from goldfish.svs.contract import validate_output_data_against_schema
+
+            errors = validate_output_data_against_schema(name, schema, validation_data)
+            if errors:
+                from goldfish.io.bootstrap import _load_svs_config
+
+                svs_config = _load_svs_config()
+                enforcement = "silent" if not svs_config.enabled else svs_config.default_enforcement
+                message = f"Output '{name}' schema mismatch: " + "; ".join(errors)
+
+                if enforcement == "blocking":
+                    raise GoldfishError(message)
+                if enforcement == "warning":
+                    logger.warning(message)
+
     output_path = _get_outputs_dir() / name
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -195,6 +321,29 @@ def save_output(name: str, data: Any, artifact: bool = False):
 
     else:
         raise ValueError(f"Cannot auto-save format '{fmt}'. Use get_output_path() for manual saving.")
+
+    # Enqueue stats if SVS is enabled
+    from goldfish.io.bootstrap import _get_stats_queue, _svs_enabled
+
+    if _svs_enabled():
+        global _WARNED_MISSING_STATS
+        if not _HAS_STATS or _StatsJob is None:
+            if not _WARNED_MISSING_STATS:
+                logger.warning("SVS stats unavailable: goldfish.io.stats missing in container image")
+                _WARNED_MISSING_STATS = True
+        else:
+            try:
+                stats_queue = _get_stats_queue()
+                stats_queue.enqueue(
+                    _StatsJob(
+                        name=name,
+                        path=output_path,
+                        dtype=str(getattr(data, "dtype", "unknown")),
+                    )
+                )
+            except Exception as e:
+                # Stats are best-effort; don't fail the stage if enqueuing fails
+                logger.warning(f"Failed to enqueue stats for {name}: {e}")
 
     if artifact:
         _mark_as_artifact(name)

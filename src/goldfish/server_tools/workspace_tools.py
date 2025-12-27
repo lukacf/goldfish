@@ -29,7 +29,7 @@ from goldfish.models import (
     WorkspaceGoalResponse,
     WorkspaceInfo,
 )
-from goldfish.server import (
+from goldfish.server_core import (
     _get_config,
     _get_db,
     _get_state_manager,

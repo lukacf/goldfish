@@ -19,11 +19,11 @@ def mock_server_imports():
     mock_mcp = MagicMock()
     mock_mcp.tool = MagicMock(return_value=lambda f: f)
 
-    # Patch the server module imports before importing execution_tools
+    # Patch the server_core module imports before importing execution_tools
     with patch.dict(
         sys.modules,
         {
-            "goldfish.server": MagicMock(
+            "goldfish.server_core": MagicMock(
                 _get_config=MagicMock(),
                 _get_db=MagicMock(),
                 _get_pipeline_executor=MagicMock(),

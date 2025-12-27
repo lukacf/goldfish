@@ -21,6 +21,7 @@ class LocalExecutor:
         inputs_dir: Path | None = None,
         outputs_dir: Path | None = None,
         goldfish_env: dict[str, str] | None = None,
+        input_paths: dict[str, str] | None = None,
     ) -> str:
         """Launch Docker container for stage run.
 
@@ -30,9 +31,10 @@ class LocalExecutor:
             entrypoint_script: Bash script to run in container
             stage_config: Stage configuration (passed as GOLDFISH_STAGE_CONFIG env var)
             work_dir: Working directory for container files
-            inputs_dir: Directory to mount as /mnt/inputs
+            inputs_dir: Directory to mount as /mnt/inputs (deprecated, use input_paths)
             outputs_dir: Directory to mount as /mnt/outputs
             goldfish_env: Goldfish environment variables (metrics, provenance, etc.)
+            input_paths: Dict mapping input names to host paths, mounted to /mnt/inputs/{name}
 
         Returns:
             Container ID (same as stage_run_id)
@@ -66,9 +68,11 @@ class LocalExecutor:
         # SECURITY: Run as non-root user (UID 1000)
         docker_cmd.extend(["--user", "1000:1000"])
 
-        # SECURITY: Add timeout to prevent runaway containers
-        # Container will be auto-removed after exit
-        docker_cmd.extend(["--rm"])
+        # Note: We intentionally do NOT use --rm here
+        # The container needs to persist after exit so we can:
+        # 1. Check exit code with docker inspect
+        # 2. Retrieve logs with docker logs
+        # Containers are cleaned up by remove_container() after finalization
 
         # Set environment variable with stage config
         stage_config_json = json.dumps(stage_config)
@@ -93,7 +97,21 @@ class LocalExecutor:
 
         # SECURITY: Mount volumes with read-only where appropriate
         # inputs are read-only, outputs are read-write
-        if inputs_dir:
+
+        # Mount individual input paths (preferred for proper data access)
+        if input_paths:
+            for input_name, host_path in input_paths.items():
+                # Resolve the actual file path (handle .npy extension)
+                src = Path(host_path)
+                if not src.exists() and src.with_suffix(".npy").exists():
+                    src = src.with_suffix(".npy")
+                    container_path = f"/mnt/inputs/{input_name}.npy"
+                else:
+                    container_path = f"/mnt/inputs/{input_name}"
+                if src.exists():
+                    docker_cmd.extend(["-v", f"{src}:{container_path}:ro"])
+        elif inputs_dir:
+            # Fallback: mount entire inputs directory
             docker_cmd.extend(["-v", f"{inputs_dir}:/mnt/inputs:ro"])
 
         if outputs_dir:

@@ -1,5 +1,6 @@
 """Unit tests for MetricsLogger (orchestration layer)."""
 
+import json
 from pathlib import Path
 
 from goldfish.metrics.backends import MetricsBackend
@@ -223,6 +224,24 @@ class TestMetricsLogger:
 
         # Check backend
         assert len(backend.metrics) == 2
+
+    def test_nan_metric_writes_svs_finding(self, tmp_path, monkeypatch):
+        """NaN should trigger SVS finding even if metric is rejected."""
+        monkeypatch.setenv("GOLDFISH_SVS_STATS_ENABLED", "true")
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(tmp_path))
+
+        logger = MetricsLogger(outputs_dir=tmp_path)
+
+        # NaN metric should not raise, but should write svs_findings.json
+        logger.log_metric("loss", float("nan"), step=1)
+
+        findings_path = tmp_path / ".goldfish" / "svs_findings.json"
+        assert findings_path.exists()
+
+        data = json.loads(findings_path.read_text())
+        assert data.get("decision") in {"blocked", "warned", "approved", None}
+        findings = data.get("findings", [])
+        assert any("nan" in str(item).lower() for item in findings)
 
     def test_log_artifact(self, tmp_path):
         """Test that log_artifact writes to both local and backend."""

@@ -71,11 +71,17 @@ stages:
       tokens:
         type: dataset
         dataset: v37-tokens
+        schema:
+          kind: tensor
+          shape: [null]
+          dtype: int32
     outputs:
       model:
         type: directory
+        schema: null
       training_log:
         type: csv
+        schema: null
 ```
 
 ## Step 5: Create Stage Config
@@ -306,9 +312,9 @@ get_run_provenance("stage-abc123")
 
 ## Step 10: Save and Continue
 
-Create checkpoint:
+Create version:
 ```
-checkpoint("w1", "Training complete - 1B model trained on V37")
+save_version("w1", "Training complete - 1B model trained on V37")
 ```
 
 Hibernate workspace:
@@ -328,7 +334,7 @@ hibernate("w1", "Completed 1B-8k LM training experiment")
 7. logs("stage-abc123", tail=100)                    # Monitor
 8. get_run("stage-abc123")                           # Check status
 9. get_outputs("stage-abc123")                       # Get results
-10. checkpoint("w1", "Training complete")            # Save progress
+10. save_version("w1", "Training complete")          # Save progress
 11. hibernate("w1", "Done with experiment")          # Clean up
 ```
 

@@ -85,6 +85,7 @@ class DummyStageExecutor:
             pipeline_name=pipeline_name,
             config=config_override or {},
             inputs={},
+            reason=reason_structured,  # Store structured reason in DB
             profile=None,
             hints=None,
             backend_type="local",
@@ -97,6 +98,8 @@ class DummyStageExecutor:
                 "workspace": workspace,
                 "stage_name": stage_name,
                 "pipeline_name": pipeline_name,
+                "reason": reason,
+                "reason_structured": reason_structured,
                 "wait": wait,
             }
         )
@@ -675,8 +678,8 @@ class TestOverridePersistence:
 
         # Verify overrides were passed to worker
         assert len(submitted_args) == 1
-        # Args: pipeline_run_id, workspace, pipeline_name, config_override, inputs_override, reason
-        _, _, _, config_override, inputs_override, _ = submitted_args[0]
+        # Args: pipeline_run_id, workspace, pipeline_name, config_override, inputs_override, reason, reason_structured
+        _, _, _, config_override, inputs_override, _, _ = submitted_args[0]
         assert config_override == {"prep": {"LR": "0.01"}}
         assert inputs_override == {"prep": {"data": "gs://test"}}
 
@@ -815,3 +818,203 @@ class TestInputValidationBeforeQueuing:
         with test_db._conn() as conn:
             count = conn.execute("SELECT COUNT(*) FROM pipeline_runs").fetchone()[0]
         assert count == 1
+
+
+class TestReasonPropagation:
+    """Test that reason_structured is correctly propagated through async pipeline execution."""
+
+    def _make_executor(self, test_db, pipeline_def, monkeypatch):
+        stage_executor = DummyStageExecutor(test_db)
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+
+        fake_pool = MagicMock()
+        monkeypatch.setattr(PipelineExecutor, "_pool", fake_pool)
+
+        executor = PipelineExecutor(
+            stage_executor=stage_executor,
+            pipeline_manager=pipeline_manager,
+            db=test_db,
+        )
+        return executor, stage_executor, pipeline_manager, fake_pool
+
+    def test_reason_structured_stored_in_pipeline_runs(self, test_db, monkeypatch):
+        """reason_structured is stored as JSON in pipeline_runs table."""
+        from goldfish.models import RunReason
+
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+
+        executor, stage_executor, _, _ = self._make_executor(test_db, pipeline_def, monkeypatch)
+
+        reason = RunReason(
+            description="Testing new architecture",
+            hypothesis="Will improve accuracy by 5%",
+            approach="Using transformer layers",
+        )
+
+        result = executor.run_stages(
+            workspace="ws",
+            pipeline_name="train",
+            reason="Testing new architecture",
+            reason_structured=reason,
+            async_mode=True,
+        )
+
+        prun_id = result["pipeline_run_id"]
+        with test_db._conn() as conn:
+            row = conn.execute("SELECT reason_json FROM pipeline_runs WHERE id=?", (prun_id,)).fetchone()
+
+        assert row is not None
+        reason_data = json.loads(row["reason_json"])
+        assert reason_data["description"] == "Testing new architecture"
+        assert reason_data["hypothesis"] == "Will improve accuracy by 5%"
+        assert reason_data["approach"] == "Using transformer layers"
+
+    def test_reason_structured_passed_to_stage_in_async_mode(self, test_db, monkeypatch):
+        """reason_structured is passed to run_stage() when processing async queue."""
+        from goldfish.models import RunReason
+
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+
+        executor, stage_executor, _, _ = self._make_executor(test_db, pipeline_def, monkeypatch)
+
+        reason = RunReason(
+            description="Testing hypothesis",
+            hypothesis="Model will converge faster",
+        )
+
+        result = executor.run_stages(
+            workspace="ws",
+            pipeline_name="train",
+            reason="Testing hypothesis",
+            reason_structured=reason,
+            async_mode=True,
+        )
+
+        prun_id = result["pipeline_run_id"]
+
+        # Process queue - this should pass reason_structured to run_stage
+        executor._process_pipeline_queue_once(
+            prun_id,
+            workspace="ws",
+            pipeline_name="train",
+            config_override=None,
+            inputs_override=None,
+            reason="Testing hypothesis",
+            reason_structured=reason.model_dump(),
+        )
+
+        # Verify reason_structured was passed to run_stage
+        assert len(stage_executor.call_kwargs) == 1
+        call = stage_executor.call_kwargs[0]
+        assert call["reason"] == "Testing hypothesis"
+        assert call["reason_structured"]["description"] == "Testing hypothesis"
+        assert call["reason_structured"]["hypothesis"] == "Model will converge faster"
+
+    def test_reason_structured_loaded_from_db_in_recovery(self, test_db, monkeypatch):
+        """reason_structured is loaded from DB when recovering inflight pipelines."""
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+        stage_executor = DummyStageExecutor(test_db)
+
+        # Create a pipeline run with reason_json directly in DB
+        now = datetime.now(UTC).isoformat()
+        prun_id = "prun-reason-recovery"
+        reason_json = json.dumps(
+            {
+                "description": "Recovery test reason",
+                "hypothesis": "Should recover correctly",
+                "approach": None,
+                "min_result": None,
+                "goal": None,
+            }
+        )
+        with test_db._conn() as conn:
+            conn.execute(
+                """INSERT INTO pipeline_runs
+                   (id, workspace_name, pipeline_name, status, started_at, reason_json)
+                   VALUES (?, ?, ?, 'running', ?, ?)""",
+                (prun_id, "ws", "train", now, reason_json),
+            )
+            conn.execute(
+                """INSERT INTO pipeline_stage_queue
+                   (pipeline_run_id, stage_name, status) VALUES (?, ?, 'pending')""",
+                (prun_id, "prep"),
+            )
+
+        # Track what _pool.submit receives
+        submitted_args = []
+
+        def mock_submit(fn, *args):
+            submitted_args.append(args)
+
+        monkeypatch.setattr(PipelineExecutor._pool, "submit", mock_submit)
+
+        # Creating executor triggers _recover_inflight_pipelines
+        executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
+
+        # Verify reason_structured was passed to worker
+        assert len(submitted_args) == 1
+        # Args: prun_id, workspace, pipeline_name, config, inputs, reason, reason_structured
+        _, _, _, _, _, reason, reason_structured = submitted_args[0]
+        assert reason == "Recovery test reason"  # Extracted from description
+        assert reason_structured["description"] == "Recovery test reason"
+        assert reason_structured["hypothesis"] == "Should recover correctly"
+
+    def test_reason_stored_in_stage_run_via_async_pipeline(self, test_db, monkeypatch):
+        """Full flow: reason_structured flows from run_stages() to stage_runs.reason_json."""
+        from goldfish.models import RunReason
+
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+
+        executor, stage_executor, _, _ = self._make_executor(test_db, pipeline_def, monkeypatch)
+
+        reason = RunReason(
+            description="Full flow test",
+            hypothesis="Reason should be in stage_runs",
+        )
+        reason_dict = reason.model_dump()
+
+        result = executor.run_stages(
+            workspace="ws",
+            pipeline_name="train",
+            reason="Full flow test",
+            reason_structured=reason,
+            async_mode=True,
+        )
+
+        prun_id = result["pipeline_run_id"]
+
+        # Process queue
+        executor._process_pipeline_queue_once(
+            prun_id,
+            workspace="ws",
+            pipeline_name="train",
+            config_override=None,
+            inputs_override=None,
+            reason="Full flow test",
+            reason_structured=reason_dict,
+        )
+
+        # Verify reason was stored in stage_runs (via DummyStageExecutor)
+        stage_runs = test_db.list_stage_runs(workspace_name="ws")
+        assert len(stage_runs) == 1
+
+        stage_run = stage_runs[0]
+        assert stage_run.get("reason_json") is not None
+        stored_reason = json.loads(stage_run["reason_json"])
+        assert stored_reason["description"] == "Full flow test"
+        assert stored_reason["hypothesis"] == "Reason should be in stage_runs"
