@@ -832,6 +832,293 @@ Find all runs that used a specific stage version as input. **Useful for impact a
 
 ---
 
+## Version Management Tools (Tags & Pruning)
+
+ML experiments generate many versions. Tags mark milestones; pruning hides noise while preserving history.
+
+### tag_version(workspace, version, tag_name)
+
+Mark a version with a memorable name. **Can be applied retroactively to any existing version.**
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `workspace` | str | Yes | Workspace name |
+| `version` | str | Yes | Version to tag (e.g., "v24") |
+| `tag_name` | str | Yes | Tag name (e.g., "baseline-working") |
+
+**Returns:**
+```python
+{
+  "success": bool,
+  "workspace": str,
+  "version": str,
+  "tag_name": str,
+  "created_at": str
+}
+```
+
+**Example:**
+```python
+# Mark the first working version
+tag_version(workspace="my_exp", version="v24", tag_name="baseline-working")
+
+# Mark the best result
+tag_version(workspace="my_exp", version="v47", tag_name="best-model")
+```
+
+**Notes:**
+- Tag names must be unique within a workspace
+- Tags can be applied to any existing version (not just current)
+- Tagged versions are protected from pruning
+
+---
+
+### untag_version(workspace, tag_name)
+
+Remove a tag from a version.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `workspace` | str | Yes | Workspace name |
+| `tag_name` | str | Yes | Tag to remove |
+
+**Returns:**
+```python
+{
+  "success": bool,
+  "workspace": str,
+  "tag_name": str,
+  "version": str  # Version that was untagged
+}
+```
+
+**Example:**
+```python
+untag_version(workspace="my_exp", tag_name="old-baseline")
+```
+
+---
+
+### list_tags(workspace)
+
+List all tags for a workspace.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `workspace` | str | Yes | Workspace name |
+
+**Returns:**
+```python
+{
+  "success": bool,
+  "workspace": str,
+  "tags": [
+    {"version": "v24", "tag_name": "baseline-working", "created_at": "..."},
+    {"version": "v47", "tag_name": "best-model", "created_at": "..."}
+  ]
+}
+```
+
+**Example:**
+```python
+list_tags(workspace="my_exp")
+```
+
+---
+
+### prune_version(workspace, version, reason)
+
+Hide a single version from listings. **Cannot prune tagged versions.**
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `workspace` | str | Yes | Workspace name |
+| `version` | str | Yes | Version to prune (e.g., "v5") |
+| `reason` | str | Yes | Why pruning (min 15 chars) |
+
+**Returns:**
+```python
+{
+  "success": bool,
+  "workspace": str,
+  "version": str,
+  "pruned_at": str
+}
+```
+
+**Example:**
+```python
+prune_version(
+    workspace="my_exp",
+    version="v5",
+    reason="Failed experiment with wrong hyperparameters"
+)
+```
+
+**Errors:**
+- Fails if version is tagged (tags are protected)
+- Fails if version doesn't exist
+
+---
+
+### prune_versions(workspace, from_version, to_version, reason)
+
+Hide a range of versions (inclusive). **Skips tagged versions.**
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `workspace` | str | Yes | Workspace name |
+| `from_version` | str | Yes | Starting version (e.g., "v1") |
+| `to_version` | str | Yes | Ending version (e.g., "v23") |
+| `reason` | str | Yes | Why pruning (min 15 chars) |
+
+**Returns:**
+```python
+{
+  "success": bool,
+  "workspace": str,
+  "from_version": str,
+  "to_version": str,
+  "pruned_count": int,    # How many were pruned
+  "skipped_tagged": int   # How many were skipped (tagged)
+}
+```
+
+**Example:**
+```python
+prune_versions(
+    workspace="my_exp",
+    from_version="v1",
+    to_version="v23",
+    reason="All early experiments before baseline was established"
+)
+# If v15 was tagged, returns pruned_count=22, skipped_tagged=1
+```
+
+---
+
+### prune_before_tag(workspace, tag_name, reason)
+
+Prune all versions before a tagged milestone. **Stops at the tag (doesn't include it).**
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `workspace` | str | Yes | Workspace name |
+| `tag_name` | str | Yes | Tag marking the cutoff |
+| `reason` | str | Yes | Why pruning (min 15 chars) |
+
+**Returns:**
+```python
+{
+  "success": bool,
+  "workspace": str,
+  "tag_name": str,
+  "tag_version": str,        # The tagged version (not pruned)
+  "pruned_count": int,
+  "skipped_tagged": int      # Other tags that were preserved
+}
+```
+
+**Example:**
+```python
+# Tag "baseline-working" is on v24
+prune_before_tag(
+    workspace="my_exp",
+    tag_name="baseline-working",
+    reason="Pruning all experiments before working baseline"
+)
+# Prunes v1-v23, preserves v24 and anything else tagged
+```
+
+---
+
+### unprune_version(workspace, version)
+
+Restore a single pruned version.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `workspace` | str | Yes | Workspace name |
+| `version` | str | Yes | Version to restore |
+
+**Returns:**
+```python
+{
+  "success": bool,
+  "workspace": str,
+  "version": str
+}
+```
+
+**Example:**
+```python
+unprune_version(workspace="my_exp", version="v5")
+```
+
+---
+
+### unprune_versions(workspace, from_version, to_version)
+
+Restore a range of pruned versions.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `workspace` | str | Yes | Workspace name |
+| `from_version` | str | Yes | Starting version |
+| `to_version` | str | Yes | Ending version |
+
+**Returns:**
+```python
+{
+  "success": bool,
+  "workspace": str,
+  "from_version": str,
+  "to_version": str,
+  "unpruned_count": int
+}
+```
+
+**Example:**
+```python
+unprune_versions(workspace="my_exp", from_version="v1", to_version="v10")
+```
+
+---
+
+### get_pruned_count(workspace)
+
+Get count of pruned versions for a workspace.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `workspace` | str | Yes | Workspace name |
+
+**Returns:**
+```python
+{
+  "success": bool,
+  "workspace": str,
+  "count": int
+}
+```
+
+**Example:**
+```python
+get_pruned_count(workspace="my_exp")
+# Returns {"success": true, "workspace": "my_exp", "count": 35}
+```
+
+---
+
 ## Utility Tools
 
 ### initialize_project(project_name, project_root, from_existing)

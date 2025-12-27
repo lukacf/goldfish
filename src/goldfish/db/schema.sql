@@ -120,6 +120,8 @@ CREATE TABLE IF NOT EXISTS workspace_versions (
     created_by TEXT NOT NULL,         -- 'run', 'checkpoint', 'manual'
     job_id TEXT,                      -- Job that triggered version (if created_by='run')
     description TEXT,
+    pruned_at TEXT,                   -- When version was pruned (NULL if not pruned)
+    prune_reason TEXT,                -- Why version was pruned
     PRIMARY KEY (workspace_name, version),
     FOREIGN KEY (workspace_name) REFERENCES workspace_lineage(workspace_name),
     FOREIGN KEY (job_id) REFERENCES jobs(id)
@@ -381,4 +383,19 @@ CREATE INDEX IF NOT EXISTS idx_failure_patterns_severity ON failure_patterns(sev
 CREATE INDEX IF NOT EXISTS idx_failure_patterns_stage_type ON failure_patterns(stage_type);
 CREATE INDEX IF NOT EXISTS idx_failure_patterns_enabled ON failure_patterns(enabled);
 CREATE INDEX IF NOT EXISTS idx_failure_patterns_created ON failure_patterns(created_at);
-CREATE INDEX IF NOT EXISTS idx_failure_patterns_source_run ON failure_patterns(source_run_id)
+CREATE INDEX IF NOT EXISTS idx_failure_patterns_source_run ON failure_patterns(source_run_id);
+
+
+-- Version tags (user-defined names for significant versions)
+-- Tags allow marking milestones like "baseline-working", "best-model"
+-- Can be applied retroactively to any existing version
+CREATE TABLE IF NOT EXISTS workspace_version_tags (
+    workspace_name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    tag_name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (workspace_name, tag_name),
+    FOREIGN KEY (workspace_name, version) REFERENCES workspace_versions(workspace_name, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_version_tags_version ON workspace_version_tags(workspace_name, version);
