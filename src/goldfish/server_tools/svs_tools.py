@@ -63,24 +63,13 @@ def manage_patterns(
         manager.approve_pattern(pattern_id)
         return {"success": True, "status": "approved"}
 
-        if action == "reject":
-            if not reason:
-                raise GoldfishError("reason is required for rejection")
-
-            manager.reject_pattern(pattern_id, reason=reason)
-
+    if action == "reject":
+        if not reason:
+            raise GoldfishError("reason is required for rejection")
+        manager.reject_pattern(pattern_id, reason=reason)
         return {"success": True, "status": "rejected"}
 
     raise GoldfishError(f"Unknown action: {action}")
-
-
-@mcp.tool()
-def get_run_svs_findings(stage_run_id: str) -> dict:
-    """Get all SVS findings (AI reviews and patterns) for a specific run."""
-    db = _get_db()
-    from goldfish.server_tools.svs_tools_impl import get_run_svs_findings as get_findings
-
-    return get_findings(db, stage_run_id)
 
 
 def _pattern_to_dict(pattern: Any) -> dict:
