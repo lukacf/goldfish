@@ -34,6 +34,8 @@ from goldfish.context import ServerContext, set_context
 from goldfish.datasets.registry import DatasetRegistry
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError, ProjectNotInitializedError
+from goldfish.infra.metadata.base import MetadataBus
+from goldfish.infra.metadata.local import LocalMetadataBus
 from goldfish.jobs.launcher import JobLauncher
 from goldfish.jobs.pipeline_executor import PipelineExecutor
 from goldfish.jobs.stage_executor import StageExecutor
@@ -326,6 +328,16 @@ class GoldfishDaemon:
         )
         pipeline_executor = PipelineExecutor(stage_executor=stage_executor, pipeline_manager=pipeline_manager, db=db)
 
+        # Initialize MetadataBus (Cloud-native or Local simulation)
+        metadata_bus: MetadataBus
+        if self.config.gce:
+            from goldfish.infra.metadata.gcp import GCPMetadataBus
+
+            metadata_bus = GCPMetadataBus()
+        else:
+            # Use a file in dev repo for local simulation
+            metadata_bus = LocalMetadataBus(self.dev_repo_path / ".metadata_bus.json")
+
         # Create and set context
         self.context = ServerContext(
             project_root=self.project_root,
@@ -339,6 +351,7 @@ class GoldfishDaemon:
             dataset_registry=dataset_registry,
             stage_executor=stage_executor,
             pipeline_executor=pipeline_executor,
+            metadata_bus=metadata_bus,
         )
         set_context(self.context)
 

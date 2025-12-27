@@ -72,6 +72,15 @@ def manage_patterns(
     raise GoldfishError(f"Unknown action: {action}")
 
 
+@mcp.tool()
+def get_run_svs_findings(stage_run_id: str) -> dict:
+    """Get all SVS findings (AI reviews and patterns) for a specific run."""
+    db = _get_db()
+    from goldfish.server_tools.svs_tools_impl import get_run_svs_findings as get_findings
+
+    return get_findings(db, stage_run_id)
+
+
 def _pattern_to_dict(pattern: Any) -> dict:
     return {
         "id": pattern["id"],

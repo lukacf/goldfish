@@ -2,7 +2,6 @@
 
 import json
 import logging
-import re
 from typing import Any
 
 from goldfish.db.database import Database
@@ -158,34 +157,33 @@ def librarian_review_patterns(
 
     try:
         result = agent.run(request)
-
     except Exception as exc:
-        logger.warning("Librarian agent failed: %s", exc)
-
+        logger.error("Librarian agent failed: %s", exc)
         return {}
 
     raw = getattr(result, "response_text", None) or getattr(result, "raw_output", "")
-
     raw_text = raw if isinstance(raw, str) else str(raw)
 
-    parsed = None
+    # Attempt to extract JSON from markdown blocks
+    if "```json" in raw_text:
+        raw_text = raw_text.split("```json")[1].split("```")[0].strip()
+    elif "```" in raw_text:
+        raw_text = raw_text.split("```")[1].split("```")[0].strip()
 
+    parsed = None
     try:
         parsed = json.loads(raw_text)
-
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-
-        if match:
-            try:
-                parsed = json.loads(match.group(0))
-
-            except json.JSONDecodeError:
-                parsed = None
+        # Fallback: try to find the first outer brace pair
+        try:
+            start = raw_text.index("{")
+            end = raw_text.rindex("}") + 1
+            parsed = json.loads(raw_text[start:end])
+        except (ValueError, json.JSONDecodeError):
+            parsed = None
 
     if not isinstance(parsed, dict):
-        logger.warning("Librarian agent returned unparseable recommendations")
-
+        logger.error(f"Librarian agent returned unparseable recommendations. Raw output: {raw_text[:500]}...")
         return {}
 
     valid_ids = {p.get("id") for p in patterns if isinstance(p, dict)}

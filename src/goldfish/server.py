@@ -252,13 +252,48 @@ def _init_server(project_root: Path) -> None:
 
 # ============== MCP TOOLS ==============
 # Tools are organized in separate modules for maintainability
-# These imports register tools with the FastMCP instance
-import goldfish.server_tools.data_tools  # noqa: F401, E402
-import goldfish.server_tools.execution_tools  # noqa: F401, E402
-import goldfish.server_tools.logging_tools  # noqa: F401, E402
-import goldfish.server_tools.svs_tools  # noqa: F401, E402
-import goldfish.server_tools.utility_tools  # noqa: F401, E402
-import goldfish.server_tools.workspace_tools  # noqa: F401, E402
+# These imports register tools with the FastMCP instance AND export them for tests
+
+from goldfish.server_tools.data_tools import (  # noqa: F401, E402
+    manage_sources,
+    promote_artifact,
+    register_source,
+)
+from goldfish.server_tools.execution_tools import (  # noqa: F401, E402
+    cancel,
+    get_run_provenance,
+    inspect_run,
+    list_runs,
+    logs,
+    mark_outcome,
+    run,
+    run_status,
+)
+from goldfish.server_tools.logging_tools import (  # noqa: F401, E402
+    search_goldfish_logs,
+)
+from goldfish.server_tools.svs_tools import (  # noqa: F401, E402
+    get_run_svs_findings,
+    manage_patterns,
+)
+from goldfish.server_tools.utility_tools import (  # noqa: F401, E402
+    initialize_project,
+    log_thought,
+    reload_config,
+    validate_config,
+)
+from goldfish.server_tools.workspace_tools import (  # noqa: F401, E402
+    create_workspace,
+    delete_workspace,
+    diff,
+    hibernate,
+    inspect_workspace,
+    manage_versions,
+    mount,
+    rollback,
+    save_version,
+    status,
+)
 
 
 def run_server(project_root: Path) -> None:

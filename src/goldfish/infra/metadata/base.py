@@ -23,8 +23,14 @@ class MetadataSignal(BaseModel):
 class MetadataBus(Protocol):
     """Protocol for interacting with Cloud Instance Metadata."""
 
-    def set_signal(self, key: str, signal: MetadataSignal) -> None:
-        """Set a metadata signal for the instance."""
+    def set_signal(self, key: str, signal: MetadataSignal, target: str | None = None) -> None:
+        """Set a metadata signal for the instance.
+
+        Args:
+            key: Metadata key/topic
+            signal: The signal object
+            target: Optional target instance/resource identifier
+        """
         ...
 
     def get_signal(self, key: str) -> MetadataSignal | None:
