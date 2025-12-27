@@ -166,8 +166,8 @@ def inspect_workspace(name: str) -> dict:
     return {
         "name": workspace_name,
         "goal": goal,
-        "status": ws_info.status,
-        "slot": ws_info.slot,
+        "is_mounted": ws_info.is_mounted,
+        "slot": ws_info.mounted_slot,
         "lineage": lineage,
         "pipeline": pipeline_def,
         "tags": db.list_tags(workspace_name),
