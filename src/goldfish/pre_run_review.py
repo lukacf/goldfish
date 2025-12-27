@@ -106,6 +106,10 @@ Check each stage for:
 3. **Config issues** - invalid hyperparameters (negative lr, etc.), mismatched shapes
 4. **Pipeline issues** - missing inputs, type mismatches between stages
 5. **Hypothesis coherence** - does the code actually test what's claimed?
+6. **Key/column name mismatches** - When code accesses arrays or dataframes with dynamically
+   constructed keys (f-strings, loop variables), trace the actual key values. For `from_stage`
+   inputs, use the Read tool to check `modules/<upstream_stage>.py` for actual output key names.
+   Pay special attention to train/val/test split naming inconsistencies (e.g., 'valid' vs 'val').
 
 ## Output Format
 

@@ -133,6 +133,34 @@ def validate_output_data_against_schema(
         return errors
 
     # Tensor schema validation
+    arrays_schema = schema.get("arrays") if kind == "tensor" else None
+
+    # Multi-array validation: dict-like data (NpzFile, dict) with arrays schema
+    if isinstance(arrays_schema, dict) and hasattr(data, "keys"):
+        data_keys = set(data.keys()) if callable(getattr(data, "keys", None)) else set()
+        for array_name, array_schema in arrays_schema.items():
+            array_context = f"{context} array '{array_name}'"
+            if array_name not in data_keys:
+                errors.append(f"{array_context}: missing from output")
+                continue
+
+            arr = data[array_name]
+            expected_shape = array_schema.get("shape") if isinstance(array_schema, dict) else None
+            expected_dtype = array_schema.get("dtype") if isinstance(array_schema, dict) else None
+
+            actual_shape = list(arr.shape) if hasattr(arr, "shape") else None
+            actual_dtype = str(arr.dtype) if hasattr(arr, "dtype") else None
+
+            if expected_shape is not None and actual_shape is None:
+                errors.append(f"{array_context}: data missing shape attribute")
+            if expected_dtype is not None and actual_dtype is None:
+                errors.append(f"{array_context}: data missing dtype attribute")
+
+            _compare_shapes(expected_shape, actual_shape, array_context, errors)
+            _compare_dtype(expected_dtype, actual_dtype, array_context, errors)
+        return errors
+
+    # Single-array validation: data with .shape/.dtype (numpy array, tensor)
     tensor_schema = schema if kind != "tensor" else _extract_tensor_schema(schema)
     expected_shape = tensor_schema.get("shape")
     expected_dtype = tensor_schema.get("dtype")
