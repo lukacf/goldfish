@@ -34,11 +34,11 @@ class LocalMetadataBus(MetadataBus):
     def _write(self, data: dict) -> None:
         self.path.write_text(json.dumps(data, indent=2))
 
-    def set_signal(self, key: str, signal: MetadataSignal) -> None:
+    def set_signal(self, key: str, signal: MetadataSignal, target: str | None = None) -> None:
         data = self._read()
         data[f"{key}_signal"] = signal.model_dump(mode="json")
         self._write(data)
-        logger.debug(f"LocalMetadata set_signal: {key}={signal.request_id}")
+        logger.debug(f"LocalMetadata set_signal: {key}={signal.request_id} target={target}")
 
     def get_signal(self, key: str) -> MetadataSignal | None:
         data = self._read()

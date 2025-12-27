@@ -32,6 +32,7 @@ from goldfish.server_core import (
 from goldfish.sources.conversion import source_row_to_info
 from goldfish.validation import (
     InvalidSourceMetadataError,
+    parse_source_metadata,
     validate_artifact_uri,
     validate_job_id,
     validate_output_name,
@@ -104,6 +105,22 @@ def manage_sources(
             raise GoldfishError("metadata and reason are required for action='update'")
         validate_reason(reason, config.audit.min_reason_length)
         validate_source_metadata(metadata)
+
+        # Check for format mismatch against existing source
+        source = db.get_source(name)
+        if not source:
+            raise SourceNotFoundError(f"Source not found: {name}")
+
+        existing_metadata, status = parse_source_metadata(source.get("metadata"))
+        if status == "ok" and existing_metadata is not None:
+            existing_format = existing_metadata.get("source", {}).get("format")
+            new_format = metadata.get("source", {}).get("format")
+            if existing_format and new_format != existing_format:
+                raise InvalidSourceMetadataError(
+                    f"metadata.source.format '{new_format}' does not match existing format '{existing_format}'",
+                    field="source.format",
+                )
+
         db.update_source_metadata(name, metadata, metadata.get("description"))
         db.log_audit(operation="update_source", reason=reason, details={"source": name})
         return {"success": True, "source": name}

@@ -80,6 +80,7 @@ def test_inspect_run_triggers_sync_when_running():
         "outputs_json": "[]",
         "progress": "50%",
         "reason_json": None,
+        "backend_handle": "instance-1",
     }
     mock_db.get_metrics_trends.return_value = {}
     mock_db.get_metrics_summary.return_value = []
@@ -94,8 +95,9 @@ def test_inspect_run_triggers_sync_when_running():
 
     # Verify sync signal was set
     mock_bus.set_signal.assert_called_once()
-    args, _ = mock_bus.set_signal.call_args
+    args, kwargs = mock_bus.set_signal.call_args
     assert args[0] == "goldfish"
     assert isinstance(args[1], MetadataSignal)
     assert args[1].command == "sync"
     assert args[1].payload["run_id"] == run_id
+    assert kwargs["target"] == "instance-1"
