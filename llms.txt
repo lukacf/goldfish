@@ -5,7 +5,7 @@
 Key concepts for LLMs working on this codebase:
 - All infrastructure (Docker, GCS, GCE) is hidden from the MCP client
 - STATE.md provides context recovery after conversation summarization
-- 40+ MCP tools organized into: workspace, execution, data, pipeline, lineage, utility, SVS
+- 24 consolidated MCP tools organized into: orientation, execution, state, data, and system
 - Security: input validation, path traversal protection, Docker sandboxing, git error translation
 
 ## Primary Documentation
@@ -27,20 +27,20 @@ Key concepts for LLMs working on this codebase:
 
 - [src/goldfish/workspace/manager.py](src/goldfish/workspace/manager.py): Workspace operations (create, mount, hibernate, checkpoint)
 - [src/goldfish/workspace/git_layer.py](src/goldfish/workspace/git_layer.py): Low-level git operations
-- [src/goldfish/jobs/stage_executor.py](src/goldfish/jobs/stage_executor.py): Stage execution engine (900 lines, core logic)
+- [src/goldfish/jobs/stage_executor.py](src/goldfish/jobs/stage_executor.py): Stage execution engine (core logic)
 - [src/goldfish/jobs/pipeline_executor.py](src/goldfish/jobs/pipeline_executor.py): Pipeline orchestration
 - [src/goldfish/pipeline/parser.py](src/goldfish/pipeline/parser.py): YAML parsing and validation
 - [src/goldfish/db/database.py](src/goldfish/db/database.py): All database operations
 - [src/goldfish/svs/](src/goldfish/svs/): Semantic Validation System (contracts, agents, patterns)
 
-## MCP Tools
+## MCP Tools (Survivors)
 
-- [src/goldfish/server_tools/workspace_tools.py](src/goldfish/server_tools/workspace_tools.py): 15 workspace management tools
-- [src/goldfish/server_tools/execution_tools.py](src/goldfish/server_tools/execution_tools.py): 6 execution tools (run, get_run, logs, cancel, list_runs, get_outputs)
-- [src/goldfish/server_tools/data_tools.py](src/goldfish/server_tools/data_tools.py): 7 data tools
-- [src/goldfish/server_tools/pipeline_tools.py](src/goldfish/server_tools/pipeline_tools.py): 4 pipeline tools
-- [src/goldfish/server_tools/lineage_tools.py](src/goldfish/server_tools/lineage_tools.py): 3 provenance tracking tools
-- [src/goldfish/server_tools/utility_tools.py](src/goldfish/server_tools/utility_tools.py): 4 utility tools
+- [src/goldfish/server_tools/workspace_tools.py](src/goldfish/server_tools/workspace_tools.py): status, inspect_workspace, manage_versions, slots
+- [src/goldfish/server_tools/execution_tools.py](src/goldfish/server_tools/execution_tools.py): run, inspect_run, logs, cancel, list_runs, mark_outcome
+- [src/goldfish/server_tools/data_tools.py](src/goldfish/server_tools/data_tools.py): manage_sources, register_source, promote_artifact
+- [src/goldfish/server_tools/svs_tools.py](src/goldfish/server_tools/svs_tools.py): manage_patterns
+- [src/goldfish/server_tools/logging_tools.py](src/goldfish/server_tools/logging_tools.py): search_goldfish_logs (with guide)
+- [src/goldfish/server_tools/utility_tools.py](src/goldfish/server_tools/utility_tools.py): initialize, reload, log_thought, validate_config
 
 ## Infrastructure
 
