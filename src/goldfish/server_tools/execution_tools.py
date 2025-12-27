@@ -231,30 +231,23 @@ def run(
 
 
 @mcp.tool()
-def inspect_run(run_id: str, include: list[str] | None = None) -> dict:  # type: ignore[no-any-return]
+def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
     """Get a comprehensive, synthesized view of a run.
 
     This is the master tool for understanding run progress, results, and health.
-    It combines metadata, config, inputs/outputs, synthesized metrics (Dashboard),
+    It combines metadata, dashboard (progress/trends), manifest (config/io),
     and provenance into a single response.
-
-    For running runs, it triggers a low-latency 'Overdrive' sync to get the
-    latest data from the cloud container.
 
     Args:
         run_id: The stage run ID (e.g., "stage-abc123")
-        include: Optional list of extra data to include. Defaults to all.
-                Options: ["dashboard", "manifest", "lineage", "svs"]
+        include: List of data to include. Defaults to ["dashboard", "metadata"].
+                Options: ["dashboard", "metadata", "manifest", "provenance", "svs"]
 
     Returns:
-        Dict with synthesized run data including:
-        - metadata: status, started_at, etc.
-        - dashboard: progress, health (GPU/VRAM), and metric trends (↑↓)
-        - manifest: config, inputs, outputs
-        - lineage: upstream/downstream relationships
-        - svs: semantic validation findings
+        Dict with synthesized run data.
     """
     db = _get_db()
+    workspace_manager = _get_workspace_manager()
     validate_stage_run_id(run_id)
 
     # 1. Trigger low-latency sync if running
@@ -270,77 +263,75 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:  # type:
             req_id = str(uuid.uuid4())[:8]
             sig = MetadataSignal(command="sync", request_id=req_id, payload={"run_id": run_id})
             bus.set_signal("goldfish", sig)
-            # We don't block here to keep the tool fast, but the next call
-            # will have fresher data.
         except Exception as e:
             logger.debug(f"Failed to trigger sync signal: {e}")
 
-    # 2. Synthesize Dashboard (Trends + Progress)
-    dashboard = {}
-    progress = row.get("progress")
+    # Set default includes if None
+    if include is None:
+        include = ["dashboard", "metadata"]
 
-    # Get trends for dashboard metrics
-    # Fallback dashboard metrics if none defined in config
-    dashboard_metrics = ["loss", "accuracy", "val_loss", "val_accuracy", "ppl"]
+    result: dict[str, Any] = {"run_id": run_id}
 
-    # Try to extract dashboard metrics from pipeline config if available
-    try:
-        run_config = json.loads(row["config_json"]) if row.get("config_json") else {}
-        if "dashboard_metrics" in run_config:
-            dashboard_metrics = run_config["dashboard_metrics"]
-    except Exception:
-        pass
-
-    metric_trends = db.get_metrics_trends(run_id, dashboard_metrics)
-    summary_rows = db.get_metrics_summary(run_id)
-    summaries = {s["name"]: s for s in summary_rows}
-
-    synthesized_metrics = {}
-    for name in dashboard_metrics:
-        if name in summaries:
-            s = summaries[name]
-            trend_vals = metric_trends.get(name, [])
-            trend = "stable"
-            if len(trend_vals) >= 2:
-                prev, last = trend_vals[0], trend_vals[1]
-                if last < prev:
-                    trend = "downward"
-                elif last > prev:
-                    trend = "upward"
-
-            synthesized_metrics[name] = {
-                "value": s["last_value"],
-                "min": s["min_value"],
-                "max": s["max_value"],
-                "count": s["count"],
-                "trend": trend,
+    if "metadata" in include:
+        result.update(
+            {
+                "workspace": row["workspace_name"],
+                "stage": row["stage_name"],
+                "status": row["status"],
+                "started_at": row["started_at"],
+                "completed_at": row["completed_at"],
             }
+        )
 
-    # Extract health metrics (GPU/VRAM)
-    health = {}
-    for name, s in summaries.items():
-        if "gpu" in name.lower() or "vram" in name.lower() or "memory" in name.lower():
-            health[name] = s["last_value"]
+    # 2. Synthesize Dashboard (Trends + Progress)
+    if "dashboard" in include:
+        progress = row.get("progress")
+        dashboard_metrics = ["loss", "accuracy", "val_loss", "val_accuracy", "ppl"]
+        try:
+            run_config = json.loads(row["config_json"]) if row.get("config_json") else {}
+            if "dashboard_metrics" in run_config:
+                dashboard_metrics = run_config["dashboard_metrics"]
+        except Exception:
+            pass
 
-    dashboard = {
-        "progress": progress,
-        "metrics": synthesized_metrics,
-        "health": health,
-        "last_sync": row.get("last_metrics_sync_at") or row.get("started_at"),
-    }
+        metric_trends = db.get_metrics_trends(run_id, dashboard_metrics)
+        summary_rows = db.get_metrics_summary(run_id)
+        summaries = {s["name"]: s for s in summary_rows}
 
-    # 3. Build full response
-    result: dict[str, Any] = {
-        "run_id": run_id,
-        "workspace": row["workspace_name"],
-        "stage": row["stage_name"],
-        "status": row["status"],
-        "started_at": row["started_at"],
-        "completed_at": row["completed_at"],
-        "dashboard": dashboard,
-    }
+        synthesized_metrics = {}
+        for name in dashboard_metrics:
+            if name in summaries:
+                s = summaries[name]
+                trend_vals = metric_trends.get(name, [])
+                trend = "stable"
+                if len(trend_vals) >= 2:
+                    prev, last = trend_vals[0], trend_vals[1]
+                    if last < prev:
+                        trend = "downward"
+                    elif last > prev:
+                        trend = "upward"
 
-    if not include or "manifest" in include:
+                synthesized_metrics[name] = {
+                    "value": s["last_value"],
+                    "min": s["min_value"],
+                    "max": s["max_value"],
+                    "count": s["count"],
+                    "trend": trend,
+                }
+
+        health = {}
+        for name, s in summaries.items():
+            if any(k in name.lower() for k in ["gpu", "vram", "memory"]):
+                health[name] = s["last_value"]
+
+        result["dashboard"] = {
+            "progress": progress,
+            "metrics": synthesized_metrics,
+            "health": health,
+            "last_sync": row.get("last_metrics_sync_at") or row.get("started_at"),
+        }
+
+    if "manifest" in include:
         result["manifest"] = {
             "config": json.loads(row["config_json"]) if row.get("config_json") else {},
             "inputs": json.loads(row["inputs_json"]) if row.get("inputs_json") else {},
@@ -348,58 +339,33 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:  # type:
             "reason": json.loads(row["reason_json"]) if row.get("reason_json") else None,
         }
 
-    if not include or "svs" in include:
+    if "provenance" in include:
+        from goldfish.lineage.manager import LineageManager
+
+        lineage_mgr = LineageManager(db=db, workspace_manager=workspace_manager)
+        result["provenance"] = lineage_mgr.get_run_provenance(run_id)
+
+    if "svs" in include:
         svs_data = None
-
         preflight_errors = json.loads(row["preflight_errors_json"]) if row.get("preflight_errors_json") else []
-
         preflight_warnings = json.loads(row["preflight_warnings_json"]) if row.get("preflight_warnings_json") else []
-
         if preflight_errors or preflight_warnings or row.get("svs_findings_json"):
             svs_data = {
                 "preflight": {"errors": preflight_errors, "warnings": preflight_warnings},
                 "during_run": None,
                 "post_run": None,
             }
-
             if row.get("svs_findings_json"):
                 try:
                     findings = json.loads(row["svs_findings_json"])
-
                     svs_data["during_run"] = findings.get("during_run")
-
                     svs_data["post_run"] = findings.get("ai_review")
-
                 except Exception:
                     pass
 
         result["svs"] = svs_data
 
     return cast(dict, result)
-
-
-@mcp.tool()
-def run_status(run_id: str) -> dict:
-    """Dashboard view of a run (Alias for inspect_run with summary view).
-
-    Use this for a quick progress check, health status, and metric trends.
-    """
-    return inspect_run(run_id, include=["dashboard"])  # type: ignore[no-any-return]
-
-
-@mcp.tool()
-def get_run_provenance(run_id: str) -> dict:
-    """Get the exact data provenance for a stage run.
-
-    Answers: "Which input versions produced this output?"
-    Recursively traces back to source datasets.
-    """
-    db = _get_db()
-    workspace_manager = _get_workspace_manager()
-    from goldfish.lineage.manager import LineageManager
-
-    lineage_mgr = LineageManager(db=db, workspace_manager=workspace_manager)
-    return lineage_mgr.get_run_provenance(run_id)
 
 
 @mcp.tool()
