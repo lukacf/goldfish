@@ -6,7 +6,7 @@ Extracted from server.py for better organization.
 import logging
 
 from goldfish.lineage.manager import LineageManager
-from goldfish.server import (
+from goldfish.server_core import (
     _get_db,
     _get_workspace_manager,
     mcp,

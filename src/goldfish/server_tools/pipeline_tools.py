@@ -22,7 +22,8 @@ from goldfish.pipeline.parser import (
     PipelineNotFoundError,
     PipelineValidationError,
 )
-from goldfish.server import (
+from goldfish.server_core import (
+    _get_config,
     _get_pipeline_manager,
     _get_workspace_manager,
     mcp,
@@ -104,7 +105,7 @@ def validate_pipeline(workspace: str, pipeline: str | None = None) -> ValidatePi
         raise WorkspaceNotFoundError(f"Workspace not found: {workspace}")
 
     try:
-        errors = pipeline_manager.validate_pipeline(workspace, pipeline)
+        errors = pipeline_manager.validate_pipeline(workspace, pipeline, config=_get_config())
         return ValidatePipelineResponse(
             workspace=workspace,
             valid=len(errors) == 0,

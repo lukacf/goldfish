@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from goldfish.config import AuditConfig, GoldfishConfig, JobsConfig, StateMdConfig
+from goldfish.config import AuditConfig, GCEConfig, GoldfishConfig, JobsConfig, StateMdConfig
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError
 from goldfish.workspace.manager import WorkspaceManager
@@ -166,9 +166,9 @@ class TestStageConfigValidation:
 stages:
   - name: train
     inputs:
-      data: {type: dataset, dataset: test_data}
+      data: {type: dataset, dataset: test_data, schema: null}
     outputs:
-      model: {type: directory}
+      model: {type: directory, schema: null}
 """)
 
         # Create configs dir and a stage config with typo
@@ -228,7 +228,7 @@ name: validate-test
 stages:
   - name: missing_module
     outputs:
-      data: {type: npy}
+      data: {type: npy, schema: null}
 """)
 
         manager.save_version(slot="w1", message="Add pipeline for validate test")
@@ -267,7 +267,7 @@ name: yaml-error-test
 stages:
   - name: train
     outputs:
-      model: {type: directory}
+      model: {type: directory, schema: null}
 """)
 
         # Create configs dir with invalid YAML
@@ -317,7 +317,7 @@ key: value
 stages:
   - name: train
     outputs:
-      model: {type: directory}
+      model: {type: directory, schema: null}
 """)
 
         manager.save_version(slot="w1", message="Add invalid pipeline")
@@ -355,7 +355,7 @@ name: valid-test
 stages:
   - name: train
     outputs:
-      model: {type: directory}
+      model: {type: directory, schema: null}
 """)
 
         # Create valid config
@@ -410,9 +410,9 @@ name: dry-run-test
 stages:
   - name: train
     inputs:
-      data: {type: dataset, dataset: nonexistent_dataset}
+      data: {type: dataset, dataset: nonexistent_dataset, schema: null}
     outputs:
-      model: {type: directory}
+      model: {type: directory, schema: null}
 """)
 
         # Create module
@@ -459,7 +459,7 @@ name: dry-run-module-test
 stages:
   - name: preprocess
     outputs:
-      features: {type: npy}
+      features: {type: npy, schema: null}
 """)
 
         manager.save_version(slot="w1", message="Add pipeline without module for test")
@@ -478,6 +478,203 @@ stages:
         assert any("module not found" in err for err in result["validation_errors"])
 
         manager.hibernate(slot="w1", reason="Done with module detection test")
+
+    def test_dry_run_catches_dataset_schema_mismatch(self, e2e_setup):
+        """dry_run should catch dataset metadata/schema mismatch."""
+        from goldfish.pipeline.validator import validate_pipeline_run
+
+        manager = e2e_setup["manager"]
+        project_root = e2e_setup["project_root"]
+        db = e2e_setup["db"]
+        config = e2e_setup["config"]
+
+        manager.create_workspace(
+            name="dry-run-schema", goal="Test schema mismatch", reason="Testing schema mismatch detection"
+        )
+        manager.mount(workspace="dry-run-schema", slot="w1", reason="Testing schema mismatch detection")
+
+        slot_path = project_root / "workspaces" / "w1"
+
+        (slot_path / "pipeline.yaml").write_text("""
+name: dry-run-schema-test
+stages:
+  - name: train
+    inputs:
+      data:
+        type: dataset
+        dataset: tokens_v1
+        schema:
+          kind: tensor
+          arrays:
+            X_train:
+              shape: [10, 3]
+              dtype: float32
+          primary_array: X_train
+    outputs:
+      model: {type: directory, schema: null}
+""")
+
+        (slot_path / "modules").mkdir(exist_ok=True)
+        (slot_path / "modules" / "train.py").write_text("# Train module")
+
+        metadata = {
+            "schema_version": 1,
+            "description": "Dataset metadata for dry run schema test.",
+            "source": {
+                "format": "npz",
+                "size_bytes": 1234,
+                "created_at": "2025-12-24T12:00:00Z",
+            },
+            "schema": {
+                "kind": "tensor",
+                "arrays": {
+                    "price_changes_train": {
+                        "role": "features",
+                        "shape": [10, 3],
+                        "dtype": "float32",
+                        "feature_names": {"kind": "list", "values": ["f1", "f2", "f3"]},
+                    }
+                },
+                "primary_array": "price_changes_train",
+            },
+        }
+
+        db.create_source(
+            source_id="tokens_v1",
+            name="tokens_v1",
+            gcs_location="gs://bucket/datasets/tokens_v1",
+            created_by="external",
+            description="Tokens dataset",
+            size_bytes=1234,
+            metadata=metadata,
+        )
+
+        manager.save_version(slot="w1", message="Add pipeline for schema mismatch test")
+
+        result = validate_pipeline_run(
+            workspace_name="dry-run-schema",
+            workspace_path=slot_path,
+            db=db,
+            stages=["train"],
+            pipeline_name=None,
+            inputs_override={},
+            config=config,
+        )
+
+        assert result["valid"] is False
+        assert any("schema mismatch" in err or "missing array" in err for err in result["validation_errors"])
+
+        manager.hibernate(slot="w1", reason="Done with schema mismatch test")
+
+    def test_dry_run_warns_on_missing_config_and_profile_for_gce(self, e2e_setup):
+        """dry_run should warn when config/profile missing for GCE backend."""
+        from goldfish.pipeline.validator import validate_pipeline_run
+
+        manager = e2e_setup["manager"]
+        project_root = e2e_setup["project_root"]
+        db = e2e_setup["db"]
+        base_config = e2e_setup["config"]
+
+        # Create workspace with pipeline
+        manager.create_workspace(
+            name="dry-run-gce-missing-config", goal="Test missing config warning", reason="Testing config warning"
+        )
+        manager.mount(workspace="dry-run-gce-missing-config", slot="w1", reason="Testing missing config warning")
+
+        slot_path = project_root / "workspaces" / "w1"
+
+        # Pipeline with a single stage
+        (slot_path / "pipeline.yaml").write_text("""
+name: dry-run-gce-missing-config
+stages:
+  - name: train
+    outputs:
+      model: {type: directory, schema: null}
+""")
+
+        # Module exists, but NO configs/train.yaml
+        (slot_path / "modules").mkdir(exist_ok=True)
+        (slot_path / "modules" / "train.py").write_text("# Train module")
+
+        # GCE config to enable profile sanity checks
+        gce_config = base_config.model_copy(
+            update={
+                "jobs": JobsConfig(backend="gce", experiments_dir="experiments"),
+                "gce": GCEConfig(project_id="test-project", zones=["us-central1-a"]),
+            }
+        )
+
+        result = validate_pipeline_run(
+            workspace_name="dry-run-gce-missing-config",
+            workspace_path=slot_path,
+            db=db,
+            stages=None,
+            pipeline_name=None,
+            inputs_override={},
+            config=gce_config,
+        )
+
+        assert result["valid"] is True
+        assert any("config file not found" in w for w in result["warnings"])
+        assert any("no compute.profile" in w for w in result["warnings"])
+
+        manager.hibernate(slot="w1", reason="Done with GCE missing config warning test")
+
+    def test_dry_run_errors_on_unknown_profile_for_gce(self, e2e_setup):
+        """dry_run should error when compute.profile is unknown for GCE backend."""
+        from goldfish.pipeline.validator import validate_pipeline_run
+
+        manager = e2e_setup["manager"]
+        project_root = e2e_setup["project_root"]
+        db = e2e_setup["db"]
+        base_config = e2e_setup["config"]
+
+        manager.create_workspace(
+            name="dry-run-gce-unknown-profile", goal="Test unknown profile", reason="Testing profile error"
+        )
+        manager.mount(workspace="dry-run-gce-unknown-profile", slot="w1", reason="Testing profile error")
+
+        slot_path = project_root / "workspaces" / "w1"
+
+        (slot_path / "pipeline.yaml").write_text("""
+name: dry-run-gce-unknown-profile
+stages:
+  - name: train
+    outputs:
+      model: {type: directory, schema: null}
+""")
+
+        (slot_path / "modules").mkdir(exist_ok=True)
+        (slot_path / "modules" / "train.py").write_text("# Train module")
+
+        # Invalid profile specified
+        (slot_path / "configs").mkdir(exist_ok=True)
+        (slot_path / "configs" / "train.yaml").write_text("""
+compute:
+  profile: unknown-profile
+""")
+
+        gce_config = base_config.model_copy(
+            update={
+                "jobs": JobsConfig(backend="gce", experiments_dir="experiments"),
+                "gce": GCEConfig(project_id="test-project", zones=["us-central1-a"]),
+            }
+        )
+
+        result = validate_pipeline_run(
+            workspace_name="dry-run-gce-unknown-profile",
+            workspace_path=slot_path,
+            db=db,
+            stages=None,
+            pipeline_name=None,
+            inputs_override={},
+            config=gce_config,
+        )
+
+        assert result["valid"] is False
+        assert any("compute.profile" in err for err in result["validation_errors"])
+
+        manager.hibernate(slot="w1", reason="Done with unknown profile test")
 
     def test_dry_run_valid_pipeline(self, e2e_setup):
         """dry_run returns valid=True for correct pipeline."""
@@ -501,12 +698,12 @@ name: dry-run-valid-test
 stages:
   - name: generate
     outputs:
-      data: {type: npy}
+      data: {type: npy, schema: null}
   - name: process
     inputs:
-      data: {type: npy, from_stage: generate}
+      data: {type: npy, from_stage: generate, schema: null}
     outputs:
-      result: {type: csv}
+      result: {type: csv, schema: null}
 """)
 
         # Create modules

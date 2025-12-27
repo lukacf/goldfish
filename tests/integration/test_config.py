@@ -37,8 +37,9 @@ class TestGoldfishConfigLoad:
         assert config.workspaces_dir == "workspaces"
         assert config.slots == ["w1", "w2", "w3"]
 
-    def test_load_with_all_options(self, temp_dir):
+    def test_load_with_all_options(self, temp_dir, monkeypatch):
         """Should load config with all optional fields."""
+        _patch_gcs_client(monkeypatch)
         config_data = {
             "project_name": "full-project",
             "dev_repo_path": "../dev",
@@ -207,8 +208,9 @@ class TestGoldfishConfigSave:
 
         assert "gcs" not in loaded
 
-    def test_save_roundtrip(self, temp_dir):
+    def test_save_roundtrip(self, temp_dir, monkeypatch):
         """Should be able to save and reload config."""
+        _patch_gcs_client(monkeypatch)
         original = GoldfishConfig(
             project_name="roundtrip-test",
             dev_repo_path="../dev",
@@ -225,6 +227,20 @@ class TestGoldfishConfigSave:
         assert loaded.slots == original.slots
         assert loaded.gcs.bucket == original.gcs.bucket
         assert loaded.invariants == original.invariants
+
+
+def _patch_gcs_client(monkeypatch) -> None:
+    import google.cloud.storage as storage
+
+    class _DummyBucket:
+        def exists(self) -> bool:
+            return True
+
+    class _DummyClient:
+        def bucket(self, _name: str) -> _DummyBucket:
+            return _DummyBucket()
+
+    monkeypatch.setattr(storage, "Client", lambda: _DummyClient())
 
 
 class TestGenerateDefaultConfig:

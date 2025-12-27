@@ -134,3 +134,51 @@ class ArtifactRow(TypedDict):
     path: str
     backend_url: str | None
     created_at: str
+
+
+class SVSReviewRow(TypedDict):
+    """Row from the svs_reviews table.
+
+    Stores AI review results for pre-run, during-run, and post-run validation.
+    """
+
+    id: int
+    stage_run_id: str
+    signal_name: str | None
+    review_type: str  # 'pre_run' | 'during_run' | 'post_run'
+    model_used: str
+    prompt_hash: str
+    stats_json: str | None  # JSON string
+    response_text: str | None
+    parsed_findings: str | None  # JSON string
+    decision: str  # 'approved' | 'blocked' | 'warned'
+    policy_overrides: str | None  # JSON string
+    reviewed_at: str
+    duration_ms: int | None
+
+
+class FailurePatternRow(TypedDict):
+    """Row from the failure_patterns table.
+
+    Tracks self-learning failure detection heuristics with approval workflow.
+    """
+
+    id: str  # UUID
+    symptom: str
+    root_cause: str
+    detection_heuristic: str
+    prevention: str
+    severity: str | None  # CRITICAL, HIGH, MEDIUM, LOW
+    stage_type: str | None
+    source_run_id: str | None
+    source_workspace: str | None
+    created_at: str
+    last_seen_at: str | None
+    occurrence_count: int
+    status: str  # pending, approved, rejected, archived
+    confidence: str | None  # HIGH, MEDIUM, LOW
+    approved_at: str | None
+    approved_by: str | None
+    rejection_reason: str | None
+    manually_edited: bool
+    enabled: bool

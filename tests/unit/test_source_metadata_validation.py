@@ -201,7 +201,33 @@ def test_validate_source_metadata_rejects_none_feature_names_for_nonscalar() -> 
         "reason": "invalid for non-scalar",
     }
 
-    with pytest.raises(InvalidSourceMetadataError, match="scalar"):
+    with pytest.raises(InvalidSourceMetadataError, match="Use 'sequence' for non-scalar"):
+        validate_source_metadata(metadata)
+
+
+def test_validate_source_metadata_accepts_sequence_for_nonscalar() -> None:
+    """feature_names.sequence should be allowed for non-scalar unnamed data."""
+    metadata = _valid_npy_metadata()
+    metadata["schema"]["arrays"]["features"]["shape"] = [1000]
+    metadata["schema"]["arrays"]["features"]["feature_names"] = {
+        "kind": "sequence",
+        "reason": "raw audio waveform",
+        "interval": 0.001,
+        "unit": "seconds",
+    }
+    validate_source_metadata(metadata)
+
+
+def test_validate_source_metadata_rejects_sequence_for_scalar() -> None:
+    """feature_names.sequence should be rejected for scalar shapes."""
+    metadata = _valid_npy_metadata()
+    metadata["schema"]["arrays"]["features"]["shape"] = []
+    metadata["schema"]["arrays"]["features"]["feature_names"] = {
+        "kind": "sequence",
+        "reason": "invalid for scalar",
+    }
+
+    with pytest.raises(InvalidSourceMetadataError, match="only allowed for non-scalar"):
         validate_source_metadata(metadata)
 
 

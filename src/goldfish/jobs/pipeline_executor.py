@@ -52,7 +52,7 @@ class PipelineExecutor:
         """On startup, reschedule any pipelines that were mid-flight."""
         with self.db._conn() as conn:
             rows = conn.execute(
-                "SELECT id, workspace_name, pipeline_name, config_override, inputs_override FROM pipeline_runs WHERE status IN (?, ?)",
+                "SELECT id, workspace_name, pipeline_name, config_override, inputs_override, reason_json FROM pipeline_runs WHERE status IN (?, ?)",
                 (PipelineStatus.PENDING, PipelineStatus.RUNNING),
             ).fetchall()
             for row in rows:
@@ -65,9 +65,12 @@ class PipelineExecutor:
                 if (counts["pending"] or 0) > 0 or (counts["running"] or 0) > 0:
                     workspace = row["workspace_name"]
                     pipeline_name = row["pipeline_name"]
-                    # Load persisted overrides
+                    # Load persisted overrides and reason
                     config_override = json.loads(row["config_override"]) if row["config_override"] else None
                     inputs_override = json.loads(row["inputs_override"]) if row["inputs_override"] else None
+                    reason_structured = json.loads(row["reason_json"]) if row["reason_json"] else None
+                    # Extract string reason from structured reason (for backwards compatibility)
+                    reason = reason_structured.get("description") if reason_structured else None
                     # submit worker to continue processing
                     self._pool.submit(
                         self._worker_loop,
@@ -76,7 +79,8 @@ class PipelineExecutor:
                         pipeline_name,
                         config_override,
                         inputs_override,
-                        None,  # reason
+                        reason,
+                        reason_structured,
                     )
 
     def run_stages(
@@ -189,8 +193,8 @@ class PipelineExecutor:
         with self.db._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO pipeline_runs (id, workspace_name, pipeline_name, status, started_at, config_override, inputs_override)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO pipeline_runs (id, workspace_name, pipeline_name, status, started_at, config_override, inputs_override, reason_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pipeline_run_id,
@@ -200,6 +204,7 @@ class PipelineExecutor:
                     now,
                     json.dumps(safe_config_override) if safe_config_override else None,
                     json.dumps(safe_inputs_override) if safe_inputs_override else None,
+                    json.dumps(reason_dict) if reason_dict else None,
                 ),
             )
 
@@ -231,6 +236,7 @@ class PipelineExecutor:
             safe_config_override,
             safe_inputs_override,
             reason,
+            reason_dict,
         )
 
         # Build queued stage info for immediate feedback
@@ -294,7 +300,16 @@ class PipelineExecutor:
                             f"Register it first, or provide inputs_override."
                         )
 
-    def _worker_loop(self, pipeline_run_id, workspace, pipeline_name, config_override, inputs_override, reason):
+    def _worker_loop(
+        self,
+        pipeline_run_id: str,
+        workspace: str,
+        pipeline_name: str | None,
+        config_override: dict | None,
+        inputs_override: dict | None,
+        reason: str | None,
+        reason_structured: dict | None = None,
+    ) -> None:
         self._logger.info("Worker started for pipeline %s workspace=%s", pipeline_run_id, workspace)
         start_time = time.time()
         error_count = 0
@@ -307,7 +322,13 @@ class PipelineExecutor:
                     self._logger.info("Pipeline %s completed", pipeline_run_id)
                     break
                 self._process_pipeline_queue_once(
-                    pipeline_run_id, workspace, pipeline_name, config_override, inputs_override, reason
+                    pipeline_run_id,
+                    workspace,
+                    pipeline_name,
+                    config_override,
+                    inputs_override,
+                    reason,
+                    reason_structured,
                 )
                 error_count = 0
             except Exception as e:
@@ -426,6 +447,7 @@ class PipelineExecutor:
         config_override: dict | None,
         inputs_override: dict | None,
         reason: str | None,
+        reason_structured: dict | None = None,
     ) -> list[StageRunInfo]:
         launched: list[StageRunInfo] = []
         now = datetime.now(UTC)
@@ -587,6 +609,7 @@ class PipelineExecutor:
                     config_override=stage_config,
                     inputs_override=stage_inputs,
                     reason=reason,
+                    reason_structured=reason_structured,
                 )
                 launched.append(stage_run)
                 # Update queue with the stage_run_id for status tracking

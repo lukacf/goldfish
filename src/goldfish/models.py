@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -467,12 +467,15 @@ class SignalDef(BaseModel):
     format: str | None = None  # Override format detection
     artifact: bool | None = False  # Mark output as artifact for auto-registration
     metadata: dict | None = None  # Optional source metadata for outputs
+    output_schema: dict | None = Field(default=None, alias="schema")  # SVS schema
+    schema_present: bool = Field(default=False, exclude=True)
 
 
 class StageDef(BaseModel):
     """Definition of a pipeline stage."""
 
     name: str
+    config_schema: dict[str, Any] | None = None
     inputs: dict[str, SignalDef] = Field(default_factory=dict)
     outputs: dict[str, SignalDef] = Field(default_factory=dict)
 
@@ -576,6 +579,8 @@ class GetRunResponse(BaseModel):
     inputs: dict
     outputs: list
     config: dict
+    reason: dict | None = None
+    svs: dict | None = None
 
 
 class CancelRunResponse(BaseModel):

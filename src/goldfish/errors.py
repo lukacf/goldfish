@@ -109,6 +109,15 @@ class DatabaseError(GoldfishError):
         super().__init__(message, details)
 
 
+class ConfigParamNotFoundError(GoldfishError):
+    """Config parameter referenced in schema but not found in merged config."""
+
+    def __init__(self, param: str, available: list[str] | None = None):
+        message = f"Config parameter '{param}' not found in stage config"
+        details = {"param": param, "available": available or []}
+        super().__init__(message, details)
+
+
 # Git error translation - never let Claude see git terminology
 GIT_ERROR_TRANSLATIONS = {
     "already exists": "already exists",

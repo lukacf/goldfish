@@ -23,9 +23,10 @@ from goldfish.models import (
     RegisterSourceResponse,
     SourceInfo,
     SourceLineage,
+    StageRunStatus,
     UpdateSourceMetadataResponse,
 )
-from goldfish.server import (
+from goldfish.server_core import (
     _get_config,
     _get_dataset_registry,
     _get_db,
@@ -466,19 +467,29 @@ def promote_artifact(
     validate_source_metadata(metadata)
 
     # Check job exists and completed
-    job = db.get_job(job_id)
-    if job is None:
-        raise JobNotFoundError(f"Job not found: {job_id}")
+    artifact_uri: str | None = None
+    if job_id.startswith("stage-"):
+        stage_run = db.get_stage_run(job_id)
+        if stage_run is None:
+            raise JobNotFoundError(f"Stage run not found: {job_id}")
 
-    if job["status"] != JobStatus.COMPLETED:
-        raise GoldfishError(f"Job {job_id} has not completed (status: {job['status']})")
+        if stage_run["status"] != StageRunStatus.COMPLETED:
+            raise GoldfishError(f"Stage run {job_id} has not completed (status: {stage_run['status']})")
+        artifact_uri = stage_run.get("artifact_uri")
+    else:
+        job = db.get_job(job_id)
+        if job is None:
+            raise JobNotFoundError(f"Job not found: {job_id}")
+
+        if job["status"] != JobStatus.COMPLETED:
+            raise GoldfishError(f"Job {job_id} has not completed (status: {job['status']})")
+        artifact_uri = job.get("artifact_uri")
 
     if db.source_exists(source_name):
         raise SourceAlreadyExistsError(f"Source '{source_name}' already exists")
 
     try:
         # Get artifact location (reference, no copy)
-        artifact_uri = job.get("artifact_uri")
         if not artifact_uri:
             raise GoldfishError(f"Job {job_id} has no artifact URI")
 
