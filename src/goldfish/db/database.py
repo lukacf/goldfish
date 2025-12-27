@@ -3353,6 +3353,55 @@ class Database:
 
             return [cast(MetricsSummaryRow, dict(row)) for row in rows]
 
+    def get_metrics_trends(
+        self,
+        stage_run_id: str,
+        metric_names: list[str] | None = None,
+    ) -> dict[str, list[float]]:
+        """Get the two most recent values for each metric to calculate trends.
+
+        Args:
+            stage_run_id: Stage run ID to filter by
+            metric_names: Optional list of metric names to filter by
+
+        Returns:
+            Dict mapping metric name to list of values [prev, last] or [last]
+        """
+        with self._conn() as conn:
+            query = """
+                WITH RankedMetrics AS (
+                    SELECT
+                        name,
+                        value,
+                        ROW_NUMBER() OVER (PARTITION BY name ORDER BY timestamp DESC, id DESC) as rank
+                    FROM run_metrics
+                    WHERE stage_run_id = ?
+            """
+            params: list[Any] = [stage_run_id]
+
+            if metric_names:
+                query += " AND name IN ({})".format(",".join(["?"] * len(metric_names)))
+                params.extend(metric_names)
+
+            query += """
+                )
+                SELECT name, value
+                FROM RankedMetrics
+                WHERE rank <= 2
+                ORDER BY name, rank DESC
+            """
+
+            rows = conn.execute(query, params).fetchall()
+
+            trends: dict[str, list[float]] = {}
+            for row in rows:
+                name = row["name"]
+                if name not in trends:
+                    trends[name] = []
+                trends[name].append(row["value"])
+
+            return trends
+
     def list_metric_names(
         self,
         stage_run_id: str,
