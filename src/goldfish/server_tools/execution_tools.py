@@ -246,19 +246,47 @@ def get_run(run_id: str) -> dict:
         Dict with stage_run info, inputs, outputs, config, and complete error message
     """
     db = _get_db()
-    # Refresh status from backend
-    _get_stage_executor().refresh_status_once(run_id)
+    # Refresh status from backend and sync live SVS findings (best-effort)
+    executor = _get_stage_executor()
+    executor.refresh_status_once(run_id)
+    executor.sync_svs_if_running(run_id)
 
     row = db.get_stage_run(run_id)
     if not row:
         raise GoldfishError(f"Run not found: {run_id}")
 
     # Use truncate_error=False to get full error message
+    reason = json.loads(row["reason_json"]) if row.get("reason_json") else None
+    preflight_errors = json.loads(row["preflight_errors_json"]) if row.get("preflight_errors_json") else []
+    preflight_warnings = json.loads(row["preflight_warnings_json"]) if row.get("preflight_warnings_json") else []
+
+    svs_data = None
+    if preflight_errors or preflight_warnings or row.get("svs_findings_json"):
+        svs_data = {
+            "preflight": {
+                "errors": preflight_errors,
+                "warnings": preflight_warnings,
+            },
+            "during_run": None,
+            "post_run": None,
+            "stats": None,
+        }
+        if row.get("svs_findings_json"):
+            try:
+                findings = json.loads(row["svs_findings_json"])
+                svs_data["during_run"] = findings.get("during_run")
+                svs_data["post_run"] = findings.get("ai_review")
+                svs_data["stats"] = findings.get("stats")
+            except json.JSONDecodeError:
+                svs_data["post_run"] = {"decision": "warned", "findings": ["SVS findings JSON invalid"]}
+
     result: dict[str, Any] = GetRunResponse(
         stage_run=stage_run_dict_to_info(row, truncate_error=False),
         inputs=json.loads(row["inputs_json"]) if row.get("inputs_json") else {},
         outputs=json.loads(row["outputs_json"]) if row.get("outputs_json") else [],
         config=json.loads(row["config_json"]) if row.get("config_json") else {},
+        reason=reason,
+        svs=svs_data,
     ).model_dump(mode="json")
     return result
 

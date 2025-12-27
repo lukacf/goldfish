@@ -10,6 +10,7 @@ import yaml
 
 from goldfish.db.database import Database
 from goldfish.errors import ConfigParamNotFoundError
+from goldfish.infra.profiles import ProfileNotFoundError, ProfileResolver, ProfileValidationError
 from goldfish.pipeline.parser import PipelineNotFoundError, PipelineParser
 from goldfish.svs.contract import (
     merge_stage_config,
@@ -31,6 +32,7 @@ def validate_pipeline_run(
     pipeline_name: str | None,
     inputs_override: dict,
     config: Optional["GoldfishConfig"] = None,
+    config_override: dict | None = None,
 ) -> dict:
     """Validate a pipeline run without actually launching.
 
@@ -118,6 +120,8 @@ def validate_pipeline_run(
                     yaml.safe_load(f)
             except yaml.YAMLError as e:
                 errors.append(f"Stage '{stage_name}': config YAML error - {e}")
+        else:
+            warnings.append(f"Stage '{stage_name}': config file not found at configs/{stage_name}.yaml")
 
         # 2b. SVS Contract Validation (if SVS enabled)
         if config and config.svs.enabled:
@@ -125,7 +129,7 @@ def validate_pipeline_run(
             merged_config = merge_stage_config(
                 stage_name=stage_name,
                 workspace_path=workspace_path,
-                runtime_overrides=None,  # No overrides in dry-run
+                runtime_overrides=config_override,  # Apply runtime overrides if provided
             )
 
             # Convert Pydantic model to dict for SVS contract validator
@@ -138,6 +142,27 @@ def validate_pipeline_run(
             contract_errors = validate_stage_contracts(stage_def_dict, merged_config)
             for err in contract_errors:
                 errors.append(f"Stage '{stage_name}' contract: {err}")
+
+        # 2c. GCE profile sanity checks
+        if config and config.jobs.backend == "gce":
+            merged_config = merge_stage_config(
+                stage_name=stage_name,
+                workspace_path=workspace_path,
+                runtime_overrides=config_override,
+            )
+            compute = merged_config.get("compute", {}) if isinstance(merged_config, dict) else {}
+            profile_name = compute.get("profile") if isinstance(compute, dict) else None
+            if not profile_name:
+                warnings.append(
+                    f"Stage '{stage_name}': no compute.profile set; GCE will use default machine_type n1-standard-4"
+                )
+            else:
+                profile_overrides = config.gce.effective_profile_overrides if config.gce else None
+                resolver = ProfileResolver(profile_overrides=profile_overrides)
+                try:
+                    resolver.resolve(profile_name)
+                except (ProfileNotFoundError, ProfileValidationError) as e:
+                    errors.append(f"Stage '{stage_name}': compute.profile '{profile_name}' invalid - {e}")
 
         # Check inputs
         for input_name, input_def in stage_def.inputs.items():
@@ -156,7 +181,7 @@ def validate_pipeline_run(
                         merged_config = merge_stage_config(
                             stage_name=stage_name,
                             workspace_path=workspace_path,
-                            runtime_overrides=None,
+                            runtime_overrides=config_override,
                         )
                         try:
                             resolved_schema = resolve_config_params(input_def.output_schema, merged_config)

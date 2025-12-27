@@ -31,6 +31,8 @@ except Exception:
     _StatsJob = None
     _HAS_STATS = False
 _WARNED_MISSING_STATS = False
+_WARNED_NULL_SCHEMA_INPUTS: set[str] = set()
+_WARNED_NULL_SCHEMA_OUTPUTS: set[str] = set()
 
 # Heartbeat configuration
 HEARTBEAT_DIR = ".goldfish"
@@ -96,6 +98,15 @@ def load_input(name: str, format: str | None = None) -> Any:
 
     if not input_config:
         raise ValueError(f"Input '{name}' not defined in stage config")
+
+    # Schema is required; null schema emits a warning (non-blocking)
+    if "schema" in input_config and input_config.get("schema") is None:
+        if name not in _WARNED_NULL_SCHEMA_INPUTS:
+            logger.warning(
+                "Input '%s': schema is null; contract validation skipped (recommended to define schema).",
+                name,
+            )
+            _WARNED_NULL_SCHEMA_INPUTS.add(name)
 
     # Check for custom loader
     if "loader" in input_config:
@@ -190,6 +201,13 @@ def save_output(name: str, data: Any, artifact: bool = False):
 
     # Enforce output schema contract (SVS law) when provided
     schema = output_config.get("schema")
+    if schema is None:
+        if name not in _WARNED_NULL_SCHEMA_OUTPUTS:
+            logger.warning(
+                "Output '%s': schema is null; contract validation skipped (recommended to define schema).",
+                name,
+            )
+            _WARNED_NULL_SCHEMA_OUTPUTS.add(name)
     if schema:
         if isinstance(data, Path):
             raise GoldfishError(f"Output '{name}' schema validation requires in-memory data, got Path")

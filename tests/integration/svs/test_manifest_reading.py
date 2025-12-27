@@ -77,6 +77,33 @@ class TestReadSVSManifests:
         assert result["ai_review"]["decision"] == "warned"
         assert "WARNING: Low entropy" in result["ai_review"]["findings"][0]
 
+    def test_reads_during_run_history(self, outputs_dir: Path) -> None:
+        """Should expose during-run history from svs_findings.json."""
+        from goldfish.svs.manifest import read_svs_manifests
+
+        findings_path = outputs_dir / ".goldfish" / "svs_findings.json"
+        findings_data = {
+            "version": 1,
+            "decision": "warned",
+            "findings": ["WARN: [during_run] metric_health at step 10 - NaN detected"],
+            "history": [
+                {
+                    "phase": "during_run",
+                    "severity": "WARN",
+                    "check": "metric_health",
+                    "summary": "NaN detected",
+                    "step": 10,
+                    "timestamp": "2025-01-01T00:00:00Z",
+                }
+            ],
+        }
+        findings_path.write_text(json.dumps(findings_data))
+
+        result = read_svs_manifests(outputs_dir)
+
+        assert result["during_run"]["decision"] == "warned"
+        assert result["during_run"]["history"][0]["check"] == "metric_health"
+
     def test_findings_stats_override_base_stats(self, outputs_dir: Path) -> None:
         """Findings manifest stats should override base stats manifest."""
         from goldfish.svs.manifest import read_svs_manifests

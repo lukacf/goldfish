@@ -172,6 +172,8 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     config_json TEXT,                 -- Effective config used
     inputs_json TEXT,                 -- Resolved inputs (URI + ref)
     reason_json TEXT,                 -- Structured RunReason (description, hypothesis, approach, etc.)
+    preflight_errors_json TEXT,       -- JSON list of preflight validation errors
+    preflight_warnings_json TEXT,     -- JSON list of preflight validation warnings
     backend_type TEXT,                -- local | gce
     backend_handle TEXT,              -- container_id or instance_name for cancel/log lookup
     error TEXT,
@@ -201,7 +203,8 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     completed_at TEXT,
     error TEXT,
     config_override TEXT,             -- JSON: per-stage config overrides
-    inputs_override TEXT              -- JSON: per-stage input overrides
+    inputs_override TEXT,             -- JSON: per-stage input overrides
+    reason_json TEXT                  -- JSON: structured RunReason (description, hypothesis, etc.)
 );
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_workspace ON pipeline_runs(workspace_name);

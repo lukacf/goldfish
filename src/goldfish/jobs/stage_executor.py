@@ -39,6 +39,7 @@ from goldfish.models import (
     StageRunStatus,
 )
 from goldfish.pipeline.manager import PipelineManager
+from goldfish.pipeline.validator import validate_pipeline_run
 from goldfish.svs.contract import resolve_config_params, validate_input_schema_against_metadata
 from goldfish.svs.manifest import read_svs_manifests
 from goldfish.svs.post_run import run_post_run_review
@@ -145,6 +146,8 @@ class StageExecutor:
         # Live metrics sync state (per run)
         self._metrics_sync_state: dict[str, _MetricsSyncState] = {}
         self._metrics_sync_lock = threading.Lock()
+        self._svs_sync_state: dict[str, float] = {}
+        self._svs_sync_lock = threading.Lock()
         self._gcs_client: GCSClient | None = None
         self._gcs_client_lock = threading.Lock()
 
@@ -201,6 +204,42 @@ class StageExecutor:
         pipeline = self.pipeline_manager.get_pipeline(workspace, pipeline_name)
         stage = self._find_stage(pipeline, stage_name)
 
+        # 2a. Establish stage_run_id early for preflight tracking
+        stage_run_precreated = stage_run_id is not None
+        if stage_run_id is None:
+            stage_run_id = f"stage-{uuid4().hex[:8]}"
+
+        # 2b. SVS preflight validation (always run when SVS enabled)
+        preflight_errors: list[str] = []
+        preflight_warnings: list[str] = []
+        if self.config.svs.enabled:
+            workspace_path = self.workspace_manager.get_workspace_path(workspace)
+            preflight = validate_pipeline_run(
+                workspace_name=workspace,
+                workspace_path=workspace_path,
+                db=self.db,
+                stages=[stage_name],
+                pipeline_name=pipeline_name,
+                inputs_override=inputs_override or {},
+                config=self.config,
+                config_override=config_override,
+            )
+            preflight_errors = list(preflight.get("validation_errors", []))
+            preflight_warnings = list(preflight.get("warnings", []))
+
+            if preflight_errors:
+                return self._create_preflight_blocked_stage_run(
+                    stage_run_id=stage_run_id,
+                    workspace=workspace,
+                    version=version,
+                    stage_name=stage_name,
+                    errors=preflight_errors,
+                    warnings=preflight_warnings,
+                    reason_structured=reason_structured,
+                    pipeline_run_id=pipeline_run_id,
+                    pipeline_name=pipeline_name,
+                )
+
         # 3. Pre-run review (if enabled and not skipped)
         review: RunReview | None = None
         if self.config.pre_run_review.enabled and not skip_review:
@@ -213,9 +252,8 @@ class StageExecutor:
             )
             if review and review.has_blocking_issues:
                 # Create failed stage run record with review
-                blocked_stage_run_id = stage_run_id or f"stage-{uuid4().hex[:8]}"
                 return self._create_blocked_stage_run(
-                    stage_run_id=blocked_stage_run_id,
+                    stage_run_id=stage_run_id,
                     workspace=workspace,
                     version=version,
                     stage_name=stage_name,
@@ -224,6 +262,7 @@ class StageExecutor:
                     reason_structured=reason_structured,
                     pipeline_run_id=pipeline_run_id,
                     pipeline_name=pipeline_name,
+                    preflight_warnings=preflight_warnings,
                 )
 
         # 3b. Load stage config and apply override
@@ -244,9 +283,8 @@ class StageExecutor:
         # 3. Resolve inputs (with source metadata for lineage tracking)
         inputs, input_sources = self._resolve_inputs(workspace, stage, inputs_override)
 
-        # 4. Generate or use provided stage run ID
-        if stage_run_id is None:
-            stage_run_id = f"stage-{uuid4().hex[:8]}"
+        # 4. Create or update stage run record
+        if not stage_run_precreated:
             # Create new stage run record
             self._create_stage_run_record(
                 stage_run_id=stage_run_id,
@@ -264,6 +302,8 @@ class StageExecutor:
                 profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
                 hints=stage_config.get("hints"),
                 config=stage_config,
+                preflight_errors=preflight_errors,
+                preflight_warnings=preflight_warnings,
             )
         else:
             # Update existing queued stage run record with resolved values
@@ -276,6 +316,8 @@ class StageExecutor:
                 config=stage_config,
                 profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
                 hints=stage_config.get("hints"),
+                preflight_warnings=preflight_warnings,
+                preflight_errors=preflight_errors,
             )
 
         try:
@@ -303,20 +345,21 @@ class StageExecutor:
                     "location": inputs.get(input_name, ""),
                     "format": input_def.format or input_def.type,  # Use format override or fall back to type
                     "type": input_def.type,
+                    "schema": resolve_config_params(input_def.output_schema, stage_config)
+                    if input_def.output_schema is not None
+                    else None,
                 }
 
             # Build output config with format info
             output_configs = {}
             for output_name, output_def in stage.outputs.items():
-                output_config = {
+                output_configs[output_name] = {
                     "format": output_def.format or output_def.type,
                     "type": output_def.type,
+                    "schema": resolve_config_params(output_def.output_schema, stage_config)
+                    if output_def.output_schema is not None
+                    else None,
                 }
-                if output_def.output_schema:
-                    # Resolve config params in schema before passing to container
-                    resolved_schema = resolve_config_params(output_def.output_schema, stage_config)
-                    output_config["schema"] = resolved_schema
-                output_configs[output_name] = output_config
 
             self._launch_container(
                 stage_run_id,
@@ -582,6 +625,8 @@ class StageExecutor:
         profile: str | None,
         hints: dict | None,
         config: dict | None,
+        preflight_errors: list[str] | None = None,
+        preflight_warnings: list[str] | None = None,
     ):
         """Create stage run record in database with input lineage tracking."""
         self.db.create_stage_run(
@@ -596,6 +641,8 @@ class StageExecutor:
             reason=reason_structured,
             profile=profile,
             hints=hints,
+            preflight_errors=preflight_errors,
+            preflight_warnings=preflight_warnings,
             backend_type=self.config.jobs.backend,
             backend_handle=stage_run_id,  # provisional handle for cancel/logs
         )
@@ -629,6 +676,8 @@ class StageExecutor:
         config: dict | None,
         profile: str | None,
         hints: dict | None,
+        preflight_warnings: list[str] | None = None,
+        preflight_errors: list[str] | None = None,
     ):
         """Update a queued stage run record with resolved values.
 
@@ -663,6 +712,14 @@ class StageExecutor:
 
         # Link stage run to its stage version
         self.db.update_stage_run_version(stage_run_id, stage_version_id)
+
+        # Persist preflight results if provided
+        if preflight_warnings is not None or preflight_errors is not None:
+            self.db.update_stage_run_preflight(
+                stage_run_id=stage_run_id,
+                errors=preflight_errors,
+                warnings=preflight_warnings,
+            )
 
         # Record input signals in lineage with source tracking
         for input_name, storage_location in inputs.items():
@@ -953,11 +1010,12 @@ class StageExecutor:
                 stats_json=json.dumps(stats),
             )
 
-        # 2. Update stage_run with findings (stats + AI review)
-        if manifest_data.get("ai_review") or manifest_data.get("stats"):
+        # 2. Update stage_run with findings (stats + AI review + during-run history)
+        if manifest_data.get("ai_review") or manifest_data.get("stats") or manifest_data.get("during_run"):
             findings = {
                 "stats": manifest_data.get("stats"),
                 "ai_review": manifest_data.get("ai_review"),
+                "during_run": manifest_data.get("during_run"),
             }
             self.db.update_stage_run_svs_findings(
                 stage_run_id=stage_run_id,
@@ -1286,6 +1344,75 @@ class StageExecutor:
             state.sync_lock.release()
         return warnings
 
+    def sync_svs_if_running(self, stage_run_id: str) -> None:
+        """Best-effort SVS findings sync for running stages."""
+        if not self.config.svs.enabled:
+            return
+
+        row = self.db.get_stage_run(stage_run_id)
+        if not row or row.get("status") != StageRunStatus.RUNNING:
+            with self._svs_sync_lock:
+                self._svs_sync_state.pop(stage_run_id, None)
+            return
+
+        now = time.time()
+        interval = float(os.environ.get("GOLDFISH_SVS_LIVE_SYNC_INTERVAL", "10"))
+        with self._svs_sync_lock:
+            last_sync = self._svs_sync_state.get(stage_run_id, 0.0)
+            if now - last_sync < interval:
+                return
+            self._svs_sync_state[stage_run_id] = now
+
+        backend = row.get("backend_type") or self.config.jobs.backend
+        outputs_dir: Path | None = None
+
+        if backend == "local":
+            outputs_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs"
+            if not outputs_dir.exists():
+                return
+        elif backend == "gce":
+            if not self.config.gcs or not self.config.gcs.bucket:
+                return
+
+            import tempfile
+
+            temp_dir = Path(tempfile.gettempdir()) / "goldfish_svs_live" / stage_run_id
+            temp_dir.mkdir(parents=True, exist_ok=True)
+
+            bucket = self.config.gcs.bucket
+            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+            gcs_prefix = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/outputs/.goldfish/"
+
+            findings_dest = temp_dir / ".goldfish" / "svs_findings.json"
+            stats_dest = temp_dir / ".goldfish" / "svs_stats.json"
+            self._download_metrics_from_gcs(gcs_prefix + "svs_findings.json", findings_dest)
+            self._download_metrics_from_gcs(gcs_prefix + "svs_stats.json", stats_dest)
+            outputs_dir = temp_dir
+        else:
+            return
+
+        manifest = read_svs_manifests(outputs_dir)
+        if not manifest.get("during_run") and not manifest.get("ai_review") and not manifest.get("stats"):
+            return
+
+        merged: dict[str, Any] = {}
+        existing_raw = row.get("svs_findings_json")
+        if existing_raw:
+            try:
+                merged = json.loads(existing_raw)
+            except json.JSONDecodeError:
+                merged = {}
+
+        if manifest.get("stats") is not None:
+            merged["stats"] = manifest.get("stats")
+        if manifest.get("ai_review") is not None:
+            merged["ai_review"] = manifest.get("ai_review")
+        if manifest.get("during_run") is not None:
+            merged["during_run"] = manifest.get("during_run")
+
+        if merged:
+            self.db.update_stage_run_svs_findings(stage_run_id, json.dumps(merged))
+
     def _build_docker_image(self, workspace: str, version: str, profile_name: str | None = None) -> str:
         """Build Docker image for this run.
 
@@ -1412,13 +1539,19 @@ class StageExecutor:
         config_path = workspace_path / "configs" / f"{stage_name}.yaml"
 
         if not config_path.exists():
+            logger.warning(
+                "Stage '%s': config file not found at %s (default config will be used)",
+                stage_name,
+                config_path,
+            )
             return {}
 
         try:
             with open(config_path) as f:
                 return yaml.safe_load(f) or {}
-        except Exception:
+        except Exception as e:
             # Log warning but don't fail - config is optional
+            logger.warning("Stage '%s': failed to parse config %s: %s", stage_name, config_path, e)
             return {}
 
     def _resolve_profile_from_config(self, stage_config: dict) -> dict | None:
@@ -2056,6 +2189,7 @@ echo "Stage completed successfully"
         reason_structured: dict | None,
         pipeline_run_id: str | None,
         pipeline_name: str | None,
+        preflight_warnings: list[str] | None = None,
     ) -> StageRunInfo:
         """Create a failed stage run record for a blocked review.
 
@@ -2096,6 +2230,7 @@ echo "Stage completed successfully"
             pipeline_run_id=pipeline_run_id,
             pipeline_name=pipeline_name,
             reason=reason_structured,
+            preflight_warnings=preflight_warnings,
             backend_type=None,  # Not executed - blocked by review
         )
 
@@ -2107,6 +2242,57 @@ echo "Stage completed successfully"
         )
 
         logger.warning(f"Stage run {stage_run_id} blocked by pre-run review: {review.summary}")
+
+        return StageRunInfo(
+            stage_run_id=stage_run_id,
+            pipeline_run_id=pipeline_run_id,
+            workspace=workspace,
+            pipeline=pipeline_name,
+            version=version,
+            stage=stage_name,
+            status=StageRunStatus.FAILED,
+            started_at=parse_optional_datetime(now),
+            completed_at=parse_optional_datetime(now),
+            error=error_msg,
+        )
+
+    def _create_preflight_blocked_stage_run(
+        self,
+        stage_run_id: str,
+        workspace: str,
+        version: str,
+        stage_name: str,
+        errors: list[str],
+        warnings: list[str],
+        reason_structured: dict | None,
+        pipeline_run_id: str | None,
+        pipeline_name: str | None,
+    ) -> StageRunInfo:
+        """Create a failed stage run record for preflight validation errors."""
+        now = datetime.now(UTC).isoformat()
+        error_msg = "Preflight validation failed: " + "; ".join(errors[:5])
+
+        self.db.create_stage_run(
+            stage_run_id=stage_run_id,
+            workspace_name=workspace,
+            version=version,
+            stage_name=stage_name,
+            pipeline_run_id=pipeline_run_id,
+            pipeline_name=pipeline_name,
+            reason=reason_structured,
+            preflight_errors=errors,
+            preflight_warnings=warnings,
+            backend_type=None,  # Not executed - blocked by preflight
+        )
+
+        self.db.update_stage_run_status(
+            stage_run_id=stage_run_id,
+            status=StageRunStatus.FAILED,
+            completed_at=now,
+            error=error_msg,
+        )
+
+        logger.warning("Stage run %s blocked by preflight validation: %s", stage_run_id, error_msg)
 
         return StageRunInfo(
             stage_run_id=stage_run_id,

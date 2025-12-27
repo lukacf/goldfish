@@ -468,6 +468,7 @@ class SignalDef(BaseModel):
     artifact: bool | None = False  # Mark output as artifact for auto-registration
     metadata: dict | None = None  # Optional source metadata for outputs
     output_schema: dict | None = Field(default=None, alias="schema")  # SVS schema
+    schema_present: bool = Field(default=False, exclude=True)
 
 
 class StageDef(BaseModel):
@@ -578,6 +579,8 @@ class GetRunResponse(BaseModel):
     inputs: dict
     outputs: list
     config: dict
+    reason: dict | None = None
+    svs: dict | None = None
 
 
 class CancelRunResponse(BaseModel):

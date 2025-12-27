@@ -74,7 +74,8 @@ class TestPatternExtractionOnFailure:
         """Should call extract_failure_pattern when stage fails and auto_learn_failures enabled."""
         stage_run_id = _create_failed_stage_run(test_db)
 
-        # Enable auto_learn_failures (opt-in feature)
+        # Enable SVS and auto_learn_failures (both required for pattern extraction)
+        executor_with_mocks.config.svs.enabled = True
         executor_with_mocks.config.svs.auto_learn_failures = True
 
         with (

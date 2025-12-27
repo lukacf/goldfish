@@ -96,6 +96,8 @@ class Database:
                 ("config_json", "TEXT"),
                 ("inputs_json", "TEXT"),
                 ("reason_json", "TEXT"),  # Structured RunReason
+                ("preflight_errors_json", "TEXT"),  # Preflight validation errors
+                ("preflight_warnings_json", "TEXT"),  # Preflight validation warnings
                 ("backend_type", "TEXT"),
                 ("backend_handle", "TEXT"),
                 ("artifact_uri", "TEXT"),
@@ -111,6 +113,9 @@ class Database:
             ],
             "run_metrics_summary": [
                 ("last_timestamp", "TEXT"),
+            ],
+            "pipeline_runs": [
+                ("reason_json", "TEXT"),  # Structured RunReason for async pipelines
             ],
         }
 
@@ -1259,6 +1264,8 @@ class Database:
         config: dict | None = None,
         inputs: dict | None = None,
         reason: dict | None = None,
+        preflight_errors: list[str] | None = None,
+        preflight_warnings: list[str] | None = None,
         backend_type: str | None = None,
         backend_handle: str | None = None,
     ) -> None:
@@ -1277,6 +1284,8 @@ class Database:
             config: Full merged config (base + overrides, computed by caller)
             inputs: Resolved input URIs/refs
             reason: Structured RunReason dict (description, hypothesis, approach, etc.)
+            preflight_errors: Preflight validation errors (if any)
+            preflight_warnings: Preflight validation warnings (if any)
             backend_type: local|gce
             backend_handle: container_id or instance_name for cancel/logs
         """
@@ -1285,6 +1294,8 @@ class Database:
         hints_json = json.dumps(hints) if hints else None
         inputs_json = json.dumps(inputs) if inputs else None
         reason_json = json.dumps(reason) if reason else None
+        preflight_errors_json = json.dumps(preflight_errors) if preflight_errors else None
+        preflight_warnings_json = json.dumps(preflight_warnings) if preflight_warnings else None
 
         with self._conn() as conn:
             # Compute attempt_num: increment after a successful run, otherwise continue current attempt
@@ -1294,9 +1305,10 @@ class Database:
                 """
                 INSERT INTO stage_runs
                 (id, job_id, pipeline_run_id, workspace_name, pipeline_name, version, stage_name, status,
-                 started_at, profile, hints_json, config_json, inputs_json, reason_json, backend_type, backend_handle,
-                 attempt_num)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 started_at, profile, hints_json, config_json, inputs_json, reason_json,
+                 preflight_errors_json, preflight_warnings_json,
+                 backend_type, backend_handle, attempt_num)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stage_run_id,
@@ -1313,6 +1325,8 @@ class Database:
                     config_json,
                     inputs_json,
                     reason_json,
+                    preflight_errors_json,
+                    preflight_warnings_json,
                     backend_type,
                     backend_handle,
                     attempt_num,
@@ -3176,6 +3190,42 @@ class Database:
 
         params.append(pattern_id)
         query = f"UPDATE failure_patterns SET {', '.join(fields)} WHERE id = ?"
+
+        with self._conn() as conn:
+            cursor = conn.execute(query, params)
+            return cursor.rowcount > 0
+
+    def update_stage_run_preflight(
+        self,
+        stage_run_id: str,
+        errors: list[str] | None = None,
+        warnings: list[str] | None = None,
+    ) -> bool:
+        """Update preflight validation results for a stage run.
+
+        Args:
+            stage_run_id: Stage run ID
+            errors: Preflight validation errors (list of strings)
+            warnings: Preflight validation warnings (list of strings)
+
+        Returns:
+            True if updated, False if not found
+        """
+        fields: list[str] = []
+        params: list = []
+
+        if errors is not None:
+            fields.append("preflight_errors_json = ?")
+            params.append(json.dumps(errors))
+        if warnings is not None:
+            fields.append("preflight_warnings_json = ?")
+            params.append(json.dumps(warnings))
+
+        if not fields:
+            return False
+
+        params.append(stage_run_id)
+        query = f"UPDATE stage_runs SET {', '.join(fields)} WHERE id = ?"
 
         with self._conn() as conn:
             cursor = conn.execute(query, params)

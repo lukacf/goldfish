@@ -66,26 +66,32 @@ class PipelineParser:
                 for stage_data in data["stages"]:
 
                     def _normalize_input_item(item, index: int = 0):
+                        schema_present = False
                         if isinstance(item, str):
                             item = {"name": item, "type": "dataset"}
                         elif isinstance(item, dict):
+                            schema_present = "schema" in item
                             item = dict(item)  # Copy to avoid mutation
                             if "type" not in item:
                                 item["type"] = "dataset"
                             if "name" not in item:
                                 # Generate name from dataset or use index
                                 item["name"] = item.get("dataset", f"input_{index}")
+                        item["schema_present"] = schema_present
                         return item
 
                     def _normalize_output_item(item, index: int = 0):
+                        schema_present = False
                         if isinstance(item, str):
                             item = {"name": item, "type": "directory"}
                         elif isinstance(item, dict):
+                            schema_present = "schema" in item
                             item = dict(item)  # Copy to avoid mutation
                             if "type" not in item:
                                 item["type"] = "directory"
                             if "name" not in item:
                                 item["name"] = f"output_{index}"
+                        item["schema_present"] = schema_present
                         return item
 
                     # Convert input/output dicts to SignalDef objects
@@ -140,7 +146,23 @@ class PipelineParser:
                             }
                         else:
                             stage_data["outputs"] = {}
-                    stages.append(StageDef(**stage_data))
+                    stage_def = StageDef(**stage_data)
+
+                    # Enforce schema tag presence (schema can be null, but tag must exist)
+                    for input_name, input_def in stage_def.inputs.items():
+                        if not input_def.schema_present:
+                            raise PipelineValidationError(
+                                f"Stage '{stage_def.name}' input '{input_name}': schema is required "
+                                "(use schema: null to opt out)."
+                            )
+                    for output_name, output_def in stage_def.outputs.items():
+                        if not output_def.schema_present:
+                            raise PipelineValidationError(
+                                f"Stage '{stage_def.name}' output '{output_name}': schema is required "
+                                "(use schema: null to opt out)."
+                            )
+
+                    stages.append(stage_def)
                 data["stages"] = stages
 
             return PipelineDef(**data)
@@ -302,13 +324,21 @@ class PipelineParser:
 
             if stage.inputs:
                 stage_data["inputs"] = {
-                    name: {k: v for k, v in sig.model_dump().items() if v is not None and k != "name"}
+                    name: {
+                        k: v
+                        for k, v in sig.model_dump(exclude_none=False, by_alias=True).items()
+                        if k not in {"name", "schema_present"}
+                    }
                     for name, sig in stage.inputs.items()
                 }
 
             if stage.outputs:
                 stage_data["outputs"] = {
-                    name: {k: v for k, v in sig.model_dump().items() if v is not None and k != "name"}
+                    name: {
+                        k: v
+                        for k, v in sig.model_dump(exclude_none=False, by_alias=True).items()
+                        if k not in {"name", "schema_present"}
+                    }
                     for name, sig in stage.outputs.items()
                 }
 

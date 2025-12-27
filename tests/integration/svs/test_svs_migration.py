@@ -99,7 +99,7 @@ class TestFreshDatabaseSVSSchema:
         assert required_columns.issubset(columns)
 
     def test_stage_runs_has_svs_findings_json(self, temp_dir):
-        """stage_runs table should have svs_findings_json column."""
+        """stage_runs table should have SVS-related columns."""
         db_path = temp_dir / "test.db"
         db = Database(db_path)
 
@@ -107,6 +107,8 @@ class TestFreshDatabaseSVSSchema:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(stage_runs)").fetchall()}
 
         assert "svs_findings_json" in columns
+        assert "preflight_errors_json" in columns
+        assert "preflight_warnings_json" in columns
 
     def test_signal_lineage_has_stats_json(self, temp_dir):
         """signal_lineage table should have stats_json column."""

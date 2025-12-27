@@ -35,7 +35,7 @@ Goldfish manages ML experiments through **six key abstractions**:
 - User workspace is plain files (no `.git`) - all versioning handled internally
 - Every `run()` creates a version BEFORE execution (100% provenance)
 - Signals connect stages with typed data flow
-- **Pre-run review**: Claude reviews your code before execution to catch bugs early
+- **Pre-run review**: The configured SVS agent reviews your code before execution to catch bugs early
 
 ## Workflow Decision Tree
 
@@ -199,7 +199,7 @@ Missing or invalid metadata is rejected.
        ├── preprocess.py
        └── train.py
 
-   **Note:** Stages automatically use pre-built images with common ML libraries
+**Note:** Stages automatically use pre-built images with common ML libraries
    (numpy, pandas, torch, scikit-learn, etc.). No setup required.
 
 4. Run the pipeline (with structured reason for experiment tracking)
@@ -219,7 +219,8 @@ Missing or invalid metadata is rejected.
 
 ### Pre-Run Review (Automatic)
 
-Before executing any stage, Goldfish automatically reviews your code using Claude:
+Before executing any stage, Goldfish automatically reviews your code using the configured SVS agent provider
+(default: Claude Code CLI):
 
 ```
 run("w1", stages=["train"])
@@ -234,12 +235,20 @@ Example review output:
   ⚠ WARNING: No validation split - training on full data
 ```
 
+**Recovery from BLOCKED status:**
+1. **Analyze findings**: Read the review output carefully. `BLOCKED` indicates high-confidence errors.
+2. **Fix the code/config**: Edit the offending files in your slot (e.g., `workspaces/w1/modules/train.py`).
+3. **Re-run**: Call `run()` again. Goldfish will perform a new review.
+4. **Dispute (rare)**: If you are certain a finding is a false positive, you can briefly explain why in the `reason` field of your next `run()` call, though the mechanistic block remains until fixed.
+5. **Disable (if permitted)**: If the validation system is being too restrictive, you can disable it in `goldfish.yaml` via `svs.enabled: false`.
+
 **Benefits:**
 - Catches bugs before wasting GPU time
 - Reviews use experiment context (diff, hypothesis, config)
 - Fails open (approves on timeout/error) to avoid blocking
-- Can be disabled: `pre_run_review.enabled: false` in goldfish.yaml
-```
+- Can be disabled: `svs.ai_pre_run_enabled: false` (or `svs.enabled: false`) in goldfish.yaml
+
+Requires the selected CLI to be installed and authenticated on the host.
 
 ### 2. Pipeline Structure
 
@@ -252,9 +261,17 @@ stages:
       raw_data:
         type: dataset
         dataset: sales_v1      # Registered dataset
+        schema:
+          kind: tabular
+          columns: ["price", "volume"]
+          dtypes: {price: "float32", volume: "int64"}
     outputs:
       features:
         type: npy              # NumPy array output
+        schema:                # Required contract (use null only if unknown)
+          kind: tensor
+          shape: [null, 768]
+          dtype: float32
 
   - name: train
     inputs:
@@ -262,21 +279,32 @@ stages:
         type: npy
         from_stage: preprocess  # Consume from upstream
         signal: features
+        schema:
+          kind: tensor
+          shape: [null, 768]
+          dtype: float32
     outputs:
       model:
         type: directory         # Model checkpoint dir
+        schema: null            # Required tag; set null if unknown
 
   - name: evaluate
     inputs:
       model:
         from_stage: train
         signal: model
+        schema: null
       features:
         from_stage: preprocess
         signal: features
+        schema:
+          kind: tensor
+          shape: [null, 768]
+          dtype: float32
     outputs:
       metrics:
         type: csv
+        schema: null
 ```
 
 **Signal aliasing (important):**
@@ -308,7 +336,10 @@ if __name__ == "__main__":
     main()
 ```
 
-**Heartbeat API**: Call `heartbeat()` periodically in long-running computations to prevent the job from being terminated due to inactivity. See `references/stage_authoring.md` for details.
+**Heartbeat API**: Call `heartbeat()` periodically in long-running computations to prevent the job from being terminated due to inactivity. 
+- **Default Timeout**: 600 seconds (10 minutes).
+- **Configuration**: Increase this via `compute.heartbeat_timeout_seconds` in the stage-specific YAML config.
+- **Auto-Termination**: If the supervisor detects a stale heartbeat, it will terminate the container to free up resources.
 
 ### 4. Metrics API (Stage Code)
 
@@ -345,7 +376,7 @@ def main():
 
 **Key semantics (important):**
 - **Step consistency:** A given metric name must be logged with either `step=None` or `step=int` consistently.
-  Mixing `None` and integers for the same metric is **skipped with a warning** (no crash).
+  - **Inconsistency rule**: If you first log "loss" with `step=1`, and then log "loss" with `step=None`, the latter is **skipped** with a warning.
 - **Timestamp formats:** `timestamp` accepts ISO 8601 strings (UTC) or Unix float seconds.
   Stored and returned (via MCP tools) as ISO 8601 UTC strings.
 - **Values:** Must be numeric (bools are rejected; use 0/1). NumPy scalars are supported.
@@ -382,16 +413,19 @@ def main():
 
 ### 4.5 SVS (Schema Contracts + Output Stats)
 
-SVS is optional but core: it enforces **output contracts** and computes
-lightweight **output stats** for silent-failure detection.
+SVS is enabled by default and can be opted out. It enforces **output contracts** (shape/dtype) and computes lightweight **output stats** (entropy, null ratio, variance, etc.) for silent-failure detection.
 
-**Output contract (pipeline.yaml):**
+**Schemas are required (inputs + outputs).** Use `schema: null` only when you truly cannot define a contract.
+Goldfish will emit a non‑blocking runtime warning whenever a schema is null.
+
+**Output contract (pipeline.yaml) — required:**
 ```yaml
 stages:
   - name: preprocess
     outputs:
       features:
         type: npy
+        # Schema is required; set to null only if unknown.
         schema:
           kind: tensor
           shape: [null, 768]
@@ -412,7 +446,28 @@ outputs:
 svs:
   default_enforcement: warning  # "blocking" or "warning"
 ```
-When in `warning` mode, contract mismatches log a warning and continue.
+When in `warning` mode (default), contract mismatches log a warning but allow the run to continue. In `blocking` mode, the stage fails if the contract is violated.
+
+**Preflight warnings & errors:**
+- When SVS is enabled, a preflight validation pass runs for every stage.
+- Errors block the run; warnings are recorded and surfaced via `get_run`.
+
+**Key Semantic Checks:**
+- `entropy`: Shannon entropy of values (catches mode collapse or data corruption).
+- `null_ratio`: Fraction of NaN/None values (catches loading errors).
+- `vocab_utilization`: Fraction of vocab indices used (catches dead embeddings).
+- `unique_count`: Distinct values in sample.
+
+**Stats Storage:** Stats are recorded for every signal output in the `signal_lineage` table and can be queried via `get_outputs(run_id)`.
+
+**Live SVS sync:** `get_run(run_id)` performs a best‑effort live sync of SVS findings for running runs (throttled).
+- `GOLDFISH_SVS_LIVE_SYNC_INTERVAL` controls polling cadence in seconds (default 10).
+
+**Experimental self‑learning:**
+```yaml
+svs:
+  auto_learn_failures: false  # default: off
+```
 
 ### 5. Monitoring Runs
 
@@ -420,7 +475,7 @@ When in `warning` mode, contract mismatches log a warning and continue.
 1. List recent runs
    list_runs(workspace="lstm_baseline", status="running")
 
-2. Get run details
+2. Get run details (includes reason + SVS preflight/during/post findings)
    get_run(run_id="stage-abc123")
 
 3. Stream logs
@@ -475,6 +530,8 @@ get_run_provenance(stage_run_id="stage-abc123")
 |------|---------|----------------|
 | `run()` | Execute stages (with pre-run review) | workspace, stages, reason, wait |
 | `get_run()` | Run details | run_id |
+| `get_run_metrics()` | Query metrics + artifacts | run_id, metric_name, limit |
+| `list_metric_names()` | Discover metric names | run_id, metric_prefix |
 | `logs()` | Container logs | run_id, tail, since |
 | `cancel()` | Stop run | run_id, reason |
 | `list_runs()` | Query runs | workspace, stage, status |
@@ -601,6 +658,28 @@ After context compaction, always start with:
 status()  # Recover orientation: slots, jobs, STATE.md
 ```
 
+## Troubleshooting & Recovery
+
+### SVS Pre-Run Blocks
+If `run()` returns a `BLOCKED` status:
+1. **Examine Findings**: Read the error messages in the tool output. They pin-point specific lines and logic flaws.
+2. **Apply Fixes**: Edit the code or config in your workspace slot.
+3. **Re-run**: Simply call `run()` again.
+4. **Bypass (Caution)**: If a finding is truly a false positive, you can use `run(..., skip_review=True)` to bypass the AI review for that specific execution. Only use this if you are certain the code is safe.
+
+### Long-Running Job Failures
+- **Timeout**: If a job is terminated with `TIMEOUT`, increase the `timeout` in `goldfish.yaml` (global) or the `hints.timeout` in the stage config (per-stage).
+- **Heartbeat Stale**: If the logs show "Supervisor: Heartbeat stale", your code is not calling `heartbeat()` frequently enough. Ensure it's called at least every 10 minutes (default) or increase `compute.heartbeat_timeout_seconds` in the stage config.
+
+## Common Failure Patterns (Knowledge Base)
+
+Goldfish auto-extracts failure patterns to prevent regression. Be aware of these common ML anti-patterns:
+
+- **Silent Feature Degradation**: Picking up "junk" signals (like sine waves from a test generator) instead of real market features. Goldfish flags this via low entropy checks.
+- **Label/Token Desynchronization**: In NLP/Time-series BPE, labels must be updated when tokens are merged. Failure to do so results in silent MI gating failure.
+- **Horizon Mismatch**: Using 5-minute forward labels to mine patterns that only exist at 1Hz. Results in extremely low Mutual Information (MI).
+- **Tool Assumption Mismatch**: Feeding dense labels to a tool expecting sequence-level labels. Many tools silently fall back to "dumb" modes when input shapes don't match.
+
 ## Best Practices
 
 1. **Always provide clear goals** when creating workspaces
@@ -610,11 +689,3 @@ status()  # Recover orientation: slots, jobs, STATE.md
 5. **Check status()** after context recovery
 6. **Use log_thought()** to document decisions
 7. **Monitor long runs** with logs() and list_runs()
-
-## Resources
-
-Project docs in this repo:
-
-- `docs/svs.md` - SVS design + enforcement semantics
-- `docs/specs/datasource-metadata.md` - Mandatory metadata schema for sources/datasets
-- `docs/a_real_project_issues_example.md` - Real-world failure examples used in SVS

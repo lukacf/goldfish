@@ -38,18 +38,22 @@ stages:
     inputs:
       raw_data:
         type: dataset
+        schema: null
         dataset: eurusd_raw
     outputs:
       features:
         type: npy
+        schema: null
   - name: train
     inputs:
       features:
         from_stage: preprocess
         type: npy
+        schema: null
     outputs:
       model:
         type: directory
+        schema: null
 """)
 
         parser = PipelineParser()
@@ -66,6 +70,26 @@ stages:
         assert "features" in pipeline.stages[1].inputs
         assert pipeline.stages[1].inputs["features"].from_stage == "preprocess"
         assert pipeline.stages[1].inputs["features"].type == "npy"
+
+    def test_parse_requires_schema_tags(self, temp_dir):
+        """Should require schema tag on inputs/outputs (schema can be null)."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text("""
+name: test_pipeline
+stages:
+  - name: preprocess
+    inputs:
+      raw_data:
+        type: dataset
+        dataset: eurusd_raw
+    outputs:
+      features:
+        type: npy
+""")
+
+        parser = PipelineParser()
+        with pytest.raises(PipelineValidationError, match="schema is required"):
+            parser.parse(pipeline_yaml)
 
     def test_parse_invalid_yaml(self, temp_dir):
         """Should raise error for invalid YAML."""
@@ -183,6 +207,7 @@ stages:
         from_stage: nonexistent_stage
         signal_name: features
         type: npy
+        schema: null
 """)
 
         # Create files
@@ -211,11 +236,13 @@ stages:
     outputs:
       features:
         type: npy
+        schema: null
   - name: train
     inputs:
       features:
         from_stage: preprocess
         type: csv
+        schema: null
 """)
 
         # Create files
@@ -246,11 +273,13 @@ stages:
     outputs:
       features:
         type: npy
+        schema: null
   - name: train
     inputs:
       features:
         from_stage: preprocess
         type: npy
+        schema: null
 """)
 
         # Create files
@@ -280,12 +309,14 @@ stages:
     outputs:
       features:
         type: npy
+        schema: null
   - name: train
     inputs:
       X:
         from_stage: preprocess
         signal: features
         type: npy
+        schema: null
 """)
 
         modules_dir = temp_dir / "modules"
@@ -323,6 +354,7 @@ stages:
     outputs:
       embeddings:
         type: npy
+        schema: null
         schema:
           shape: [1000, 256, 10]
           rank: 2
@@ -353,6 +385,7 @@ stages:
     outputs:
       predictions:
         type: npy
+        schema: null
         schema:
           shape: [null, "{vocab_size}"]
           rank: 2
@@ -383,6 +416,7 @@ stages:
     outputs:
       embeddings:
         type: npy
+        schema: null
         schema:
           shape: [1000, 256]
           rank: 2
@@ -413,6 +447,7 @@ stages:
     outputs:
       predictions:
         type: npy
+        schema: null
         schema:
           shape: [null, "{vocab_size}"]
           rank: 2
@@ -445,6 +480,7 @@ stages:
     outputs:
       predictions:
         type: npy
+        schema: null
         schema:
           shape: [null, "{vocab_size}"]
           rank: 2
@@ -476,6 +512,7 @@ stages:
     outputs:
       embeddings:
         type: npy
+        schema: null
         schema:
           shape: [null, "{dim}"]
           rank: 2
@@ -485,6 +522,7 @@ stages:
         from_stage: preprocess
         signal: embeddings
         type: npy
+        schema: null
         schema:
           shape: [null, "{dim}"]
           rank: 2
@@ -517,6 +555,7 @@ stages:
     inputs:
       data:
         type: dataset
+        schema: null
         dataset: tokens_v1
         schema:
           kind: tensor
@@ -526,7 +565,7 @@ stages:
               dtype: float32
           primary_array: X_train
     outputs:
-      model: {type: directory}
+      model: {type: directory, schema: null}
 """
         )
 
@@ -614,6 +653,7 @@ stages:
     outputs:
       model:
         type: directory
+        schema: null
 """
         )
 
@@ -641,10 +681,12 @@ stages:
     config_schema:
       num_epochs:
         type: int
+        schema: null
         required: true
     outputs:
       model:
         type: directory
+        schema: null
 """
         )
 

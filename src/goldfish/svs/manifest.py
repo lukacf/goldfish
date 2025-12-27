@@ -45,6 +45,7 @@ def read_svs_manifests(outputs_dir: Path) -> dict[str, Any]:
     result: dict[str, Any] = {
         "stats": {},
         "ai_review": None,
+        "during_run": None,
         "missing": [],
         "version": None,
         "version_mismatch": False,
@@ -82,10 +83,38 @@ def read_svs_manifests(outputs_dir: Path) -> dict[str, Any]:
                 logger.warning(f"Findings manifest version mismatch: {version} != {EXPECTED_MANIFEST_VERSION}")
                 result["version_mismatch"] = True
 
-            # Extract AI review info
+            # Extract during-run history if present
+            history = data.get("history")
+            if isinstance(history, list) and history:
+                # Compute decision based on severity in history
+                severity_rank = {
+                    "BLOCK": 2,
+                    "ERROR": 2,
+                    "WARN": 1,
+                    "WARNING": 1,
+                }
+                decision = "approved"
+                for entry in history:
+                    severity = str(entry.get("severity", "")).upper()
+                    if severity_rank.get(severity, 0) == 2:
+                        decision = "blocked"
+                        break
+                    if severity_rank.get(severity, 0) == 1 and decision != "blocked":
+                        decision = "warned"
+                result["during_run"] = {
+                    "decision": decision,
+                    "history": history,
+                }
+
+            # Extract AI review info (exclude during-run findings if tagged)
+            findings_list = data.get("findings", [])
+            if isinstance(findings_list, list):
+                filtered_findings = [f for f in findings_list if "[during_run]" not in str(f)]
+            else:
+                filtered_findings = []
             result["ai_review"] = {
                 "decision": data.get("decision"),
-                "findings": data.get("findings", []),
+                "findings": filtered_findings,
                 "duration_ms": data.get("duration_ms"),
             }
 
