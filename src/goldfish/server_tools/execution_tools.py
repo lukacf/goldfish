@@ -8,7 +8,7 @@ import logging
 import os
 import threading
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from pydantic import ValidationError
 
@@ -16,15 +16,10 @@ from goldfish.errors import (
     GoldfishError,
     validate_reason,
 )
+from goldfish.infra.metadata.base import MetadataSignal
 from goldfish.jobs.conversion import stage_run_dict_to_info
 from goldfish.models import (
-    ArtifactInfo,
     CancelRunResponse,
-    GetOutputsResponse,
-    GetRunMetricsResponse,
-    GetRunResponse,
-    MetricInfo,
-    MetricSummary,
     RunReason,
     StageRunInfo,
     StageRunStatus,
@@ -32,6 +27,7 @@ from goldfish.models import (
 from goldfish.server_core import (
     _get_config,
     _get_db,
+    _get_metadata_bus,
     _get_pipeline_executor,
     _get_stage_executor,  # Used for logs, cancel, refresh
     _get_workspace_manager,
@@ -39,7 +35,6 @@ from goldfish.server_core import (
 )
 from goldfish.utils import parse_datetime
 from goldfish.validation import (
-    validate_metric_name,
     validate_stage_run_id,
     validate_workspace_name,
 )
@@ -236,59 +231,175 @@ def run(
 
 
 @mcp.tool()
-def get_run(run_id: str) -> dict:
-    """Get full details of a run: metadata, inputs, outputs, config, full error.
+def inspect_run(run_id: str, include: list[str] | None = None) -> dict:  # type: ignore[no-any-return]
+    """Get a comprehensive, synthesized view of a run.
+
+    This is the master tool for understanding run progress, results, and health.
+    It combines metadata, config, inputs/outputs, synthesized metrics (Dashboard),
+    and provenance into a single response.
+
+    For running runs, it triggers a low-latency 'Overdrive' sync to get the
+    latest data from the cloud container.
 
     Args:
-        run_id: The run ID (e.g., "stage-abc123")
+        run_id: The stage run ID (e.g., "stage-abc123")
+        include: Optional list of extra data to include. Defaults to all.
+                Options: ["dashboard", "manifest", "lineage", "svs"]
 
     Returns:
-        Dict with stage_run info, inputs, outputs, config, and complete error message
+        Dict with synthesized run data including:
+        - metadata: status, started_at, etc.
+        - dashboard: progress, health (GPU/VRAM), and metric trends (↑↓)
+        - manifest: config, inputs, outputs
+        - lineage: upstream/downstream relationships
+        - svs: semantic validation findings
     """
     db = _get_db()
-    # Refresh status from backend and sync live SVS findings (best-effort)
-    executor = _get_stage_executor()
-    executor.refresh_status_once(run_id)
-    executor.sync_svs_if_running(run_id)
+    validate_stage_run_id(run_id)
 
+    # 1. Trigger low-latency sync if running
     row = db.get_stage_run(run_id)
     if not row:
         raise GoldfishError(f"Run not found: {run_id}")
 
-    # Use truncate_error=False to get full error message
-    reason = json.loads(row["reason_json"]) if row.get("reason_json") else None
-    preflight_errors = json.loads(row["preflight_errors_json"]) if row.get("preflight_errors_json") else []
-    preflight_warnings = json.loads(row["preflight_warnings_json"]) if row.get("preflight_warnings_json") else []
+    if row["status"] == StageRunStatus.RUNNING:
+        try:
+            bus = _get_metadata_bus()
+            import uuid
 
-    svs_data = None
-    if preflight_errors or preflight_warnings or row.get("svs_findings_json"):
-        svs_data = {
-            "preflight": {
-                "errors": preflight_errors,
-                "warnings": preflight_warnings,
-            },
-            "during_run": None,
-            "post_run": None,
-            "stats": None,
+            req_id = str(uuid.uuid4())[:8]
+            sig = MetadataSignal(command="sync", request_id=req_id, payload={"run_id": run_id})
+            bus.set_signal("goldfish", sig)
+            # We don't block here to keep the tool fast, but the next call
+            # will have fresher data.
+        except Exception as e:
+            logger.debug(f"Failed to trigger sync signal: {e}")
+
+    # 2. Synthesize Dashboard (Trends + Progress)
+    dashboard = {}
+    progress = row.get("progress")
+
+    # Get trends for dashboard metrics
+    # Fallback dashboard metrics if none defined in config
+    dashboard_metrics = ["loss", "accuracy", "val_loss", "val_accuracy", "ppl"]
+
+    # Try to extract dashboard metrics from pipeline config if available
+    try:
+        run_config = json.loads(row["config_json"]) if row.get("config_json") else {}
+        if "dashboard_metrics" in run_config:
+            dashboard_metrics = run_config["dashboard_metrics"]
+    except Exception:
+        pass
+
+    metric_trends = db.get_metrics_trends(run_id, dashboard_metrics)
+    summary_rows = db.get_metrics_summary(run_id)
+    summaries = {s["name"]: s for s in summary_rows}
+
+    synthesized_metrics = {}
+    for name in dashboard_metrics:
+        if name in summaries:
+            s = summaries[name]
+            trend_vals = metric_trends.get(name, [])
+            trend = "stable"
+            if len(trend_vals) >= 2:
+                prev, last = trend_vals[0], trend_vals[1]
+                if last < prev:
+                    trend = "downward"
+                elif last > prev:
+                    trend = "upward"
+
+            synthesized_metrics[name] = {
+                "value": s["last_value"],
+                "min": s["min_value"],
+                "max": s["max_value"],
+                "count": s["count"],
+                "trend": trend,
+            }
+
+    # Extract health metrics (GPU/VRAM)
+    health = {}
+    for name, s in summaries.items():
+        if "gpu" in name.lower() or "vram" in name.lower() or "memory" in name.lower():
+            health[name] = s["last_value"]
+
+    dashboard = {
+        "progress": progress,
+        "metrics": synthesized_metrics,
+        "health": health,
+        "last_sync": row.get("last_metrics_sync_at") or row.get("started_at"),
+    }
+
+    # 3. Build full response
+    result: dict[str, Any] = {
+        "run_id": run_id,
+        "workspace": row["workspace_name"],
+        "stage": row["stage_name"],
+        "status": row["status"],
+        "started_at": row["started_at"],
+        "completed_at": row["completed_at"],
+        "dashboard": dashboard,
+    }
+
+    if not include or "manifest" in include:
+        result["manifest"] = {
+            "config": json.loads(row["config_json"]) if row.get("config_json") else {},
+            "inputs": json.loads(row["inputs_json"]) if row.get("inputs_json") else {},
+            "outputs": json.loads(row["outputs_json"]) if row.get("outputs_json") else [],
+            "reason": json.loads(row["reason_json"]) if row.get("reason_json") else None,
         }
-        if row.get("svs_findings_json"):
-            try:
-                findings = json.loads(row["svs_findings_json"])
-                svs_data["during_run"] = findings.get("during_run")
-                svs_data["post_run"] = findings.get("ai_review")
-                svs_data["stats"] = findings.get("stats")
-            except json.JSONDecodeError:
-                svs_data["post_run"] = {"decision": "warned", "findings": ["SVS findings JSON invalid"]}
 
-    result: dict[str, Any] = GetRunResponse(
-        stage_run=stage_run_dict_to_info(row, truncate_error=False),
-        inputs=json.loads(row["inputs_json"]) if row.get("inputs_json") else {},
-        outputs=json.loads(row["outputs_json"]) if row.get("outputs_json") else [],
-        config=json.loads(row["config_json"]) if row.get("config_json") else {},
-        reason=reason,
-        svs=svs_data,
-    ).model_dump(mode="json")
-    return result
+    if not include or "svs" in include:
+        svs_data = None
+
+        preflight_errors = json.loads(row["preflight_errors_json"]) if row.get("preflight_errors_json") else []
+
+        preflight_warnings = json.loads(row["preflight_warnings_json"]) if row.get("preflight_warnings_json") else []
+
+        if preflight_errors or preflight_warnings or row.get("svs_findings_json"):
+            svs_data = {
+                "preflight": {"errors": preflight_errors, "warnings": preflight_warnings},
+                "during_run": None,
+                "post_run": None,
+            }
+
+            if row.get("svs_findings_json"):
+                try:
+                    findings = json.loads(row["svs_findings_json"])
+
+                    svs_data["during_run"] = findings.get("during_run")
+
+                    svs_data["post_run"] = findings.get("ai_review")
+
+                except Exception:
+                    pass
+
+        result["svs"] = svs_data
+
+    return cast(dict, result)
+
+
+@mcp.tool()
+def run_status(run_id: str) -> dict:
+    """Dashboard view of a run (Alias for inspect_run with summary view).
+
+    Use this for a quick progress check, health status, and metric trends.
+    """
+    return inspect_run(run_id, include=["dashboard"])  # type: ignore[no-any-return]
+
+
+@mcp.tool()
+def get_run_provenance(run_id: str) -> dict:
+    """Get the exact data provenance for a stage run.
+
+    Answers: "Which input versions produced this output?"
+    Recursively traces back to source datasets.
+    """
+    db = _get_db()
+    workspace_manager = _get_workspace_manager()
+    from goldfish.lineage.manager import LineageManager
+
+    lineage_mgr = LineageManager(db=db, workspace_manager=workspace_manager)
+    return lineage_mgr.get_run_provenance(run_id)
 
 
 @mcp.tool()
@@ -615,263 +726,6 @@ def list_runs(
         if attempts:
             result["attempt_summary"] = attempts
 
-    return result
-
-
-@mcp.tool()
-def get_outputs(run_id: str) -> dict:
-    """Get outputs from a completed run.
-
-    Args:
-        run_id: The run ID
-
-    Returns:
-        Dict with run_id and outputs list
-    """
-    db = _get_db()
-    row = db.get_stage_run(run_id)
-    if not row:
-        raise GoldfishError(f"Run not found: {run_id}")
-    outputs = json.loads(row["outputs_json"]) if row.get("outputs_json") else []
-    result: dict[str, Any] = GetOutputsResponse(stage_run_id=run_id, outputs=outputs).model_dump(mode="json")
-    return result
-
-
-@mcp.tool()
-def get_run_metrics(
-    run_id: str,
-    metric_name: str | None = None,
-    limit: int | None = DEFAULT_METRICS_LIMIT,
-    offset: int = 0,
-    metric_prefix: str | None = None,
-    artifact_limit: int | None = DEFAULT_ARTIFACT_LIMIT,
-    artifact_offset: int = 0,
-    workspace: str | None = None,
-) -> dict:
-    """Get metrics and artifacts from a stage run.
-
-    Returns metrics logged during stage execution, summary statistics,
-    and artifacts. Useful for analyzing run performance and results.
-    Supports filtering and pagination for large metric sets.
-    For running runs, performs a best-effort live sync before returning.
-
-    Args:
-        run_id: The stage run ID (e.g., "stage-abc123")
-        metric_name: Optional filter by metric name (e.g., "loss")
-        limit: Optional limit on number of metrics returned (1-10000). None returns all.
-        offset: Optional offset for pagination (default 0)
-        metric_prefix: Optional prefix filter (e.g., "train/")
-        artifact_limit: Optional limit on number of artifacts returned (1-10000). None returns all.
-        artifact_offset: Optional offset for artifact pagination (default 0)
-        workspace: Optional workspace name to enforce run ownership
-
-    Returns:
-        Dict with:
-        - metrics: List of individual metric data points
-        - summary: Summary statistics (min, max, last, count) per metric
-        - artifacts: List of artifacts logged during execution
-        - total_metrics: Total count of metrics (before limit/offset)
-        - total_artifacts: Total count of artifacts (before limit/offset)
-
-    Examples:
-        # Get all metrics from a training run
-        metrics = get_run_metrics("stage-abc123")
-        print(f"Total: {metrics['total_metrics']}")
-
-        # Filter by metric name
-        loss_metrics = get_run_metrics("stage-abc123", metric_name="loss")
-
-        # Paginate large metric sets
-        page1 = get_run_metrics("stage-abc123", limit=1000, offset=0)
-        page2 = get_run_metrics("stage-abc123", limit=1000, offset=1000)
-    """
-    db = _get_db()
-
-    # Validate inputs (security: reject invalid IDs before any DB access)
-    validate_stage_run_id(run_id)
-    if metric_name is not None:
-        validate_metric_name(metric_name)
-    if metric_prefix is not None:
-        validate_metric_name(metric_prefix)
-    if metric_name is not None and metric_prefix is not None:
-        raise GoldfishError("metric_name and metric_prefix cannot be used together")
-    if workspace is not None:
-        validate_workspace_name(workspace)
-
-    # Validate parameters
-    if limit is not None and (limit < 1 or limit > 10000):
-        raise GoldfishError("limit must be 1-10000")
-    if offset < 0:
-        raise GoldfishError("offset must be >= 0")
-    if offset > MAX_METRICS_OFFSET:
-        raise GoldfishError(f"offset must be <= {MAX_METRICS_OFFSET}")
-    if artifact_limit is not None and (artifact_limit < 1 or artifact_limit > 10000):
-        raise GoldfishError("artifact_limit must be 1-10000")
-    if artifact_offset < 0:
-        raise GoldfishError("artifact_offset must be >= 0")
-    if artifact_offset > MAX_METRICS_OFFSET:
-        raise GoldfishError(f"artifact_offset must be <= {MAX_METRICS_OFFSET}")
-
-    # Verify run exists
-    row = db.get_stage_run(run_id)
-    if not row:
-        raise GoldfishError(f"Run not found: {run_id}")
-    if workspace is not None and row.get("workspace_name") != workspace:
-        raise GoldfishError(f"Run {run_id} does not belong to workspace {workspace}")
-
-    # Opportunistic live sync for running runs (best-effort, non-blocking)
-    sync_warnings: list[str] = []
-    if row.get("status") == StageRunStatus.RUNNING:
-        try:
-            sync_warnings = _get_stage_executor().sync_metrics_if_running(run_id)
-        except Exception as exc:
-            logger.debug("Live metrics sync failed for %s: %s", run_id, exc)
-            sync_warnings = ["Live metrics sync failed: unexpected error. Check server logs for details."]
-
-    # Get total count first (for pagination info) - separate query
-    total_metrics = db.count_run_metrics(run_id, metric_name=metric_name, metric_prefix=metric_prefix)
-    total_artifacts = db.count_run_artifacts(run_id)
-
-    # Get metrics with SQL-level pagination (critical for performance)
-    # This avoids loading all metrics into memory then slicing
-    if offset >= total_metrics and total_metrics > 0:
-        metric_rows = []
-    else:
-        metric_rows = db.get_run_metrics(
-            run_id,
-            metric_name=metric_name,
-            metric_prefix=metric_prefix,
-            limit=limit,
-            offset=offset,
-        )
-
-    metrics = [
-        MetricInfo(
-            name=m["name"],
-            value=m["value"],
-            step=m["step"],
-            timestamp=m["timestamp"],
-        )
-        for m in metric_rows
-    ]
-
-    # Get summary (filter pushed to SQL for efficiency)
-    summary_rows = db.get_metrics_summary(run_id, metric_name=metric_name, metric_prefix=metric_prefix)
-
-    summaries = [
-        MetricSummary(
-            name=s["name"],
-            min_value=s["min_value"],
-            max_value=s["max_value"],
-            last_value=s["last_value"],
-            count=s["count"],
-        )
-        for s in summary_rows
-    ]
-
-    # Get artifacts
-    if artifact_offset >= total_artifacts and total_artifacts > 0:
-        artifact_rows = []
-    else:
-        artifact_rows = db.get_run_artifacts(run_id, limit=artifact_limit, offset=artifact_offset)
-    artifacts = [
-        ArtifactInfo(
-            name=a["name"],
-            path=a["path"],
-            backend_url=a["backend_url"],
-            created_at=a["created_at"],
-        )
-        for a in artifact_rows
-    ]
-
-    warnings: list[str] = []
-    warnings.extend(sync_warnings)
-    if limit is None and total_metrics > UNBOUNDED_METRICS_WARNING:
-        warnings.append(f"Request returned {total_metrics} metrics. Consider using limit/offset for large runs.")
-    if artifact_limit is None and total_artifacts > UNBOUNDED_ARTIFACTS_WARNING:
-        warnings.append(
-            f"Request returned {total_artifacts} artifacts. Consider using artifact_limit/offset for large runs."
-        )
-
-    result: dict[str, Any] = GetRunMetricsResponse(
-        stage_run_id=run_id,
-        metrics=metrics,
-        summary=summaries,
-        artifacts=artifacts,
-        total_metrics=total_metrics,
-        total_artifacts=total_artifacts,
-        warnings=warnings,
-    ).model_dump(mode="json")
-
-    db.log_audit(
-        operation="get_run_metrics",
-        reason="metrics query request",
-        workspace=row.get("workspace_name"),
-        details={
-            "run_id": run_id,
-            "metric_name": metric_name,
-            "metric_prefix": metric_prefix,
-            "limit": limit,
-            "offset": offset,
-            "artifact_limit": artifact_limit,
-            "artifact_offset": artifact_offset,
-        },
-    )
-
-    return result
-
-
-@mcp.tool()
-def list_metric_names(run_id: str, metric_prefix: str | None = None, workspace: str | None = None) -> dict:
-    """List distinct metric names for a stage run.
-
-    Args:
-        run_id: The stage run ID
-        metric_prefix: Optional prefix filter (e.g., "train/")
-        workspace: Optional workspace name to enforce run ownership
-
-    Returns:
-        Dict with run_id, metric_names, and count
-    """
-    db = _get_db()
-    validate_stage_run_id(run_id)
-    if metric_prefix is not None:
-        validate_metric_name(metric_prefix)
-    if workspace is not None:
-        validate_workspace_name(workspace)
-
-    row = db.get_stage_run(run_id)
-    if not row:
-        raise GoldfishError(f"Run not found: {run_id}")
-    if workspace is not None and row.get("workspace_name") != workspace:
-        raise GoldfishError(f"Run {run_id} does not belong to workspace {workspace}")
-
-    names = db.list_metric_names(run_id, metric_prefix=metric_prefix)
-    db.log_audit(
-        operation="list_metric_names",
-        reason="metrics discovery",
-        workspace=row.get("workspace_name"),
-        details={"run_id": run_id, "metric_prefix": metric_prefix},
-    )
-    return {"run_id": run_id, "metric_names": names, "count": len(names)}
-
-
-@mcp.tool()
-def get_pipeline_status(pipeline_run_id: str) -> dict:
-    """Get detailed status of a pipeline run including queue state.
-
-    Use this to debug why a pipeline isn't progressing.
-
-    Args:
-        pipeline_run_id: The pipeline run ID (e.g., "prun-abc123")
-
-    Returns:
-        Dict with pipeline run info, queue entries, and their statuses
-    """
-    db = _get_db()
-    result = db.get_pipeline_run_status(pipeline_run_id)
-    if not result:
-        raise GoldfishError(f"Pipeline run not found: {pipeline_run_id}")
     return result
 
 

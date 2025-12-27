@@ -6,11 +6,13 @@ Uses ServerContext for dependency management instead of global variables.
 
 import logging
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from goldfish.config import GoldfishConfig
 from goldfish.context import ServerContext, set_context
 from goldfish.datasets.registry import DatasetRegistry
 from goldfish.db.database import Database
+from goldfish.infra.metadata.local import LocalMetadataBus
 from goldfish.jobs.launcher import JobLauncher
 from goldfish.jobs.pipeline_executor import PipelineExecutor
 from goldfish.jobs.stage_executor import StageExecutor
@@ -72,6 +74,7 @@ def configure_server(
     dataset_registry: DatasetRegistry,
     stage_executor,
     pipeline_executor,
+    metadata_bus=None,
 ) -> None:
     """Configure server with custom dependencies.
 
@@ -103,6 +106,7 @@ def configure_server(
         dataset_registry=dataset_registry,
         stage_executor=stage_executor,
         pipeline_executor=pipeline_executor,
+        metadata_bus=metadata_bus if metadata_bus else MagicMock(),
     )
     set_context(ctx)
 
@@ -213,6 +217,18 @@ def _init_server(project_root: Path) -> None:
     )
     pipeline_executor = PipelineExecutor(stage_executor=stage_executor, pipeline_manager=pipeline_manager, db=db)
 
+    # Initialize MetadataBus (Cloud-native or Local simulation)
+    from goldfish.infra.metadata.base import MetadataBus
+
+    metadata_bus: MetadataBus
+    if config.gce:
+        from goldfish.infra.metadata.gcp import GCPMetadataBus
+
+        metadata_bus = GCPMetadataBus()
+    else:
+        # Use a file in dev repo for local simulation
+        metadata_bus = LocalMetadataBus(dev_repo_path / ".metadata_bus.json")
+
     # Ensure worker daemon is running (spawns if needed)
     _ensure_worker_running(project_root, dev_repo_path)
 
@@ -229,91 +245,20 @@ def _init_server(project_root: Path) -> None:
         dataset_registry=dataset_registry,
         stage_executor=stage_executor,
         pipeline_executor=pipeline_executor,
+        metadata_bus=metadata_bus,
     )
     set_context(ctx)
 
 
 # ============== MCP TOOLS ==============
 # Tools are organized in separate modules for maintainability
-# These imports MUST be after mcp is defined since they use @mcp.tool() decorator
-from goldfish.server_tools.data_tools import (  # noqa: E402, F401
-    delete_source,
-    get_source,
-    get_source_lineage,
-    list_sources,
-    promote_artifact,
-    register_dataset,
-    register_source,
-    update_source_metadata,
-)
-from goldfish.server_tools.execution_tools import (  # noqa: E402, F401
-    cancel,
-    get_outputs,
-    get_run,
-    list_runs,
-    logs,
-    run,
-)
-from goldfish.server_tools.lineage_tools import (  # noqa: E402, F401
-    get_run_provenance,
-    get_version_diff,
-    get_workspace_lineage,
-)
-from goldfish.server_tools.logging_tools import (  # noqa: E402, F401
-    get_logsql_guide,
-    search_goldfish_logs,
-)
-from goldfish.server_tools.pipeline_tools import get_pipeline, update_pipeline, validate_pipeline  # noqa: E402, F401
-from goldfish.server_tools.svs_tools import (  # noqa: E402, F401
-    approve_pattern,
-    get_failure_pattern,
-    get_run_svs_findings,
-    get_svs_reviews,
-    list_failure_patterns,
-    register_svs_tools,
-    reject_pattern,
-    review_pending_patterns,
-    update_pattern,
-)
-from goldfish.server_tools.utility_tools import (  # noqa: E402, F401
-    get_audit_log,
-    initialize_project,
-    log_thought,
-    reload_config,
-    status,
-)
-
-# Explicitly register SVS MCP tools (avoid import side effects)
-register_svs_tools()
-
-# Re-export all tools for backward compatibility with existing code
-from goldfish.server_tools.workspace_tools import (  # noqa: E402, F401
-    branch_workspace,
-    checkpoint,
-    create_workspace,
-    delete_snapshot,
-    delete_workspace,
-    diff,
-    get_pruned_count,
-    get_snapshot,
-    get_workspace,
-    get_workspace_goal,
-    hibernate,
-    list_snapshots,
-    list_tags,
-    list_workspaces,
-    mount,
-    prune_before_tag,
-    prune_version,
-    prune_versions,
-    rollback,
-    save_version,
-    tag_version,
-    unprune_version,
-    unprune_versions,
-    untag_version,
-    update_workspace_goal,
-)
+# These imports register tools with the FastMCP instance
+import goldfish.server_tools.data_tools  # noqa: F401, E402
+import goldfish.server_tools.execution_tools  # noqa: F401, E402
+import goldfish.server_tools.logging_tools  # noqa: F401, E402
+import goldfish.server_tools.svs_tools  # noqa: F401, E402
+import goldfish.server_tools.utility_tools  # noqa: F401, E402
+import goldfish.server_tools.workspace_tools  # noqa: F401, E402
 
 
 def run_server(project_root: Path) -> None:

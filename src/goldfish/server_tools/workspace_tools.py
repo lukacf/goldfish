@@ -4,9 +4,7 @@ Extracted from server.py for better organization.
 """
 
 import logging
-import warnings
-from datetime import datetime
-from typing import Any, cast
+from typing import Any
 
 from goldfish.errors import (
     GoldfishError,
@@ -15,24 +13,17 @@ from goldfish.errors import (
 )
 from goldfish.lineage.manager import LineageManager
 from goldfish.models import (
-    CheckpointResponse,
     CreateWorkspaceResponse,
-    DeleteSnapshotResponse,
     DeleteWorkspaceResponse,
     DiffResponse,
     HibernateResponse,
-    ListSnapshotsResponse,
     MountResponse,
     RollbackResponse,
-    SaveVersionResponse,
-    SnapshotInfo,
-    UpdateWorkspaceGoalResponse,
-    WorkspaceGoalResponse,
-    WorkspaceInfo,
 )
 from goldfish.server_core import (
     _get_config,
     _get_db,
+    _get_pipeline_manager,
     _get_state_manager,
     _get_state_md,
     _get_workspace_manager,
@@ -40,7 +31,6 @@ from goldfish.server_core import (
 )
 from goldfish.validation import (
     validate_slot_name,
-    validate_snapshot_id,
     validate_version,
     validate_workspace_name,
 )
@@ -107,6 +97,148 @@ def hibernate(slot: str, reason: str) -> HibernateResponse:
 
 
 @mcp.tool()
+def status() -> dict:
+    """Get a global summary of the project state.
+
+    Returns:
+        - slots: Which workspaces are mounted where
+        - active_jobs: Currently running stages/pipelines
+        - source_count: Total registered data sources
+        - recent_audit: Last 5 state-changing operations
+        - state_md: The current content of STATE.md
+    """
+    config = _get_config()
+    db = _get_db()
+    workspace_manager = _get_workspace_manager()
+
+    slots = workspace_manager.get_all_slots()
+    active_jobs_raw = db.get_active_jobs()
+    from goldfish.jobs.conversion import job_dict_to_info
+
+    active_jobs = [job_dict_to_info(j, db) for j in active_jobs_raw]
+    source_count = db.count_sources()
+    audit_entries = db.get_recent_audit(limit=5)
+    state_md = _get_state_md()
+
+    return {
+        "project_name": config.project_name,
+        "slots": slots,
+        "active_jobs": active_jobs,
+        "source_count": source_count,
+        "recent_audit": [
+            {"op": e["operation"], "reason": e["reason"], "ts": e["timestamp"][:19]} for e in audit_entries
+        ],
+        "state_md": state_md,
+    }
+
+
+@mcp.tool()
+def inspect_workspace(name: str) -> dict:
+    """Get a comprehensive view of a workspace.
+
+    Combines metadata, lineage (parent/branches), goal, and pipeline definition.
+
+    Args:
+        name: Workspace name or slot (e.g., "baseline" or "w1")
+    """
+    db = _get_db()
+    workspace_manager = _get_workspace_manager()
+
+    # Resolve slot
+    workspace_name = workspace_manager.get_workspace_for_slot(name) or name
+    validate_workspace_name(workspace_name)
+
+    # 1. Basic Info & Goal
+    ws_info = workspace_manager.get_workspace(workspace_name)
+    goal = db.get_workspace_goal(workspace_name)
+
+    # 2. Lineage (History and Branches)
+    lineage_mgr = LineageManager(db=db, workspace_manager=workspace_manager)
+    lineage = lineage_mgr.get_workspace_lineage(workspace_name)
+
+    # 3. Pipeline Info
+    pipeline_manager = _get_pipeline_manager()
+    try:
+        pipeline_def = pipeline_manager.get_pipeline(workspace_name)
+    except Exception:
+        pipeline_def = None
+
+    return {
+        "name": workspace_name,
+        "goal": goal,
+        "status": ws_info.status,
+        "slot": ws_info.slot,
+        "lineage": lineage,
+        "pipeline": pipeline_def,
+        "tags": db.list_tags(workspace_name),
+    }
+
+
+@mcp.tool()
+def manage_versions(
+    workspace: str,
+    action: str,
+    version: str | None = None,
+    tag: str | None = None,
+    reason: str | None = None,
+    from_version: str | None = None,
+    to_version: str | None = None,
+) -> dict:
+    """Unified tool for version tagging, pruning, and listing.
+
+    Args:
+        workspace: Workspace name
+        action: "list", "tag", "untag", "prune", "unprune"
+        version: Target version (e.g., "v5")
+        tag: Tag name for tag/untag actions
+        reason: Why performing this action (for prune)
+        from_version / to_version: Range for bulk pruning
+    """
+    db = _get_db()
+    validate_workspace_name(workspace)
+    config = _get_config()
+
+    if action == "list":
+        versions = db.list_versions(workspace, include_pruned=True)
+        return {"workspace": workspace, "versions": versions}
+
+    elif action == "tag":
+        if not version or not tag:
+            raise GoldfishError("version and tag are required for action='tag'")
+        tag_res = db.create_tag(workspace, version, tag)
+        return {"success": True, "tag": tag_res}
+
+    elif action == "untag":
+        if not tag:
+            raise GoldfishError("tag is required for action='untag'")
+        db.delete_tag(workspace, tag)
+        return {"success": True, "removed_tag": tag}
+
+    elif action == "prune":
+        if not reason:
+            raise GoldfishError("reason is required for pruning")
+        validate_reason(reason, config.audit.min_reason_length)
+        prune_res: Any
+        if from_version and to_version:
+            prune_res = db.prune_versions(workspace, from_version, to_version, reason)
+        elif version:
+            prune_res = db.prune_version(workspace, version, reason)
+        else:
+            raise GoldfishError("version or range (from/to) required for pruning")
+        return {"success": True, "result": prune_res}
+
+    elif action == "unprune":
+        unprune_res: Any
+        if from_version and to_version:
+            unprune_res = db.unprune_versions(workspace, from_version, to_version)
+        elif version:
+            unprune_res = db.unprune_version(workspace, version)
+        return {"success": True, "result": unprune_res}
+
+    raise GoldfishError(f"Unknown action: {action}")
+
+
+@mcp.tool()
 def create_workspace(name: str, goal: str, reason: str) -> CreateWorkspaceResponse:
     """Create a new workspace from main.
 
@@ -136,30 +268,6 @@ def create_workspace(name: str, goal: str, reason: str) -> CreateWorkspaceRespon
     except Exception as e:
         logger.error("create_workspace() failed", extra={"workspace": name, "error": str(e)})
         raise
-
-
-@mcp.tool()
-def list_workspaces() -> list[WorkspaceInfo]:
-    """List all workspaces (active and hibernated).
-
-    Shows which workspaces are currently mounted and where.
-    """
-    workspace_manager = _get_workspace_manager()
-
-    return workspace_manager.list_workspaces()
-
-
-@mcp.tool()
-def get_workspace(name: str) -> WorkspaceInfo:
-    """Get detailed information about a specific workspace.
-
-    Args:
-        name: Name of the workspace to look up
-    """
-    workspace_manager = _get_workspace_manager()
-    validate_workspace_name(name)
-
-    return workspace_manager.get_workspace(name)
 
 
 @mcp.tool()
@@ -238,72 +346,10 @@ def delete_workspace(workspace: str, reason: str) -> DeleteWorkspaceResponse:
 
 
 @mcp.tool()
-def save_version(slot: str, message: str) -> SaveVersionResponse:
-    """Create a version of the current slot state.
-
-    Args:
-        slot: Slot to save version from (w1, w2, or w3)
-        message: Describe what this version represents (min 15 chars)
-
-    Creates an immutable version that can be used for rollback and branching.
-    The version (v1, v2, etc.) is the primary identifier.
-    """
-    logger.info("save_version() called", extra={"slot": slot})
-
-    config = _get_config()
-    workspace_manager = _get_workspace_manager()
-
-    # Validate inputs
-    validate_slot_name(slot, config.slots)
-
-    try:
-        result = workspace_manager.save_version(slot, message)
-        logger.info("save_version() succeeded", extra={"slot": slot, "version": result.version})
-        return result
-    except Exception as e:
-        logger.error("save_version() failed", extra={"slot": slot, "error": str(e)})
-        raise
-
-
-@mcp.tool()
-def checkpoint(slot: str, message: str) -> CheckpointResponse:
-    """[DEPRECATED] Create a snapshot of the current slot state.
-
-    Use save_version() instead. checkpoint() will be removed in a future version.
-
-    Args:
-        slot: Slot to checkpoint (w1, w2, or w3)
-        message: Describe what this checkpoint represents (min 15 chars)
-
-    Creates an immutable snapshot that jobs can run against.
-    """
-    warnings.warn(
-        "checkpoint() is deprecated, use save_version() instead",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    logger.info("checkpoint() called (deprecated)", extra={"slot": slot})
-
-    config = _get_config()
-    workspace_manager = _get_workspace_manager()
-
-    # Validate inputs
-    validate_slot_name(slot, config.slots)
-
-    try:
-        result = workspace_manager.checkpoint(slot, message)
-        logger.info("checkpoint() succeeded", extra={"slot": slot, "snapshot_id": result.snapshot_id})
-        return result
-    except Exception as e:
-        logger.error("checkpoint() failed", extra={"slot": slot, "error": str(e)})
-        raise
-
-
-@mcp.tool()
 def diff(target: str, against: str | None = None) -> DiffResponse:
     """Compare changes between targets.
 
-    Single argument: Compare slot against its last saved version (save_version/checkpoint).
+    Single argument: Compare slot against its last saved version (save_version).
     Two arguments: Compare any two targets.
 
     Args:
@@ -314,12 +360,6 @@ def diff(target: str, against: str | None = None) -> DiffResponse:
 
     Returns:
         DiffResponse with change summary, files changed, and what was compared.
-
-    Examples:
-        diff("w1")                       # Slot vs last version (most common)
-        diff("w1", "w2")                 # Compare two slots
-        diff("w1", "baseline@v3")        # Slot vs specific version
-        diff("baseline@v1", "baseline@v5")  # Compare two versions
     """
     workspace_manager = _get_workspace_manager()
     return workspace_manager.diff(target, against)
@@ -345,665 +385,3 @@ def rollback(slot: str, version: str, reason: str) -> RollbackResponse:
     validate_reason(reason, config.audit.min_reason_length)
 
     return workspace_manager.rollback(slot, version, reason)
-
-
-# ============== VERSION TAG TOOLS ==============
-
-
-@mcp.tool()
-def tag_version(workspace: str, version: str, tag_name: str) -> dict[str, Any]:
-    """Tag a version with a memorable name.
-
-    Tags allow marking significant versions (e.g., "baseline-working", "best-model").
-    Tags can be applied retroactively to any existing version.
-
-    Args:
-        workspace: Workspace name
-        version: Version to tag (e.g., "v1", "v2")
-        tag_name: Name for the tag (e.g., "baseline-working")
-
-    Returns:
-        Dict with tag info including workspace_name, version, tag_name, created_at
-    """
-    logger.info("tag_version() called", extra={"workspace": workspace, "version": version, "tag_name": tag_name})
-
-    db = _get_db()
-    state_manager = _get_state_manager()
-
-    validate_workspace_name(workspace)
-    validate_version(version)
-
-    try:
-        result = db.create_tag(workspace, version, tag_name)
-
-        # Log to audit
-        db.log_audit(
-            operation="tag_version",
-            workspace=workspace,
-            reason=f"Tagged {version} as '{tag_name}'",
-            details={"version": version, "tag_name": tag_name},
-        )
-
-        state_manager.add_action(f"Tagged {version} as '{tag_name}'")
-
-        logger.info("tag_version() succeeded", extra={"workspace": workspace, "version": version, "tag_name": tag_name})
-        return cast(dict[str, Any], result)
-    except Exception as e:
-        logger.error(
-            "tag_version() failed",
-            extra={"workspace": workspace, "version": version, "tag_name": tag_name, "error": str(e)},
-        )
-        raise
-
-
-@mcp.tool()
-def untag_version(workspace: str, tag_name: str) -> dict[str, Any]:
-    """Remove a tag from a version.
-
-    Args:
-        workspace: Workspace name
-        tag_name: Name of the tag to remove
-
-    Returns:
-        Dict with success status
-    """
-    logger.info("untag_version() called", extra={"workspace": workspace, "tag_name": tag_name})
-
-    db = _get_db()
-    state_manager = _get_state_manager()
-
-    validate_workspace_name(workspace)
-
-    try:
-        db.delete_tag(workspace, tag_name)
-
-        # Log to audit
-        db.log_audit(
-            operation="untag_version",
-            workspace=workspace,
-            reason=f"Removed tag '{tag_name}'",
-            details={"tag_name": tag_name},
-        )
-
-        state_manager.add_action(f"Removed tag '{tag_name}'")
-
-        logger.info("untag_version() succeeded", extra={"workspace": workspace, "tag_name": tag_name})
-        return {"success": True, "tag_name": tag_name}
-    except Exception as e:
-        logger.error("untag_version() failed", extra={"workspace": workspace, "tag_name": tag_name, "error": str(e)})
-        raise
-
-
-@mcp.tool()
-def list_tags(workspace: str) -> list[dict[str, Any]]:
-    """List all tags for a workspace.
-
-    Args:
-        workspace: Workspace name
-
-    Returns:
-        List of tag dicts with workspace_name, version, tag_name, created_at
-    """
-    db = _get_db()
-
-    validate_workspace_name(workspace)
-
-    return cast(list[dict[str, Any]], db.list_tags(workspace))
-
-
-# ============== VERSION PRUNING TOOLS ==============
-
-
-@mcp.tool()
-def prune_version(workspace: str, version: str, reason: str) -> dict[str, Any]:
-    """Prune a single version (soft delete).
-
-    Pruned versions are hidden from list_versions() but can be restored.
-    Tagged versions cannot be pruned (they are protected).
-
-    Args:
-        workspace: Workspace name
-        version: Version to prune (e.g., "v2")
-        reason: Why pruning this version (min 15 chars)
-
-    Returns:
-        Dict with pruned version info
-    """
-    logger.info("prune_version() called", extra={"workspace": workspace, "version": version})
-
-    config = _get_config()
-    db = _get_db()
-    state_manager = _get_state_manager()
-
-    validate_workspace_name(workspace)
-    validate_version(version)
-    validate_reason(reason, config.audit.min_reason_length)
-
-    try:
-        result = db.prune_version(workspace, version, reason)
-
-        # Log to audit
-        db.log_audit(
-            operation="prune_version",
-            workspace=workspace,
-            reason=reason,
-            details={"version": version},
-        )
-
-        state_manager.add_action(f"Pruned version {version}")
-
-        logger.info("prune_version() succeeded", extra={"workspace": workspace, "version": version})
-        return cast(dict[str, Any], result)
-    except Exception as e:
-        logger.error("prune_version() failed", extra={"workspace": workspace, "version": version, "error": str(e)})
-        raise
-
-
-@mcp.tool()
-def prune_versions(workspace: str, from_version: str, to_version: str, reason: str) -> dict[str, Any]:
-    """Prune a range of versions (inclusive).
-
-    Tagged versions within the range are skipped (not pruned).
-
-    Args:
-        workspace: Workspace name
-        from_version: Start version (e.g., "v3")
-        to_version: End version (e.g., "v7")
-        reason: Why pruning this range (min 15 chars)
-
-    Returns:
-        Dict with pruned_count and skipped_tagged count
-    """
-    logger.info("prune_versions() called", extra={"workspace": workspace, "from": from_version, "to": to_version})
-
-    config = _get_config()
-    db = _get_db()
-    state_manager = _get_state_manager()
-
-    validate_workspace_name(workspace)
-    validate_version(from_version)
-    validate_version(to_version)
-    validate_reason(reason, config.audit.min_reason_length)
-
-    try:
-        result = db.prune_versions(workspace, from_version, to_version, reason)
-
-        # Log to audit
-        db.log_audit(
-            operation="prune_versions",
-            workspace=workspace,
-            reason=reason,
-            details={
-                "from_version": from_version,
-                "to_version": to_version,
-                "pruned_count": result["pruned_count"],
-            },
-        )
-
-        state_manager.add_action(f"Pruned {result['pruned_count']} versions ({from_version}-{to_version})")
-
-        logger.info(
-            "prune_versions() succeeded",
-            extra={"workspace": workspace, "pruned_count": result["pruned_count"]},
-        )
-        return result
-    except Exception as e:
-        logger.error(
-            "prune_versions() failed",
-            extra={"workspace": workspace, "from": from_version, "to": to_version, "error": str(e)},
-        )
-        raise
-
-
-@mcp.tool()
-def prune_before_tag(workspace: str, tag_name: str, reason: str) -> dict[str, Any]:
-    """Prune all versions before a tagged milestone.
-
-    The tagged version itself is NOT pruned. Other tagged versions
-    before the milestone are also protected (not pruned).
-
-    Args:
-        workspace: Workspace name
-        tag_name: Tag marking the milestone (e.g., "first-working")
-        reason: Why pruning versions before this milestone (min 15 chars)
-
-    Returns:
-        Dict with pruned_count
-    """
-    logger.info("prune_before_tag() called", extra={"workspace": workspace, "tag_name": tag_name})
-
-    config = _get_config()
-    db = _get_db()
-    state_manager = _get_state_manager()
-
-    validate_workspace_name(workspace)
-    validate_reason(reason, config.audit.min_reason_length)
-
-    try:
-        result = db.prune_before_tag(workspace, tag_name, reason)
-
-        # Log to audit
-        db.log_audit(
-            operation="prune_before_tag",
-            workspace=workspace,
-            reason=reason,
-            details={"tag_name": tag_name, "pruned_count": result["pruned_count"]},
-        )
-
-        state_manager.add_action(f"Pruned {result['pruned_count']} versions before '{tag_name}'")
-
-        logger.info(
-            "prune_before_tag() succeeded",
-            extra={"workspace": workspace, "pruned_count": result["pruned_count"]},
-        )
-        return result
-    except Exception as e:
-        logger.error("prune_before_tag() failed", extra={"workspace": workspace, "tag_name": tag_name, "error": str(e)})
-        raise
-
-
-@mcp.tool()
-def unprune_version(workspace: str, version: str) -> dict[str, Any]:
-    """Restore a pruned version.
-
-    Makes a previously pruned version visible again.
-
-    Args:
-        workspace: Workspace name
-        version: Version to restore (e.g., "v3")
-
-    Returns:
-        Dict with restored version info
-    """
-    logger.info("unprune_version() called", extra={"workspace": workspace, "version": version})
-
-    db = _get_db()
-    state_manager = _get_state_manager()
-
-    validate_workspace_name(workspace)
-    validate_version(version)
-
-    try:
-        result = db.unprune_version(workspace, version)
-
-        # Log to audit
-        db.log_audit(
-            operation="unprune_version",
-            workspace=workspace,
-            reason=f"Restored pruned version {version}",
-            details={"version": version},
-        )
-
-        state_manager.add_action(f"Restored version {version}")
-
-        logger.info("unprune_version() succeeded", extra={"workspace": workspace, "version": version})
-        return result
-    except Exception as e:
-        logger.error("unprune_version() failed", extra={"workspace": workspace, "version": version, "error": str(e)})
-        raise
-
-
-@mcp.tool()
-def unprune_versions(workspace: str, from_version: str, to_version: str) -> dict[str, Any]:
-    """Restore a range of pruned versions.
-
-    Args:
-        workspace: Workspace name
-        from_version: Start version (e.g., "v4")
-        to_version: End version (e.g., "v6")
-
-    Returns:
-        Dict with unpruned_count
-    """
-    logger.info("unprune_versions() called", extra={"workspace": workspace, "from": from_version, "to": to_version})
-
-    db = _get_db()
-    state_manager = _get_state_manager()
-
-    validate_workspace_name(workspace)
-    validate_version(from_version)
-    validate_version(to_version)
-
-    try:
-        result = db.unprune_versions(workspace, from_version, to_version)
-
-        # Log to audit
-        db.log_audit(
-            operation="unprune_versions",
-            workspace=workspace,
-            reason=f"Restored pruned versions {from_version}-{to_version}",
-            details={
-                "from_version": from_version,
-                "to_version": to_version,
-                "unpruned_count": result["unpruned_count"],
-            },
-        )
-
-        state_manager.add_action(f"Restored {result['unpruned_count']} versions ({from_version}-{to_version})")
-
-        logger.info(
-            "unprune_versions() succeeded",
-            extra={"workspace": workspace, "unpruned_count": result["unpruned_count"]},
-        )
-        return result
-    except Exception as e:
-        logger.error(
-            "unprune_versions() failed",
-            extra={"workspace": workspace, "from": from_version, "to": to_version, "error": str(e)},
-        )
-        raise
-
-
-@mcp.tool()
-def get_pruned_count(workspace: str) -> dict[str, Any]:
-    """Get the count of pruned versions in a workspace.
-
-    Args:
-        workspace: Workspace name
-
-    Returns:
-        Dict with workspace and pruned_count
-    """
-    db = _get_db()
-
-    validate_workspace_name(workspace)
-
-    count = db.get_pruned_count(workspace)
-    return {"workspace": workspace, "pruned_count": count}
-
-
-@mcp.tool()
-def list_snapshots(workspace: str, limit: int = 50, offset: int = 0) -> ListSnapshotsResponse:
-    """[DEPRECATED] List snapshots for a workspace with pagination.
-
-    Use get_workspace() instead, which includes version/snapshot history.
-
-    Args:
-        workspace: Workspace name to list snapshots for
-        limit: Maximum number of snapshots to return (1-200, default 50)
-        offset: Number of snapshots to skip for pagination (default 0)
-
-    Returns:
-        ListSnapshotsResponse with snapshots and pagination metadata
-    """
-    warnings.warn(
-        "list_snapshots is deprecated, use get_workspace() instead",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    workspace_manager = _get_workspace_manager()
-
-    # Validate workspace name
-    validate_workspace_name(workspace)
-
-    # Validate pagination bounds
-    if limit < 1 or limit > 200:
-        raise GoldfishError("limit must be between 1 and 200")
-    if offset < 0:
-        raise GoldfishError("offset must be >= 0")
-
-    # Get all snapshots once and apply pagination in memory
-    all_snapshots_data = workspace_manager.list_snapshots(workspace, limit=10000, offset=0)
-
-    # Filter out snapshots without dates and convert to SnapshotInfo objects
-    all_valid_snapshots = [
-        SnapshotInfo(
-            snapshot_id=s["snapshot_id"],
-            created_at=s["created_at"],
-            message=s["message"],
-        )
-        for s in all_snapshots_data
-        if s["created_at"] is not None
-    ]
-
-    total_count = len(all_valid_snapshots)
-
-    # Apply pagination in memory
-    snapshots = all_valid_snapshots[offset : offset + limit]
-
-    # Calculate has_more
-    has_more = (offset + len(snapshots)) < total_count
-
-    return ListSnapshotsResponse(
-        workspace=workspace,
-        snapshots=snapshots,
-        total_count=total_count,
-        offset=offset,
-        limit=limit,
-        has_more=has_more,
-    )
-
-
-@mcp.tool()
-def get_snapshot(workspace: str, snapshot_id: str) -> SnapshotInfo:
-    """[DEPRECATED] Get detailed information about a specific snapshot.
-
-    Use get_workspace_lineage() instead for version/snapshot history.
-
-    Args:
-        workspace: Workspace name the snapshot belongs to
-        snapshot_id: Snapshot ID (e.g., snap-abc1234-20251205-120000)
-
-    Returns:
-        SnapshotInfo with snapshot details
-
-    Raises:
-        GoldfishError: If workspace doesn't exist or snapshot not found in workspace
-    """
-    warnings.warn(
-        "get_snapshot is deprecated, use get_workspace_lineage() instead",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    workspace_manager = _get_workspace_manager()
-
-    # Validate parameters
-    validate_workspace_name(workspace)
-    validate_snapshot_id(snapshot_id)
-
-    # Check workspace exists by trying to get its snapshots
-    try:
-        snapshot_ids = workspace_manager.git.list_snapshots(workspace)
-    except GoldfishError as e:
-        raise GoldfishError(f"Workspace '{workspace}' not found or inaccessible: {e}") from e
-
-    # Check if snapshot belongs to this workspace
-    if snapshot_id not in snapshot_ids:
-        raise GoldfishError(
-            f"Snapshot '{snapshot_id}' not found in workspace '{workspace}'. "
-            f"Use list_snapshots() to see available snapshots."
-        )
-
-    # Get snapshot info
-    info = workspace_manager.git.get_snapshot_info(snapshot_id)
-    created_at = None
-    if info.get("commit_date"):
-        try:
-            created_at = datetime.fromisoformat(info["commit_date"])
-        except ValueError as e:
-            raise GoldfishError(f"Invalid date format for snapshot '{snapshot_id}': {info.get('commit_date')}") from e
-
-    if created_at is None:
-        raise GoldfishError(f"Snapshot '{snapshot_id}' has no valid creation date")
-
-    return SnapshotInfo(
-        snapshot_id=snapshot_id,
-        created_at=created_at,
-        message=info.get("message", ""),
-    )
-
-
-# ============== JOB TOOLS ==============
-
-
-@mcp.tool()
-def delete_snapshot(workspace: str, snapshot_id: str, reason: str) -> DeleteSnapshotResponse:
-    """[DEPRECATED] Delete a specific snapshot from a workspace.
-
-    This tool is deprecated. Snapshots are now managed as workspace versions.
-
-    WARNING: This is irreversible. You cannot rollback to a deleted snapshot.
-
-    Args:
-        workspace: Workspace containing the snapshot
-        snapshot_id: ID of the snapshot to delete
-        reason: Why you're deleting this snapshot (min 15 chars)
-    """
-    warnings.warn(
-        "delete_snapshot is deprecated, snapshots are now managed as workspace versions",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    config = _get_config()
-    db = _get_db()
-    workspace_manager = _get_workspace_manager()
-    state_manager = _get_state_manager()
-
-    validate_workspace_name(workspace)
-    validate_snapshot_id(snapshot_id)
-    validate_reason(reason, config.audit.min_reason_length)
-
-    # Check workspace exists
-    if not workspace_manager.git.branch_exists(workspace):
-        raise WorkspaceNotFoundError(f"Workspace not found: {workspace}")
-
-    # Check snapshot exists in this workspace
-    snapshots = workspace_manager.git.list_snapshots(workspace)
-    if snapshot_id not in snapshots:
-        raise GoldfishError(f"Snapshot '{snapshot_id}' not found in workspace '{workspace}'")
-
-    # Delete the snapshot
-    if not workspace_manager.git.delete_snapshot(snapshot_id):
-        raise GoldfishError(f"Failed to delete snapshot '{snapshot_id}'")
-
-    # Log to audit
-    db.log_audit(
-        operation="delete_snapshot",
-        workspace=workspace,
-        reason=reason,
-        details={"snapshot_id": snapshot_id},
-    )
-
-    state_manager.add_action(f"Deleted snapshot '{snapshot_id}' from '{workspace}'")
-
-    return DeleteSnapshotResponse(
-        success=True,
-        workspace=workspace,
-        snapshot_id=snapshot_id,
-    )
-
-
-# ============== PIPELINE TOOLS ==============
-
-
-@mcp.tool()
-def get_workspace_goal(workspace: str) -> WorkspaceGoalResponse:
-    """[DEPRECATED] Get the goal for a workspace.
-
-    Use get_workspace() instead, which includes the goal in the response.
-
-    Args:
-        workspace: Workspace name to query
-    """
-    warnings.warn(
-        "get_workspace_goal is deprecated, use get_workspace() instead",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    db = _get_db()
-
-    validate_workspace_name(workspace)
-
-    goal = db.get_workspace_goal(workspace)
-
-    return WorkspaceGoalResponse(
-        workspace=workspace,
-        goal=goal,
-    )
-
-
-@mcp.tool()
-def update_workspace_goal(workspace: str, goal: str, reason: str) -> UpdateWorkspaceGoalResponse:
-    """[DEPRECATED] Update the goal for a workspace.
-
-    The goal is now set at workspace creation time. If you need to update it,
-    consider creating a new workspace with the new goal.
-
-    Args:
-        workspace: Workspace name to update
-        goal: New goal description
-        reason: Why you're updating the goal (min 15 chars)
-    """
-    warnings.warn(
-        "update_workspace_goal is deprecated, set goal at workspace creation time",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    config = _get_config()
-    db = _get_db()
-    state_manager = _get_state_manager()
-
-    validate_workspace_name(workspace)
-    validate_reason(reason, config.audit.min_reason_length)
-
-    # Update in database
-    db.set_workspace_goal(workspace, goal)
-
-    # Log audit
-    db.log_audit(
-        operation="update_workspace_goal",
-        workspace=workspace,
-        reason=reason,
-        details={"goal": goal},
-    )
-
-    # Update state manager
-    state_manager.set_goal(goal)
-    state_manager.add_action(f"Updated workspace goal: {goal[:50]}...")
-
-    state_md = _get_state_md()
-
-    return UpdateWorkspaceGoalResponse(
-        success=True,
-        workspace=workspace,
-        goal=goal,
-        state_md=state_md,
-    )
-
-
-@mcp.tool()
-def branch_workspace(from_workspace: str, from_version: str, new_workspace: str, reason: str) -> dict:
-    """[DEPRECATED] Create new workspace branched from specific version.
-
-    Use create_workspace() instead. Branching is now handled by workspace lineage
-    which tracks parent relationships automatically.
-
-    Args:
-        from_workspace: Source workspace
-        from_version: Version to branch from (e.g., "v3")
-        new_workspace: Name for new workspace
-        reason: Why branching (min 15 chars)
-
-    Returns:
-        Dict with:
-        - workspace: New workspace name
-        - parent: Parent workspace
-        - parent_version: Version branched from
-    """
-    warnings.warn(
-        "branch_workspace is deprecated, use create_workspace() instead",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    config = _get_config()
-    db = _get_db()
-    workspace_manager = _get_workspace_manager()
-
-    validate_workspace_name(from_workspace)
-    validate_workspace_name(new_workspace)
-    validate_reason(reason, config.audit.min_reason_length)
-
-    lineage_mgr = LineageManager(db=db, workspace_manager=workspace_manager)
-    lineage_mgr.branch_workspace(from_workspace, from_version, new_workspace, reason)
-
-    return {"workspace": new_workspace, "parent": from_workspace, "parent_version": from_version}

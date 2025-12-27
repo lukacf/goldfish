@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from goldfish.server_tools import svs_tools
+from goldfish.server_tools import svs_tools_impl
 from goldfish.svs.agent import ReviewRequest, ReviewResult
 from goldfish.svs.config import SVSConfig
 
@@ -41,7 +41,7 @@ def test_librarian_review_parses_json_response():
     agent = _StubAgent(response)
     config = SVSConfig(enabled=True, agent_provider="null")
 
-    recommendations = svs_tools.librarian_review_patterns(patterns, agent=agent, config=config)
+    recommendations = svs_tools_impl.librarian_review_patterns(patterns, agent=agent, config=config)
 
     assert recommendations["pat-001"]["action"] == "approve"
     assert recommendations["pat-002"]["action"] == "reject"
