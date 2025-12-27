@@ -19,6 +19,7 @@ from goldfish.models import (
     HibernateResponse,
     MountResponse,
     RollbackResponse,
+    SaveVersionResponse,
 )
 from goldfish.server_core import (
     _get_config,
@@ -342,6 +343,34 @@ def delete_workspace(workspace: str, reason: str) -> DeleteWorkspaceResponse:
         )
     except Exception as e:
         logger.error("delete_workspace() failed", extra={"workspace": workspace, "error": str(e)})
+        raise
+
+
+@mcp.tool()
+def save_version(slot: str, message: str) -> SaveVersionResponse:
+    """Create a version of the current slot state.
+
+    Args:
+        slot: Slot to save version from (w1, w2, or w3)
+        message: Describe what this version represents (min 15 chars)
+
+    Creates an immutable version that can be used for rollback and branching.
+    The version (v1, v2, etc.) is the primary identifier.
+    """
+    logger.info("save_version() called", extra={"slot": slot})
+
+    config = _get_config()
+    workspace_manager = _get_workspace_manager()
+
+    # Validate inputs
+    validate_slot_name(slot, config.slots)
+
+    try:
+        result = workspace_manager.save_version(slot, message)
+        logger.info("save_version() succeeded", extra={"slot": slot, "version": result.version})
+        return result
+    except Exception as e:
+        logger.error("save_version() failed", extra={"slot": slot, "error": str(e)})
         raise
 
 

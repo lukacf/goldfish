@@ -262,7 +262,8 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
 
             req_id = str(uuid.uuid4())[:8]
             sig = MetadataSignal(command="sync", request_id=req_id, payload={"run_id": run_id})
-            bus.set_signal("goldfish", sig)
+            target = row.get("backend_handle")
+            bus.set_signal("goldfish", sig, target=target)
         except Exception as e:
             logger.debug(f"Failed to trigger sync signal: {e}")
 
@@ -366,6 +367,30 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
         result["svs"] = svs_data
 
     return cast(dict, result)
+
+
+@mcp.tool()
+def run_status(run_id: str) -> dict:
+    """Dashboard view of a run (Alias for inspect_run with summary view).
+
+    Use this for a quick progress check, health status, and metric trends.
+    """
+    return inspect_run(run_id, include=["dashboard"])  # type: ignore[no-any-return]
+
+
+@mcp.tool()
+def get_run_provenance(run_id: str) -> dict:
+    """Get the exact data provenance for a stage run.
+
+    Answers: "Which input versions produced this output?"
+    Recursively traces back to source datasets.
+    """
+    db = _get_db()
+    workspace_manager = _get_workspace_manager()
+    from goldfish.lineage.manager import LineageManager
+
+    lineage_mgr = LineageManager(db=db, workspace_manager=workspace_manager)
+    return lineage_mgr.get_run_provenance(run_id)
 
 
 @mcp.tool()

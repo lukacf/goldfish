@@ -48,11 +48,13 @@ def mock_metadata_bus(tmp_path):
 @patch("goldfish.server_tools.execution_tools._get_db")
 @patch("goldfish.server_tools.execution_tools._get_metadata_bus")
 @patch("goldfish.server_tools.execution_tools._get_config")
-def test_inspect_run_synthesis(mock_get_config, mock_get_bus, mock_get_db, mock_db, mock_metadata_bus):
+@patch("goldfish.server_tools.execution_tools._get_workspace_manager")
+def test_inspect_run_synthesis(mock_get_wm, mock_get_config, mock_get_bus, mock_get_db, mock_db, mock_metadata_bus):
     """Test that inspect_run correctly synthesizes dashboard and trends."""
     mock_get_db.return_value = mock_db
     mock_get_bus.return_value = mock_metadata_bus
     mock_get_config.return_value = MagicMock()
+    mock_get_wm.return_value = MagicMock()
 
     result = inspect_run.fn("stage-123")
 

@@ -176,9 +176,8 @@ class TestSourceMetadataTools:
             server.reset_server()
 
     def test_register_dataset_rejects_size_bytes_mismatch(self, temp_dir):
-        """register_dataset should enforce size_bytes matching."""
+        """register_source should enforce size_bytes matching for datasets."""
         from goldfish import server
-        from goldfish.datasets.registry import DatasetRegistry
 
         db = Database(temp_dir / "test.db")
         config = GoldfishConfig(
@@ -190,7 +189,6 @@ class TestSourceMetadataTools:
             gcs=None,
         )
         state_manager = StateManager(temp_dir / "STATE.md", config)
-        dataset_registry = DatasetRegistry(db=db, config=config)
 
         server.configure_server(
             project_root=temp_dir,
@@ -201,20 +199,19 @@ class TestSourceMetadataTools:
             job_launcher=MagicMock(),
             job_tracker=MagicMock(),
             pipeline_manager=MagicMock(),
-            dataset_registry=dataset_registry,
+            dataset_registry=MagicMock(),
             stage_executor=MagicMock(),
             pipeline_executor=MagicMock(),
         )
 
         try:
-            register_fn = (
-                server.register_dataset.fn if hasattr(server.register_dataset, "fn") else server.register_dataset
-            )
+            register_fn = server.register_source.fn if hasattr(server.register_source, "fn") else server.register_source
             with pytest.raises(InvalidSourceMetadataError, match="size_bytes"):
                 register_fn(
                     name="dataset_v1",
-                    source="gs://bucket/data.csv",
+                    gcs_path="gs://bucket/data.csv",
                     description=_valid_file_metadata()["description"],
+                    reason="Testing dataset registration validation",
                     format="file",
                     metadata=_valid_file_metadata(),
                     size_bytes=999,
@@ -223,7 +220,7 @@ class TestSourceMetadataTools:
             server.reset_server()
 
     def test_register_dataset_requires_size_bytes(self, temp_dir):
-        """register_dataset should reject missing size_bytes."""
+        """register_source should reject missing size_bytes for datasets."""
         from goldfish import server
 
         db = Database(temp_dir / "test.db")
@@ -251,14 +248,13 @@ class TestSourceMetadataTools:
         )
 
         try:
-            register_fn = (
-                server.register_dataset.fn if hasattr(server.register_dataset, "fn") else server.register_dataset
-            )
+            register_fn = server.register_source.fn if hasattr(server.register_source, "fn") else server.register_source
             with pytest.raises(InvalidSourceMetadataError, match="size_bytes"):
                 register_fn(
                     name="dataset_missing_size",
-                    source="gs://bucket/data.csv",
+                    gcs_path="gs://bucket/data.csv",
                     description=_valid_csv_metadata_missing_size()["description"],
+                    reason="Testing dataset registration validation",
                     format="csv",
                     metadata=_valid_csv_metadata_missing_size(),
                 )
@@ -266,7 +262,7 @@ class TestSourceMetadataTools:
             server.reset_server()
 
     def test_update_source_metadata_updates_metadata(self, temp_dir):
-        """update_source_metadata should update metadata and return SourceInfo."""
+        """manage_sources(action='update') should update metadata."""
         from goldfish import server
 
         db = Database(temp_dir / "test.db")
@@ -303,20 +299,16 @@ class TestSourceMetadataTools:
         )
 
         try:
-            update_fn = (
-                server.update_source_metadata.fn
-                if hasattr(server.update_source_metadata, "fn")
-                else server.update_source_metadata
-            )
-            result = update_fn(
-                source_name="legacy",
+            manage_fn = server.manage_sources.fn if hasattr(server.manage_sources, "fn") else server.manage_sources
+            result = manage_fn(
+                action="update",
+                name="legacy",
                 metadata=_valid_file_metadata(),
                 reason="Backfilling metadata for legacy source.",
             )
 
-            assert result.success is True
-            assert result.source.metadata_status == "ok"
-            assert result.source.metadata is not None
+            assert result["success"] is True
+            assert result["source"] == "legacy"
 
             stored = db.get_source("legacy")
             assert stored is not None
@@ -325,7 +317,7 @@ class TestSourceMetadataTools:
             server.reset_server()
 
     def test_update_source_metadata_rejects_format_change(self, temp_dir):
-        """update_source_metadata should not allow format changes."""
+        """manage_sources(action='update') should not allow format changes."""
         from goldfish import server
 
         db = Database(temp_dir / "test.db")
@@ -363,14 +355,11 @@ class TestSourceMetadataTools:
         )
 
         try:
-            update_fn = (
-                server.update_source_metadata.fn
-                if hasattr(server.update_source_metadata, "fn")
-                else server.update_source_metadata
-            )
+            manage_fn = server.manage_sources.fn if hasattr(server.manage_sources, "fn") else server.manage_sources
             with pytest.raises(InvalidSourceMetadataError, match="format"):
-                update_fn(
-                    source_name="csv_source",
+                manage_fn(
+                    action="update",
+                    name="csv_source",
                     metadata=_valid_file_metadata(),
                     reason="Attempting to change format should fail.",
                 )
