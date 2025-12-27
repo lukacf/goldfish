@@ -572,6 +572,7 @@ function renderWorkspaces() {
         const safeDescription = escapeHtml(ws.description);
         const safeMountStatus = escapeHtml(ws.mount_status);
         const safeVersionCount = escapeHtml(ws.version_count);
+        const safePrunedCount = escapeHtml(ws.pruned_count || 0);
         const safeParentWorkspace = escapeHtml(ws.parent_workspace);
 
         return `
@@ -583,7 +584,7 @@ function renderWorkspaces() {
                 ${ws.description ? `<p>${safeDescription}</p>` : ''}
                 ${ws.mount_status ? `<span class="status status-${safeMountStatus}">${safeMountStatus}</span>` : ''}
                 <div class="workspace-meta">
-                    <div class="meta-item"><span aria-hidden="true">&#x1F4E6;</span> ${safeVersionCount} versions</div>
+                    <div class="meta-item"><span aria-hidden="true">&#x1F4E6;</span> ${safeVersionCount} versions${ws.pruned_count > 0 ? ` <span class="pruned-badge" title="${safePrunedCount} versions hidden">(${safePrunedCount} pruned)</span>` : ''}</div>
                     ${ws.parent_workspace ? `<div class="meta-item"><span aria-hidden="true">&#x1F500;</span> from ${safeParentWorkspace}</div>` : ''}
                 </div>
             </div>
@@ -871,12 +872,15 @@ function renderTimelineView() {
                 .attr('transform', `translate(${x}, ${laneY})`)
                 .style('cursor', 'pointer');
 
+            // Tagged versions get a golden border and slightly larger size
+            const isTagged = !!version.tag_name;
             nodeGroup.append('circle')
-                .attr('r', NODE_RADIUS)
+                .attr('r', isTagged ? NODE_RADIUS + 2 : NODE_RADIUS)
                 .attr('fill', color)
-                .attr('stroke', '#fff')
-                .attr('stroke-width', 2);
+                .attr('stroke', isTagged ? '#FFD700' : '#fff')
+                .attr('stroke-width', isTagged ? 3 : 2);
 
+            // Version label
             nodeGroup.append('text')
                 .attr('y', -14)
                 .attr('text-anchor', 'middle')
@@ -884,6 +888,17 @@ function renderTimelineView() {
                 .attr('font-size', '10px')
                 .attr('font-weight', 'bold')
                 .text(version.version);
+
+            // Tag label (shown below version if present)
+            if (version.tag_name) {
+                nodeGroup.append('text')
+                    .attr('y', version.git_sha ? 30 : 18)
+                    .attr('text-anchor', 'middle')
+                    .attr('fill', 'var(--accent-color)')
+                    .attr('font-size', '9px')
+                    .attr('font-weight', 'bold')
+                    .text('🏷️ ' + version.tag_name);
+            }
 
             if (version.git_sha) {
                 nodeGroup.append('text')
@@ -911,7 +926,8 @@ function renderTimelineView() {
                     .style('top', (event.pageY - 10) + 'px');
 
                 tooltip.html(`
-                    <strong>${escapeHtml(ws.name)} ${escapeHtml(version.version)}</strong><br>
+                    <strong>${escapeHtml(ws.name)} ${escapeHtml(version.version)}</strong>
+                    ${version.tag_name ? `<span style="color: var(--accent-color); margin-left: 8px;">🏷️ ${escapeHtml(version.tag_name)}</span>` : ''}<br>
                     <span style="color: var(--text-secondary)">SHA:</span> ${escapeHtml(version.git_sha || 'N/A')}<br>
                     <span style="color: var(--text-secondary)">Created:</span> ${version.created_at ? new Date(version.created_at).toLocaleString() : 'N/A'}<br>
                     <span style="color: var(--text-secondary)">By:</span> ${escapeHtml(version.created_by || 'N/A')}
@@ -1032,16 +1048,28 @@ function showVersionDetail(workspaceName) {
     title.textContent = `${workspaceName} Versions`;
 
     const versions = ws.versions || [];
+    const prunedCount = ws.pruned_count || 0;
+
+    let html = '';
+
+    // Show pruned count if any
+    if (prunedCount > 0) {
+        html += `<div class="pruned-notice" style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem; padding: 0.5rem; background: var(--bg-secondary); border-radius: 4px;">
+            <span style="opacity: 0.7">🗑️</span> ${prunedCount} version${prunedCount > 1 ? 's' : ''} pruned (hidden)
+        </div>`;
+    }
+
     if (versions.length === 0) {
-        content.innerHTML = '<div class="empty-state">No versions yet</div>';
+        html += '<div class="empty-state">No versions yet</div>';
     } else {
         // Show versions in reverse order (newest first)
-        content.innerHTML = [...versions].reverse().map(v => `
-            <div class="version-item">
-                <div class="version-node"></div>
+        html += [...versions].reverse().map(v => `
+            <div class="version-item${v.tag_name ? ' tagged' : ''}" style="${v.tag_name ? 'border-left: 3px solid #FFD700;' : ''}">
+                <div class="version-node" style="${v.tag_name ? 'background: #FFD700;' : ''}"></div>
                 <div class="version-info">
                     <div class="version-header">
                         <span class="version-name">${escapeHtml(v.version)}</span>
+                        ${v.tag_name ? `<span class="version-tag" style="color: #FFD700; margin-left: 8px; font-weight: bold;">🏷️ ${escapeHtml(v.tag_name)}</span>` : ''}
                         <span class="version-sha">${escapeHtml(v.git_sha || '')}</span>
                     </div>
                     <div class="version-meta">
@@ -1053,6 +1081,8 @@ function showVersionDetail(workspaceName) {
             </div>
         `).join('');
     }
+
+    content.innerHTML = html;
 
     panel.classList.remove('hidden');
     panel.classList.add('visible');

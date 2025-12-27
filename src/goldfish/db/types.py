@@ -182,3 +182,21 @@ class FailurePatternRow(TypedDict):
     rejection_reason: str | None
     manually_edited: bool
     enabled: bool
+
+
+class VersionTagRow(TypedDict):
+    """Row from the workspace_version_tags table."""
+
+    workspace_name: str
+    version: str
+    tag_name: str
+    created_at: str
+
+
+class PrunedVersionRow(TypedDict):
+    """Pruned version info (from workspace_versions)."""
+
+    workspace_name: str
+    version: str
+    pruned_at: str
+    prune_reason: str
