@@ -1,6 +1,6 @@
 ---
 name: goldfish-ml
-description: This skill should be used when working with Goldfish ML, an MCP server for AI-driven machine learning experimentation. Use this skill for workspace management, pipeline execution, data registry operations, and provenance tracking. Goldfish provides a consolidated set of 24 master tools for efficient ML workflows.
+description: This skill should be used when working with Goldfish ML, an MCP server for AI-driven machine learning experimentation. Use this skill for workspace management, pipeline execution, data registry operations, and provenance tracking. Goldfish provides 24 master tools for efficient ML workflows.
 ---
 
 # Goldfish ML
@@ -32,9 +32,9 @@ Goldfish manages ML experiments through **six key abstractions**:
 
 **Key invariants:**
 - All infrastructure (Docker, GCS, GCE) is hidden from Claude.
-- Every `run()` creates an immutable version BEFORE execution (100% provenance).
+- User workspace is plain files (no `.git`) - all versioning handled internally.
+- Every `run()` creates a version BEFORE execution (100% provenance).
 - **Inspect-First Workflow**: Use `inspect_run` for real-time dashboards and `inspect_workspace` for global orientation.
-- **Low-Latency Sync**: `inspect_run` triggers a metadata signal to the cloud container for real-time "Overdrive" synchronization.
 
 ## Workflow Decision Tree
 
@@ -50,80 +50,147 @@ START: What task?
   ├─▶ "Inspect existing workspace"
   │     └─▶ inspect_workspace(name) → Goal, Pipeline, Lineage, Tags.
   │
-  ├─▶ "Run ML training"
-  │     └─▶ run(workspace, stages=["train"]) or run(workspace) for all.
-  │
   ├─▶ "Check run progress/health"
   │     └─▶ inspect_run(run_id) → Dashboard (Trends ↑↓), GPU Health, Provenance.
   │
   ├─▶ "Deep debug failure"
   │     └─▶ inspect_run(run_id, include=["manifest", "svs"]) + logs(run_id).
   │
-  ├─▶ "Manage versions/tags"
-  │     └─▶ manage_versions(workspace, action="tag|prune|list")
-  │
   ├─▶ "Manage data sources"
-  │     └─▶ manage_sources(action="list|get|lineage|update") or register_source()
+  │     └─▶ manage_sources(action="list|get|lineage") or register_source()
   │
   └─▶ "Save progress / Switch context"
         └─▶ save_version() → hibernate() (auto-saves)
 ```
 
-## Essential Master Tools
+## 1. Stage Implementation Pattern (Inside Container)
 
-### 1. `inspect_run(run_id)` (The Dashboard)
-The single source of truth for any execution. Always triggers a fresh sync.
-- **Dashboard**: Step/Epoch progress + Metric Trends (↑↓) + ETA.
-- **Health**: GPU utilization, VRAM usage, Heartbeat status.
-- **Provenance**: Traces exactly which input versions produced the results.
-- **Manifest**: Full config, resolved inputs, and output locations.
+Stage modules follow a consistent pattern. Use `goldfish.io` for data and `goldfish.metrics` for tracking.
 
-### 2. `inspect_workspace(name)` (The Overview)
-Unified view of a workspace's purpose and state.
-- **Goal & Pipeline**: What this workspace is for and how it works.
-- **Lineage Tree**: Parent relationship (if branched) and child branches.
-- **Version History**: Timeline of immutable versions and their tags.
+```python
+# modules/train.py
+from goldfish.io import load_input, save_output, heartbeat
+from goldfish.metrics import log_metric, log_metrics, finish
 
-### 3. `manage_versions(workspace, action)`
-Consolidated interface for version maintenance.
-- `action="tag"`: Mark milestones (e.g., "baseline", "best").
-- `action="prune"`: Hide failed/intermediate versions (protected if tagged).
-- `action="list"`: View full history including pruned versions.
+def main():
+    # 1. Load inputs (from pipeline signals)
+    features = load_input("features") 
 
-### 4. `manage_sources(action)`
-Central registry for all data (external datasets and promoted artifacts).
-- `action="list"`: Discover available data.
-- `action="lineage"`: Trace data back to the job and inputs that produced it.
+    # 2. Training logic
+    for epoch in range(10):
+        # Signal "I'm alive" for long jobs
+        heartbeat(f"Training epoch {epoch}") 
+        
+        loss = train_epoch(features)
+        
+        # Log progress for the Real-time Dashboard
+        log_metrics({"loss": loss, "train/accuracy": 0.85}, step=epoch)
 
-## Data Source Metadata (Required, Strict)
+    # 3. Save outputs (to /mnt/outputs/)
+    save_output("model", model_dir)
+    
+    # 4. Finalize metrics
+    finish()
 
-All new sources/datasets/artifacts must include **mandatory metadata**.
+if __name__ == "__main__":
+    main()
+```
 
-### Required Top-Level Structure
+## 2. Pipeline Structure (pipeline.yaml)
+
+Define stages and their data flow contracts. **Schemas are required.**
+
+```yaml
+stages:
+  - name: preprocess
+    inputs:
+      raw_data:
+        type: dataset
+        dataset: sales_v1
+    outputs:
+      features:
+        type: npy
+        schema:
+          kind: tensor
+          shape: [null, 768]
+          dtype: float32
+
+  - name: train
+    inputs:
+      features:
+        from_stage: preprocess
+        signal: features
+        schema:
+          kind: tensor
+          shape: [null, 768]
+    outputs:
+      model:
+        type: directory
+        schema: null
+```
+
+## 3. Data Source Metadata (Strict)
+
+All new sources must include mandatory metadata for SVS validation.
+
+### Required Structure
 ```json
 {
   "schema_version": 1,
-  "description": "Human/LLM description (min 20 chars)",
-  "source": { "format": "npy|csv|file", "size_bytes": 1234, "created_at": "ISO-TS" },
-  "schema": { "kind": "tensor|tabular|file", ... }
+  "description": "Descriptive text (min 20 chars)",
+  "source": {
+    "format": "npy|npz|csv|file",
+    "size_bytes": 123456,
+    "created_at": "2025-12-27T10:00:00Z"
+  },
+  "schema": {
+    "kind": "tensor",
+    "arrays": {
+      "features": { "role": "features", "shape": [1000, 768], "dtype": "float32" }
+    }
+  }
 }
 ```
 
+## 4. Master Tool Reference
+
+| Category | Tool | Key Purpose |
+| :--- | :--- | :--- |
+| **Orientation** | `status()` | Get project context, slots, and active jobs. |
+| | `inspect_run()` | **The Dashboard.** Progress, Trends ↑↓, Health, and Lineage. |
+| | `inspect_workspace()` | Full view of Goal, Pipeline, and Version history. |
+| **Execution** | `run()` | Launch stages/pipelines with pre-run AI review. |
+| | `logs()` | Raw text stream for deep debugging. |
+| | `cancel()` | Immediate stop of a running job. |
+| | `mark_outcome()` | Manually classify run result as `success` or `bad_results`. |
+| **Versioning** | `manage_versions()` | Unified interface for `tag`, `prune`, and `list` actions. |
+| | `save_version()` | Immutable save point for the current slot state. |
+| | `rollback()` | Revert slot to a specific version (destructive). |
+| | `diff()` | Compare slots, versions, or workspaces. |
+| **Data** | `manage_sources()` | Unified interface for `list`, `get`, `lineage`, and `update`. |
+| | `register_source()` | Register external GCS data or local datasets. |
+| | `promote_artifact()` | Turn a run output into a registered source. |
+| **Debug** | `manage_patterns()` | Manage SVS failure patterns and AI librarian reviews. |
+| | `search_goldfish_logs()` | Search centralized logs via VictoriaLogs (incl. guide). |
+| | `log_thought()` | Record reasoning in the project audit trail. |
+
+## 5. Common Patterns
+
+### Iterative Development
+1. `status()` to find an empty slot.
+2. `mount(slot="w1", workspace="my-task")`.
+3. Edit code in `workspaces/w1/`.
+4. `run("w1")` → Watch progress via `inspect_run(run_id)`.
+5. If success: `manage_versions(workspace="my-task", action="tag", tag="working")`.
+6. `manage_versions(action="prune")` to clean up the intermediate failures.
+
+### Reproducing a Past Result
+1. `inspect_run(run_id, include=["provenance"])` to get the exact `version`.
+2. `rollback(slot="w2", version="v12")`.
+3. `run("w2")` with the same config overrides.
+
 ## Best Practices
-
-1. **Always use `inspect_run`** instead of raw `logs` for monitoring progress.
-2. **Tag significant milestones** (e.g., "v24" -> "baseline-working") before pruning noise.
-3. **Check `status()`** after every context recovery/compaction to re-orient.
-4. **Provide structured reasons** in `run()` to improve the automated pre-run review quality.
-5. **Use `log_thought()`** to document architectural decisions for the audit trail.
-
-## Troubleshooting
-
-### Pre-Run Blocks
-If `run()` returns `BLOCKED`:
-1. Analyze the SVS findings in the tool output.
-2. Fix the code/config in your workspace slot.
-3. Re-run. Bypass only if necessary via `skip_review=True`.
-
-### Stale Run Data
-If `inspect_run` data feels old, call it again. It sends a low-latency "Overdrive" sync signal to the container via Instance Metadata on every invocation.
+1. **Never use raw `logs`** if `inspect_run` dashboard provides the answer.
+2. **Always trigger a sync**: `inspect_run` automatically sends a metadata signal to the cloud container to flush data.
+3. **Use slots**: Work in `w1`, `w2`, etc., to keep experiments isolated.
+4. **Document Decisions**: Use `log_thought()` whenever you make a significant change to architecture or hyperparameters.
