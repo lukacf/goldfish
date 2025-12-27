@@ -220,7 +220,9 @@ def manage_versions(
             raise GoldfishError("reason is required for pruning")
         validate_reason(reason, config.audit.min_reason_length)
         prune_res: Any
-        if from_version and to_version:
+        if from_version or to_version:
+            if not (from_version and to_version):
+                raise GoldfishError("Both from_version and to_version are required for range pruning")
             prune_res = db.prune_versions(workspace, from_version, to_version, reason)
         elif version:
             prune_res = db.prune_version(workspace, version, reason)
@@ -228,9 +230,20 @@ def manage_versions(
             raise GoldfishError("version or range (from/to) required for pruning")
         return {"success": True, "result": prune_res}
 
+    elif action == "prune_before_tag":
+        if not tag:
+            raise GoldfishError("tag is required for action='prune_before_tag'")
+        if not reason:
+            raise GoldfishError("reason is required for pruning")
+        validate_reason(reason, config.audit.min_reason_length)
+        prune_before_res = db.prune_before_tag(workspace, tag, reason)
+        return {"success": True, "result": prune_before_res}
+
     elif action == "unprune":
         unprune_res: Any
-        if from_version and to_version:
+        if from_version or to_version:
+            if not (from_version and to_version):
+                raise GoldfishError("Both from_version and to_version are required for range unpruning")
             unprune_res = db.unprune_versions(workspace, from_version, to_version)
         elif version:
             unprune_res = db.unprune_version(workspace, version)
