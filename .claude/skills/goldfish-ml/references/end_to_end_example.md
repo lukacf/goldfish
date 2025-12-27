@@ -547,8 +547,14 @@ unprune_version(workspace, "v5")  # If you need to review old work
 
 ### Key Benefits
 
+
+
 1. **Clean context**: Claude sees only significant versions in STATE.md
+
 2. **Preserved history**: Pruned versions still exist for audit/recovery
+
 3. **Protected milestones**: Tagged versions cannot be accidentally pruned
+
 4. **Retroactive tagging**: Discover milestones after the fact
-5. **Continuous numbering**: v50 is always v50, even if v1-v49 are pruned
+
+5. **Continuous numbering**: v50 is **created** as v50, even if v1-v49 are pruned

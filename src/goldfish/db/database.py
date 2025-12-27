@@ -1527,6 +1527,19 @@ class Database:
                 "prune_reason": reason,
             }
 
+    def _parse_version_number(self, version: str) -> int:
+        """Parse version string to integer (e.g., 'v24' -> 24).
+
+        Raises:
+            GoldfishError: If version format is invalid
+        """
+        from goldfish.errors import GoldfishError
+
+        try:
+            return int(version.lstrip("v"))
+        except ValueError as e:
+            raise GoldfishError(f"Invalid version format: {version}") from e
+
     def prune_versions(self, workspace_name: str, from_version: str, to_version: str, reason: str) -> dict:
         """Prune a range of versions (inclusive).
 
@@ -1541,27 +1554,25 @@ class Database:
         Returns:
             Dict with pruned_count and skipped_tagged count
         """
-        from goldfish.errors import GoldfishError
-
         timestamp = datetime.now(UTC).isoformat()
 
         # Extract version numbers
-        try:
-            from_num = int(from_version.lstrip("v"))
-            to_num = int(to_version.lstrip("v"))
-        except ValueError as e:
-            raise GoldfishError(f"Invalid version format: {from_version} or {to_version}") from e
+        from_num = self._parse_version_number(from_version)
+        to_num = self._parse_version_number(to_version)
 
         pruned_count = 0
         skipped_tagged = 0
 
         with self._conn() as conn:
-            # Get all versions in range
+            # Use a single query to get versions and their tag counts in range
+            # This avoids N+1 query problem
             rows = conn.execute(
                 """
-                SELECT version FROM workspace_versions
-                WHERE workspace_name = ?
-                AND pruned_at IS NULL
+                SELECT v.version, COUNT(t.tag_name) as tag_count
+                FROM workspace_versions v
+                LEFT JOIN workspace_version_tags t ON v.workspace_name = t.workspace_name AND v.version = t.version
+                WHERE v.workspace_name = ? AND v.pruned_at IS NULL
+                GROUP BY v.version
                 """,
                 (workspace_name,),
             ).fetchall()
@@ -1574,16 +1585,7 @@ class Database:
                     continue
 
                 if from_num <= version_num <= to_num:
-                    # Check if tagged
-                    tag_count = conn.execute(
-                        """
-                        SELECT COUNT(*) as count FROM workspace_version_tags
-                        WHERE workspace_name = ? AND version = ?
-                        """,
-                        (workspace_name, version),
-                    ).fetchone()["count"]
-
-                    if tag_count > 0:
+                    if row["tag_count"] > 0:
                         skipped_tagged += 1
                         continue
 
@@ -1640,18 +1642,19 @@ class Database:
                 )
 
             tagged_version = tag_row["version"]
-            try:
-                tagged_num = int(tagged_version.lstrip("v"))
-            except ValueError as e:
-                raise GoldfishError(f"Invalid tagged version format: {tagged_version}") from e
+            tagged_num = self._parse_version_number(tagged_version)
 
             # Prune all versions before the tagged one (skip other tagged versions)
             pruned_count = 0
+
+            # Use single query to avoid N+1 problem
             rows = conn.execute(
                 """
-                SELECT version FROM workspace_versions
-                WHERE workspace_name = ?
-                AND pruned_at IS NULL
+                SELECT v.version, COUNT(t.tag_name) as tag_count
+                FROM workspace_versions v
+                LEFT JOIN workspace_version_tags t ON v.workspace_name = t.workspace_name AND v.version = t.version
+                WHERE v.workspace_name = ? AND v.pruned_at IS NULL
+                GROUP BY v.version
                 """,
                 (workspace_name,),
             ).fetchall()
@@ -1664,16 +1667,7 @@ class Database:
                     continue
 
                 if version_num < tagged_num:
-                    # Check if this version is also tagged
-                    tag_count = conn.execute(
-                        """
-                        SELECT COUNT(*) as count FROM workspace_version_tags
-                        WHERE workspace_name = ? AND version = ?
-                        """,
-                        (workspace_name, version),
-                    ).fetchone()["count"]
-
-                    if tag_count > 0:
+                    if row["tag_count"] > 0:
                         continue  # Skip tagged versions
 
                     # Prune this version
@@ -1754,14 +1748,10 @@ class Database:
         Returns:
             Dict with unpruned_count
         """
-        from goldfish.errors import GoldfishError
 
         # Extract version numbers
-        try:
-            from_num = int(from_version.lstrip("v"))
-            to_num = int(to_version.lstrip("v"))
-        except ValueError as e:
-            raise GoldfishError(f"Invalid version format: {from_version} or {to_version}") from e
+        from_num = self._parse_version_number(from_version)
+        to_num = self._parse_version_number(to_version)
 
         unpruned_count = 0
 
@@ -1779,8 +1769,8 @@ class Database:
             for row in rows:
                 version = row["version"]
                 try:
-                    version_num = int(version.lstrip("v"))
-                except ValueError:
+                    version_num = self._parse_version_number(version)
+                except Exception:
                     continue
 
                 if from_num <= version_num <= to_num:
