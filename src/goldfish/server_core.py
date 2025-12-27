@@ -13,6 +13,7 @@ from goldfish.context import get_context, has_context
 from goldfish.datasets.registry import DatasetRegistry
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError
+from goldfish.infra.metadata.base import MetadataBus
 from goldfish.jobs.launcher import JobLauncher
 from goldfish.jobs.tracker import JobTracker
 from goldfish.pipeline.manager import PipelineManager
@@ -111,6 +112,13 @@ def _get_pipeline_executor():
     if not has_context():
         raise GoldfishError("Server not initialized")
     return get_context().pipeline_executor
+
+
+def _get_metadata_bus() -> MetadataBus:
+    """Get metadata bus from context or raise GoldfishError."""
+    if not has_context():
+        raise GoldfishError("Server not initialized")
+    return get_context().metadata_bus
 
 
 def _get_state_md() -> str:

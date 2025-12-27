@@ -15,20 +15,15 @@ from goldfish.errors import (
     validate_reason,
 )
 from goldfish.models import (
-    DeleteSourceResponse,
     JobStatus,
-    ListSourcesResponse,
     PromoteArtifactResponse,
-    RegisterDatasetResponse,
     RegisterSourceResponse,
     SourceInfo,
     SourceLineage,
     StageRunStatus,
-    UpdateSourceMetadataResponse,
 )
 from goldfish.server_core import (
     _get_config,
-    _get_dataset_registry,
     _get_db,
     _get_state_manager,
     _get_state_md,
@@ -37,7 +32,6 @@ from goldfish.server_core import (
 from goldfish.sources.conversion import source_row_to_info
 from goldfish.validation import (
     InvalidSourceMetadataError,
-    parse_source_metadata,
     validate_artifact_uri,
     validate_job_id,
     validate_output_name,
@@ -57,161 +51,75 @@ def _truncate_for_error(value: str | None, limit: int = 120) -> str | None:
 
 
 @mcp.tool()
-def list_sources(
+def manage_sources(
+    action: str,
+    name: str | None = None,
     status: str | None = None,
     created_by: str | None = None,
+    metadata: dict | None = None,
+    reason: str | None = None,
     limit: int = 50,
     offset: int = 0,
-) -> ListSourcesResponse:
-    """List available data sources with pagination and filtering.
+) -> dict:
+    """Unified tool for managing the data registry.
 
     Args:
-        status: Filter by status (available, processing, error)
-        created_by: Filter by creator. Use "external" for datasets (registered
-                   via register_dataset), or "job:xxx" for promoted artifacts.
-        limit: Maximum number of sources to return (1-200, default 50)
-        offset: Number of sources to skip for pagination (default 0)
-
-    Returns:
-        ListSourcesResponse with sources and pagination metadata
-
-    Examples:
-        list_sources()                           # All sources
-        list_sources(created_by="external")      # Only datasets
-        list_sources(status="available")         # Only available sources
+        action: "list", "get", "lineage", "update", "delete"
+        name: Source name or identifier
+        status: Filter for 'list' action
+        created_by: Filter for 'list' action
+        metadata: New metadata for 'update' action
+        reason: Why performing this action (update/delete)
+        limit / offset: Pagination for 'list'
     """
     db = _get_db()
+    config = _get_config()
 
-    # Validate limit and offset
-    if limit < 1 or limit > 200:
-        raise GoldfishError("limit must be between 1 and 200")
-    if offset < 0:
-        raise GoldfishError("offset must be >= 0")
+    if action == "list":
+        total = db.count_sources(status=status, created_by=created_by)
+        rows = db.list_sources(status=status, created_by=created_by, limit=limit, offset=offset)
+        return {"sources": [source_row_to_info(r) for r in rows], "total": total}
 
-    # Get total count matching filters
-    total_count = db.count_sources(status=status, created_by=created_by)
-
-    # Get page of sources
-    sources = db.list_sources(
-        status=status,
-        created_by=created_by,
-        limit=limit,
-        offset=offset,
-    )
-
-    source_infos = [source_row_to_info(source) for source in sources]
-
-    # Calculate has_more
-    has_more = (offset + len(source_infos)) < total_count
-
-    # Track which filters were applied
-    filters_applied = {}
-    if status:
-        filters_applied["status"] = status
-    if created_by:
-        filters_applied["created_by"] = created_by
-
-    return ListSourcesResponse(
-        sources=source_infos,
-        total_count=total_count,
-        offset=offset,
-        limit=limit,
-        has_more=has_more,
-        filters_applied=filters_applied,
-    )
-
-
-@mcp.tool()
-def get_source(name: str) -> SourceInfo:
-    """Get detailed information about a specific data source.
-
-    Args:
-        name: Name of the source to look up
-    """
-    db = _get_db()
+    if not name:
+        raise GoldfishError("name is required for this action")
     validate_source_name(name)
 
-    source = db.get_source(name)
-    if source is None:
-        raise SourceNotFoundError(f"Source not found: {name}")
+    if action == "get":
+        source = db.get_source(name)
+        if not source:
+            raise SourceNotFoundError(f"Source not found: {name}")
+        return source_row_to_info(source).model_dump(mode="json")  # type: ignore[no-any-return]
 
-    return source_row_to_info(source)
+    if action == "lineage":
+        # Get lineage records
+        lineage_records = db.get_lineage(name)
+        return {
+            "source_name": name,
+            "parents": [r["parent_source_id"] for r in lineage_records if r["parent_source_id"]],
+            "job_id": next((r["job_id"] for r in lineage_records if r["job_id"]), None),
+        }
+
+    if action == "update":
+        if not metadata or not reason:
+            raise GoldfishError("metadata and reason are required for action='update'")
+        validate_reason(reason, config.audit.min_reason_length)
+        validate_source_metadata(metadata)
+        db.update_source_metadata(name, metadata, metadata.get("description"))
+        db.log_audit(operation="update_source", reason=reason, details={"source": name})
+        return {"success": True, "source": name}
+
+    if action == "delete":
+        if not reason:
+            raise GoldfishError("reason is required for action='delete'")
+        validate_reason(reason, config.audit.min_reason_length)
+        db.delete_source(name)
+        db.log_audit(operation="delete_source", reason=reason, details={"source": name})
+        return {"success": True, "deleted": name}
+
+    raise GoldfishError(f"Unknown action: {action}")
 
 
-@mcp.tool()
-def update_source_metadata(
-    source_name: str,
-    metadata: dict,
-    reason: str,
-) -> UpdateSourceMetadataResponse:
-    """Update metadata for an existing source.
-
-    Args:
-        source_name: Source name to update
-        metadata: Required metadata dict (strict schema)
-        reason: Why you're updating metadata (min 15 chars)
-    """
-    logger.info("update_source_metadata() called", extra={"source_name": source_name})
-
-    config = _get_config()
-    db = _get_db()
-    state_manager = _get_state_manager()
-
-    validate_source_name(source_name)
-    validate_reason(reason, config.audit.min_reason_length)
-
-    if metadata is None:
-        raise InvalidSourceMetadataError("metadata is required")
-
-    validate_source_metadata(metadata)
-
-    source = db.get_source(source_name)
-    if source is None:
-        raise SourceNotFoundError(f"Source not found: {source_name}")
-
-    description = metadata.get("description")
-    size_bytes = metadata.get("source", {}).get("size_bytes")
-
-    existing_metadata, status = parse_source_metadata(source.get("metadata"))
-    if status == "ok" and existing_metadata is not None:
-        existing_format = existing_metadata.get("source", {}).get("format")
-        new_format = metadata.get("source", {}).get("format")
-        if existing_format and new_format != existing_format:
-            raise InvalidSourceMetadataError(
-                f"metadata.source.format '{new_format}' does not match existing format '{existing_format}'",
-                field="source.format",
-            )
-        existing_size = source.get("size_bytes")
-        if existing_size is not None and size_bytes != existing_size:
-            raise InvalidSourceMetadataError(
-                f"metadata.source.size_bytes {size_bytes} does not match existing size_bytes {existing_size}",
-                field="source.size_bytes",
-            )
-
-    db.update_source_metadata(
-        source_id_or_name=source_name,
-        metadata=metadata,
-        description=description,
-        size_bytes=size_bytes,
-    )
-
-    db.log_audit(
-        operation="update_source_metadata",
-        reason=reason,
-        details={"source_name": source_name},
-    )
-
-    state_manager.add_action(f"Updated metadata for source '{source_name}'")
-
-    source = db.get_source(source_name)
-    if source is None:
-        raise SourceNotFoundError(f"Source not found: {source_name}")
-
-    source_info = source_row_to_info(source)
-
-    state_md = _get_state_md()
-
-    return UpdateSourceMetadataResponse(success=True, source=source_info, state_md=state_md)
+# ============== REGISTRATION TOOLS ==============
 
 
 @mcp.tool()
@@ -325,94 +233,7 @@ def register_source(
         raise
 
 
-@mcp.tool()
-def delete_source(source_name: str, reason: str) -> DeleteSourceResponse:
-    """Delete a data source from the registry.
-
-    WARNING: This is irreversible. Jobs that used this source
-    will have broken lineage references.
-
-    Args:
-        source_name: Name of the source to delete
-        reason: Why you're deleting this source (min 15 chars)
-    """
-    logger.info("delete_source() called", extra={"source_name": source_name})
-
-    config = _get_config()
-    db = _get_db()
-    state_manager = _get_state_manager()
-
-    validate_source_name(source_name)
-    validate_reason(reason, config.audit.min_reason_length)
-
-    # Check source exists
-    if not db.source_exists(source_name):
-        raise SourceNotFoundError(f"Source not found: {source_name}")
-
-    try:
-        # Delete source (and lineage)
-        db.delete_source(source_name)
-
-        # Log to audit
-        db.log_audit(
-            operation="delete_source",
-            reason=reason,
-            details={"source_name": source_name},
-        )
-
-        state_manager.add_action(f"Deleted source '{source_name}'")
-
-        logger.info("delete_source() succeeded", extra={"source_name": source_name})
-
-        return DeleteSourceResponse(
-            success=True,
-            source_name=source_name,
-        )
-    except Exception as e:
-        logger.error("delete_source() failed", extra={"source_name": source_name, "error": str(e)})
-        raise
-
-
-@mcp.tool()
-def get_source_lineage(source_name: str) -> SourceLineage:
-    """Get lineage information for a data source.
-
-    Shows the parent sources and creating job for a source.
-    Useful for understanding data provenance.
-
-    Args:
-        source_name: Name of the source to query
-    """
-    db = _get_db()
-
-    # Validate source name
-    validate_source_name(source_name)
-
-    # Check source exists
-    if not db.source_exists(source_name):
-        raise SourceNotFoundError(f"Source not found: {source_name}")
-
-    # Get lineage records
-    lineage_records = db.get_lineage(source_name)
-
-    parent_sources = []
-    job_id = None
-
-    for record in lineage_records:
-        parent_id = record.get("parent_source_id")
-        if parent_id:
-            parent_sources.append(parent_id)
-        if record.get("job_id") and job_id is None:
-            job_id = record["job_id"]
-
-    return SourceLineage(
-        source_name=source_name,
-        parent_sources=parent_sources,
-        job_id=job_id,
-    )
-
-
-# ============== DELETE TOOLS ==============
+# ============== ARTIFACT TOOLS ==============
 
 
 @mcp.tool()
@@ -613,97 +434,5 @@ def promote_artifact(
         raise
 
 
-@mcp.tool()
-def register_dataset(
-    name: str,
-    source: str,
-    description: str,
-    format: str,
-    metadata: dict,
-    size_bytes: int | None = None,
-) -> RegisterDatasetResponse:
-    """Register a project-level dataset.
-
-    Datasets are immutable data sources shared across all workspaces.
-    For local files, Goldfish uploads them to GCS automatically.
-
-    Args:
-        name: Dataset identifier (e.g., "eurusd_raw_v3")
-        source: Source location:
-            - "local:/path/to/file.csv" - Local file (will be uploaded to GCS)
-            - "gs://bucket/path" - GCS path (used directly)
-        description: Human-readable description
-        format: File format (csv, npy, directory, etc.)
-        metadata: Required metadata dict (strict schema)
-        size_bytes: Optional size bytes (must match metadata.source.size_bytes)
-
-    Returns:
-        Dataset info with GCS location
-
-    Example:
-        register_dataset(
-            name="eurusd_raw_v3",
-            source="local:/data/eurusd.csv",
-            description="EUR/USD tick data, version 3",
-            format="csv"
-        )
-    """
-    from goldfish.validation import validate_source_name
-
-    dataset_registry = _get_dataset_registry()
-    validate_source_name(name)
-
-    if metadata is None:
-        raise InvalidSourceMetadataError("metadata is required for new datasets")
-
-    validate_source_metadata(metadata)
-
-    if description != metadata.get("description"):
-        raise InvalidSourceMetadataError(
-            "tool description must match metadata.description exactly",
-            field="description",
-            details={
-                "provided": _truncate_for_error(description),
-                "in_metadata": _truncate_for_error(metadata.get("description")),
-            },
-        )
-
-    source_format = metadata.get("source", {}).get("format")
-    metadata_size = metadata.get("source", {}).get("size_bytes")
-    if metadata_size is None:
-        raise InvalidSourceMetadataError(
-            "metadata.source.size_bytes is required for register_dataset",
-            field="source.size_bytes",
-        )
-    if format != source_format:
-        raise InvalidSourceMetadataError(
-            f"format '{format}' does not match metadata.source.format '{source_format}'",
-            field="format",
-        )
-
-    if size_bytes is not None and metadata_size != size_bytes:
-        raise InvalidSourceMetadataError(
-            f"size_bytes {size_bytes} does not match metadata.source.size_bytes {metadata_size}",
-            field="size_bytes",
-        )
-
-    try:
-        dataset = dataset_registry.register_dataset(
-            name=name,
-            source=source,
-            description=description,
-            format=format,
-            metadata=metadata,
-            size_bytes=size_bytes,
-        )
-
-        return RegisterDatasetResponse(
-            success=True,
-            dataset=dataset,
-        )
-    except SourceAlreadyExistsError as e:
-        raise GoldfishError(str(e)) from e
-
-
-# Note: list_datasets() and get_dataset() removed.
-# Use list_sources(created_by="external") and get_source() instead.
+# Note: list_datasets(), get_dataset(), and register_dataset() removed.
+# Use manage_sources(), register_source(), and promote_artifact() instead.
