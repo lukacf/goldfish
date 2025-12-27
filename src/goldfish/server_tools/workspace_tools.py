@@ -6,6 +6,7 @@ Extracted from server.py for better organization.
 import logging
 import warnings
 from datetime import datetime
+from typing import Any, cast
 
 from goldfish.errors import (
     GoldfishError,
@@ -350,7 +351,7 @@ def rollback(slot: str, version: str, reason: str) -> RollbackResponse:
 
 
 @mcp.tool()
-def tag_version(workspace: str, version: str, tag_name: str) -> dict:
+def tag_version(workspace: str, version: str, tag_name: str) -> dict[str, Any]:
     """Tag a version with a memorable name.
 
     Tags allow marking significant versions (e.g., "baseline-working", "best-model").
@@ -386,7 +387,7 @@ def tag_version(workspace: str, version: str, tag_name: str) -> dict:
         state_manager.add_action(f"Tagged {version} as '{tag_name}'")
 
         logger.info("tag_version() succeeded", extra={"workspace": workspace, "version": version, "tag_name": tag_name})
-        return result
+        return cast(dict[str, Any], result)
     except Exception as e:
         logger.error(
             "tag_version() failed",
@@ -396,7 +397,7 @@ def tag_version(workspace: str, version: str, tag_name: str) -> dict:
 
 
 @mcp.tool()
-def untag_version(workspace: str, tag_name: str) -> dict:
+def untag_version(workspace: str, tag_name: str) -> dict[str, Any]:
     """Remove a tag from a version.
 
     Args:
@@ -434,7 +435,7 @@ def untag_version(workspace: str, tag_name: str) -> dict:
 
 
 @mcp.tool()
-def list_tags(workspace: str) -> list[dict]:
+def list_tags(workspace: str) -> list[dict[str, Any]]:
     """List all tags for a workspace.
 
     Args:
@@ -447,14 +448,14 @@ def list_tags(workspace: str) -> list[dict]:
 
     validate_workspace_name(workspace)
 
-    return db.list_tags(workspace)
+    return cast(list[dict[str, Any]], db.list_tags(workspace))
 
 
 # ============== VERSION PRUNING TOOLS ==============
 
 
 @mcp.tool()
-def prune_version(workspace: str, version: str, reason: str) -> dict:
+def prune_version(workspace: str, version: str, reason: str) -> dict[str, Any]:
     """Prune a single version (soft delete).
 
     Pruned versions are hidden from list_versions() but can be restored.
@@ -492,14 +493,14 @@ def prune_version(workspace: str, version: str, reason: str) -> dict:
         state_manager.add_action(f"Pruned version {version}")
 
         logger.info("prune_version() succeeded", extra={"workspace": workspace, "version": version})
-        return result
+        return cast(dict[str, Any], result)
     except Exception as e:
         logger.error("prune_version() failed", extra={"workspace": workspace, "version": version, "error": str(e)})
         raise
 
 
 @mcp.tool()
-def prune_versions(workspace: str, from_version: str, to_version: str, reason: str) -> dict:
+def prune_versions(workspace: str, from_version: str, to_version: str, reason: str) -> dict[str, Any]:
     """Prune a range of versions (inclusive).
 
     Tagged versions within the range are skipped (not pruned).
@@ -555,7 +556,7 @@ def prune_versions(workspace: str, from_version: str, to_version: str, reason: s
 
 
 @mcp.tool()
-def prune_before_tag(workspace: str, tag_name: str, reason: str) -> dict:
+def prune_before_tag(workspace: str, tag_name: str, reason: str) -> dict[str, Any]:
     """Prune all versions before a tagged milestone.
 
     The tagged version itself is NOT pruned. Other tagged versions
@@ -602,7 +603,7 @@ def prune_before_tag(workspace: str, tag_name: str, reason: str) -> dict:
 
 
 @mcp.tool()
-def unprune_version(workspace: str, version: str) -> dict:
+def unprune_version(workspace: str, version: str) -> dict[str, Any]:
     """Restore a pruned version.
 
     Makes a previously pruned version visible again.
@@ -643,7 +644,7 @@ def unprune_version(workspace: str, version: str) -> dict:
 
 
 @mcp.tool()
-def unprune_versions(workspace: str, from_version: str, to_version: str) -> dict:
+def unprune_versions(workspace: str, from_version: str, to_version: str) -> dict[str, Any]:
     """Restore a range of pruned versions.
 
     Args:
@@ -694,7 +695,7 @@ def unprune_versions(workspace: str, from_version: str, to_version: str) -> dict
 
 
 @mcp.tool()
-def get_pruned_count(workspace: str) -> dict:
+def get_pruned_count(workspace: str) -> dict[str, Any]:
     """Get the count of pruned versions in a workspace.
 
     Args:

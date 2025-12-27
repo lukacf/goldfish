@@ -1550,6 +1550,12 @@ class Database:
                         details={"workspace": workspace_name, "version": version},
                     )
 
+                # Fallback for unknown error
+                raise GoldfishError(
+                    f"Failed to prune version '{version}' for unknown reason",
+                    details={"workspace": workspace_name, "version": version},
+                )
+
             return cast(
                 PrunedVersionRow,
                 {
@@ -1580,45 +1586,39 @@ class Database:
         from_num = self._parse_version_number(from_version)
         to_num = self._parse_version_number(to_version)
 
-        pruned_count = 0
-        skipped_tagged = 0
-
         with self._conn() as conn:
-            # Use a single query to get versions and their tag counts in range
-            # This avoids N+1 query problem
-            rows = conn.execute(
+            # 1. Count tagged versions in range (to report skipped)
+            # Use CAST(SUBSTR(version, 2) AS INTEGER) to extract number from "v123"
+            row = conn.execute(
                 """
-                SELECT v.version, COUNT(t.tag_name) as tag_count
+                SELECT COUNT(*) as count
                 FROM workspace_versions v
-                LEFT JOIN workspace_version_tags t ON v.workspace_name = t.workspace_name AND v.version = t.version
-                WHERE v.workspace_name = ? AND v.pruned_at IS NULL
-                GROUP BY v.version
+                JOIN workspace_version_tags t ON v.workspace_name = t.workspace_name AND v.version = t.version
+                WHERE v.workspace_name = ?
+                AND v.pruned_at IS NULL
+                AND CAST(SUBSTR(v.version, 2) AS INTEGER) BETWEEN ? AND ?
                 """,
-                (workspace_name,),
-            ).fetchall()
+                (workspace_name, from_num, to_num),
+            ).fetchone()
+            skipped_tagged = row["count"]
 
-            for row in rows:
-                version = row["version"]
-                try:
-                    version_num = int(version.lstrip("v"))
-                except ValueError:
-                    continue
-
-                if from_num <= version_num <= to_num:
-                    if row["tag_count"] > 0:
-                        skipped_tagged += 1
-                        continue
-
-                    # Prune this version
-                    conn.execute(
-                        """
-                        UPDATE workspace_versions
-                        SET pruned_at = ?, prune_reason = ?
-                        WHERE workspace_name = ? AND version = ?
-                        """,
-                        (timestamp, reason, workspace_name, version),
-                    )
-                    pruned_count += 1
+            # 2. Prune non-tagged versions in range
+            result = conn.execute(
+                """
+                UPDATE workspace_versions
+                SET pruned_at = ?, prune_reason = ?
+                WHERE workspace_name = ?
+                AND pruned_at IS NULL
+                AND CAST(SUBSTR(version, 2) AS INTEGER) BETWEEN ? AND ?
+                AND NOT EXISTS (
+                    SELECT 1 FROM workspace_version_tags t
+                    WHERE t.workspace_name = workspace_versions.workspace_name
+                    AND t.version = workspace_versions.version
+                )
+                """,
+                (timestamp, reason, workspace_name, from_num, to_num),
+            )
+            pruned_count = result.rowcount
 
         return {
             "workspace_name": workspace_name,
@@ -1639,7 +1639,7 @@ class Database:
             reason: Why pruning
 
         Returns:
-            Dict with pruned_count
+            Dict with pruned_count, skipped_tagged, and tag_version
         """
         from goldfish.errors import GoldfishError
 
@@ -1664,47 +1664,44 @@ class Database:
             tagged_version = tag_row["version"]
             tagged_num = self._parse_version_number(tagged_version)
 
-            # Prune all versions before the tagged one (skip other tagged versions)
-            pruned_count = 0
-
-            # Use single query to avoid N+1 problem
-            rows = conn.execute(
+            # 1. Count tagged versions before cutoff (excluding the cutoff itself)
+            row = conn.execute(
                 """
-                SELECT v.version, COUNT(t.tag_name) as tag_count
+                SELECT COUNT(*) as count
                 FROM workspace_versions v
-                LEFT JOIN workspace_version_tags t ON v.workspace_name = t.workspace_name AND v.version = t.version
-                WHERE v.workspace_name = ? AND v.pruned_at IS NULL
-                GROUP BY v.version
+                JOIN workspace_version_tags t ON v.workspace_name = t.workspace_name AND v.version = t.version
+                WHERE v.workspace_name = ?
+                AND v.pruned_at IS NULL
+                AND CAST(SUBSTR(v.version, 2) AS INTEGER) < ?
                 """,
-                (workspace_name,),
-            ).fetchall()
+                (workspace_name, tagged_num),
+            ).fetchone()
+            skipped_tagged = row["count"]
 
-            for row in rows:
-                version = row["version"]
-                try:
-                    version_num = int(version.lstrip("v"))
-                except ValueError:
-                    continue
-
-                if version_num < tagged_num:
-                    if row["tag_count"] > 0:
-                        continue  # Skip tagged versions
-
-                    # Prune this version
-                    conn.execute(
-                        """
-                        UPDATE workspace_versions
-                        SET pruned_at = ?, prune_reason = ?
-                        WHERE workspace_name = ? AND version = ?
-                        """,
-                        (timestamp, reason, workspace_name, version),
-                    )
-                    pruned_count += 1
+            # 2. Prune non-tagged versions before cutoff
+            result = conn.execute(
+                """
+                UPDATE workspace_versions
+                SET pruned_at = ?, prune_reason = ?
+                WHERE workspace_name = ?
+                AND pruned_at IS NULL
+                AND CAST(SUBSTR(version, 2) AS INTEGER) < ?
+                AND NOT EXISTS (
+                    SELECT 1 FROM workspace_version_tags t
+                    WHERE t.workspace_name = workspace_versions.workspace_name
+                    AND t.version = workspace_versions.version
+                )
+                """,
+                (timestamp, reason, workspace_name, tagged_num),
+            )
+            pruned_count = result.rowcount
 
         return {
             "workspace_name": workspace_name,
             "tag_name": tag_name,
+            "tag_version": tagged_version,
             "pruned_count": pruned_count,
+            "skipped_tagged": skipped_tagged,
         }
 
     def unprune_version(self, workspace_name: str, version: str) -> dict:
