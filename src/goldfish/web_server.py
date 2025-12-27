@@ -577,14 +577,15 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
             pass
 
     def _get_workspaces(self, db: Database) -> list[dict[str, Any]]:
-        """Get list of all workspaces."""
+        """Get list of all workspaces with version counts (excluding pruned)."""
         with db._conn() as conn:
             rows = conn.execute(
                 """
                 SELECT wl.workspace_name, wl.description, wl.created_at,
                        wl.parent_workspace, wl.parent_version,
-                       COUNT(DISTINCT wv.version) as version_count,
-                       MAX(wv.created_at) as last_version_at,
+                       COUNT(DISTINCT CASE WHEN wv.pruned_at IS NULL THEN wv.version END) as version_count,
+                       COUNT(DISTINCT CASE WHEN wv.pruned_at IS NOT NULL THEN wv.version END) as pruned_count,
+                       MAX(CASE WHEN wv.pruned_at IS NULL THEN wv.created_at END) as last_version_at,
                        wm.status as mount_status
                 FROM workspace_lineage wl
                 LEFT JOIN workspace_versions wv ON wl.workspace_name = wv.workspace_name
@@ -602,6 +603,7 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
                 "parent_workspace": r["parent_workspace"],
                 "parent_version": r["parent_version"],
                 "version_count": r["version_count"],
+                "pruned_count": r["pruned_count"],
                 "last_version_at": r["last_version_at"],
                 "mount_status": r["mount_status"],
             }
@@ -609,7 +611,7 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
         ]
 
     def _get_workspace_details(self, db: Database, workspace_name: str) -> dict[str, Any]:
-        """Get detailed information about a workspace."""
+        """Get detailed information about a workspace (excluding pruned versions)."""
         with db._conn() as conn:
             # Get workspace info
             workspace = conn.execute(
@@ -623,15 +625,27 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
             if not workspace:
                 raise ValueError(f"Workspace '{workspace_name}' not found")
 
-            # Get versions
+            # Get versions (excluding pruned) with their tags
             versions = conn.execute(
                 """
-                SELECT * FROM workspace_versions
-                WHERE workspace_name = ?
-                ORDER BY created_at DESC
+                SELECT wv.*, wvt.tag_name
+                FROM workspace_versions wv
+                LEFT JOIN workspace_version_tags wvt
+                    ON wv.workspace_name = wvt.workspace_name AND wv.version = wvt.version
+                WHERE wv.workspace_name = ? AND wv.pruned_at IS NULL
+                ORDER BY wv.created_at DESC
                 """,
                 (workspace_name,),
             ).fetchall()
+
+            # Get pruned count
+            pruned_count = conn.execute(
+                """
+                SELECT COUNT(*) as count FROM workspace_versions
+                WHERE workspace_name = ? AND pruned_at IS NOT NULL
+                """,
+                (workspace_name,),
+            ).fetchone()["count"]
 
             # Get recent runs
             runs = conn.execute(
@@ -647,6 +661,7 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
             return {
                 "workspace": dict(workspace),
                 "versions": [dict(v) for v in versions],
+                "pruned_count": pruned_count,
                 "recent_runs": [dict(r) for r in runs],
             }
 
@@ -769,6 +784,8 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
     def _get_version_lineage(self, db: Database) -> dict[str, Any]:
         """Get workspace/version lineage for git-style DAG visualization.
 
+        Excludes pruned versions by default and includes tags.
+
         Returns:
             {
                 "workspaces": [
@@ -777,37 +794,40 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
                         "parent": null,
                         "parent_version": null,
                         "created_at": "...",
+                        "pruned_count": 5,
                         "versions": [
-                            {"version": "v1", "git_sha": "abc123", "created_at": "...", "created_by": "run"},
-                            {"version": "v2", "git_sha": "def456", "created_at": "...", "created_by": "checkpoint"},
+                            {"version": "v1", "git_sha": "abc123", "created_at": "...", "created_by": "run", "tag_name": null},
+                            {"version": "v2", "git_sha": "def456", "created_at": "...", "created_by": "checkpoint", "tag_name": "baseline-working"},
                         ]
                     },
-                    {
-                        "name": "experiment-dropout",
-                        "parent": "baseline",
-                        "parent_version": "v2",
-                        "created_at": "...",
-                        "versions": [...]
-                    }
+                    ...
                 ]
             }
         """
         with db._conn() as conn:
-            # Get all workspaces with lineage info
+            # Get all workspaces with lineage info and pruned counts
             workspaces = conn.execute(
                 """
-                SELECT workspace_name, parent_workspace, parent_version, created_at, description
-                FROM workspace_lineage
-                ORDER BY created_at ASC
+                SELECT wl.workspace_name, wl.parent_workspace, wl.parent_version,
+                       wl.created_at, wl.description,
+                       COUNT(CASE WHEN wv.pruned_at IS NOT NULL THEN 1 END) as pruned_count
+                FROM workspace_lineage wl
+                LEFT JOIN workspace_versions wv ON wl.workspace_name = wv.workspace_name
+                GROUP BY wl.workspace_name
+                ORDER BY wl.created_at ASC
                 """
             ).fetchall()
 
-            # Get all versions grouped by workspace
+            # Get all non-pruned versions with tags, grouped by workspace
             versions = conn.execute(
                 """
-                SELECT workspace_name, version, git_sha, created_at, created_by, description
-                FROM workspace_versions
-                ORDER BY workspace_name, created_at ASC
+                SELECT wv.workspace_name, wv.version, wv.git_sha, wv.created_at,
+                       wv.created_by, wv.description, wvt.tag_name
+                FROM workspace_versions wv
+                LEFT JOIN workspace_version_tags wvt
+                    ON wv.workspace_name = wvt.workspace_name AND wv.version = wvt.version
+                WHERE wv.pruned_at IS NULL
+                ORDER BY wv.workspace_name, wv.created_at ASC
                 """
             ).fetchall()
 
@@ -824,6 +844,7 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
                         "created_at": v["created_at"],
                         "created_by": v["created_by"],
                         "description": v["description"],
+                        "tag_name": v["tag_name"],
                     }
                 )
 
@@ -837,6 +858,7 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
                         "parent_version": ws["parent_version"],
                         "created_at": ws["created_at"],
                         "description": ws["description"],
+                        "pruned_count": ws["pruned_count"],
                         "versions": versions_by_workspace.get(ws["workspace_name"], []),
                     }
                 )
