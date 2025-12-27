@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -255,6 +256,7 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
     if not row:
         raise GoldfishError(f"Run not found: {run_id}")
 
+    sync_status = "not_running"
     if row["status"] == StageRunStatus.RUNNING:
         try:
             bus = _get_metadata_bus()
@@ -264,8 +266,20 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
             sig = MetadataSignal(command="sync", request_id=req_id, payload={"run_id": run_id})
             target = row.get("backend_handle")
             bus.set_signal("goldfish", sig, target=target)
+
+            # Wait for ACK (max 2 seconds)
+            start_time = time.time()
+            sync_status = "timeout"
+            while time.time() - start_time < 2.0:
+                ack = bus.get_ack("goldfish")
+                if ack == req_id:
+                    sync_status = "synced"
+                    break
+                time.sleep(0.1)
+
         except Exception as e:
             logger.debug(f"Failed to trigger sync signal: {e}")
+            sync_status = f"error: {e}"
 
     # Set default includes if None
     if include is None:
@@ -330,6 +344,7 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
             "metrics": synthesized_metrics,
             "health": health,
             "last_sync": row.get("last_metrics_sync_at") or row.get("started_at"),
+            "sync_status": sync_status,
         }
 
     if "manifest" in include:
