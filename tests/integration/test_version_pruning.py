@@ -251,7 +251,7 @@ class TestCannotPruneTaggedVersion:
         db.create_tag("test-ws", versions[1], "protected-milestone")
 
         # Trying to prune v2 should fail
-        with pytest.raises(GoldfishError, match="Cannot prune tagged version"):
+        with pytest.raises(GoldfishError, match="Cannot prune version .* because it has tags"):
             db.prune_version("test-ws", versions[1], "Attempting to prune protected version")
 
     def test_prune_range_skips_tagged_versions(self, pruning_setup):

@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS workspace_versions (
 CREATE INDEX IF NOT EXISTS idx_workspace_versions_workspace ON workspace_versions(workspace_name);
 CREATE INDEX IF NOT EXISTS idx_workspace_versions_created ON workspace_versions(created_at);
 CREATE INDEX IF NOT EXISTS idx_workspace_versions_pruned ON workspace_versions(workspace_name, pruned_at);
+CREATE INDEX IF NOT EXISTS idx_workspace_versions_pruned_version ON workspace_versions(workspace_name, pruned_at, version);
 
 
 -- Stage versions (tracks unique code + config combinations per stage)
