@@ -79,6 +79,141 @@ class TestInputResolution:
         assert sources["raw_data"]["source_type"] == "dataset"
         assert sources["raw_data"]["dataset_name"] == "eurusd_raw_v3"
 
+
+class TestInputResolutionOutcome:
+    """Test outcome-aware input resolution (success vs bad_results)."""
+
+    def test_resolve_input_prioritizes_success(self, test_db, test_config):
+        """Should prioritize most recent 'success' over newer unreviewed runs."""
+        # 1. Setup runs for stage 'preprocess'
+        with test_db._conn() as conn:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            # Old success
+            conn.execute(
+                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, status, outcome, started_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-10 minutes'))",
+                ("run-success", "w1", "preprocess", "v1", StageRunStatus.COMPLETED, "success"),
+            )
+            # New unreviewed
+            conn.execute(
+                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, status, outcome, started_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-5 minutes'))",
+                ("run-new", "w1", "preprocess", "v1", StageRunStatus.COMPLETED, None),
+            )
+            # Add signal to success run
+            conn.execute(
+                "INSERT INTO signal_lineage (stage_run_id, signal_name, signal_type, storage_location) "
+                "VALUES (?, ?, ?, ?)",
+                ("run-success", "data", "output", "gs://bucket/success"),
+            )
+            # Add signal to new run
+            conn.execute(
+                "INSERT INTO signal_lineage (stage_run_id, signal_name, signal_type, storage_location) "
+                "VALUES (?, ?, ?, ?)",
+                ("run-new", "data", "output", "gs://bucket/new"),
+            )
+
+        executor = StageExecutor(
+            db=test_db,
+            config=test_config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=Path("/tmp"),
+        )
+
+        stage_def = StageDef(
+            name="train",
+            inputs={"input_data": SignalDef(name="input_data", type="signal", from_stage="preprocess", signal="data")},
+            outputs={},
+        )
+
+        # Execute
+        inputs, sources = executor._resolve_inputs("w1", stage_def)
+
+        # Verify: should pick the 'success' run even if it's older than the unreviewed one
+        assert inputs["input_data"] == "gs://bucket/success"
+        assert sources["input_data"]["source_stage_run_id"] == "run-success"
+
+    def test_resolve_input_skips_bad_results(self, test_db, test_config):
+        """Should skip runs marked as 'bad_results'."""
+        with test_db._conn() as conn:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            # Newer but bad
+            conn.execute(
+                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, status, outcome, started_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-5 minutes'))",
+                ("run-bad", "w1", "preprocess", "v1", StageRunStatus.COMPLETED, "bad_results"),
+            )
+            # Older success
+            conn.execute(
+                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, status, outcome, started_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-10 minutes'))",
+                ("run-good", "w1", "preprocess", "v1", StageRunStatus.COMPLETED, "success"),
+            )
+            conn.execute(
+                "INSERT INTO signal_lineage (stage_run_id, signal_name, signal_type, storage_location) "
+                "VALUES (?, ?, ?, ?)",
+                ("run-good", "data", "output", "gs://bucket/good"),
+            )
+
+        executor = StageExecutor(
+            db=test_db,
+            config=test_config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=Path("/tmp"),
+        )
+        stage_def = StageDef(
+            name="train",
+            inputs={"input_data": SignalDef(name="input_data", type="signal", from_stage="preprocess", signal="data")},
+            outputs={},
+        )
+
+        inputs, sources = executor._resolve_inputs("w1", stage_def)
+
+        assert inputs["input_data"] == "gs://bucket/good"
+        assert sources["input_data"]["source_stage_run_id"] == "run-good"
+
+    def test_resolve_input_falls_back_to_null(self, test_db, test_config):
+        """Should fall back to most recent unreviewed run if no 'success' exists."""
+        with test_db._conn() as conn:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            # Most recent unreviewed
+            conn.execute(
+                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, status, outcome, started_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-5 minutes'))",
+                ("run-latest", "w1", "preprocess", "v1", StageRunStatus.COMPLETED, None),
+            )
+            # Older unreviewed
+            conn.execute(
+                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, status, outcome, started_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-10 minutes'))",
+                ("run-older", "w1", "preprocess", "v1", StageRunStatus.COMPLETED, None),
+            )
+            conn.execute(
+                "INSERT INTO signal_lineage (stage_run_id, signal_name, signal_type, storage_location) "
+                "VALUES (?, ?, ?, ?)",
+                ("run-latest", "data", "output", "gs://bucket/latest"),
+            )
+
+        executor = StageExecutor(
+            db=test_db,
+            config=test_config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=Path("/tmp"),
+        )
+        stage_def = StageDef(
+            name="train",
+            inputs={"input_data": SignalDef(name="input_data", type="signal", from_stage="preprocess", signal="data")},
+            outputs={},
+        )
+
+        inputs, sources = executor._resolve_inputs("w1", stage_def)
+
+        assert inputs["input_data"] == "gs://bucket/latest"
+        assert sources["input_data"]["source_stage_run_id"] == "run-latest"
+
     def test_resolve_dataset_input_rejects_schema_mismatch(self, test_db, test_config):
         """Should reject dataset input when contract schema mismatches metadata."""
         pipeline_manager = MagicMock()
@@ -285,7 +420,7 @@ class TestInputResolution:
 
         # Execute - should raise because preprocess hasn't been run
         stage = pipeline_manager.get_pipeline.return_value.stages[1]
-        with pytest.raises(GoldfishError, match="No successful run found"):
+        with pytest.raises(GoldfishError, match="No successful or unreviewed COMPLETED run found"):
             executor._resolve_inputs("test_workspace", stage)
 
 

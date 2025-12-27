@@ -683,25 +683,38 @@ class GoldfishDaemon:
             instance_name = backend_handle.replace("_", "-").lower()[:60]
 
             if instance_name not in alive_instances:
-                # Check if the instance was preempted
-                was_preempted = self._check_if_preempted(instance_name, project_id)
+                # Check for exit_code.txt in GCS first to handle race conditions
+                # where the instance self-deletes before final status update.
+                exit_code = self._get_exit_code(stage_run_id)
 
-                if was_preempted:
-                    error_msg = "Instance preempted by GCE (spot/preemptible)"
-                    logger.warning(
-                        "Preempted stage run detected: %s (instance %s was preempted)",
+                if exit_code == 0:
+                    status = StageRunStatus.COMPLETED
+                    error_msg = None
+                    logger.info(
+                        "Stage run %s completed successfully (found exit_code=0 in GCS)",
                         stage_run_id,
-                        instance_name,
                     )
                 else:
-                    error_msg = "Instance disappeared (orphan cleanup)"
-                    logger.warning(
-                        "Orphaned stage run detected: %s (instance %s not running)",
-                        stage_run_id,
-                        instance_name,
-                    )
+                    # Check if the instance was preempted
+                    was_preempted = self._check_if_preempted(instance_name, project_id)
+                    status = StageRunStatus.FAILED
 
-                # Mark stage run as failed with appropriate error message
+                    if was_preempted:
+                        error_msg = "Instance preempted by GCE (spot/preemptible)"
+                        logger.warning(
+                            "Preempted stage run detected: %s (instance %s was preempted)",
+                            stage_run_id,
+                            instance_name,
+                        )
+                    else:
+                        error_msg = f"Instance disappeared (orphan cleanup, exit_code={exit_code})"
+                        logger.warning(
+                            "Orphaned stage run detected: %s (instance %s not running)",
+                            stage_run_id,
+                            instance_name,
+                        )
+
+                # Update stage run status
                 try:
                     with self._db._conn() as conn:
                         conn.execute(
@@ -712,76 +725,54 @@ class GoldfishDaemon:
                                 completed_at = datetime('now')
                             WHERE id = ? AND status = ?
                             """,
-                            (StageRunStatus.FAILED, error_msg, stage_run_id, StageRunStatus.RUNNING),
+                            (status, error_msg, stage_run_id, StageRunStatus.RUNNING),
                         )
                     logger.info(
-                        "Marked stage run %s as failed: %s (workspace=%s, stage=%s)",
+                        "Marked stage run %s as %s (workspace=%s, stage=%s)",
                         stage_run_id,
-                        error_msg,
+                        status,
                         workspace,
                         stage,
                     )
                 except Exception as e:
                     logger.exception("Failed to update stage run %s: %s", stage_run_id, e)
 
-        # === Check 2: Instance alive but DB says terminal (canceled/completed/failed) ===
-        # This catches cases where cancel() failed to delete the instance
-        if not alive_instances:
-            return
+    def _get_exit_code(self, stage_run_id: str, max_attempts: int = 2, retry_delay: float = 1.0) -> int:
+        """Get exit code from GCS for a stage run.
 
-        # Get all GCE runs with terminal status that might have orphaned instances
-        with self._db._conn() as conn:
-            terminal_rows = conn.execute(
-                """
-                SELECT id, backend_handle, status
-                FROM stage_runs
-                WHERE status IN (?, ?, ?)
-                AND backend_type = 'gce'
-                AND backend_handle IS NOT NULL
-                AND completed_at > datetime('now', '-24 hours')
-                """,
-                (StageRunStatus.CANCELED, StageRunStatus.COMPLETED, StageRunStatus.FAILED),
-            ).fetchall()
+        Args:
+            stage_run_id: Stage run identifier
+            max_attempts: Number of retry attempts
+            retry_delay: Seconds between retries
 
-        for row in terminal_rows:
-            stage_run_id = row["id"]
-            backend_handle = row["backend_handle"]
-            db_status = row["status"]
+        Returns:
+            Exit code (0 for success), or 1 if not found or failed.
+        """
+        import subprocess
+        import time
 
-            # Sanitize instance name (same logic as GCELauncher)
-            instance_name = backend_handle.replace("_", "-").lower()[:60]
+        if not self.config or not self.config.gce or not self.config.gcs or not self.config.gcs.bucket:
+            return 1
 
-            if instance_name in alive_instances:
-                zone = alive_instances[instance_name]
-                logger.warning(
-                    "Orphaned instance detected: %s still running but DB status=%s, deleting...",
-                    instance_name,
-                    db_status,
+        bucket = self.config.gcs.bucket
+        bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+        gcs_path = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/exit_code.txt"
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = subprocess.run(
+                    ["gsutil", "cat", gcs_path],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=20,
                 )
+                return int(result.stdout.strip() or "0")
+            except Exception:
+                if attempt < max_attempts:
+                    time.sleep(retry_delay)
 
-                try:
-                    subprocess.run(
-                        [
-                            "gcloud",
-                            "compute",
-                            "instances",
-                            "delete",
-                            instance_name,
-                            f"--project={project_id}",
-                            f"--zone={zone}",
-                            "--quiet",
-                        ],
-                        capture_output=True,
-                        timeout=60,
-                    )
-                    logger.info(
-                        "Deleted orphaned instance %s (run %s was %s)",
-                        instance_name,
-                        stage_run_id,
-                        db_status,
-                    )
-                except Exception as e:
-                    logger.warning("Failed to delete orphaned instance %s: %s", instance_name, e)
+        return 1  # Default to failure if not found
 
     def start_http_server(self) -> None:
         """Start the HTTP server on Unix socket."""

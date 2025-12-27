@@ -1548,6 +1548,7 @@ class Database:
         workspace_name: str | None = None,
         stage_name: str | None = None,
         status: str | None = None,
+        outcome: str | None = None,
         pipeline_run_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
@@ -1558,6 +1559,7 @@ class Database:
             workspace_name: Filter by workspace
             stage_name: Filter by stage
             status: Filter by status
+            outcome: Filter by outcome (e.g., 'success', 'bad_results')
             limit: Maximum number of results
             offset: Number of results to skip
 
@@ -1579,6 +1581,9 @@ class Database:
         if status:
             query += " AND status = ?"
             params.append(status)
+        if outcome:
+            query += " AND outcome = ?"
+            params.append(outcome)
 
         query += " ORDER BY started_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
@@ -1592,6 +1597,7 @@ class Database:
         workspace_name: str | None = None,
         stage_name: str | None = None,
         status: str | None = None,
+        outcome: str | None = None,
         pipeline_run_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
@@ -1612,6 +1618,9 @@ class Database:
         if status:
             query += " AND status = ?"
             params.append(status)
+        if outcome:
+            query += " AND outcome = ?"
+            params.append(outcome)
 
         query += " ORDER BY started_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])

@@ -456,18 +456,51 @@ class StageExecutor:
             # Resolve precedence: from_stage first, then dataset
             if input_def.from_stage:
                 # Find output from previous stage
-                # Get most recent successful run of source stage
-                stage_runs = self.db.list_stage_runs(workspace_name=workspace, stage_name=input_def.from_stage)
+                # Priority:
+                # 1. Most recent COMPLETED run with outcome='success'
+                # 2. Most recent COMPLETED run with outcome IS NULL (unreviewed)
+                # Skip any run with outcome != 'success' and not NULL (e.g., 'bad_results')
+                stage_runs = self.db.list_stage_runs(
+                    workspace_name=workspace, stage_name=input_def.from_stage, status=StageRunStatus.COMPLETED
+                )
 
-                # Find completed run with the signal
                 source_run = None
+                skipped_bad = 0
                 for run in stage_runs:
-                    if run["status"] == StageRunStatus.COMPLETED:
+                    outcome = run.get("outcome")
+                    if outcome == "success":
                         source_run = run
                         break
+                    if outcome is None:
+                        # Fallback candidate (keep looking for an explicit 'success')
+                        if source_run is None:
+                            source_run = run
+                        # Continue searching for a 'success' outcome in previous runs
+                        continue
+
+                    # If we reach here, outcome is set but not 'success' (e.g., 'bad_results')
+                    skipped_bad += 1
+
+                if skipped_bad > 0:
+                    logger.warning(
+                        "Stage '%s': skipped %d COMPLETED runs with non-success outcome for input '%s'",
+                        stage.name,
+                        skipped_bad,
+                        input_name,
+                    )
 
                 if not source_run:
-                    raise GoldfishError(f"No successful run found for stage '{input_def.from_stage}'")
+                    raise GoldfishError(
+                        f"No successful or unreviewed COMPLETED run found for stage '{input_def.from_stage}'"
+                    )
+
+                if source_run.get("outcome") is None:
+                    logger.info(
+                        "Stage '%s': using unreviewed run %s for input '%s' (no run marked 'success' found)",
+                        stage.name,
+                        source_run["id"],
+                        input_name,
+                    )
 
                 source_run_id = source_run["id"]
 
