@@ -5,6 +5,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from goldfish.svs.config import SVSConfig
+
 
 class StateMdConfig(BaseModel):
     """STATE.md configuration."""
@@ -76,7 +78,8 @@ class GCEConfig(BaseModel):
 
     # Optional: Artifact Registry URL for Docker images
     # Example: "us-docker.pkg.dev/{project_id}/goldfish"
-    artifact_registry: str | None = Field(default=None, alias="image_uri")
+    artifact_registry: str | None = Field(default=None)
+    image_uri: str | None = Field(default=None)  # Alias for artifact_registry
 
     # Optional: global zone preferences (applies to all profiles)
     zones: list[str] | None = None
@@ -115,6 +118,11 @@ class GCEConfig(BaseModel):
         raise ValueError("GCE config requires project_id or project")
 
     @property
+    def effective_artifact_registry(self) -> str | None:
+        """Get artifact registry URL from either field."""
+        return self.artifact_registry or self.image_uri
+
+    @property
     def effective_profile_overrides(self) -> dict[str, dict] | None:
         """Get profile overrides from either field."""
         return self.profile_overrides or self.profiles
@@ -140,6 +148,7 @@ def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
         "gce": list(GCEConfig.model_fields.keys()),
         "pre_run_review": list(PreRunReviewConfig.model_fields.keys()),
         "metrics": list(MetricsConfig.model_fields.keys()),
+        "svs": list(SVSConfig.model_fields.keys()),
     }
 
     top_level_fields = [
@@ -154,6 +163,7 @@ def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
         "gce",
         "pre_run_review",
         "metrics",
+        "svs",
         "invariants",
     ]
 
@@ -189,6 +199,7 @@ class GoldfishConfig(BaseModel):
     gce: GCEConfig | None = None
     pre_run_review: PreRunReviewConfig = Field(default_factory=PreRunReviewConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    svs: SVSConfig = Field(default_factory=SVSConfig)
     invariants: list[str] = Field(default_factory=list)
 
     @classmethod
@@ -225,7 +236,7 @@ class GoldfishConfig(BaseModel):
                 data["gcs"] = {"bucket": gcs_bucket}
 
         try:
-            return cls(**data)
+            config = cls(**data)
         except ValidationError as e:
             # Extract the most useful error info with suggestions for typos
             from goldfish.validation import format_unknown_field_error
@@ -246,6 +257,8 @@ class GoldfishConfig(BaseModel):
 
                 raise GoldfishError(f"Invalid configuration: {field} - {msg}") from e
             raise GoldfishError("Invalid configuration: validation failed") from e
+
+        return config
 
     def save(self, project_root: Path) -> None:
         """Save configuration to goldfish.yaml."""
@@ -293,5 +306,6 @@ def generate_default_config(project_name: str, dev_repo_path: str = "../{project
         state_md=StateMdConfig(),
         audit=AuditConfig(),
         jobs=JobsConfig(),
+        svs=SVSConfig(),
         invariants=[],
     )

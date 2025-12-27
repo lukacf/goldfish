@@ -29,7 +29,7 @@ from goldfish.models import (
     StageRunInfo,
     StageRunStatus,
 )
-from goldfish.server import (
+from goldfish.server_core import (
     _get_config,
     _get_db,
     _get_pipeline_executor,
@@ -208,6 +208,7 @@ def run(
 
         workspace_path = workspace_manager.get_workspace_path(workspace_name)
         db = _get_db()
+        config = _get_config()
         return validate_pipeline_run(
             workspace_name=workspace_name,
             workspace_path=workspace_path,
@@ -215,6 +216,7 @@ def run(
             stages=stages,
             pipeline_name=pipeline,
             inputs_override=inputs_override or {},
+            config=config,
         )
 
     # Execute through run_stages
@@ -244,19 +246,47 @@ def get_run(run_id: str) -> dict:
         Dict with stage_run info, inputs, outputs, config, and complete error message
     """
     db = _get_db()
-    # Refresh status from backend
-    _get_stage_executor().refresh_status_once(run_id)
+    # Refresh status from backend and sync live SVS findings (best-effort)
+    executor = _get_stage_executor()
+    executor.refresh_status_once(run_id)
+    executor.sync_svs_if_running(run_id)
 
     row = db.get_stage_run(run_id)
     if not row:
         raise GoldfishError(f"Run not found: {run_id}")
 
     # Use truncate_error=False to get full error message
+    reason = json.loads(row["reason_json"]) if row.get("reason_json") else None
+    preflight_errors = json.loads(row["preflight_errors_json"]) if row.get("preflight_errors_json") else []
+    preflight_warnings = json.loads(row["preflight_warnings_json"]) if row.get("preflight_warnings_json") else []
+
+    svs_data = None
+    if preflight_errors or preflight_warnings or row.get("svs_findings_json"):
+        svs_data = {
+            "preflight": {
+                "errors": preflight_errors,
+                "warnings": preflight_warnings,
+            },
+            "during_run": None,
+            "post_run": None,
+            "stats": None,
+        }
+        if row.get("svs_findings_json"):
+            try:
+                findings = json.loads(row["svs_findings_json"])
+                svs_data["during_run"] = findings.get("during_run")
+                svs_data["post_run"] = findings.get("ai_review")
+                svs_data["stats"] = findings.get("stats")
+            except json.JSONDecodeError:
+                svs_data["post_run"] = {"decision": "warned", "findings": ["SVS findings JSON invalid"]}
+
     result: dict[str, Any] = GetRunResponse(
         stage_run=stage_run_dict_to_info(row, truncate_error=False),
         inputs=json.loads(row["inputs_json"]) if row.get("inputs_json") else {},
         outputs=json.loads(row["outputs_json"]) if row.get("outputs_json") else [],
         config=json.loads(row["config_json"]) if row.get("config_json") else {},
+        reason=reason,
+        svs=svs_data,
     ).model_dump(mode="json")
     return result
 
@@ -690,11 +720,13 @@ def get_run_metrics(
         raise GoldfishError(f"Run {run_id} does not belong to workspace {workspace}")
 
     # Opportunistic live sync for running runs (best-effort, non-blocking)
+    sync_warnings: list[str] = []
     if row.get("status") == StageRunStatus.RUNNING:
         try:
-            _get_stage_executor().sync_metrics_if_running(run_id)
+            sync_warnings = _get_stage_executor().sync_metrics_if_running(run_id)
         except Exception as exc:
             logger.debug("Live metrics sync failed for %s: %s", run_id, exc)
+            sync_warnings = ["Live metrics sync failed: unexpected error. Check server logs for details."]
 
     # Get total count first (for pagination info) - separate query
     total_metrics = db.count_run_metrics(run_id, metric_name=metric_name, metric_prefix=metric_prefix)
@@ -753,6 +785,7 @@ def get_run_metrics(
     ]
 
     warnings: list[str] = []
+    warnings.extend(sync_warnings)
     if limit is None and total_metrics > UNBOUNDED_METRICS_WARNING:
         warnings.append(f"Request returned {total_metrics} metrics. Consider using limit/offset for large runs.")
     if artifact_limit is None and total_artifacts > UNBOUNDED_ARTIFACTS_WARNING:

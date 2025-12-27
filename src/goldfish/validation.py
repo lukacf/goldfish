@@ -582,9 +582,21 @@ def _validate_metadata_structure_limits(metadata: dict[str, Any]) -> None:
                     stack.append((value, depth + 1))
 
 
-def _validate_exact_keys(obj: dict[str, Any], expected: set[str], context: str) -> None:
-    """Ensure object has exactly the expected keys."""
-    missing = expected - obj.keys()
+def _validate_exact_keys(
+    obj: dict[str, Any], expected: set[str], context: str, optional: set[str] | None = None
+) -> None:
+    """Ensure object has exactly the expected keys.
+
+    Args:
+        obj: The object to check
+        expected: Set of ALL allowed keys (required + optional)
+        context: Field name for error reporting
+        optional: Set of keys from 'expected' that are NOT required
+    """
+    optional = optional or set()
+    required = expected - optional
+
+    missing = required - obj.keys()
     if missing:
         raise InvalidSourceMetadataError(
             f"{context} missing required fields: {', '.join(sorted(missing))}",
@@ -740,15 +752,9 @@ def _validate_feature_names(feature_names: Any, shape: list[int], array_name: st
         )
 
     kind = feature_names.get("kind")
-    if kind not in {"list", "pattern", "none"}:
+    if kind not in {"list", "pattern", "none", "sequence"}:
         raise InvalidSourceMetadataError(
-            "feature_names.kind must be list, pattern, or none",
-            field=f"schema.arrays.{array_name}.feature_names.kind",
-        )
-
-    if len(shape) == 0 and kind != "none":
-        raise InvalidSourceMetadataError(
-            "feature_names.kind 'none' required for scalar shapes",
+            "feature_names.kind must be list, pattern, none, or sequence",
             field=f"schema.arrays.{array_name}.feature_names.kind",
         )
 
@@ -836,9 +842,48 @@ def _validate_feature_names(feature_names: Any, shape: list[int], array_name: st
             )
         if len(shape) != 0:
             raise InvalidSourceMetadataError(
-                "feature_names.kind 'none' only allowed for scalar shapes",
+                "feature_names.kind 'none' only allowed for scalar shapes. Use 'sequence' for non-scalar unnamed data.",
                 field=f"schema.arrays.{array_name}.feature_names.kind",
             )
+        return
+
+    if kind == "sequence":
+        # 'sequence' is for unnamed data (e.g. time-series, raw signals)
+        # It allows optional metadata about the sequence.
+        _validate_exact_keys(
+            feature_names,
+            {"kind", "reason", "interval", "unit", "start_value"},
+            f"schema.arrays.{array_name}.feature_names",
+            optional={"interval", "unit", "start_value"},
+        )
+        reason = feature_names.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise InvalidSourceMetadataError(
+                "feature_names.reason must be a non-empty string",
+                field=f"schema.arrays.{array_name}.feature_names.reason",
+            )
+
+        # Optional time-series metadata
+        interval = feature_names.get("interval")
+        if interval is not None and (not isinstance(interval, int | float) or interval <= 0):
+            raise InvalidSourceMetadataError(
+                "feature_names.interval must be a positive number",
+                field=f"schema.arrays.{array_name}.feature_names.interval",
+            )
+
+        unit = feature_names.get("unit")
+        if unit is not None and (not isinstance(unit, str) or not unit.strip()):
+            raise InvalidSourceMetadataError(
+                "feature_names.unit must be a non-empty string",
+                field=f"schema.arrays.{array_name}.feature_names.unit",
+            )
+
+        if len(shape) == 0:
+            raise InvalidSourceMetadataError(
+                "feature_names.kind 'sequence' only allowed for non-scalar shapes",
+                field=f"schema.arrays.{array_name}.feature_names.kind",
+            )
+        return
 
 
 def _validate_feature_count(values_count: int, shape: list[int], array_name: str) -> None:
@@ -1150,13 +1195,16 @@ def validate_from_ref(ref: str) -> None:
 
 
 def validate_job_id(job_id: str) -> None:
-    """Validate a job ID.
+    """Validate a job ID or stage run ID.
 
-    Job IDs must match format: job-{8 hex chars}
-    This prevents database/command injection via job_status(), get_job_logs(), etc.
+    Accepts:
+    - Legacy Job IDs: job-{8 hex chars}
+    - Stage Run IDs: stage-{hex chars}
+
+    This prevents database/command injection.
 
     Args:
-        job_id: The job ID to validate (e.g., "job-a1b2c3d4")
+        job_id: The ID to validate
 
     Raises:
         InvalidJobIdError: If validation fails
@@ -1173,9 +1221,9 @@ def validate_job_id(job_id: str) -> None:
     if _contains_path_traversal(job_id) or "/" in job_id:
         raise InvalidJobIdError(job_id, "cannot contain path components")
 
-    # Must match exact format
-    if not _JOB_ID_PATTERN.match(job_id):
-        raise InvalidJobIdError(job_id, "must match format job-{8 hex chars} (e.g., job-a1b2c3d4)")
+    # Check against allowed patterns
+    if not (_JOB_ID_PATTERN.match(job_id) or _STAGE_RUN_ID_PATTERN.match(job_id)):
+        raise InvalidJobIdError(job_id, "must match format job-{8 hex chars} or stage-{hex chars}")
 
 
 def validate_stage_run_id(run_id: str) -> None:

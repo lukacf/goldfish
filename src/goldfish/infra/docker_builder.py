@@ -11,9 +11,11 @@ from goldfish.errors import GoldfishError
 # Paths to goldfish runtime modules (relative to this file)
 GOLDFISH_IO_PATH = Path(__file__).parent.parent / "io" / "__init__.py"
 GOLDFISH_METRICS_PATH = Path(__file__).parent.parent / "metrics"
-# Metrics depends on validation and errors modules
+GOLDFISH_SVS_PATH = Path(__file__).parent.parent / "svs"
+# Metrics and SVS depend on validation, errors, and utils modules
 GOLDFISH_VALIDATION_PATH = Path(__file__).parent.parent / "validation.py"
 GOLDFISH_ERRORS_PATH = Path(__file__).parent.parent / "errors.py"
+GOLDFISH_UTILS_PATH = Path(__file__).parent.parent / "utils"
 
 # Default base image when none specified (backwards compatibility)
 DEFAULT_BASE_IMAGE = "python:3.11-slim"
@@ -30,6 +32,52 @@ class DockerBuilder:
     def __init__(self, config: object | None = None):
         # Store config for backend checks (may be GoldfishConfig or partial)
         self.config = config
+
+    def _get_agent_cli_packages(self) -> list[str]:
+        """Return CLI packages to install based on SVS config."""
+        svs = getattr(self.config, "svs", None) if self.config else None
+        if not svs or not getattr(svs, "enabled", False):
+            return []
+        if not getattr(svs, "ai_post_run_enabled", False):
+            return []
+
+        provider = getattr(svs, "agent_provider", None)
+        if not isinstance(provider, str):
+            return []
+        provider_map = {
+            "claude_code": "@anthropic-ai/claude-code",
+            "codex_cli": "@openai/codex",
+            "gemini_cli": "@google/gemini-cli",
+        }
+        package = provider_map.get(provider)
+        return [package] if package else []
+
+    def _render_agent_install_block(self, packages: list[str], is_nonroot_image: bool) -> str:
+        """Render Dockerfile block to install agent CLI packages."""
+        if not packages:
+            return ""
+
+        npm_packages = " ".join(packages)
+        header = "# Install SVS agent CLI (Node + npm)\n"
+        user_prefix = "USER root\n" if is_nonroot_image else ""
+        user_suffix = "USER 1000\n" if is_nonroot_image else ""
+        return (
+            f"{header}{user_prefix}"
+            "RUN if ! command -v npm >/dev/null 2>&1; then \\\n"
+            "      if command -v apt-get >/dev/null 2>&1; then \\\n"
+            "        apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \\\n"
+            "        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \\\n"
+            "        apt-get install -y --no-install-recommends nodejs && \\\n"
+            "        rm -rf /var/lib/apt/lists/*; \\\n"
+            "      elif command -v apk >/dev/null 2>&1; then \\\n"
+            "        apk add --no-cache nodejs npm; \\\n"
+            "      else \\\n"
+            '        echo "No supported package manager for Node.js install" >&2; exit 1; \\\n'
+            "      fi; \\\n"
+            "    fi && npm install -g "
+            f"{npm_packages}\n"
+            f"{user_suffix}\n"
+        )
 
     def generate_dockerfile(self, workspace_dir: Path, base_image: str | None = None) -> str:
         """Generate Dockerfile for workspace.
@@ -55,6 +103,7 @@ class DockerBuilder:
         # - NVIDIA NGC images (nvcr.io/nvidia/*) run as root
         # - Other images default to root-compatible mode
         is_nonroot_image = "jupyter" in base.lower() or "goldfish-base" in base.lower()
+        agent_cli_packages = self._get_agent_cli_packages()
 
         dockerfile = f"FROM {base}\n\n"
 
@@ -79,10 +128,15 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 """
 
-        if is_nonroot_image:
-            # Non-root images: use --chown for uid 1000 user
-            # VERSION arg busts cache when workspace version changes
-            dockerfile += """# Cache-bust: version changes invalidate subsequent layers
+        # Install agent CLI packages when SVS post-run reviews are enabled
+        dockerfile += self._render_agent_install_block(agent_cli_packages, is_nonroot_image)
+
+        # Always use --chown=1000:100 for local execution compatibility
+        # The local executor runs containers as --user 1000:1000 for security
+        # Root users can still read files owned by uid 1000, so this works for all images
+        #
+        # VERSION arg busts cache when workspace version changes
+        dockerfile += """# Cache-bust: version changes invalidate subsequent layers
 ARG VERSION
 RUN echo "Building version: ${VERSION}"
 
@@ -94,25 +148,8 @@ ENV PYTHONPATH="/app/goldfish_io:/app/modules:/app:${PYTHONPATH}"
 COPY --chown=1000:100 modules/ /app/modules/
 COPY --chown=1000:100 configs/ /app/configs/
 """
-            if has_loaders:
-                dockerfile += "COPY --chown=1000:100 loaders/ /app/loaders/\n"
-        else:
-            # Root images: no chown needed
-            # VERSION arg busts cache when workspace version changes
-            dockerfile += """# Cache-bust: version changes invalidate subsequent layers
-ARG VERSION
-RUN echo "Building version: ${VERSION}"
-
-# Install Goldfish IO library
-COPY goldfish_io/ /app/goldfish_io/
-ENV PYTHONPATH="/app/goldfish_io:/app/modules:/app:${PYTHONPATH}"
-
-# Copy workspace code
-COPY modules/ /app/modules/
-COPY configs/ /app/configs/
-"""
-            if has_loaders:
-                dockerfile += "COPY loaders/ /app/loaders/\n"
+        if has_loaders:
+            dockerfile += "COPY --chown=1000:100 loaders/ /app/loaders/\n"
 
         dockerfile += """
 WORKDIR /app
@@ -172,28 +209,34 @@ CMD ["/bin/bash"]
 
             # Copy goldfish.io module into build context
             # This creates a goldfish/io package structure so `from goldfish.io import ...` works
-            goldfish_io_dest = build_context / "goldfish_io" / "goldfish" / "io"
-            goldfish_io_dest.mkdir(parents=True, exist_ok=True)
-            if GOLDFISH_IO_PATH.exists():
-                shutil.copy2(GOLDFISH_IO_PATH, goldfish_io_dest / "__init__.py")
-                # Create parent __init__.py for package structure
-                (build_context / "goldfish_io" / "goldfish" / "__init__.py").write_text(
-                    '"""Goldfish ML package (container runtime)."""\n'
-                )
-                (build_context / "goldfish_io" / "__init__.py").write_text("")
-
-            # Copy goldfish.metrics module into build context
-            # This enables `from goldfish.metrics import log_metric, log_metrics, ...`
-            if GOLDFISH_METRICS_PATH.exists() and GOLDFISH_METRICS_PATH.is_dir():
-                goldfish_metrics_dest = build_context / "goldfish_io" / "goldfish" / "metrics"
-                shutil.copytree(
-                    GOLDFISH_METRICS_PATH,
-                    goldfish_metrics_dest,
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-                )
-
-            # Copy goldfish.validation and goldfish.errors (metrics dependencies)
             goldfish_pkg_dest = build_context / "goldfish_io" / "goldfish"
+            goldfish_pkg_dest.mkdir(parents=True, exist_ok=True)
+            # Parent __init__.py for goldfish package
+            (goldfish_pkg_dest / "__init__.py").write_text('"""Goldfish ML package (container runtime)."""\n')
+            # Top-level __init__.py for goldfish_io directory
+            (build_context / "goldfish_io" / "__init__.py").write_text("")
+
+            # Copy goldfish sub-packages
+            for subpkg, path in [
+                ("io", GOLDFISH_IO_PATH.parent),
+                ("metrics", GOLDFISH_METRICS_PATH),
+                ("svs", GOLDFISH_SVS_PATH),
+                ("utils", GOLDFISH_UTILS_PATH),
+            ]:
+                if path.exists() and path.is_dir():
+                    dest = goldfish_pkg_dest / subpkg
+                    shutil.copytree(
+                        path,
+                        dest,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                    )
+                elif path.exists() and path.is_file() and subpkg == "io":
+                    # Special case for goldfish.io if it's just __init__.py
+                    dest = goldfish_pkg_dest / "io"
+                    dest.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, dest / "__init__.py")
+
+            # Copy goldfish.validation and goldfish.errors (top-level modules in goldfish package)
             if GOLDFISH_VALIDATION_PATH.exists():
                 shutil.copy2(GOLDFISH_VALIDATION_PATH, goldfish_pkg_dest / "validation.py")
             if GOLDFISH_ERRORS_PATH.exists():

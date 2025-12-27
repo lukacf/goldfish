@@ -1,0 +1,206 @@
+"""SVS post-run AI review.
+
+This module provides post-run review functionality that analyzes stage outputs
+and statistics after a stage completes. It writes findings to
+.goldfish/svs_findings.json for later aggregation.
+
+Key behaviors:
+- Skips when ai_post_run_enabled=False in config
+- Skips when rate_limit_per_hour=0
+- Handles errors gracefully (fails open - approves on error)
+- Creates .goldfish directory if missing
+- Records timing information
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from goldfish.svs.agent import ReviewRequest
+
+if TYPE_CHECKING:
+    from goldfish.svs.agent import AgentProvider
+    from goldfish.svs.config import SVSConfig
+
+logger = logging.getLogger("goldfish.svs.post_run")
+
+
+@dataclass
+class PostRunReview:
+    """Result from post-run AI review.
+
+    Attributes:
+        skipped: Whether the review was skipped (disabled or rate limited)
+        decision: Review decision - "approved", "blocked", or "warned"
+        findings: List of issues found (ERROR/WARNING/NOTE messages)
+        stats: Stage output statistics that were reviewed
+        duration_ms: Time taken for review in milliseconds
+    """
+
+    skipped: bool
+    decision: str
+    findings: list[str]
+    stats: dict
+    duration_ms: int
+
+
+def run_post_run_review(
+    outputs_dir: Path,
+    stats: dict | None,
+    config: SVSConfig,
+    agent: AgentProvider,
+) -> PostRunReview:
+    """Run post-run AI review on stage outputs.
+
+    Analyzes the outputs directory and statistics using the configured agent
+    provider. Writes findings to .goldfish/svs_findings.json.
+
+    Args:
+        outputs_dir: Path to stage outputs directory
+        stats: Statistics about the stage outputs (can be None)
+        config: SVS configuration
+        agent: Agent provider to use for review
+
+    Returns:
+        PostRunReview with decision, findings, and timing information
+
+    Note:
+        This function fails open - if an error occurs during review,
+        it returns an approved decision with an error message in findings.
+    """
+    start_time = time.time()
+
+    # Normalize stats to empty dict if None
+    if stats is None:
+        stats = {}
+
+    # Check if review is disabled
+    if not config.ai_post_run_enabled:
+        duration_ms = int((time.time() - start_time) * 1000)
+        return PostRunReview(
+            skipped=True,
+            decision="approved",
+            findings=[],
+            stats=stats,
+            duration_ms=duration_ms,
+        )
+
+    # Check rate limit
+    if config.rate_limit_per_hour == 0:
+        duration_ms = int((time.time() - start_time) * 1000)
+        return PostRunReview(
+            skipped=True,
+            decision="approved",
+            findings=[],
+            stats=stats,
+            duration_ms=duration_ms,
+        )
+
+    # Build review request
+    request = ReviewRequest(
+        review_type="post_run",
+        context={
+            "outputs_dir": str(outputs_dir),
+            "model": config.agent_model,
+            "max_turns": config.agent_max_turns,
+            "timeout_seconds": config.agent_timeout,
+        },
+        stats=stats,
+    )
+
+    # Run agent
+    try:
+        result = agent.run(request)
+        decision = result.decision
+        findings = result.findings
+        duration_ms = result.duration_ms
+    except Exception as e:
+        # Fail open - approve on error but record the error
+        logger.warning("Post-run review agent error: %s", e)
+        decision = "approved"
+        findings = [f"SVS post-run review error: {e}"]
+        duration_ms = int((time.time() - start_time) * 1000)
+
+    # Write findings to file
+    _write_findings_file(outputs_dir, decision, findings, stats, duration_ms)
+
+    return PostRunReview(
+        skipped=False,
+        decision=decision,
+        findings=findings,
+        stats=stats,
+        duration_ms=duration_ms,
+    )
+
+
+def _write_findings_file(
+    outputs_dir: Path,
+    decision: str,
+    findings: list[str],
+    stats: dict,
+    duration_ms: int,
+) -> None:
+    """Write findings to .goldfish/svs_findings.json.
+
+    Creates .goldfish directory if it doesn't exist.
+    Handles file write errors gracefully.
+
+    Args:
+        outputs_dir: Path to stage outputs directory
+        decision: Review decision
+        findings: List of finding messages
+        stats: Stage output statistics
+        duration_ms: Review duration in milliseconds
+    """
+    try:
+        goldfish_dir = outputs_dir / ".goldfish"
+        goldfish_dir.mkdir(parents=True, exist_ok=True)
+
+        findings_path = goldfish_dir / "svs_findings.json"
+        findings_data: dict = {"version": 1, "findings": [], "stats": {}}
+        if findings_path.exists():
+            try:
+                findings_data = json.loads(findings_path.read_text())
+            except Exception:
+                findings_data = {"version": 1, "findings": [], "stats": {}}
+
+        # Merge findings list
+        existing_findings = findings_data.get("findings")
+        if not isinstance(existing_findings, list):
+            existing_findings = []
+        merged_findings = existing_findings + [f for f in findings if f not in existing_findings]
+
+        # Escalate decision only (blocked > warned > approved)
+        severity_rank = {"approved": 0, "warned": 1, "blocked": 2}
+        existing_decision = findings_data.get("decision") or "approved"
+        new_decision = decision or "approved"
+        merged_decision = (
+            existing_decision
+            if severity_rank.get(existing_decision, 0) >= severity_rank.get(new_decision, 0)
+            else new_decision
+        )
+
+        # Merge stats (post-run overrides existing)
+        merged_stats = findings_data.get("stats")
+        if not isinstance(merged_stats, dict):
+            merged_stats = {}
+        merged_stats.update(stats or {})
+
+        findings_data.update(
+            {
+                "version": 1,
+                "decision": merged_decision,
+                "findings": merged_findings,
+                "stats": merged_stats,
+                "duration_ms": duration_ms,
+            }
+        )
+
+        findings_path.write_text(json.dumps(findings_data, indent=2))
+    except OSError as e:
+        logger.warning("Failed to write svs_findings.json: %s", e)

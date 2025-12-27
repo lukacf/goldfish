@@ -1,10 +1,6 @@
-"""Server tools package."""
+"""Server tools package.
 
-# Import all tools to register them with MCP
-from goldfish.server_tools.data_tools import *  # noqa: F401, F403
-from goldfish.server_tools.execution_tools import *  # noqa: F401, F403
-from goldfish.server_tools.lineage_tools import *  # noqa: F401, F403
-from goldfish.server_tools.logging_tools import *  # noqa: F401, F403
-from goldfish.server_tools.pipeline_tools import *  # noqa: F401, F403
-from goldfish.server_tools.utility_tools import *  # noqa: F401, F403
-from goldfish.server_tools.workspace_tools import *  # noqa: F401, F403
+Tools are imported directly by server.py to avoid circular imports.
+Each tool module imports `mcp` from server.py, so server.py must
+complete initialization before these modules can be imported.
+"""

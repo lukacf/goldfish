@@ -194,6 +194,93 @@ class TestSaveOutput:
         marker_path = temp_dir / "outputs" / ".artifacts" / "model"
         assert marker_path.exists()
 
+    def test_save_output_enforces_schema_shape(self, temp_dir):
+        """save_output should enforce output schema shape when provided."""
+        from goldfish.errors import GoldfishError
+        from goldfish.io import save_output
+
+        test_array = np.zeros((2, 3), dtype=np.float32)
+
+        config = {
+            "outputs": {
+                "results": {
+                    "format": "npy",
+                    "schema": {
+                        "shape": [2, 2],
+                        "dtype": "float32",
+                    },
+                }
+            }
+        }
+
+        svs_config = {"default_enforcement": "blocking"}
+        env = {
+            "GOLDFISH_STAGE_CONFIG": json.dumps(config),
+            "GOLDFISH_SVS_CONFIG": json.dumps(svs_config),
+            "GOLDFISH_OUTPUTS_DIR": str(temp_dir / "outputs"),
+        }
+        with patch.dict(os.environ, env):
+            with pytest.raises(GoldfishError, match="schema"):
+                save_output("results", test_array)
+
+    def test_save_output_allows_schema_wildcard(self, temp_dir):
+        """save_output should allow wildcard dimensions in output schema."""
+        from goldfish.io import save_output
+
+        test_array = np.zeros((2, 3), dtype=np.float32)
+
+        config = {
+            "outputs": {
+                "results": {
+                    "format": "npy",
+                    "schema": {
+                        "shape": [None, 3],
+                        "dtype": "float32",
+                    },
+                }
+            }
+        }
+
+        env = {
+            "GOLDFISH_STAGE_CONFIG": json.dumps(config),
+            "GOLDFISH_SVS_CONFIG": json.dumps({"default_enforcement": "blocking"}),
+            "GOLDFISH_OUTPUTS_DIR": str(temp_dir / "outputs"),
+        }
+        with patch.dict(os.environ, env):
+            save_output("results", test_array)
+
+    def test_save_output_warns_on_schema_mismatch_when_warning(self, temp_dir, caplog):
+        """save_output should warn (not raise) when enforcement is warning."""
+        from goldfish.io import save_output
+
+        test_array = np.zeros((2, 3), dtype=np.float32)
+
+        config = {
+            "outputs": {
+                "results": {
+                    "format": "npy",
+                    "schema": {
+                        "shape": [2, 2],
+                        "dtype": "float32",
+                    },
+                }
+            }
+        }
+
+        svs_config = {"default_enforcement": "warning"}
+        env = {
+            "GOLDFISH_STAGE_CONFIG": json.dumps(config),
+            "GOLDFISH_SVS_CONFIG": json.dumps(svs_config),
+            "GOLDFISH_OUTPUTS_DIR": str(temp_dir / "outputs"),
+        }
+
+        with patch.dict(os.environ, env):
+            save_output("results", test_array)
+
+        output_path = temp_dir / "outputs" / "results.npy"
+        assert output_path.exists()
+        assert any("schema mismatch" in rec.message for rec in caplog.records)
+
 
 class TestGetPaths:
     """Test get_input_path() and get_output_path()."""

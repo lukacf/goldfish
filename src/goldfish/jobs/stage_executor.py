@@ -4,14 +4,19 @@ import asyncio
 import json
 import logging
 import os
+import re
+import subprocess
 import threading
 import time
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from google.cloud.storage import Client as GCSClient
 
 import yaml
 
@@ -34,6 +39,10 @@ from goldfish.models import (
     StageRunStatus,
 )
 from goldfish.pipeline.manager import PipelineManager
+from goldfish.pipeline.validator import validate_pipeline_run
+from goldfish.svs.contract import resolve_config_params, validate_input_schema_against_metadata
+from goldfish.svs.manifest import read_svs_manifests
+from goldfish.svs.post_run import run_post_run_review
 from goldfish.utils import parse_optional_datetime
 from goldfish.utils.config_hash import compute_config_hash
 from goldfish.validation import InvalidSourceMetadataError, parse_source_metadata, validate_source_metadata
@@ -42,6 +51,13 @@ from goldfish.workspace.manager import WorkspaceManager
 logger = logging.getLogger(__name__)
 
 STAGE_LOG_TAIL_FOR_FINALIZE = int(os.getenv("GOLDFISH_FINALIZE_LOG_TAIL", "1000"))
+
+REDACTION_PATTERNS = [
+    (r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*[^\s]+", r"\1=[REDACTED]"),
+    (r"(?i)bearer\s+[A-Za-z0-9._-]+", "Bearer [REDACTED]"),
+    (r"sk-[a-zA-Z0-9]{20,}", "[REDACTED_API_KEY]"),
+    (r"ghp_[A-Za-z0-9]{36}", "[REDACTED_GITHUB_TOKEN]"),
+]
 
 
 @dataclass
@@ -113,7 +129,7 @@ class StageExecutor:
             gce_gpu_preference = config.gce.gpu_preference
 
             # Resolve artifact_registry from config or auto-generate from project
-            self.artifact_registry = config.gce.artifact_registry
+            self.artifact_registry = config.gce.effective_artifact_registry
             if not self.artifact_registry and gce_project:
                 self.artifact_registry = f"us-docker.pkg.dev/{gce_project}/goldfish"
                 logger.info(f"Auto-generated artifact_registry: {self.artifact_registry}")
@@ -130,7 +146,9 @@ class StageExecutor:
         # Live metrics sync state (per run)
         self._metrics_sync_state: dict[str, _MetricsSyncState] = {}
         self._metrics_sync_lock = threading.Lock()
-        self._gcs_client = None
+        self._svs_sync_state: dict[str, float] = {}
+        self._svs_sync_lock = threading.Lock()
+        self._gcs_client: GCSClient | None = None
         self._gcs_client_lock = threading.Lock()
 
     def run_stage(
@@ -176,12 +194,51 @@ class StageExecutor:
         Returns:
             StageRunInfo with status and review (if review blocked the run)
         """
+        # Ensure GCS is configured and reachable for GCE runs
+        self._ensure_gcs_access(operation="run_stage")
+
         # 1. Auto-version workspace (returns version and git SHA)
         version, git_sha = self._auto_version(workspace, stage_name, reason)
 
         # 2. Load pipeline and stage
         pipeline = self.pipeline_manager.get_pipeline(workspace, pipeline_name)
         stage = self._find_stage(pipeline, stage_name)
+
+        # 2a. Establish stage_run_id early for preflight tracking
+        stage_run_precreated = stage_run_id is not None
+        if stage_run_id is None:
+            stage_run_id = f"stage-{uuid4().hex[:8]}"
+
+        # 2b. SVS preflight validation (always run when SVS enabled)
+        preflight_errors: list[str] = []
+        preflight_warnings: list[str] = []
+        if self.config.svs.enabled:
+            workspace_path = self.workspace_manager.get_workspace_path(workspace)
+            preflight = validate_pipeline_run(
+                workspace_name=workspace,
+                workspace_path=workspace_path,
+                db=self.db,
+                stages=[stage_name],
+                pipeline_name=pipeline_name,
+                inputs_override=inputs_override or {},
+                config=self.config,
+                config_override=config_override,
+            )
+            preflight_errors = list(preflight.get("validation_errors", []))
+            preflight_warnings = list(preflight.get("warnings", []))
+
+            if preflight_errors:
+                return self._create_preflight_blocked_stage_run(
+                    stage_run_id=stage_run_id,
+                    workspace=workspace,
+                    version=version,
+                    stage_name=stage_name,
+                    errors=preflight_errors,
+                    warnings=preflight_warnings,
+                    reason_structured=reason_structured,
+                    pipeline_run_id=pipeline_run_id,
+                    pipeline_name=pipeline_name,
+                )
 
         # 3. Pre-run review (if enabled and not skipped)
         review: RunReview | None = None
@@ -195,9 +252,8 @@ class StageExecutor:
             )
             if review and review.has_blocking_issues:
                 # Create failed stage run record with review
-                blocked_stage_run_id = stage_run_id or f"stage-{uuid4().hex[:8]}"
                 return self._create_blocked_stage_run(
-                    stage_run_id=blocked_stage_run_id,
+                    stage_run_id=stage_run_id,
                     workspace=workspace,
                     version=version,
                     stage_name=stage_name,
@@ -206,6 +262,7 @@ class StageExecutor:
                     reason_structured=reason_structured,
                     pipeline_run_id=pipeline_run_id,
                     pipeline_name=pipeline_name,
+                    preflight_warnings=preflight_warnings,
                 )
 
         # 3b. Load stage config and apply override
@@ -226,9 +283,8 @@ class StageExecutor:
         # 3. Resolve inputs (with source metadata for lineage tracking)
         inputs, input_sources = self._resolve_inputs(workspace, stage, inputs_override)
 
-        # 4. Generate or use provided stage run ID
-        if stage_run_id is None:
-            stage_run_id = f"stage-{uuid4().hex[:8]}"
+        # 4. Create or update stage run record
+        if not stage_run_precreated:
             # Create new stage run record
             self._create_stage_run_record(
                 stage_run_id=stage_run_id,
@@ -246,6 +302,8 @@ class StageExecutor:
                 profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
                 hints=stage_config.get("hints"),
                 config=stage_config,
+                preflight_errors=preflight_errors,
+                preflight_warnings=preflight_warnings,
             )
         else:
             # Update existing queued stage run record with resolved values
@@ -258,6 +316,8 @@ class StageExecutor:
                 config=stage_config,
                 profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
                 hints=stage_config.get("hints"),
+                preflight_warnings=preflight_warnings,
+                preflight_errors=preflight_errors,
             )
 
         try:
@@ -285,6 +345,9 @@ class StageExecutor:
                     "location": inputs.get(input_name, ""),
                     "format": input_def.format or input_def.type,  # Use format override or fall back to type
                     "type": input_def.type,
+                    "schema": resolve_config_params(input_def.output_schema, stage_config)
+                    if input_def.output_schema is not None
+                    else None,
                 }
 
             # Build output config with format info
@@ -293,6 +356,9 @@ class StageExecutor:
                 output_configs[output_name] = {
                     "format": output_def.format or output_def.type,
                     "type": output_def.type,
+                    "schema": resolve_config_params(output_def.output_schema, stage_config)
+                    if output_def.output_schema is not None
+                    else None,
                 }
 
             self._launch_container(
@@ -390,18 +456,51 @@ class StageExecutor:
             # Resolve precedence: from_stage first, then dataset
             if input_def.from_stage:
                 # Find output from previous stage
-                # Get most recent successful run of source stage
-                stage_runs = self.db.list_stage_runs(workspace_name=workspace, stage_name=input_def.from_stage)
+                # Priority:
+                # 1. Most recent COMPLETED run with outcome='success'
+                # 2. Most recent COMPLETED run with outcome IS NULL (unreviewed)
+                # Skip any run with outcome != 'success' and not NULL (e.g., 'bad_results')
+                stage_runs = self.db.list_stage_runs(
+                    workspace_name=workspace, stage_name=input_def.from_stage, status=StageRunStatus.COMPLETED
+                )
 
-                # Find completed run with the signal
                 source_run = None
+                skipped_bad = 0
                 for run in stage_runs:
-                    if run["status"] == StageRunStatus.COMPLETED:
+                    outcome = run.get("outcome")
+                    if outcome == "success":
                         source_run = run
                         break
+                    if outcome is None:
+                        # Fallback candidate (keep looking for an explicit 'success')
+                        if source_run is None:
+                            source_run = run
+                        # Continue searching for a 'success' outcome in previous runs
+                        continue
+
+                    # If we reach here, outcome is set but not 'success' (e.g., 'bad_results')
+                    skipped_bad += 1
+
+                if skipped_bad > 0:
+                    logger.warning(
+                        "Stage '%s': skipped %d COMPLETED runs with non-success outcome for input '%s'",
+                        stage.name,
+                        skipped_bad,
+                        input_name,
+                    )
 
                 if not source_run:
-                    raise GoldfishError(f"No successful run found for stage '{input_def.from_stage}'")
+                    raise GoldfishError(
+                        f"No successful or unreviewed COMPLETED run found for stage '{input_def.from_stage}'"
+                    )
+
+                if source_run.get("outcome") is None:
+                    logger.info(
+                        "Stage '%s': using unreviewed run %s for input '%s' (no run marked 'success' found)",
+                        stage.name,
+                        source_run["id"],
+                        input_name,
+                    )
 
                 source_run_id = source_run["id"]
 
@@ -437,6 +536,23 @@ class StageExecutor:
                 if input_def.dataset is None:
                     raise GoldfishError(f"Input '{input_name}' is type 'dataset' but no dataset specified")
                 dataset = self.dataset_registry.get_dataset(input_def.dataset)
+                if input_def.output_schema:
+                    if getattr(dataset, "metadata_status", None) == "ok" and getattr(dataset, "metadata", None):
+                        metadata = dataset.metadata
+                        assert metadata is not None  # Checked above
+                        schema_errors = validate_input_schema_against_metadata(
+                            input_name=input_name,
+                            input_schema=input_def.output_schema,
+                            metadata=metadata,
+                        )
+                        if schema_errors:
+                            raise GoldfishError(f"Input '{input_name}' schema mismatch: " + "; ".join(schema_errors))
+                    else:
+                        logger.warning(
+                            "Skipping input schema check for '%s': metadata %s",
+                            input_name,
+                            getattr(dataset, "metadata_status", "missing"),
+                        )
                 inputs[input_name] = dataset.gcs_location
                 sources[input_name] = {
                     "source_type": "dataset",
@@ -447,6 +563,49 @@ class StageExecutor:
                 raise GoldfishError(f"Cannot resolve input: {input_name}")
 
         return inputs, sources
+
+    def _get_svs_agent(self):
+        """Get the configured SVS agent provider."""
+        from goldfish.svs.agent import get_agent_provider
+
+        return get_agent_provider(self.config.svs.agent_provider)
+
+    def _run_post_run_svs_review(self, stage_run_id: str, backend: str) -> None:
+        """Run AI semantic review of stage outputs after completion."""
+        # Only run if SVS and AI post-run are enabled
+        if not self.config.svs.enabled or not self.config.svs.ai_post_run_enabled:
+            return
+
+        # AI review currently only supported for local backend as it needs direct disk access
+        # for reading outputs. GCE support requires downloading full outputs first.
+        if backend != "local":
+            logger.debug(f"Skipping post-run AI review for {stage_run_id}: backend {backend} not yet supported")
+            return
+
+        outputs_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs"
+
+        # If container-side review already wrote findings, skip host-side review
+        findings_path = outputs_dir / ".goldfish" / "svs_findings.json"
+        if findings_path.exists():
+            logger.debug("Skipping host post-run review for %s: findings already present", stage_run_id)
+            return
+
+        # Read intermediate stats manifest to pass to agent
+        # (svs_findings.json hasn't been written yet)
+        manifest_data = read_svs_manifests(outputs_dir)
+        stats = manifest_data.get("stats", {})
+
+        # Run review (this writes svs_findings.json)
+        try:
+            agent = self._get_svs_agent()
+            run_post_run_review(
+                outputs_dir=outputs_dir,
+                stats=stats,
+                config=self.config.svs,
+                agent=agent,
+            )
+        except Exception as e:
+            logger.warning(f"SVS post-run AI review failed for {stage_run_id}: {e}")
 
     def _auto_version(self, workspace: str, stage_name: str, reason: str | None) -> tuple[str, str]:
         """Create automatic version for workspace.
@@ -499,6 +658,8 @@ class StageExecutor:
         profile: str | None,
         hints: dict | None,
         config: dict | None,
+        preflight_errors: list[str] | None = None,
+        preflight_warnings: list[str] | None = None,
     ):
         """Create stage run record in database with input lineage tracking."""
         self.db.create_stage_run(
@@ -513,6 +674,8 @@ class StageExecutor:
             reason=reason_structured,
             profile=profile,
             hints=hints,
+            preflight_errors=preflight_errors,
+            preflight_warnings=preflight_warnings,
             backend_type=self.config.jobs.backend,
             backend_handle=stage_run_id,  # provisional handle for cancel/logs
         )
@@ -546,6 +709,8 @@ class StageExecutor:
         config: dict | None,
         profile: str | None,
         hints: dict | None,
+        preflight_warnings: list[str] | None = None,
+        preflight_errors: list[str] | None = None,
     ):
         """Update a queued stage run record with resolved values.
 
@@ -580,6 +745,14 @@ class StageExecutor:
 
         # Link stage run to its stage version
         self.db.update_stage_run_version(stage_run_id, stage_version_id)
+
+        # Persist preflight results if provided
+        if preflight_warnings is not None or preflight_errors is not None:
+            self.db.update_stage_run_preflight(
+                stage_run_id=stage_run_id,
+                errors=preflight_errors,
+                warnings=preflight_warnings,
+            )
 
         # Record input signals in lineage with source tracking
         for input_name, storage_location in inputs.items():
@@ -752,12 +925,25 @@ class StageExecutor:
 
                     logging.getLogger(__name__).warning("Failed to auto-register artifact %s: %s", source_id, e)
 
+    def _redact_logs(self, logs: str) -> str:
+        """Apply redaction patterns to logs to protect sensitive information."""
+        if not logs:
+            return ""
+
+        redacted = logs
+        for pattern, replacement in REDACTION_PATTERNS:
+            redacted = re.sub(pattern, replacement, redacted)
+        return redacted
+
     def _persist_logs(self, stage_run_id: str, logs: str) -> str:
         """Write logs to local run directory and return path."""
         run_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "logs"
         run_dir.mkdir(parents=True, exist_ok=True)
         log_path = run_dir / "output.log"
-        log_path.write_text(logs or "")
+
+        # Redact logs before persisting
+        redacted_logs = self._redact_logs(logs)
+        log_path.write_text(redacted_logs or "")
         return str(log_path)
 
     @staticmethod
@@ -813,6 +999,62 @@ class StageExecutor:
 
         return reasons
 
+    def _collect_svs_manifests(self, stage_run_id: str, backend: str) -> None:
+        """Read SVS manifests from container output and sync to database."""
+        # Only collect if SVS is enabled
+        if not self.config.svs.enabled:
+            return
+
+        # Determine outputs directory based on backend
+        if backend == "local":
+            outputs_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs"
+        elif backend == "gce":
+            # For GCE, we need to download the .goldfish directory from GCS
+            if not self.config.gcs or not self.config.gcs.bucket:
+                return
+
+            import tempfile
+
+            temp_dir = Path(tempfile.gettempdir()) / "goldfish_svs" / stage_run_id
+            temp_dir.mkdir(parents=True, exist_ok=True)
+
+            # Goldfish manifests are in outputs/.goldfish/
+            bucket = self.config.gcs.bucket
+            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+            gcs_prefix = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/outputs/.goldfish/"
+
+            # We use a simplified approach: just try to download the two known files
+            for filename in ["svs_stats.json", "svs_findings.json"]:
+                dest = temp_dir / ".goldfish" / filename
+                self._download_metrics_from_gcs(gcs_prefix + filename, dest)
+
+            outputs_dir = temp_dir
+        else:
+            return
+
+        # Read manifests using shared logic
+        manifest_data = read_svs_manifests(outputs_dir)
+
+        # 1. Update signal_lineage with stats
+        for signal_name, stats in manifest_data.get("stats", {}).items():
+            self.db.update_signal_lineage_stats(
+                stage_run_id=stage_run_id,
+                signal_name=signal_name,
+                stats_json=json.dumps(stats),
+            )
+
+        # 2. Update stage_run with findings (stats + AI review + during-run history)
+        if manifest_data.get("ai_review") or manifest_data.get("stats") or manifest_data.get("during_run"):
+            findings = {
+                "stats": manifest_data.get("stats"),
+                "ai_review": manifest_data.get("ai_review"),
+                "during_run": manifest_data.get("during_run"),
+            }
+            self.db.update_stage_run_svs_findings(
+                stage_run_id=stage_run_id,
+                svs_findings_json=json.dumps(findings),
+            )
+
     def _collect_metrics(self, stage_run_id: str, backend: str) -> None:
         """Collect metrics from JSONL and store in database."""
         from goldfish.metrics.collector import MetricsCollector
@@ -857,8 +1099,12 @@ class StageExecutor:
 
         Returns True if download succeeded, False if the object doesn't exist.
         """
-        client = self._get_gcs_client()
+        client, client_error = self._get_gcs_client()
         if client is None:
+            if self._download_metrics_from_gcs_cli(gcs_path, destination):
+                return True
+            if client_error:
+                logger.warning("GCS client unavailable for metrics download: %s", client_error)
             return False
 
         try:
@@ -879,29 +1125,55 @@ class StageExecutor:
             blob.reload()
         except NotFound:
             return False
+        except Exception as exc:
+            if self._download_metrics_from_gcs_cli(gcs_path, destination):
+                return True
+            logger.warning("Failed to access metrics in GCS: %s", exc)
+            return False
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         try:
             blob.download_to_filename(str(destination))
         except Exception as exc:
+            if self._download_metrics_from_gcs_cli(gcs_path, destination):
+                return True
             logger.warning("Failed to download metrics from GCS: %s", exc)
             return False
         return True
 
-    def _get_gcs_client(self):
+    def _get_gcs_client(self) -> tuple["GCSClient | None", str | None]:
         if self._gcs_client is not None:
-            return self._gcs_client
+            return self._gcs_client, None
 
         with self._gcs_client_lock:
             if self._gcs_client is not None:
-                return self._gcs_client
+                return self._gcs_client, None
             try:
                 from google.cloud import storage
             except Exception as exc:
-                logger.warning("google-cloud-storage not available: %s", exc)
-                return None
-            self._gcs_client = storage.Client()
-            return self._gcs_client
+                return None, f"google-cloud-storage not available: {exc}"
+            try:
+                self._gcs_client = storage.Client()
+            except Exception as exc:
+                return None, f"GCS credentials unavailable: {exc}"
+            return self._gcs_client, None
+
+    def _ensure_gcs_access(self, operation: str) -> None:
+        if self.config.jobs.backend != "gce":
+            return
+        if not self.config.gcs or not self.config.gcs.bucket:
+            raise GoldfishError(
+                f"GCE backend requires gcs.bucket for {operation}. "
+                "Set gcs.bucket in goldfish.yaml or GOLDFISH_GCS_BUCKET."
+            )
+        client, client_error = self._get_gcs_client()
+        if client is None:
+            raise GoldfishError(f"GCS access unavailable for {operation}: {client_error}")
+        try:
+            bucket = client.bucket(self.config.gcs.bucket)
+            bucket.exists()
+        except Exception as exc:
+            raise GoldfishError(f"GCS access check failed for {operation}: {exc}") from exc
 
     def _metrics_live_sync_enabled(self) -> bool:
         value = os.getenv("GOLDFISH_METRICS_LIVE_SYNC", "1").strip().lower()
@@ -923,21 +1195,61 @@ class StageExecutor:
                 self._metrics_sync_state[stage_run_id] = state
             return state
 
-    def _sync_metrics_file_from_gcs(self, gcs_path: str, state: _MetricsSyncState) -> tuple[Path | None, int]:
+    def _download_metrics_from_gcs_cli(self, gcs_path: str, destination: Path) -> bool:
+        """Download metrics.jsonl from GCS using gcloud/gsutil CLI (fallback)."""
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            cmd = ["gcloud", "storage", "cp", gcs_path, str(destination)]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                return True
+        except Exception as exc:
+            logger.debug("gcloud storage cp failed: %s", exc)
+
+        try:
+            cmd = ["gsutil", "cp", gcs_path, str(destination)]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                return True
+        except Exception as exc:
+            logger.debug("gsutil cp failed: %s", exc)
+
+        return False
+
+    def _sync_metrics_file_from_gcs(
+        self, gcs_path: str, state: _MetricsSyncState
+    ) -> tuple[Path | None, int, str | None]:
         """Append new bytes from GCS metrics.jsonl into a local temp file."""
-        client = self._get_gcs_client()
+        client, client_error = self._get_gcs_client()
         if client is None:
-            return None, state.offset
+            local_path = state.temp_path
+            if local_path is None:
+                import tempfile
+
+                temp_dir = (
+                    Path(tempfile.gettempdir())
+                    / "goldfish_metrics_live"
+                    / gcs_path.replace("gs://", "").replace("/", "_")
+                )
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                local_path = temp_dir / "metrics.jsonl"
+                state.temp_path = local_path
+
+            if self._download_metrics_from_gcs_cli(gcs_path, local_path):
+                return local_path, state.offset, None
+            if client_error:
+                return None, state.offset, f"Live metrics sync skipped: {client_error}"
+            return None, state.offset, "Live metrics sync skipped: GCS client unavailable and CLI download failed."
 
         try:
             from google.api_core.exceptions import NotFound
         except Exception as exc:
             logger.warning("google-cloud-storage not available for live metrics sync: %s", exc)
-            return None, state.offset
+            return None, state.offset, "Live metrics sync skipped: google-cloud-storage unavailable."
 
         if not gcs_path.startswith("gs://"):
             logger.warning("Invalid GCS path: %s", gcs_path)
-            return None, state.offset
+            return None, state.offset, "Live metrics sync skipped: invalid GCS path."
 
         bucket_name, blob_path = gcs_path[5:].split("/", 1)
         bucket = client.bucket(bucket_name)
@@ -946,7 +1258,19 @@ class StageExecutor:
         try:
             blob.reload()
         except NotFound:
-            return None, state.offset
+            return None, state.offset, None
+        except Exception as exc:
+            import tempfile
+
+            temp_dir = (
+                Path(tempfile.gettempdir()) / "goldfish_metrics_live" / gcs_path.replace("gs://", "").replace("/", "_")
+            )
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            fallback_path = temp_dir / "metrics.jsonl"
+            if self._download_metrics_from_gcs_cli(gcs_path, fallback_path):
+                state.temp_path = fallback_path
+                return fallback_path, state.offset, None
+            return None, state.offset, f"Live metrics sync failed: {exc}"
 
         size = blob.size or 0
         local_path = state.temp_path
@@ -971,40 +1295,43 @@ class StageExecutor:
                 local_path.unlink()
 
         if size == state.offset:
-            return local_path, state.offset
+            return local_path, state.offset, None
 
         try:
             data = blob.download_as_bytes(start=state.offset)
         except Exception as exc:
+            if self._download_metrics_from_gcs_cli(gcs_path, local_path):
+                return local_path, state.offset, None
             logger.warning("Failed to download metrics bytes from GCS: %s", exc)
-            return local_path, state.offset
+            return local_path, state.offset, f"Live metrics sync failed: {exc}"
 
         if data:
             local_path.parent.mkdir(parents=True, exist_ok=True)
             with open(local_path, "ab") as f:
                 f.write(data)
 
-        return local_path, state.offset
+        return local_path, state.offset, None
 
-    def sync_metrics_if_running(self, stage_run_id: str) -> None:
+    def sync_metrics_if_running(self, stage_run_id: str) -> list[str]:
         """Best-effort incremental metrics sync for running stages."""
+        warnings: list[str] = []
         if not self._metrics_live_sync_enabled():
-            return
+            return warnings
 
         row = self.db.get_stage_run(stage_run_id)
         if not row or row.get("status") != StageRunStatus.RUNNING:
             with self._metrics_sync_lock:
                 self._metrics_sync_state.pop(stage_run_id, None)
-            return
+            return warnings
 
         state = self._get_metrics_sync_state(stage_run_id)
         if not state.sync_lock.acquire(blocking=False):
-            return
+            return warnings
         try:
             interval = self._metrics_live_sync_interval()
             now = time.time()
             if now - state.last_sync < interval:
-                return
+                return warnings
 
             backend = row.get("backend_type") or self.config.jobs.backend
             metrics_file: Path | None = None
@@ -1016,16 +1343,21 @@ class StageExecutor:
                 )
             elif backend == "gce":
                 if not self.config.gcs or not self.config.gcs.bucket:
-                    return
+                    warnings.append(
+                        "Live metrics sync skipped: gcs.bucket not configured for GCE backend.",
+                    )
+                    return warnings
                 bucket = self.config.gcs.bucket
                 bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
                 gcs_path = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/metrics.jsonl"
-                metrics_file, start_offset = self._sync_metrics_file_from_gcs(gcs_path, state)
+                metrics_file, start_offset, sync_warning = self._sync_metrics_file_from_gcs(gcs_path, state)
+                if sync_warning:
+                    warnings.append(sync_warning)
             else:
-                return
+                return warnings
 
             if metrics_file is None or not metrics_file.exists():
-                return
+                return warnings
 
             from goldfish.metrics.collector import MetricsCollector
 
@@ -1043,6 +1375,76 @@ class StageExecutor:
             state.last_sync = now
         finally:
             state.sync_lock.release()
+        return warnings
+
+    def sync_svs_if_running(self, stage_run_id: str) -> None:
+        """Best-effort SVS findings sync for running stages."""
+        if not self.config.svs.enabled:
+            return
+
+        row = self.db.get_stage_run(stage_run_id)
+        if not row or row.get("status") != StageRunStatus.RUNNING:
+            with self._svs_sync_lock:
+                self._svs_sync_state.pop(stage_run_id, None)
+            return
+
+        now = time.time()
+        interval = float(os.environ.get("GOLDFISH_SVS_LIVE_SYNC_INTERVAL", "10"))
+        with self._svs_sync_lock:
+            last_sync = self._svs_sync_state.get(stage_run_id, 0.0)
+            if now - last_sync < interval:
+                return
+            self._svs_sync_state[stage_run_id] = now
+
+        backend = row.get("backend_type") or self.config.jobs.backend
+        outputs_dir: Path | None = None
+
+        if backend == "local":
+            outputs_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs"
+            if not outputs_dir.exists():
+                return
+        elif backend == "gce":
+            if not self.config.gcs or not self.config.gcs.bucket:
+                return
+
+            import tempfile
+
+            temp_dir = Path(tempfile.gettempdir()) / "goldfish_svs_live" / stage_run_id
+            temp_dir.mkdir(parents=True, exist_ok=True)
+
+            bucket = self.config.gcs.bucket
+            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+            gcs_prefix = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/outputs/.goldfish/"
+
+            findings_dest = temp_dir / ".goldfish" / "svs_findings.json"
+            stats_dest = temp_dir / ".goldfish" / "svs_stats.json"
+            self._download_metrics_from_gcs(gcs_prefix + "svs_findings.json", findings_dest)
+            self._download_metrics_from_gcs(gcs_prefix + "svs_stats.json", stats_dest)
+            outputs_dir = temp_dir
+        else:
+            return
+
+        manifest = read_svs_manifests(outputs_dir)
+        if not manifest.get("during_run") and not manifest.get("ai_review") and not manifest.get("stats"):
+            return
+
+        merged: dict[str, Any] = {}
+        existing_raw = row.get("svs_findings_json")
+        if existing_raw:
+            try:
+                merged = json.loads(existing_raw)
+            except json.JSONDecodeError:
+                merged = {}
+
+        if manifest.get("stats") is not None:
+            merged["stats"] = manifest.get("stats")
+        if manifest.get("ai_review") is not None:
+            merged["ai_review"] = manifest.get("ai_review")
+        if manifest.get("during_run") is not None:
+            merged["during_run"] = manifest.get("during_run")
+
+        if merged:
+            self.db.update_stage_run_svs_findings(stage_run_id, json.dumps(merged))
 
     def _build_docker_image(self, workspace: str, version: str, profile_name: str | None = None) -> str:
         """Build Docker image for this run.
@@ -1170,13 +1572,19 @@ class StageExecutor:
         config_path = workspace_path / "configs" / f"{stage_name}.yaml"
 
         if not config_path.exists():
+            logger.warning(
+                "Stage '%s': config file not found at %s (default config will be used)",
+                stage_name,
+                config_path,
+            )
             return {}
 
         try:
             with open(config_path) as f:
                 return yaml.safe_load(f) or {}
-        except Exception:
+        except Exception as e:
             # Log warning but don't fail - config is optional
+            logger.warning("Stage '%s': failed to parse config %s: %s", stage_name, config_path, e)
             return {}
 
     def _resolve_profile_from_config(self, stage_config: dict) -> dict | None:
@@ -1241,7 +1649,15 @@ class StageExecutor:
             "GOLDFISH_STAGE": stage_name,
             "GOLDFISH_RUN_ID": stage_run_id,
             "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
-            "GOLDFISH_CONFIG": json.dumps(stage_config),
+            "GOLDFISH_STAGE_CONFIG": json.dumps(stage_config),
+            "GOLDFISH_SVS_CONFIG": json.dumps(self.config.svs.model_dump()),
+            "GOLDFISH_SVS_STATS_ENABLED": "true"
+            if self.config.svs.enabled and self.config.svs.stats_enabled
+            else "false",
+            # Ensure agent CLIs write config in a writable home directory
+            "HOME": "/app",
+            "XDG_CONFIG_HOME": "/app/.config",
+            "XDG_CACHE_HOME": "/app/.cache",
         }
 
         # Add git SHA if available
@@ -1273,10 +1689,8 @@ class StageExecutor:
             run_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id
             run_dir.mkdir(parents=True, exist_ok=True)
 
-            # Create inputs and outputs directories
-            inputs_dir = run_dir / "inputs"
+            # Create outputs directory (inputs are mounted directly from source)
             outputs_dir = run_dir / "outputs"
-            inputs_dir.mkdir(exist_ok=True)
             outputs_dir.mkdir(exist_ok=True)
 
             # Generate entrypoint script
@@ -1285,7 +1699,11 @@ set -euo pipefail
 
 echo "Running stage: {stage_name}"
 cd /app
-python -m modules.{stage_name}
+python - <<'PY'
+from goldfish.io.bootstrap import run_module_with_svs
+import sys
+sys.exit(run_module_with_svs("modules.{stage_name}"))
+PY
 
 echo "Stage completed successfully"
 """
@@ -1297,9 +1715,9 @@ echo "Stage completed successfully"
                 entrypoint_script=entrypoint_script,
                 stage_config=stage_config,
                 work_dir=run_dir,
-                inputs_dir=inputs_dir,
                 outputs_dir=outputs_dir,
                 goldfish_env=goldfish_env,
+                input_paths=inputs,  # Mount inputs directly from source locations
             )
 
         elif backend == "gce":
@@ -1336,7 +1754,11 @@ set -euo pipefail
 
 echo "Running stage: {stage_name}"
 cd /app
-python -m modules.{stage_name}
+python - <<'PY'
+from goldfish.io.bootstrap import run_module_with_svs
+import sys
+sys.exit(run_module_with_svs("modules.{stage_name}"))
+PY
 
 echo "Stage completed successfully"
 """,
@@ -1424,6 +1846,49 @@ echo "Stage completed successfully"
             # Log warning but don't fail the run if metrics collection fails
             logger.warning(f"Failed to collect metrics for {stage_run_id}: {e}")
 
+        # Run AI semantic review of outputs
+        try:
+            self._run_post_run_svs_review(stage_run_id, backend)
+        except Exception as e:
+            logger.warning(f"Failed AI post-run review for {stage_run_id}: {e}")
+
+        # Collect SVS manifests (stats + AI findings)
+        try:
+            self._collect_svs_manifests(stage_run_id, backend)
+        except Exception as e:
+            logger.warning(f"Failed to collect SVS manifests for {stage_run_id}: {e}")
+
+        # Extract failure pattern for self-learning (only on failure)
+        if status == StageRunStatus.FAILED and self.config.svs.enabled and self.config.svs.auto_learn_failures:
+            import threading
+
+            from goldfish.svs.agent import get_agent_provider
+            from goldfish.svs.patterns.extractor import extract_failure_pattern
+
+            error_msg = logs[-500:] if logs else "Unknown error"
+            agent = get_agent_provider(self.config.svs.agent_provider)
+
+            def _extract_pattern() -> None:
+                try:
+                    logger.info(f"Starting pattern extraction for {stage_run_id}")
+                    pattern = extract_failure_pattern(
+                        db=self.db,
+                        stage_run_id=stage_run_id,
+                        error=error_msg,
+                        logs=logs,
+                        agent=agent,
+                    )
+                    if pattern:
+                        logger.info(f"Created pattern {pattern.id}: {pattern.symptom[:50]}...")
+                    else:
+                        logger.info(f"No pattern extracted for {stage_run_id}")
+                except Exception as e:
+                    logger.warning(f"Pattern extraction failed for {stage_run_id}: {e}")
+
+            thread = threading.Thread(target=_extract_pattern, daemon=True)
+            thread.start()
+            logger.info(f"Started background pattern extraction for {stage_run_id}")
+
         with self._metrics_sync_lock:
             self._metrics_sync_state.pop(stage_run_id, None)
 
@@ -1432,9 +1897,20 @@ echo "Stage completed successfully"
             status=status,
             completed_at=datetime.now(UTC).isoformat(),
             log_uri=log_uri,
-            error=(logs[-STAGE_LOG_TAIL_FOR_FINALIZE:] if (status == StageRunStatus.FAILED and logs) else None),
+            error=(
+                self._redact_logs(logs[-STAGE_LOG_TAIL_FOR_FINALIZE:])
+                if (status == StageRunStatus.FAILED and logs)
+                else None
+            ),
             progress=StageRunProgress.FINALIZING,
         )
+
+        # Clean up container after finalization (local backend only)
+        if backend == "local":
+            try:
+                self.local_executor.remove_container(stage_run_id)
+            except Exception:
+                pass  # Container may already be removed
 
     def wait_for_completion(self, stage_run_id: str, poll_interval: int = 5, timeout: int = 3600) -> str:
         """Wait for stage run to complete.
@@ -1485,6 +1961,10 @@ echo "Stage completed successfully"
                     return status
 
                 elif status == "not_found":
+                    # Grace period for container startup - Docker may not have created it yet
+                    if elapsed < 10:
+                        time.sleep(0.5)
+                        continue
                     raise GoldfishError(f"Container {stage_run_id} not found")
 
                 else:
@@ -1633,6 +2113,7 @@ echo "Stage completed successfully"
             review = self._run_async_review(
                 review_before_run(
                     config=self.config.pre_run_review,
+                    svs_config=self.config.svs,
                     workspace_path=slot_path,
                     dev_repo_path=self.dev_repo,
                     stages=[stage_name],  # Review the specific stage
@@ -1741,6 +2222,7 @@ echo "Stage completed successfully"
         reason_structured: dict | None,
         pipeline_run_id: str | None,
         pipeline_name: str | None,
+        preflight_warnings: list[str] | None = None,
     ) -> StageRunInfo:
         """Create a failed stage run record for a blocked review.
 
@@ -1781,6 +2263,7 @@ echo "Stage completed successfully"
             pipeline_run_id=pipeline_run_id,
             pipeline_name=pipeline_name,
             reason=reason_structured,
+            preflight_warnings=preflight_warnings,
             backend_type=None,  # Not executed - blocked by review
         )
 
@@ -1792,6 +2275,57 @@ echo "Stage completed successfully"
         )
 
         logger.warning(f"Stage run {stage_run_id} blocked by pre-run review: {review.summary}")
+
+        return StageRunInfo(
+            stage_run_id=stage_run_id,
+            pipeline_run_id=pipeline_run_id,
+            workspace=workspace,
+            pipeline=pipeline_name,
+            version=version,
+            stage=stage_name,
+            status=StageRunStatus.FAILED,
+            started_at=parse_optional_datetime(now),
+            completed_at=parse_optional_datetime(now),
+            error=error_msg,
+        )
+
+    def _create_preflight_blocked_stage_run(
+        self,
+        stage_run_id: str,
+        workspace: str,
+        version: str,
+        stage_name: str,
+        errors: list[str],
+        warnings: list[str],
+        reason_structured: dict | None,
+        pipeline_run_id: str | None,
+        pipeline_name: str | None,
+    ) -> StageRunInfo:
+        """Create a failed stage run record for preflight validation errors."""
+        now = datetime.now(UTC).isoformat()
+        error_msg = "Preflight validation failed: " + "; ".join(errors[:5])
+
+        self.db.create_stage_run(
+            stage_run_id=stage_run_id,
+            workspace_name=workspace,
+            version=version,
+            stage_name=stage_name,
+            pipeline_run_id=pipeline_run_id,
+            pipeline_name=pipeline_name,
+            reason=reason_structured,
+            preflight_errors=errors,
+            preflight_warnings=warnings,
+            backend_type=None,  # Not executed - blocked by preflight
+        )
+
+        self.db.update_stage_run_status(
+            stage_run_id=stage_run_id,
+            status=StageRunStatus.FAILED,
+            completed_at=now,
+            error=error_msg,
+        )
+
+        logger.warning("Stage run %s blocked by preflight validation: %s", stage_run_id, error_msg)
 
         return StageRunInfo(
             stage_run_id=stage_run_id,

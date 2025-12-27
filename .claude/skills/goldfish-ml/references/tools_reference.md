@@ -1,6 +1,6 @@
 # Goldfish MCP Tools Reference
 
-Complete API documentation for all 39 Goldfish MCP tools organized by category.
+Complete API documentation for over 40 Goldfish MCP tools organized by category.
 
 ## Workspace Management Tools
 
@@ -293,7 +293,7 @@ List all workspaces with pagination.
 
 ## Execution Tools
 
-### run(workspace, stages, pipeline, config_override, inputs_override, reason, wait)
+### run(workspace, stages, pipeline, config_override, inputs_override, reason, wait, dry_run, skip_review)
 
 Execute pipeline stages. **The primary execution tool.**
 
@@ -307,6 +307,8 @@ Execute pipeline stages. **The primary execution tool.**
 | `inputs_override` | dict | No | None | Override input sources |
 | `reason` | str | No | None | Why running (min 15 chars) |
 | `wait` | bool | No | False | Block until completion |
+| `dry_run` | bool | No | False | Validate everything without launching |
+| `skip_review` | bool | No | False | Skip the pre-run AI review |
 
 **Returns:**
 ```python
@@ -329,6 +331,9 @@ run("w1", stages=["preprocess", "train", "evaluate"])
 
 # Override config
 run("w1", stages=["train"], config_override={"learning_rate": 0.001})
+
+# Multi-stage overrides (overrides apply to all requested stages)
+run("w1", stages=["preprocess", "train"], config_override={"debug": True})
 
 # Wait for completion
 run("w1", stages=["train"], wait=True)
@@ -455,6 +460,58 @@ Get output artifacts from a completed run.
 GetOutputsResponse:
   stage_run_id: str
   outputs: list  # Output artifact details
+```
+
+---
+
+### get_run_metrics(run_id, metric_name, limit, offset, metric_prefix, artifact_limit, artifact_offset, workspace)
+
+Get metrics and artifacts from a stage run. Useful for analyzing run performance and results.
+For running runs, performs a best-effort live sync.
+
+**Parameters:**
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `run_id` | str | Yes | - | Run ID (e.g., "stage-abc123") |
+| `metric_name` | str | No | None | Filter by metric name (e.g., "loss") |
+| `limit` | int | No | 1000 | Max metrics returned (1-10000) |
+| `offset` | int | No | 0 | Metrics pagination offset |
+| `metric_prefix` | str | No | None | Prefix filter (e.g., "train/") |
+| `artifact_limit` | int | No | 1000 | Max artifacts returned (1-10000) |
+| `artifact_offset` | int | No | 0 | Artifact pagination offset |
+| `workspace` | str | No | None | Enforce run ownership |
+
+**Returns:**
+```python
+{
+  "metrics": list,      # Individual metric data points
+  "summary": dict,      # Summary stats (min, max, last, count) per metric
+  "artifacts": list,    # Artifacts logged during execution
+  "total_metrics": int,
+  "total_artifacts": int
+}
+```
+
+---
+
+### list_metric_names(run_id, metric_prefix, workspace)
+
+List distinct metric names for a stage run.
+
+**Parameters:**
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `run_id` | str | Yes | - | Run ID |
+| `metric_prefix` | str | No | None | Prefix filter (e.g., "train/") |
+| `workspace` | str | No | None | Enforce run ownership |
+
+**Returns:**
+```python
+{
+  "run_id": str,
+  "metric_names": list[str],
+  "count": int
+}
 ```
 
 ---
@@ -787,6 +844,26 @@ Initialize a new Goldfish project. **First-time setup only.**
 | `project_name` | str | Yes | Project name |
 | `project_root` | str | Yes | Root directory |
 | `from_existing` | str | No | Import existing code from path |
+
+---
+
+### reload_config()
+
+Reload configuration from goldfish.yaml. Use this after editing goldfish.yaml to pick up changes without restarting the MCP server.
+
+**Parameters:** None
+
+**Returns:**
+```python
+{
+  "success": bool,
+  "message": str,
+  "project_name": str,
+  "jobs_backend": str,
+  "gcs_configured": bool,
+  "gce_configured": bool
+}
+```
 
 ---
 

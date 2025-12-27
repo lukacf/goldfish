@@ -10,6 +10,7 @@ import pytest
 
 from goldfish.config import AuditConfig, GCSConfig, GoldfishConfig, JobsConfig, StateMdConfig
 from goldfish.db.database import Database
+from goldfish.svs.config import SVSConfig
 
 
 @pytest.fixture
@@ -57,6 +58,7 @@ def test_config(temp_dir: Path) -> GoldfishConfig:
             sources_prefix="sources/",
             artifacts_prefix="artifacts/",
         ),
+        svs=SVSConfig(enabled=False),  # Disable SVS for tests by default
         invariants=["Test invariant"],
     )
 

@@ -38,18 +38,22 @@ stages:
     inputs:
       raw_data:
         type: dataset
+        schema: null
         dataset: eurusd_raw
     outputs:
       features:
         type: npy
+        schema: null
   - name: train
     inputs:
       features:
         from_stage: preprocess
         type: npy
+        schema: null
     outputs:
       model:
         type: directory
+        schema: null
 """)
 
         parser = PipelineParser()
@@ -66,6 +70,26 @@ stages:
         assert "features" in pipeline.stages[1].inputs
         assert pipeline.stages[1].inputs["features"].from_stage == "preprocess"
         assert pipeline.stages[1].inputs["features"].type == "npy"
+
+    def test_parse_requires_schema_tags(self, temp_dir):
+        """Should require schema tag on inputs/outputs (schema can be null)."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text("""
+name: test_pipeline
+stages:
+  - name: preprocess
+    inputs:
+      raw_data:
+        type: dataset
+        dataset: eurusd_raw
+    outputs:
+      features:
+        type: npy
+""")
+
+        parser = PipelineParser()
+        with pytest.raises(PipelineValidationError, match="schema is required"):
+            parser.parse(pipeline_yaml)
 
     def test_parse_invalid_yaml(self, temp_dir):
         """Should raise error for invalid YAML."""
@@ -119,8 +143,8 @@ stages:
         assert len(errors) > 0
         assert any("preprocess.py" in err for err in errors)
 
-    def test_validate_checks_config_exists(self, temp_dir):
-        """Should validate that config files exist."""
+    def test_validate_config_files_are_optional(self, temp_dir):
+        """Config files are optional - validation should pass without them."""
         # Create pipeline
         pipeline_yaml = temp_dir / "pipeline.yaml"
         pipeline_yaml.write_text("""
@@ -135,15 +159,15 @@ stages:
         modules_dir.mkdir()
         configs_dir.mkdir()
 
-        # Create module but not config
+        # Create module but not config - configs are optional
         (modules_dir / "preprocess.py").write_text("def main(): pass")
 
         parser = PipelineParser()
         pipeline = parser.parse(pipeline_yaml)
         errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
 
-        assert len(errors) > 0
-        assert any("preprocess.yaml" in err for err in errors)
+        # Config files are optional - validation should pass
+        assert len(errors) == 0
 
     def test_validate_passes_when_files_exist(self, temp_dir):
         """Should pass validation when all files exist."""
@@ -183,6 +207,7 @@ stages:
         from_stage: nonexistent_stage
         signal_name: features
         type: npy
+        schema: null
 """)
 
         # Create files
@@ -211,11 +236,13 @@ stages:
     outputs:
       features:
         type: npy
+        schema: null
   - name: train
     inputs:
       features:
         from_stage: preprocess
         type: csv
+        schema: null
 """)
 
         # Create files
@@ -246,11 +273,13 @@ stages:
     outputs:
       features:
         type: npy
+        schema: null
   - name: train
     inputs:
       features:
         from_stage: preprocess
         type: npy
+        schema: null
 """)
 
         # Create files
@@ -280,12 +309,14 @@ stages:
     outputs:
       features:
         type: npy
+        schema: null
   - name: train
     inputs:
       X:
         from_stage: preprocess
         signal: features
         type: npy
+        schema: null
 """)
 
         modules_dir = temp_dir / "modules"
@@ -302,3 +333,372 @@ stages:
         errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
 
         assert errors == []
+
+
+class TestPreflightContractValidation:
+    """Test SVS preflight contract validation integration.
+
+    Validates that pipeline parser checks output schemas during preflight:
+    - Shape/rank consistency validation
+    - Config param resolution in schemas
+    - Upstream/downstream schema compatibility
+    """
+
+    def test_validate_catches_shape_rank_mismatch(self, temp_dir):
+        """Should catch when shape dimensions don't match declared rank."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text("""
+name: test_pipeline
+stages:
+  - name: preprocess
+    outputs:
+      embeddings:
+        type: npy
+        schema: null
+        schema:
+          shape: [1000, 256, 10]
+          rank: 2
+""")
+
+        # Create files
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "preprocess.py").write_text("def main(): pass")
+        (configs_dir / "preprocess.yaml").write_text("batch_size: 32")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        # Should detect shape/rank mismatch
+        assert any("shape" in err.lower() and "rank" in err.lower() for err in errors)
+
+    def test_validate_catches_missing_schema_param(self, temp_dir):
+        """Should catch when schema references missing config param."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text("""
+name: test_pipeline
+stages:
+  - name: train
+    outputs:
+      predictions:
+        type: npy
+        schema: null
+        schema:
+          shape: [null, "{vocab_size}"]
+          rank: 2
+""")
+
+        # Create files - note: vocab_size NOT in config
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text("hidden_dim: 256")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        # Should detect missing config param
+        assert any("vocab_size" in err for err in errors)
+
+    def test_validate_passes_valid_schema(self, temp_dir):
+        """Should pass validation when schema is valid."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text("""
+name: test_pipeline
+stages:
+  - name: train
+    outputs:
+      embeddings:
+        type: npy
+        schema: null
+        schema:
+          shape: [1000, 256]
+          rank: 2
+""")
+
+        # Create files
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text("batch_size: 32")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        # Should pass - no shape/rank mismatch errors
+        assert not any("shape" in err.lower() and "rank" in err.lower() for err in errors)
+
+    def test_validate_resolves_param_in_schema(self, temp_dir):
+        """Should resolve {param} in schema from config."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text("""
+name: test_pipeline
+stages:
+  - name: train
+    outputs:
+      predictions:
+        type: npy
+        schema: null
+        schema:
+          shape: [null, "{vocab_size}"]
+          rank: 2
+""")
+
+        # Create files WITH vocab_size in config
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text("vocab_size: 15034")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        # Should pass - param was resolved
+        assert not any("vocab_size" in err for err in errors)
+
+    def test_validate_resolves_param_from_pipeline_defaults(self, temp_dir):
+        """Should resolve {param} from pipeline.yaml defaults section."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text("""
+name: test_pipeline
+stages:
+  - name: train
+    defaults:
+      vocab_size: 15034
+    outputs:
+      predictions:
+        type: npy
+        schema: null
+        schema:
+          shape: [null, "{vocab_size}"]
+          rank: 2
+""")
+
+        # Create files without vocab_size (should come from defaults)
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text("batch_size: 32")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        # Should pass - param was resolved from defaults
+        assert not any("vocab_size" in err for err in errors)
+
+    def test_validate_cross_stage_shape_mismatch(self, temp_dir):
+        """Should detect cross-stage shape mismatch."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text(
+            """
+name: test_pipeline
+stages:
+  - name: preprocess
+    outputs:
+      embeddings:
+        type: npy
+        schema: null
+        schema:
+          shape: [null, "{dim}"]
+          rank: 2
+  - name: train
+    inputs:
+      X:
+        from_stage: preprocess
+        signal: embeddings
+        type: npy
+        schema: null
+        schema:
+          shape: [null, "{dim}"]
+          rank: 2
+"""
+        )
+
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "preprocess.py").write_text("def main(): pass")
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "preprocess.yaml").write_text("dim: 512")
+        (configs_dir / "train.yaml").write_text("dim: 256")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        assert any("shape[1]" in err for err in errors)
+
+    def test_validate_dataset_schema_mismatch(self, temp_dir):
+        """Should detect dataset metadata mismatch against input schema."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text(
+            """
+name: test_pipeline
+stages:
+  - name: train
+    inputs:
+      data:
+        type: dataset
+        schema: null
+        dataset: tokens_v1
+        schema:
+          kind: tensor
+          arrays:
+            X_train:
+              shape: [10, 3]
+              dtype: float32
+          primary_array: X_train
+    outputs:
+      model: {type: directory, schema: null}
+"""
+        )
+
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text("batch_size: 32")
+
+        metadata = {
+            "schema_version": 1,
+            "description": "Dataset metadata for parser test.",
+            "source": {
+                "format": "npz",
+                "size_bytes": 1234,
+                "created_at": "2025-12-24T12:00:00Z",
+            },
+            "schema": {
+                "kind": "tensor",
+                "arrays": {
+                    "price_changes_train": {
+                        "role": "features",
+                        "shape": [10, 3],
+                        "dtype": "float32",
+                        "feature_names": {"kind": "list", "values": ["f1", "f2", "f3"]},
+                    }
+                },
+                "primary_array": "price_changes_train",
+            },
+        }
+
+        def dataset_exists_fn(name: str) -> bool:
+            return name == "tokens_v1"
+
+        def dataset_metadata_fn(name: str):
+            return metadata, "ok"
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn, dataset_metadata_fn)
+
+        assert any("missing array" in err for err in errors)
+
+    def test_validate_rejects_non_int_shape_param(self, temp_dir):
+        """Should reject non-int config param used in shape."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text(
+            """
+name: test_pipeline
+stages:
+  - name: train
+    outputs:
+      embeddings:
+        type: npy
+        schema:
+          shape: [null, "{dim}"]
+          rank: 2
+"""
+        )
+
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text('dim: "512"')
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        assert any("shape[1]" in err and "int" in err.lower() for err in errors)
+
+    def test_validate_config_schema_type_mismatch(self, temp_dir):
+        """Should reject config values that don't match config_schema types."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text(
+            """
+name: test_pipeline
+stages:
+  - name: train
+    config_schema:
+      num_epochs: int
+    outputs:
+      model:
+        type: directory
+        schema: null
+"""
+        )
+
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text('num_epochs: "10"')
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        assert any("num_epochs" in err and "int" in err.lower() for err in errors)
+
+    def test_validate_config_schema_required_missing(self, temp_dir):
+        """Should reject missing required config values."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text(
+            """
+name: test_pipeline
+stages:
+  - name: train
+    config_schema:
+      num_epochs:
+        type: int
+        schema: null
+        required: true
+    outputs:
+      model:
+        type: directory
+        schema: null
+"""
+        )
+
+        modules_dir = temp_dir / "modules"
+        configs_dir = temp_dir / "configs"
+        modules_dir.mkdir()
+        configs_dir.mkdir()
+        (modules_dir / "train.py").write_text("def main(): pass")
+        (configs_dir / "train.yaml").write_text("batch_size: 32")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        assert any("num_epochs" in err and "required" in err.lower() for err in errors)

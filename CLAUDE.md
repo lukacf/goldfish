@@ -75,7 +75,7 @@ MCP Client (Claude) ─── JSON-RPC ───▶ server.py
                     ┌─────────────────────┼─────────────────────┐
                     ▼                     ▼                     ▼
              server_tools/*         context.py            db/database.py
-             (39 MCP tools)      (ServerContext DI)         (SQLite)
+             (40+ MCP tools)     (ServerContext DI)         (SQLite)
                     │                     │
         ┌───────────┼───────────┐         │
         ▼           ▼           ▼         ▼
@@ -87,19 +87,19 @@ MCP Client (Claude) ─── JSON-RPC ───▶ server.py
 
 ### Key Files
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `jobs/stage_executor.py` | 1400 | **Core**: Stage execution + sync + provenance + review |
-| `pre_run_review.py` | 500 | Pre-run code review using Claude Agent SDK |
-| `db/database.py` | 1200 | All database operations |
-| `workspace/manager.py` | 400 | Workspace CRUD + copy-based mounting |
-| `workspace/git_layer.py` | 500 | Git ops + sync_slot_to_branch |
-| `infra/gce_launcher.py` | 600 | GCE instance lifecycle |
-| `server.py` | 350 | MCP server initialization |
+| File | Purpose |
+|------|---------|
+| `jobs/stage_executor.py` | **Core**: Stage execution + sync + provenance + review |
+| `pre_run_review.py` | Pre-run code review using Claude Agent SDK |
+| `db/database.py` | All database operations |
+| `workspace/manager.py` | Workspace CRUD + copy-based mounting |
+| `workspace/git_layer.py` | Git ops + sync_slot_to_branch |
+| `infra/gce_launcher.py` | GCE instance lifecycle |
+| `server.py` | MCP server initialization |
 
 ---
 
-## The Six Abstractions
+## The Seven Abstractions
 
 ### 1. Workspaces = Copy-Based Isolation
 
@@ -166,56 +166,24 @@ Goldfish resolves to: `a3-highgpu-1g`, H100 GPU, spot pricing, multi-zone.
 
 Built-in: `cpu-small`, `cpu-large`, `h100-spot`, `h100-on-demand`, `a100-spot`, `a100-on-demand`
 
-### 7. Pre-Run Review = Automatic Bug Detection
+### 7. SVS (Semantic Validation System)
 
-**Location**: `pre_run_review.py` (497 lines) - Integrated into `jobs/stage_executor.py`
+**Core System**: `validation.py`, `src/goldfish/svs/`, integrated into `jobs/stage_executor.py`
 
-Before every `run()`, Claude reviews your code to catch errors early:
+SVS provides defense-in-depth through three phases:
 
-```
-Review flow:
-1. Sync workspace → dev repo (commit for provenance)
-2. Build context: pipeline.yaml, modules/*.py, configs/*.yaml, git diff, RunReason
-3. Call Claude Agent SDK with read-only tools (Glob, Grep, Read)
-4. Parse ERROR/WARNING/NOTE from response
-5. Block if ERRORs found, approve if warnings only
-```
+1.  **Pre-Run Review**: AI-driven static analysis of code/config/diff using the Claude Agent SDK (`pre_run_review.py`).
+2.  **Schema Contracts**: Mechanistic validation of stage outputs against `pipeline.yaml` definitions (shape, dtype, kind).
+3.  **Output Stats**: Automatic computation of statistical properties (entropy, null ratio, unique counts) for every signal, stored in `signal_lineage.stats_json`.
 
-**Security** (`pre_run_review.py:270-310`):
-- Path traversal protection (symlinks blocked)
-- File size limits (100KB/file, 500KB total)
-- API timeout (configurable, default 60s)
-- Safe filename validation (no `../`, `.hidden`)
-- Fails open on error (approves to avoid blocking)
+**Key Patterns**:
+- **Enforcement Modes**: `warning` (log only) or `blocking` (fail stage).
+- **Reservoir Sampling**: Stats are computed on 10k samples to handle large tensors/CSVs.
+- **Fail-Open**: AI reviews approve by default on timeout or API error to avoid blocking developer velocity.
 
-**Configuration** (`config.py:48-56`):
-```python
-class PreRunReviewConfig:
-    enabled: bool = True
-    model: str = "claude-opus-4-5..."
-    timeout_seconds: int = 60
-    max_turns: int = 5  # Agent exploration budget
-```
-
-**RunReason Model** (`models.py:574-619`):
-```python
-class RunReason(BaseModel):
-    description: str              # Required, max 500 chars
-    hypothesis: str | None        # Optional, max 1000 chars
-    approach: str | None          # Optional, max 1000 chars
-    min_result: str | None        # Optional, max 500 chars
-    goal: str | None              # Optional, max 500 chars
-```
-
-**Integration** (`stage_executor.py:1240-1275`):
-- Called before Docker build
-- Uses `_run_async_review()` for sync/async bridging
-- Creates FAILED stage run if blocked
-- Logs review results at INFO/WARNING level
-
-**Testing**:
-- 37 unit tests in `tests/unit/test_pre_run_review.py`
-- 14 integration tests in `tests/integration/test_pre_run_review_integration.py`
+**Security**:
+- Path traversal protection in `pre_run_review.py`.
+- File size limits (100KB/file) for review context.
 
 ---
 
@@ -353,8 +321,8 @@ Full schema: `db/schema.sql`
 
 ```
 tests/
-├── unit/           # 164 tests, <1s, pure logic, all mocked
-├── integration/    # 408 tests, ~2min, real DB + git
+├── unit/           # Over 850 tests, <1s, pure logic, all mocked
+├── integration/    # Over 750 tests, ~2min, real DB + git
 ├── e2e/            # Full Docker tests
 │   └── deluxe/     # GCE tests (@pytest.mark.deluxe_gce)
 └── conftest.py     # Fixtures: test_db, temp_git_repo
@@ -460,7 +428,7 @@ import logging; logging.basicConfig(level=logging.DEBUG)
 | **Data** | `datasets/registry.py`, `sources/registry.py` |
 | **State** | `state/state_md.py` (per-workspace + global STATE.md) |
 | **IO** | `io/__init__.py` (container load_input/save_output) |
-| **Tools** | `server_tools/*.py` (39 MCP tools) |
+| **Tools** | `server_tools/*.py` (40+ MCP tools) |
 
 ---
 
