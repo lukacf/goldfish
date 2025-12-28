@@ -36,8 +36,10 @@ class GCPMetadataBus(MetadataBus):
 
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to set metadata on {target}: {e.stderr}")
+            raise  # Re-raise to alert caller
         except Exception as e:
             logger.error(f"Error in set_signal: {e}")
+            raise
 
     def get_signal(self, key: str) -> MetadataSignal | None:
         return None
