@@ -45,11 +45,15 @@ class LocalMetadataBus(MetadataBus):
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     def _read(self) -> dict:
-        """Read data with shared lock to prevent torn reads."""
+        """Read data with exclusive lock to prevent TOCTOU."""
         try:
-            with open(self.path) as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+            # Open with 'a+' to allow seeking to beginning for read,
+            # but 'a+' ensures file exists if it was deleted.
+            # Using exclusive lock consistent with _atomic_update.
+            with open(self.path, "a+") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 try:
+                    f.seek(0)
                     content = f.read()
                     return json.loads(content) if content else {}  # type: ignore[no-any-return]
                 finally:
@@ -65,7 +69,7 @@ class LocalMetadataBus(MetadataBus):
     def get_signal(self, key: str) -> MetadataSignal | None:
         data = self._read()
         sig_data = data.get(f"{key}_signal")
-        if not sig_data:
+        if not sig_data or not isinstance(sig_data, dict):
             return None
         return MetadataSignal(**sig_data)
 
