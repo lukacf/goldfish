@@ -73,6 +73,30 @@ _MAX_CURSORS = 1000  # Maximum number of cursors to keep
 _log_cursor_lock = threading.Lock()
 
 
+def _read_overdrive_ack_timeout() -> float:
+    value = os.environ.get("GOLDFISH_OVERDRIVE_ACK_TIMEOUT")
+    if not value:
+        return 0.0
+    try:
+        parsed = float(value)
+    except ValueError:
+        return 0.0
+    return max(0.5, min(10.0, parsed))
+
+
+def _overdrive_ack_timeout(row: dict) -> float:
+    override = _read_overdrive_ack_timeout()
+    if override:
+        return override
+    backend = row.get("backend_type") or "local"
+    progress = row.get("progress")
+    if backend == "local":
+        return 1.0
+    if backend == "gce" and progress == StageRunProgress.RUNNING:
+        return 4.0
+    return 2.0
+
+
 def _cleanup_stale_cursors() -> None:
     """Remove cursors that haven't been accessed in over TTL seconds."""
     import time
@@ -259,6 +283,15 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
 
     sync_status = "not_running"
     if row["status"] == StageRunStatus.RUNNING:
+        # Refresh status once for async runs to avoid stale launch/finalize states.
+        try:
+            _get_stage_executor().refresh_status_once(run_id)
+            refreshed = db.get_stage_run(run_id)
+            if refreshed:
+                row = refreshed
+        except Exception:
+            pass
+
         progress = row.get("progress")
         backend_type = row.get("backend_type")
         if backend_type == "gce" and progress in {StageRunProgress.BUILD, StageRunProgress.LAUNCH}:
@@ -286,10 +319,11 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
 
                 bus.set_signal("goldfish", sig, target=target)
 
-                # Wait for ACK (max 2 seconds)
+                # Wait for ACK (dynamic timeout)
+                ack_timeout = _overdrive_ack_timeout(row)
                 start_time = time.time()
                 sync_status = "timeout"
-                while time.time() - start_time < 2.0:
+                while time.time() - start_time < ack_timeout:
                     ack = bus.get_ack("goldfish", target=target)
                     if ack == req_id:
                         sync_status = "synced"

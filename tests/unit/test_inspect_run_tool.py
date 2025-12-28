@@ -98,6 +98,7 @@ def test_inspect_run_triggers_sync_when_running():
     ):
         inspect_run(run_id)
 
+    mock_stage_exec.refresh_status_once.assert_called_once_with(run_id)
     # Verify sync signal was set with correct target URI
     mock_bus.set_signal.assert_called_once()
     args, kwargs = mock_bus.set_signal.call_args
@@ -134,11 +135,15 @@ def test_inspect_run_skips_sync_when_launching():
 
     mock_bus = MagicMock()
 
+    mock_stage_exec = MagicMock()
+
     with (
         patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db),
         patch("goldfish.server_tools.execution_tools._get_metadata_bus", return_value=mock_bus),
+        patch("goldfish.server_tools.execution_tools._get_stage_executor", return_value=mock_stage_exec),
     ):
         result = inspect_run(run_id)
 
     assert result["dashboard"]["sync_status"] == "starting"
+    mock_stage_exec.refresh_status_once.assert_called_once_with(run_id)
     mock_bus.set_signal.assert_not_called()
