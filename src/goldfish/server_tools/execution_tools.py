@@ -271,7 +271,7 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
             start_time = time.time()
             sync_status = "timeout"
             while time.time() - start_time < 2.0:
-                ack = bus.get_ack("goldfish")
+                ack = bus.get_ack("goldfish", target=target)
                 if ack == req_id:
                     sync_status = "synced"
                     break
