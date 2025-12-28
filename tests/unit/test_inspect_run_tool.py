@@ -106,3 +106,39 @@ def test_inspect_run_triggers_sync_when_running():
     assert args[1].command == "sync"
     assert args[1].payload["run_id"] == run_id
     assert kwargs["target"] == "zones/us-west1-b/instances/instance-1"
+
+
+def test_inspect_run_skips_sync_when_launching():
+    """GCE runs in launch/build should not report timeout sync."""
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-abcd1234"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "running",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": None,
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "progress": "launch",
+        "reason_json": None,
+        "backend_type": "gce",
+        "backend_handle": "instance-1",
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    mock_bus = MagicMock()
+
+    with (
+        patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db),
+        patch("goldfish.server_tools.execution_tools._get_metadata_bus", return_value=mock_bus),
+    ):
+        result = inspect_run(run_id)
+
+    assert result["dashboard"]["sync_status"] == "starting"
+    mock_bus.set_signal.assert_not_called()
