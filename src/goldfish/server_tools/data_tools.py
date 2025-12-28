@@ -6,6 +6,7 @@ Extracted from server.py for better organization.
 import json
 import logging
 from datetime import UTC, datetime
+from typing import Literal
 
 from goldfish.errors import (
     GoldfishError,
@@ -53,7 +54,7 @@ def _truncate_for_error(value: str | None, limit: int = 120) -> str | None:
 
 @mcp.tool()
 def manage_sources(
-    action: str,
+    action: Literal["list", "get", "lineage", "update", "delete"],
     name: str | None = None,
     status: str | None = None,
     created_by: str | None = None,

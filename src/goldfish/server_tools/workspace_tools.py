@@ -4,7 +4,7 @@ Extracted from server.py for better organization.
 """
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from goldfish.errors import (
     GoldfishError,
@@ -178,7 +178,7 @@ def inspect_workspace(name: str) -> dict:
 @mcp.tool()
 def manage_versions(
     workspace: str,
-    action: str,
+    action: Literal["list", "tag", "untag", "prune", "unprune", "prune_before_tag"],
     version: str | None = None,
     tag: str | None = None,
     reason: str | None = None,
