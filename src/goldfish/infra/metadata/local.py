@@ -8,6 +8,7 @@ import contextlib
 import fcntl
 import json
 import logging
+import os
 from collections.abc import Generator
 from pathlib import Path
 
@@ -24,14 +25,19 @@ class LocalMetadataBus(MetadataBus):
         self._ensure_exists()
 
     def _ensure_exists(self) -> None:
-        if not self.path.exists():
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text("{}")
-            self.path.chmod(0o600)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # Atomic creation with 600 permissions
+            fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write("{}")
+        except FileExistsError:
+            pass
 
     @contextlib.contextmanager
     def _atomic_update(self) -> Generator[dict, None, None]:
         """Context manager for atomic read-modify-write operations."""
+        # Use r+ to read/write without truncating immediately
         with open(self.path, "r+") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             try:
@@ -45,15 +51,11 @@ class LocalMetadataBus(MetadataBus):
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     def _read(self) -> dict:
-        """Read data with exclusive lock to prevent TOCTOU."""
+        """Read data with shared lock to prevent torn reads."""
         try:
-            # Open with 'a+' to allow seeking to beginning for read,
-            # but 'a+' ensures file exists if it was deleted.
-            # Using exclusive lock consistent with _atomic_update.
-            with open(self.path, "a+") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            with open(self.path) as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
                 try:
-                    f.seek(0)
                     content = f.read()
                     return json.loads(content) if content else {}  # type: ignore[no-any-return]
                 finally:
