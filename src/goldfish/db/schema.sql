@@ -290,6 +290,8 @@ CREATE INDEX IF NOT EXISTS idx_run_metrics_name ON run_metrics(stage_run_id, nam
 CREATE INDEX IF NOT EXISTS idx_run_metrics_timestamp ON run_metrics(stage_run_id, timestamp);
 -- Composite index for pagination stability (ORDER BY timestamp ASC, id ASC)
 CREATE INDEX IF NOT EXISTS idx_run_metrics_pagination ON run_metrics(stage_run_id, timestamp, id);
+-- Index for trend calculation (ORDER BY name, timestamp DESC, id DESC)
+CREATE INDEX IF NOT EXISTS idx_run_metrics_trends ON run_metrics(stage_run_id, name, timestamp DESC, id DESC);
 -- Unique constraint to prevent duplicate metrics (idempotency)
 -- COALESCE(step, -1) ensures NULL steps are deduplicated too.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_run_metrics_unique

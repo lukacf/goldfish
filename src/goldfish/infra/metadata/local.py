@@ -38,17 +38,23 @@ class LocalMetadataBus(MetadataBus):
     def _atomic_update(self) -> Generator[dict, None, None]:
         """Context manager for atomic read-modify-write operations."""
         # Use r+ to read/write without truncating immediately
-        with open(self.path, "r+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                content = f.read()
-                data = json.loads(content) if content else {}
+        try:
+            with open(self.path, "r+") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    content = f.read()
+                    data = json.loads(content) if content else {}
+                    yield data
+                    f.seek(0)
+                    f.write(json.dumps(data, indent=2))
+                    f.truncate()
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except FileNotFoundError:
+            # Re-initialize if deleted during run
+            self._ensure_exists()
+            with self._atomic_update() as data:
                 yield data
-                f.seek(0)
-                f.write(json.dumps(data, indent=2))
-                f.truncate()
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     def _read(self) -> dict:
         """Read data with shared lock to prevent torn reads."""
