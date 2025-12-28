@@ -109,6 +109,46 @@ def test_inspect_run_triggers_sync_when_running():
     assert kwargs["target"] == "zones/us-west1-b/instances/instance-1"
 
 
+def test_inspect_run_pending_when_ack_missing():
+    """GCE running runs should report pending when ack not received."""
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-acde1234"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "running",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": None,
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "progress": "running",
+        "reason_json": None,
+        "backend_type": "gce",
+        "backend_handle": "instance-1",
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    mock_bus = MagicMock()
+    mock_bus.get_ack.return_value = None
+
+    mock_stage_exec = MagicMock()
+    mock_stage_exec.gce_launcher._find_instance_zone.return_value = "us-west1-b"
+
+    with (
+        patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db),
+        patch("goldfish.server_tools.execution_tools._get_metadata_bus", return_value=mock_bus),
+        patch("goldfish.server_tools.execution_tools._get_stage_executor", return_value=mock_stage_exec),
+    ):
+        result = inspect_run(run_id)
+
+    assert result["dashboard"]["sync_status"] == "pending"
+
+
 def test_inspect_run_skips_sync_when_launching():
     """GCE runs in launch/build should not report timeout sync."""
     from goldfish.server_tools.execution_tools import inspect_run

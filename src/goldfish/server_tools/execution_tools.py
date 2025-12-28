@@ -330,6 +330,8 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
                         break
                     time.sleep(0.1)
 
+                if sync_status == "timeout" and row.get("backend_type") == "gce":
+                    sync_status = "pending"
             except Exception as e:
                 logger.debug(f"Failed to trigger sync signal: {e}")
                 sync_status = f"error: {e}"
