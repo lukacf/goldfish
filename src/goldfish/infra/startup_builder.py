@@ -616,14 +616,15 @@ start_metadata_syncer() {{
                     LAST_SEEN="$REQ_ID"
                     ACK_OK=0
                     if command -v gcloud >/dev/null 2>&1; then
-                        if gcloud compute instances add-metadata "$INSTANCE_NAME" \
+                        ACK_ERR=""
+                        if ACK_ERR=$(gcloud compute instances add-metadata "$INSTANCE_NAME" \
                             --zone="$INSTANCE_ZONE" \
                             --project="$PROJECT_ID" \
                             --metadata "goldfish_ack=$REQ_ID" \
-                            --quiet 2>/dev/null; then
+                            --quiet 2>&1); then
                             ACK_OK=1
                         else
-                            echo "Failed to set goldfish_ack for $REQ_ID"
+                            echo "Failed to set goldfish_ack for $REQ_ID: $ACK_ERR"
                         fi
                     else
                         echo "gcloud not available for metadata ack"
