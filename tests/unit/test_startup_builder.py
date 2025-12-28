@@ -396,6 +396,8 @@ def test_metadata_syncer_section_sets_ack():
     assert "goldfish_ack" in script
     assert "gcloud compute instances add-metadata" in script
     assert "sync_final_logs" in script
+    assert "Failed to set goldfish_ack" in script
+    assert 'LAST_ACK="$REQ_ID"' in script
 
 
 def test_build_startup_script_starts_metadata_syncer():
