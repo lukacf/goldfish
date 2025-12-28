@@ -99,11 +99,11 @@ PROJECT_ID=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.intern
 sync_final_logs() {
     echo "=== SYNCING FINAL LOGS BEFORE DELETION ==="
     # Only sync if GCS paths are configured (set by log_syncer_section)
-    if [[ -n "${GCS_STDOUT_PATH:-}" ]]; then
+    if [[ -n "${GCS_STDOUT_PATH:-}" && -s "${LOCAL_STDOUT:-/tmp/stdout.log}" ]]; then
         echo "Uploading final stdout.log..."
         timeout 30 gcloud storage cp "${LOCAL_STDOUT:-/tmp/stdout.log}" "$GCS_STDOUT_PATH" --quiet 2>/dev/null || echo "stdout upload failed"
     fi
-    if [[ -n "${GCS_STDERR_PATH:-}" ]]; then
+    if [[ -n "${GCS_STDERR_PATH:-}" && -s "${LOCAL_STDERR:-/tmp/stderr.log}" ]]; then
         echo "Uploading final stderr.log..."
         timeout 30 gcloud storage cp "${LOCAL_STDERR:-/tmp/stderr.log}" "$GCS_STDERR_PATH" --quiet 2>/dev/null || echo "stderr upload failed"
     fi
@@ -605,13 +605,15 @@ start_metadata_syncer() {{
     (
         set +e
         LAST_ACK=""
+        LAST_SEEN=""
         while true; do
             SIG_JSON=$(curl -sf -H "Metadata-Flavor: Google" "$METADATA_SIGNAL_URL" || true)
             if [[ -n "$SIG_JSON" ]]; then
                 CMD=$(printf "%s" "$SIG_JSON" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
                 REQ_ID=$(printf "%s" "$SIG_JSON" | sed -n 's/.*"request_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
-                if [[ "$CMD" == "sync" && -n "$REQ_ID" && "$REQ_ID" != "$LAST_ACK" ]]; then
+                if [[ "$CMD" == "sync" && -n "$REQ_ID" && "$REQ_ID" != "$LAST_SEEN" ]]; then
                     sync_final_logs || true
+                    LAST_SEEN="$REQ_ID"
                     ACK_OK=0
                     if command -v gcloud >/dev/null 2>&1; then
                         if gcloud compute instances add-metadata "$INSTANCE_NAME" \
