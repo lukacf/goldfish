@@ -6,6 +6,7 @@ Uses Instance Metadata for low-latency signaling.
 import logging
 import re
 import subprocess
+import tempfile
 
 from goldfish.errors import GoldfishError
 from goldfish.infra.metadata.base import MetadataBus, MetadataSignal
@@ -41,11 +42,24 @@ class GCPMetadataBus(MetadataBus):
             # Format the signal as a string
             value = signal.model_dump_json()
 
-            # Use gcloud to update metadata
-            # gcloud compute instances add-metadata INSTANCE --metadata KEY=VALUE
-            cmd = ["gcloud", "compute", "instances", "add-metadata", target, "--metadata", f"{key}={value}", "--quiet"]
+            # Use --metadata-from-file to avoid shell/gcloud escaping issues with JSON
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as tmp:
+                tmp.write(value)
+                tmp.flush()
 
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+                # gcloud compute instances add-metadata INSTANCE --metadata-from-file KEY=FILE
+                cmd = [
+                    "gcloud",
+                    "compute",
+                    "instances",
+                    "add-metadata",
+                    target,
+                    "--metadata-from-file",
+                    f"{key}={tmp.name}",
+                    "--quiet",
+                ]
+
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
             logger.debug(f"GCPMetadataBus set_signal: {key}={signal.request_id} target={target}")
 
         except subprocess.CalledProcessError as e:
@@ -83,6 +97,7 @@ class GCPMetadataBus(MetadataBus):
             return
         validate_instance_name(target)
         try:
+            # Simple strings are safe for --metadata flag
             cmd = [
                 "gcloud",
                 "compute",
