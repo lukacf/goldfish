@@ -3380,8 +3380,8 @@ class Database:
             params: list[Any] = [stage_run_id]
 
             if metric_names:
-                placeholders = ",".join("?" for _ in metric_names)
-                query += f" AND name IN ({placeholders})"
+                placeholders = ",".join(["?"] * len(metric_names))
+                query += " AND name IN (" + placeholders + ")"
                 params.extend(metric_names)
 
             query += """
