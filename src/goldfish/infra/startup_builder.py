@@ -587,6 +587,50 @@ start_log_syncer() {{
 """
 
 
+def metadata_syncer_section(sync_interval: int = 1) -> str:
+    """Generate metadata syncer for Overdrive-style on-demand log refresh.
+
+    Args:
+        sync_interval: Seconds between metadata polls (default 1).
+
+    Returns:
+        Shell script fragment with start_metadata_syncer function.
+    """
+    return f"""
+# === METADATA SYNCER (Overdrive on-demand sync) ===
+METADATA_SYNC_INTERVAL={sync_interval}
+METADATA_SIGNAL_URL="http://metadata.google.internal/computeMetadata/v1/instance/attributes/goldfish"
+
+start_metadata_syncer() {{
+    (
+        set +e
+        LAST_ACK=""
+        while true; do
+            SIG_JSON=$(curl -sf -H "Metadata-Flavor: Google" "$METADATA_SIGNAL_URL" || true)
+            if [[ -n "$SIG_JSON" ]]; then
+                CMD=$(printf "%s" "$SIG_JSON" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+                REQ_ID=$(printf "%s" "$SIG_JSON" | sed -n 's/.*"request_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+                if [[ "$CMD" == "sync" && -n "$REQ_ID" && "$REQ_ID" != "$LAST_ACK" ]]; then
+                    sync_final_logs || true
+                    if command -v gcloud >/dev/null 2>&1; then
+                        gcloud compute instances add-metadata "$INSTANCE_NAME" \
+                            --zone="$INSTANCE_ZONE" \
+                            --project="$PROJECT_ID" \
+                            --metadata "goldfish_ack=$REQ_ID" \
+                            --quiet 2>/dev/null || true
+                    fi
+                    LAST_ACK="$REQ_ID"
+                fi
+            fi
+            sleep "$METADATA_SYNC_INTERVAL"
+        done
+    ) &
+    METADATA_SYNCER_PID=$!
+    echo "Metadata syncer started (PID=$METADATA_SYNCER_PID, interval=${{METADATA_SYNC_INTERVAL}}s)"
+}}
+"""
+
+
 def build_startup_script(
     *,
     bucket: str,
@@ -688,6 +732,9 @@ def build_startup_script(
     if use_log_syncer and log_sync_interval is not None:
         parts.append(log_syncer_section(bucket, bucket_path, log_sync_interval))
 
+    # Add metadata syncer for on-demand Overdrive sync
+    parts.append(metadata_syncer_section())
+
     parts.extend(
         [
             "apt-get update -y",
@@ -695,6 +742,7 @@ def build_startup_script(
             "systemctl enable --now docker || true",
             'log_stage "docker_ready"',
             env_exports_block,
+            "start_metadata_syncer",
         ]
     )
 
