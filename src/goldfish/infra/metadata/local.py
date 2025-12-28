@@ -45,11 +45,15 @@ class LocalMetadataBus(MetadataBus):
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     def _read(self) -> dict:
-        """Read data (no lock required for simple read, but safer with shared lock)."""
-        # For simplicity in local dev, we skip shared read locks,
-        # focusing on fixing the critical write race condition.
+        """Read data with shared lock to prevent torn reads."""
         try:
-            return json.loads(self.path.read_text())  # type: ignore[no-any-return]
+            with open(self.path) as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                try:
+                    content = f.read()
+                    return json.loads(content) if content else {}  # type: ignore[no-any-return]
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         except (json.JSONDecodeError, FileNotFoundError):
             return {}
 
