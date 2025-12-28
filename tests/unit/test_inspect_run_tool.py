@@ -80,6 +80,7 @@ def test_inspect_run_triggers_sync_when_running():
         "outputs_json": "[]",
         "progress": "50%",
         "reason_json": None,
+        "backend_type": "gce",
         "backend_handle": "instance-1",
     }
     mock_db.get_metrics_trends.return_value = {}
@@ -87,17 +88,21 @@ def test_inspect_run_triggers_sync_when_running():
 
     mock_bus = MagicMock()
 
+    mock_stage_exec = MagicMock()
+    mock_stage_exec.gce_launcher._find_instance_zone.return_value = "us-west1-b"
+
     with (
         patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db),
         patch("goldfish.server_tools.execution_tools._get_metadata_bus", return_value=mock_bus),
+        patch("goldfish.server_tools.execution_tools._get_stage_executor", return_value=mock_stage_exec),
     ):
         inspect_run(run_id)
 
-    # Verify sync signal was set
+    # Verify sync signal was set with correct target URI
     mock_bus.set_signal.assert_called_once()
     args, kwargs = mock_bus.set_signal.call_args
     assert args[0] == "goldfish"
     assert isinstance(args[1], MetadataSignal)
     assert args[1].command == "sync"
     assert args[1].payload["run_id"] == run_id
-    assert kwargs["target"] == "instance-1"
+    assert kwargs["target"] == "zones/us-west1-b/instances/instance-1"

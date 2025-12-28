@@ -15,13 +15,27 @@ logger = logging.getLogger(__name__)
 
 
 def validate_instance_name(name: str) -> None:
-    """Validate GCP instance name to prevent command injection.
+    """Validate GCP instance name or URI to prevent command injection.
 
-    Rules: 1-63 chars, lowercase letters, numbers, hyphens.
-    Must start with a letter, end with a letter or number.
+    Allows simple names (e.g. "instance-1") or full URIs
+    (e.g. "projects/p/zones/z/instances/i").
     """
-    if not re.match(r"^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$", name):
-        raise GoldfishError(f"Invalid GCP instance name: {name}")
+    # Simple name regex (RFC1035)
+    simple_pattern = r"^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$"
+
+    # URI pattern (allows projects, zones, instances segments)
+    # Roughly: (projects/[^/]+/)?(zones/[^/]+/)?instances/[^/]+
+    # We want to be strict enough to prevent shell injection but loose enough for valid URIs.
+    # Allowing alphanumeric, hyphens, and slashes is mostly safe if we ensure no spaces/semicolons.
+    if re.match(simple_pattern, name):
+        return
+
+    # Check for valid URI characters (alphanumeric, -, /, ., :)
+    # This prevents shell injection characters like ; & | $ > <
+    if re.match(r"^[a-zA-Z0-9\-\/\.\:]+$", name) and "instances/" in name:
+        return
+
+    raise GoldfishError(f"Invalid GCP instance name or URI: {name}")
 
 
 class GCPMetadataBus(MetadataBus):
