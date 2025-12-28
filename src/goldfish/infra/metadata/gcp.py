@@ -13,29 +13,50 @@ from goldfish.infra.metadata.base import MetadataBus, MetadataSignal
 
 logger = logging.getLogger(__name__)
 
+_SIMPLE_INSTANCE_RE = re.compile(r"^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$")
+_TARGET_ALLOWED_RE = re.compile(r"^[a-zA-Z0-9\-\/\.\:]+$")
+_TARGET_RE = re.compile(r"(?:projects/(?P<project>[^/]+)/)?zones/(?P<zone>[^/]+)/instances/(?P<instance>[^/]+)$")
+_TARGET_PREFIXES = (
+    "https://www.googleapis.com/compute/v1/",
+    "https://compute.googleapis.com/compute/v1/",
+)
+
 
 def validate_instance_name(name: str) -> None:
-    """Validate GCP instance name or URI to prevent command injection.
-
-    Allows simple names (e.g. "instance-1") or full URIs
-    (e.g. "projects/p/zones/z/instances/i").
-    """
-    # Simple name regex (RFC1035)
-    simple_pattern = r"^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$"
-
-    # URI pattern (allows projects, zones, instances segments)
-    # Roughly: (projects/[^/]+/)?(zones/[^/]+/)?instances/[^/]+
-    # We want to be strict enough to prevent shell injection but loose enough for valid URIs.
-    # Allowing alphanumeric, hyphens, and slashes is mostly safe if we ensure no spaces/semicolons.
-    if re.match(simple_pattern, name):
+    """Validate GCP instance name or URI to prevent command injection."""
+    if _SIMPLE_INSTANCE_RE.match(name):
         return
 
-    # Check for valid URI characters (alphanumeric, -, /, ., :)
-    # This prevents shell injection characters like ; & | $ > <
-    if re.match(r"^[a-zA-Z0-9\-\/\.\:]+$", name) and "instances/" in name:
+    # Only allow safe URI characters and require the instances path to exist.
+    if _TARGET_ALLOWED_RE.match(name) and "instances/" in name:
         return
 
     raise GoldfishError(f"Invalid GCP instance name or URI: {name}")
+
+
+def _normalize_target(target: str) -> tuple[str, str | None, str | None]:
+    """Normalize instance targets to (name, zone, project) for gcloud commands."""
+    validate_instance_name(target)
+
+    normalized = target
+    for prefix in _TARGET_PREFIXES:
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+            break
+
+    match = _TARGET_RE.search(normalized)
+    if match:
+        instance = match.group("instance")
+        zone = match.group("zone")
+        project = match.group("project")
+        if not _SIMPLE_INSTANCE_RE.match(instance):
+            raise GoldfishError(f"Invalid GCP instance name: {instance}")
+        return instance, zone, project
+
+    if not _SIMPLE_INSTANCE_RE.match(target):
+        raise GoldfishError(f"Invalid GCP instance name: {target}")
+
+    return target, None, None
 
 
 class GCPMetadataBus(MetadataBus):
@@ -50,7 +71,7 @@ class GCPMetadataBus(MetadataBus):
             logger.warning("GCPMetadataBus.set_signal: target instance name required")
             return
 
-        validate_instance_name(target)
+        instance_name, zone, project = _normalize_target(target)
 
         try:
             # Format the signal as a string
@@ -67,11 +88,15 @@ class GCPMetadataBus(MetadataBus):
                     "compute",
                     "instances",
                     "add-metadata",
-                    target,
+                    instance_name,
                     "--metadata-from-file",
                     f"{key}={tmp.name}",
                     "--quiet",
                 ]
+                if zone:
+                    cmd.append(f"--zone={zone}")
+                if project:
+                    cmd.append(f"--project={project}")
 
                 subprocess.run(cmd, check=True, capture_output=True, text=True)
             logger.debug(f"GCPMetadataBus set_signal: {key}={signal.request_id} target={target}")
@@ -87,8 +112,10 @@ class GCPMetadataBus(MetadataBus):
 
     def get_signal(self, key: str, target: str | None = None) -> MetadataSignal | None:
         if target:
-            validate_instance_name(target)
-        val = self._get_metadata_value(target, key)
+            instance_name, zone, project = _normalize_target(target)
+        else:
+            instance_name, zone, project = None, None, None
+        val = self._get_metadata_value(instance_name, key, zone=zone, project=project)
         if not val:
             return None
         try:
@@ -99,9 +126,22 @@ class GCPMetadataBus(MetadataBus):
     def clear_signal(self, key: str, target: str | None = None) -> None:
         if not target:
             return
-        validate_instance_name(target)
+        instance_name, zone, project = _normalize_target(target)
         try:
-            cmd = ["gcloud", "compute", "instances", "remove-metadata", target, "--keys", key, "--quiet"]
+            cmd = [
+                "gcloud",
+                "compute",
+                "instances",
+                "remove-metadata",
+                instance_name,
+                "--keys",
+                key,
+                "--quiet",
+            ]
+            if zone:
+                cmd.append(f"--zone={zone}")
+            if project:
+                cmd.append(f"--project={project}")
             subprocess.run(cmd, check=True, capture_output=True)
         except Exception as e:
             logger.debug(f"Failed to clear signal on {target}: {e}")
@@ -109,7 +149,7 @@ class GCPMetadataBus(MetadataBus):
     def set_ack(self, key: str, request_id: str, target: str | None = None) -> None:
         if not target:
             return
-        validate_instance_name(target)
+        instance_name, zone, project = _normalize_target(target)
         try:
             # Simple strings are safe for --metadata flag
             cmd = [
@@ -117,11 +157,15 @@ class GCPMetadataBus(MetadataBus):
                 "compute",
                 "instances",
                 "add-metadata",
-                target,
+                instance_name,
                 "--metadata",
                 f"{key}_ack={request_id}",
                 "--quiet",
             ]
+            if zone:
+                cmd.append(f"--zone={zone}")
+            if project:
+                cmd.append(f"--project={project}")
             subprocess.run(cmd, check=True, capture_output=True)
         except Exception as e:
             logger.error(f"Failed to set ACK on {target}: {e}")
@@ -129,10 +173,18 @@ class GCPMetadataBus(MetadataBus):
 
     def get_ack(self, key: str, target: str | None = None) -> str | None:
         if target:
-            validate_instance_name(target)
-        return self._get_metadata_value(target, f"{key}_ack")
+            instance_name, zone, project = _normalize_target(target)
+        else:
+            instance_name, zone, project = None, None, None
+        return self._get_metadata_value(instance_name, f"{key}_ack", zone=zone, project=project)
 
-    def _get_metadata_value(self, target: str | None, key: str) -> str | None:
+    def _get_metadata_value(
+        self,
+        target: str | None,
+        key: str,
+        zone: str | None = None,
+        project: str | None = None,
+    ) -> str | None:
         if not target:
             return None
         try:
@@ -147,6 +199,10 @@ class GCPMetadataBus(MetadataBus):
                 f"value(metadata.items.{key})",
                 "--quiet",
             ]
+            if zone:
+                cmd.append(f"--zone={zone}")
+            if project:
+                cmd.append(f"--project={project}")
             result = subprocess.run(cmd, check=True, capture_output=True, text=True)
             return result.stdout.strip() or None
         except Exception:

@@ -37,3 +37,45 @@ def test_set_signal_command_syntax():
         if isinstance(written_content, bytes):
             written_content = written_content.decode()
         assert '"request_id": "12345"' in written_content or '"request_id":"12345"' in written_content
+
+
+def test_set_signal_with_zonal_target_adds_zone_flag() -> None:
+    """Zonal instance targets should be parsed into instance + --zone flag."""
+    bus = GCPMetadataBus()
+    sig = MetadataSignal(command="sync", request_id="12345")
+
+    with patch("subprocess.run") as mock_run, patch("tempfile.NamedTemporaryFile") as mock_temp:
+        mock_file = MagicMock()
+        mock_file.name = "/tmp/fake-metadata-file"
+        mock_temp.return_value.__enter__.return_value = mock_file
+        mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+
+        bus.set_signal("goldfish", sig, target="zones/us-central1-a/instances/test-instance")
+
+        args = mock_run.call_args[0][0]
+        assert "test-instance" in args
+        assert "--zone=us-central1-a" in args
+        assert "zones/us-central1-a/instances/test-instance" not in args
+
+
+def test_set_signal_with_project_zonal_target_adds_project_flag() -> None:
+    """Project+zone instance targets should be parsed into flags."""
+    bus = GCPMetadataBus()
+    sig = MetadataSignal(command="sync", request_id="12345")
+
+    with patch("subprocess.run") as mock_run, patch("tempfile.NamedTemporaryFile") as mock_temp:
+        mock_file = MagicMock()
+        mock_file.name = "/tmp/fake-metadata-file"
+        mock_temp.return_value.__enter__.return_value = mock_file
+        mock_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+
+        bus.set_signal(
+            "goldfish",
+            sig,
+            target="projects/my-proj/zones/us-central1-a/instances/test-instance",
+        )
+
+        args = mock_run.call_args[0][0]
+        assert "test-instance" in args
+        assert "--zone=us-central1-a" in args
+        assert "--project=my-proj" in args
