@@ -142,10 +142,40 @@ class LineageManager:
             raise GoldfishError(f"Version '{run['version']}' not found for workspace '{run['workspace_name']}'")
 
         # Get input signals (signals consumed by this run)
-        inputs = self.db.list_signals(consumed_by=stage_run_id)
+        # We support both the new explicit 'input' model and the legacy 'consumed_by' model
+        explicit_inputs = self.db.list_signals(stage_run_id=stage_run_id, signal_type="input")
+        legacy_inputs = self.db.list_signals(consumed_by=stage_run_id)
+
+        # Merge and deduplicate (by signal name and source)
+        inputs = []
+        seen_inputs = set()
+        for inp in explicit_inputs + legacy_inputs:
+            key = (inp["signal_name"], inp.get("source_stage_run_id") or inp.get("stage_run_id"))
+            if key not in seen_inputs:
+                inputs.append(inp)
+                seen_inputs.add(key)
 
         # Get output signals (signals produced by this run)
-        outputs = self.db.list_signals(stage_run_id=stage_run_id)
+        # We fetch all signals for this run except 'input'
+        all_signals = self.db.list_signals(stage_run_id=stage_run_id)
+        outputs = [s for s in all_signals if s["signal_type"] != "input"]
+
+        # Get downstream signals (runs produced using outputs from this run)
+        downstream_signals = self.db.list_signals(source_stage_run_id=stage_run_id)
+        # Deduplicate consumer runs
+        downstream_run_ids = sorted({s["stage_run_id"] for s in downstream_signals if s.get("stage_run_id")})
+        downstream_runs = []
+        for d_id in downstream_run_ids:
+            d_run = self.db.get_stage_run(d_id)
+            if d_run:
+                downstream_runs.append(
+                    {
+                        "stage_run_id": d_run["id"],
+                        "stage": d_run["stage_name"],
+                        "status": d_run["status"],
+                        "started_at": d_run.get("started_at"),
+                    }
+                )
 
         # Parse config_override if it's a JSON string
         config_override = run.get("config_override") or run.get("config_json") or {}
@@ -166,6 +196,7 @@ class LineageManager:
                     "signal_name": inp["signal_name"],
                     "signal_type": inp["signal_type"],
                     "storage_location": inp["storage_location"],
+                    "source_stage_run_id": inp.get("source_stage_run_id"),
                 }
                 for inp in inputs
             ],
@@ -174,9 +205,11 @@ class LineageManager:
                     "signal_name": out["signal_name"],
                     "signal_type": out["signal_type"],
                     "storage_location": out["storage_location"],
+                    "size_bytes": out.get("size_bytes"),
                 }
                 for out in outputs
             ],
+            "downstream": downstream_runs,
         }
 
     def branch_workspace(

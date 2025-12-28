@@ -2108,6 +2108,19 @@ class Database:
         with self._conn() as conn:
             conn.execute(query, params)
 
+    def update_stage_run_outcome(self, stage_run_id: str, outcome: str) -> None:
+        """Update stage run outcome.
+
+        Args:
+            stage_run_id: Stage run ID
+            outcome: New outcome (success, bad_results)
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE stage_runs SET outcome = ? WHERE id = ?",
+                (outcome, stage_run_id),
+            )
+
     def get_stage_run(self, stage_run_id: str) -> dict | None:
         """Get a stage run by ID.
 
@@ -2462,14 +2475,18 @@ class Database:
         self,
         stage_run_id: str | None = None,
         consumed_by: str | None = None,
+        source_stage_run_id: str | None = None,
         is_artifact: bool | None = None,
+        signal_type: str | None = None,
     ) -> list[dict]:
         """List signals with optional filters.
 
         Args:
             stage_run_id: Filter by producing stage run
             consumed_by: Filter by consuming stage run
+            source_stage_run_id: Filter by source stage run (for downstream tracking)
             is_artifact: Filter by artifact status
+            signal_type: Filter by signal type (e.g., 'input', 'npy')
 
         Returns:
             List of signal dicts
@@ -2483,13 +2500,46 @@ class Database:
         if consumed_by:
             query += " AND consumed_by = ?"
             params.append(consumed_by)
+        if source_stage_run_id:
+            query += " AND source_stage_run_id = ?"
+            params.append(source_stage_run_id)
         if is_artifact is not None:
             query += " AND is_artifact = ?"
             params.append(1 if is_artifact else 0)
+        if signal_type:
+            query += " AND signal_type = ?"
+            params.append(signal_type)
 
         with self._conn() as conn:
             rows = conn.execute(query, params).fetchall()
             return [dict(row) for row in rows]
+
+    def list_inputs_for_runs(self, run_ids: list[str]) -> dict[str, list[dict]]:
+        """Efficiently fetch input signal info for a list of stage runs.
+
+        Returns:
+            Dict mapping run_id to list of input signal records.
+        """
+        if not run_ids:
+            return {}
+
+        placeholders = ",".join(["?"] * len(run_ids))
+        query = f"""
+            SELECT stage_run_id, signal_name, signal_type, storage_location,
+                   source_stage_run_id, source_stage_version_id
+            FROM signal_lineage
+            WHERE stage_run_id IN ({placeholders})
+            AND signal_type = 'input'
+        """
+
+        result: dict[str, list[dict]] = {run_id: [] for run_id in run_ids}
+        with self._conn() as conn:
+            rows = conn.execute(query, run_ids).fetchall()
+            for row in rows:
+                run_id = row["stage_run_id"]
+                if run_id in result:
+                    result[run_id].append(dict(row))
+        return result
 
     def mark_signal_consumed(
         self,

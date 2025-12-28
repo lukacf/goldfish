@@ -742,6 +742,10 @@ def list_runs(
     )
     total = rows[0]["total_count"] if rows else 0
 
+    # Fetch inputs for all runs efficiently
+    run_ids = [r["id"] for r in rows if r.get("id")]
+    inputs_map = db.list_inputs_for_runs(run_ids)
+
     # Compact view: just essential fields, one line per run
     for r in rows:
         # Build compact status string
@@ -759,6 +763,15 @@ def list_runs(
         attempt_info = f"#{r['attempt_num']}" if r.get("attempt_num") else None
         outcome = r.get("outcome")  # success, bad_results, or None
 
+        # Format input sources
+        run_inputs = inputs_map.get(r["id"], [])
+        input_sources = []
+        for inp in run_inputs:
+            if inp.get("source_stage_run_id"):
+                input_sources.append(inp["source_stage_run_id"])
+
+        inputs_str = ", ".join(list(set(input_sources))) if input_sources else None
+
         compact_runs.append(
             {
                 "run_id": r.get("id") or r.get("stage_run_id"),
@@ -766,6 +779,7 @@ def list_runs(
                 "attempt": attempt_info,
                 "status": status_str,
                 "outcome": outcome,
+                "inputs": inputs_str,
                 "started": r.get("started_at", "")[:19] if r.get("started_at") else None,  # Trim to datetime
                 "error": error_snippet,
             }
