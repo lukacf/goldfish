@@ -27,6 +27,7 @@ class LocalMetadataBus(MetadataBus):
         if not self.path.exists():
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text("{}")
+            self.path.chmod(0o600)
 
     @contextlib.contextmanager
     def _atomic_update(self) -> Generator[dict, None, None]:
