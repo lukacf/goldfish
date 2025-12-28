@@ -823,7 +823,11 @@ def list_runs(
     )
     total = rows[0]["total_count"] if rows else 0
 
-    # 2. When filtering by pipeline_run_id, also show queued stages that haven't started
+    # 2. Fetch inputs for all runs efficiently
+    run_ids = [r["id"] for r in rows if r.get("id")]
+    inputs_map = db.list_inputs_for_runs(run_ids)
+
+    # 3. When filtering by pipeline_run_id, also show queued stages that haven't started
     # We fetch these AFTER actual runs to handle the race condition where a run is created
     # but the queue hasn't been updated with the run_id yet.
     queued_to_show = []
@@ -848,7 +852,7 @@ def list_runs(
     # Start with queued stages (they are logically "next")
     compact_runs.extend(queued_to_show)
 
-    # 3. Compact view: just essential fields, one line per run
+    # 4. Compact view: just essential fields, one line per run
     for r in rows:
         # Build compact status string
         status_str = r["status"]
@@ -865,6 +869,15 @@ def list_runs(
         attempt_info = f"#{r['attempt_num']}" if r.get("attempt_num") else None
         outcome = r.get("outcome")  # success, bad_results, or None
 
+        # Format input sources
+        run_inputs = inputs_map.get(r["id"], [])
+        input_sources = []
+        for inp in run_inputs:
+            if inp.get("source_stage_run_id"):
+                input_sources.append(inp["source_stage_run_id"])
+
+        inputs_str = ", ".join(list(set(input_sources))) if input_sources else None
+
         compact_runs.append(
             {
                 "run_id": r.get("id") or r.get("stage_run_id"),
@@ -872,6 +885,7 @@ def list_runs(
                 "attempt": attempt_info,
                 "status": status_str,
                 "outcome": outcome,
+                "inputs": inputs_str,
                 "started": r.get("started_at", "")[:19] if r.get("started_at") else None,  # Trim to datetime
                 "error": error_snippet,
             }
