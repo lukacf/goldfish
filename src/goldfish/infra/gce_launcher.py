@@ -49,6 +49,9 @@ class GCELauncher:
         resources: list[dict[str, Any]] | None = None,
         zones: list[str] | None = None,
         gpu_preference: list[str] | None = None,
+        service_account: str | None = None,
+        ensure_metadata_permissions: bool = True,
+        metadata_ack_role: str = "roles/compute.instanceAdmin.v1",
     ):
         """Initialize GCE launcher.
 
@@ -66,6 +69,10 @@ class GCELauncher:
         self.resources = resources or []
         self.zones = zones or [zone]  # Default to list containing just default_zone
         self.gpu_preference = gpu_preference or ["h100", "a100", "none"]
+        self.service_account = service_account
+        self.ensure_metadata_permissions = ensure_metadata_permissions
+        self.metadata_ack_role = metadata_ack_role
+        self._project_number: str | None = None
 
     @property
     def bucket_uri(self) -> str | None:
@@ -79,6 +86,55 @@ class GCELauncher:
         if self.bucket.startswith("gs://"):
             return self.bucket
         return f"gs://{self.bucket}"
+
+    def _resolve_service_account(self) -> str | None:
+        """Resolve the service account email for instances."""
+        if self.service_account:
+            return self.service_account
+        if not self.project_id:
+            return None
+        if not self._project_number:
+            cmd = [
+                "gcloud",
+                "projects",
+                "describe",
+                self.project_id,
+                "--format=value(projectNumber)",
+            ]
+            result = run_gcloud(cmd)
+            self._project_number = result.stdout.strip()
+        if not self._project_number:
+            return None
+        return f"{self._project_number}-compute@developer.gserviceaccount.com"
+
+    def _ensure_metadata_permissions(self) -> None:
+        """Ensure instance service account can set metadata ACKs."""
+        if not self.project_id:
+            logger.warning("Skipping metadata permission check (project_id not set).")
+            return
+
+        service_account = self._resolve_service_account()
+        if not service_account:
+            logger.warning("Skipping metadata permission check (service account not resolved).")
+            return
+
+        cmd = [
+            "gcloud",
+            "projects",
+            "add-iam-policy-binding",
+            self.project_id,
+            f"--member=serviceAccount:{service_account}",
+            f"--role={self.metadata_ack_role}",
+            "--quiet",
+        ]
+        try:
+            run_gcloud(cmd)
+        except GoldfishError as exc:
+            raise GoldfishError(
+                "Failed to grant metadata ACK permissions for the instance service account. "
+                "Grant compute.instances.get + compute.instances.setMetadata (or roles/compute.instanceAdmin.v1) "
+                f"to {service_account} and retry."
+            ) from exc
 
     def launch_instance(
         self,
@@ -269,6 +325,10 @@ class GCELauncher:
             log_sync_interval=log_sync_interval,
         )
 
+        # Ensure instance service account can set metadata ACKs.
+        if self.ensure_metadata_permissions:
+            self._ensure_metadata_permissions()
+
         if use_capacity_search and self.resources:
             # Use ResourceLauncher for capacity-aware search
             return self._launch_with_capacity_search(
@@ -333,6 +393,7 @@ class GCELauncher:
             force_gpu=gpu_type,
             zones_override=zones,
             project_id=self.project_id,
+            service_account=self._resolve_service_account(),
         )
 
         # Launch with capacity search
@@ -392,6 +453,9 @@ class GCELauncher:
                 "--scopes=https://www.googleapis.com/auth/cloud-platform",
                 "--quiet",
             ]
+            service_account = self._resolve_service_account()
+            if service_account:
+                cmd.append(f"--service-account={service_account}")
 
             if gpu_type and gpu_count > 0:
                 cmd.extend(["--accelerator", f"count={gpu_count},type={gpu_type}"])

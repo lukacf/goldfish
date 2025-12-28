@@ -221,6 +221,7 @@ class ResourceLauncher:
         backoff_multiplier: float = 1.5,
         max_attempts: int = 100,
         project_id: str | None = None,
+        service_account: str | None = None,
     ) -> None:
         if not resources:
             raise GoldfishError("resources list is empty")
@@ -236,6 +237,7 @@ class ResourceLauncher:
         self.backoff_multiplier = backoff_multiplier
         self.max_attempts = max_attempts
         self.project_id = project_id
+        self.service_account = service_account
 
         self.ordered_resources = order_resources(resources, self.gpu_preference, self.force_gpu)
 
@@ -436,6 +438,8 @@ class ResourceLauncher:
             "--scopes=https://www.googleapis.com/auth/cloud-platform",
             "--quiet",
         ]
+        if self.service_account:
+            cmd.append(f"--service-account={self.service_account}")
 
         # Boot disk image
         boot_disk = resource.get("boot_disk", {})
