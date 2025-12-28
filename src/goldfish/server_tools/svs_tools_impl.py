@@ -5,6 +5,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from goldfish.db.database import Database
+from goldfish.errors import GoldfishError
 
 if TYPE_CHECKING:
     from goldfish.svs.agent import AgentProvider
@@ -163,7 +164,7 @@ def librarian_review_patterns(
         result = agent.run(request)
     except Exception as exc:
         logger.error("Librarian agent failed: %s", exc)
-        return {}
+        raise GoldfishError(f"Librarian agent failed: {exc}") from exc
 
     raw = getattr(result, "response_text", None) or getattr(result, "raw_output", "")
     raw_text = raw if isinstance(raw, str) else str(raw)
