@@ -502,6 +502,13 @@ class StageExecutor:
                             "source_stage_run_id": source_run_id,
                             "source_stage_version_id": None,
                         }
+                        logger.info(
+                            "Stage '%s': input '%s' OVERRIDDEN to run '%s' signal '%s'",
+                            stage.name,
+                            input_name,
+                            source_run_id,
+                            signal_name,
+                        )
                         ctx.update({"source_type": "stage", "override": override_value, "run_id": source_run_id})
                         input_context.append(ctx)
                         continue
@@ -512,6 +519,13 @@ class StageExecutor:
                     if source:
                         inputs[input_name] = source["gcs_location"]
                         sources[input_name] = {"source_type": "source", "source_name": str(override_value)}
+                        logger.info(
+                            "Stage '%s': input '%s' OVERRIDDEN to source '%s' (%s)",
+                            stage.name,
+                            input_name,
+                            override_value,
+                            source["gcs_location"],
+                        )
                         ctx.update({"source_type": "source", "override": override_value})
                         input_context.append(ctx)
                         continue
@@ -519,6 +533,7 @@ class StageExecutor:
                 # 3. Use as literal path (fallback)
                 inputs[input_name] = str(override_value)
                 sources[input_name] = {"source_type": "override"}
+                logger.info("Stage '%s': input '%s' OVERRIDDEN to path '%s'", stage.name, input_name, override_value)
                 ctx.update({"source_type": "override", "override": override_value})
                 input_context.append(ctx)
                 continue
@@ -605,6 +620,13 @@ class StageExecutor:
                     "source_stage_run_id": source_run_id,
                     "source_stage_version_id": source_run.get("stage_version_id"),
                 }
+                logger.info(
+                    "Stage '%s': input '%s' resolved to run %s (%s)",
+                    stage.name,
+                    input_name,
+                    source_run_id,
+                    signal["storage_location"],
+                )
 
                 latest_runs = self.db.list_stage_runs(
                     workspace_name=workspace, stage_name=input_def.from_stage, limit=1
@@ -654,6 +676,13 @@ class StageExecutor:
                     "source_type": "dataset",
                     "dataset_name": input_def.dataset,
                 }
+                logger.info(
+                    "Stage '%s': input '%s' resolved to dataset '%s' (%s)",
+                    stage.name,
+                    input_name,
+                    input_def.dataset,
+                    dataset.gcs_location,
+                )
                 input_context.append(ctx)
 
             else:
@@ -916,11 +945,26 @@ class StageExecutor:
                         # directory, file, or other types use trailing /
                         storage_location = f"{gcs_base.rstrip('/')}/{output_name}/"
 
+                # Calculate fingerprint for local outputs
+                stats_json = None
+                if not gcs_base:
+                    from goldfish.utils.fingerprint import calculate_fingerprint
+
+                    local_path = outputs_dir / output_name
+                    if output_def.type == "npy":
+                        local_path = local_path.with_suffix(".npy")
+                    elif output_def.type == "csv":
+                        local_path = local_path.with_suffix(".csv")
+
+                    stats = calculate_fingerprint(local_path)
+                    if stats:
+                        stats_json = json.dumps(stats)
+
                 conn.execute(
                     """
                     INSERT INTO signal_lineage
-                    (stage_run_id, signal_name, signal_type, storage_location, is_artifact)
-                    VALUES (?, ?, ?, ?, ?)
+                    (stage_run_id, signal_name, signal_type, storage_location, is_artifact, stats_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         stage_run_id,
@@ -928,6 +972,7 @@ class StageExecutor:
                         output_def.type or "directory",
                         storage_location,
                         int(bool(output_def.artifact)),
+                        stats_json,
                     ),
                 )
 
