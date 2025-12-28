@@ -23,6 +23,7 @@ from goldfish.models import (
     CancelRunResponse,
     RunReason,
     StageRunInfo,
+    StageRunProgress,
     StageRunStatus,
 )
 from goldfish.server_core import (
@@ -258,39 +259,46 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
 
     sync_status = "not_running"
     if row["status"] == StageRunStatus.RUNNING:
-        try:
-            bus = _get_metadata_bus()
-            import uuid
+        progress = row.get("progress")
+        backend_type = row.get("backend_type")
+        if backend_type == "gce" and progress in {StageRunProgress.BUILD, StageRunProgress.LAUNCH}:
+            sync_status = "starting"
+        elif backend_type == "gce" and progress == StageRunProgress.FINALIZING:
+            sync_status = "finalizing"
+        else:
+            try:
+                bus = _get_metadata_bus()
+                import uuid
 
-            req_id = str(uuid.uuid4())[:8]
-            sig = MetadataSignal(command="sync", request_id=req_id, payload={"run_id": run_id})
-            target = row.get("backend_handle")
+                req_id = str(uuid.uuid4())[:8]
+                sig = MetadataSignal(command="sync", request_id=req_id, payload={"run_id": run_id})
+                target = row.get("backend_handle")
 
-            # If GCE, resolve zone to ensure correct targeting
-            if row.get("backend_type") == "gce" and target:
-                try:
-                    stage_exec = _get_stage_executor()
-                    zone = stage_exec.gce_launcher._find_instance_zone(target)
-                    if zone:
-                        target = f"zones/{zone}/instances/{target}"
-                except Exception as e:
-                    logger.warning(f"Failed to resolve zone for {target}: {e}")
+                # If GCE, resolve zone to ensure correct targeting
+                if row.get("backend_type") == "gce" and target:
+                    try:
+                        stage_exec = _get_stage_executor()
+                        zone = stage_exec.gce_launcher._find_instance_zone(target)
+                        if zone:
+                            target = f"zones/{zone}/instances/{target}"
+                    except Exception as e:
+                        logger.warning(f"Failed to resolve zone for {target}: {e}")
 
-            bus.set_signal("goldfish", sig, target=target)
+                bus.set_signal("goldfish", sig, target=target)
 
-            # Wait for ACK (max 2 seconds)
-            start_time = time.time()
-            sync_status = "timeout"
-            while time.time() - start_time < 2.0:
-                ack = bus.get_ack("goldfish", target=target)
-                if ack == req_id:
-                    sync_status = "synced"
-                    break
-                time.sleep(0.1)
+                # Wait for ACK (max 2 seconds)
+                start_time = time.time()
+                sync_status = "timeout"
+                while time.time() - start_time < 2.0:
+                    ack = bus.get_ack("goldfish", target=target)
+                    if ack == req_id:
+                        sync_status = "synced"
+                        break
+                    time.sleep(0.1)
 
-        except Exception as e:
-            logger.debug(f"Failed to trigger sync signal: {e}")
-            sync_status = f"error: {e}"
+            except Exception as e:
+                logger.debug(f"Failed to trigger sync signal: {e}")
+                sync_status = f"error: {e}"
 
     # Set default includes if None
     if include is None:

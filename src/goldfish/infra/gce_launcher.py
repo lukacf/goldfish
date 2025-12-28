@@ -241,8 +241,8 @@ class GCELauncher:
         compute_config = stage_config.get("compute", {})
         max_runtime = compute_config.get("max_runtime_seconds", DEFAULT_MAX_RUNTIME_SECONDS)
         heartbeat_timeout = compute_config.get("heartbeat_timeout_seconds")  # None = no supervisor
-        # Log sync interval for real-time log visibility (default 30s, configurable)
-        log_sync_interval = compute_config.get("log_sync_interval", 30)
+        # Log sync interval for real-time log visibility (default 10s, configurable)
+        log_sync_interval = compute_config.get("log_sync_interval", 10)
 
         # Build startup script with proper orchestration and cost protection
         startup_script = build_startup_script(
