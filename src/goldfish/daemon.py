@@ -330,13 +330,15 @@ class GoldfishDaemon:
 
         # Initialize MetadataBus (Cloud-native or Local simulation)
         metadata_bus: MetadataBus
+        local_metadata_bus: LocalMetadataBus | None = None
         if self.config.gce:
             from goldfish.infra.metadata.gcp import GCPMetadataBus
 
             metadata_bus = GCPMetadataBus()
         else:
             # Use a file in dev repo for local simulation
-            metadata_bus = LocalMetadataBus(self.dev_repo_path / ".metadata_bus.json")
+            local_metadata_bus = LocalMetadataBus(self.dev_repo_path / ".metadata_bus.json")
+            metadata_bus = local_metadata_bus
 
         # Create and set context
         self.context = ServerContext(
@@ -354,6 +356,16 @@ class GoldfishDaemon:
             metadata_bus=metadata_bus,
         )
         set_context(self.context)
+
+        # Start local metadata syncer for Overdrive parity in non-GCE environments
+        if local_metadata_bus is not None:
+            from goldfish.infra.metadata.local_syncer import LocalMetadataSyncer
+
+            self._local_metadata_syncer = LocalMetadataSyncer(
+                bus=local_metadata_bus,
+                stage_executor=stage_executor,
+            )
+            self._local_metadata_syncer.start()
 
         # Store references for worker
         self._db = db

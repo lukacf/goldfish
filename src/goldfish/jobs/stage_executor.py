@@ -1660,6 +1660,13 @@ class StageExecutor:
             "XDG_CACHE_HOME": "/app/.cache",
         }
 
+        # Overdrive defaults: unbuffered stdout + faster metrics flush
+        goldfish_env.setdefault("PYTHONUNBUFFERED", os.environ.get("PYTHONUNBUFFERED", "1"))
+        goldfish_env.setdefault(
+            "GOLDFISH_METRICS_FLUSH_INTERVAL",
+            os.environ.get("GOLDFISH_METRICS_FLUSH_INTERVAL", "5"),
+        )
+
         # Add git SHA if available
         if git_sha:
             goldfish_env["GOLDFISH_GIT_SHA"] = git_sha
@@ -1679,8 +1686,6 @@ class StageExecutor:
                     goldfish_env["GOLDFISH_WANDB_ENTITY"] = wandb_config["entity"]
 
         # Passthrough WANDB_API_KEY from host environment if set
-        import os
-
         if "WANDB_API_KEY" in os.environ:
             goldfish_env["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
 
