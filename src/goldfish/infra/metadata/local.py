@@ -68,22 +68,22 @@ class LocalMetadataBus(MetadataBus):
             data[f"{key}_signal"] = signal.model_dump(mode="json")
         logger.debug(f"LocalMetadata set_signal: {key}={signal.request_id} target={target}")
 
-    def get_signal(self, key: str) -> MetadataSignal | None:
+    def get_signal(self, key: str, target: str | None = None) -> MetadataSignal | None:
         data = self._read()
         sig_data = data.get(f"{key}_signal")
         if not sig_data or not isinstance(sig_data, dict):
             return None
         return MetadataSignal(**sig_data)
 
-    def clear_signal(self, key: str) -> None:
+    def clear_signal(self, key: str, target: str | None = None) -> None:
         with self._atomic_update() as data:
             data.pop(f"{key}_signal", None)
 
-    def set_ack(self, key: str, request_id: str) -> None:
+    def set_ack(self, key: str, request_id: str, target: str | None = None) -> None:
         with self._atomic_update() as data:
             data[f"{key}_ack"] = request_id
         logger.debug(f"LocalMetadata set_ack: {key}={request_id}")
 
-    def get_ack(self, key: str) -> str | None:
+    def get_ack(self, key: str, target: str | None = None) -> str | None:
         data = self._read()
         return data.get(f"{key}_ack")

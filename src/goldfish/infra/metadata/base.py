@@ -33,18 +33,18 @@ class MetadataBus(Protocol):
         """
         ...
 
-    def get_signal(self, key: str) -> MetadataSignal | None:
-        """Get the current metadata signal."""
+    def get_signal(self, key: str, target: str | None = None) -> MetadataSignal | None:
+        """Get the current signal for a key."""
         ...
 
-    def clear_signal(self, key: str) -> None:
-        """Clear a metadata signal."""
+    def clear_signal(self, key: str, target: str | None = None) -> None:
+        """Clear the signal for a key."""
         ...
 
-    def set_ack(self, key: str, request_id: str) -> None:
-        """Acknowledge a signal (used by the container)."""
+    def set_ack(self, key: str, request_id: str, target: str | None = None) -> None:
+        """Acknowledge a signal."""
         ...
 
-    def get_ack(self, key: str) -> str | None:
-        """Get the last acknowledged request ID (used by the server)."""
+    def get_ack(self, key: str, target: str | None = None) -> str | None:
+        """Get the current acknowledgment."""
         ...
