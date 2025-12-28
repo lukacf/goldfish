@@ -2,9 +2,13 @@
 
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from goldfish.db.database import Database
+
+if TYPE_CHECKING:
+    from goldfish.svs.agent import AgentProvider
+    from goldfish.svs.config import SVSConfig
 
 logger = logging.getLogger("goldfish.server")
 
@@ -88,8 +92,8 @@ def review_pending_patterns(db: Database, dry_run: bool = True) -> dict:
 def librarian_review_patterns(
     patterns: list[dict],
     *,
-    agent: Any = None,
-    config: Any = None,
+    agent: "AgentProvider | None" = None,
+    config: "SVSConfig | None" = None,
 ) -> dict[str, dict]:
     """AI librarian review of patterns.
 
