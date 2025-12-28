@@ -265,6 +265,17 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
             req_id = str(uuid.uuid4())[:8]
             sig = MetadataSignal(command="sync", request_id=req_id, payload={"run_id": run_id})
             target = row.get("backend_handle")
+
+            # If GCE, resolve zone to ensure correct targeting
+            if row.get("backend_type") == "gce" and target:
+                try:
+                    stage_exec = _get_stage_executor()
+                    zone = stage_exec.gce_launcher._find_instance_zone(target)
+                    if zone:
+                        target = f"zones/{zone}/instances/{target}"
+                except Exception as e:
+                    logger.warning(f"Failed to resolve zone for {target}: {e}")
+
             bus.set_signal("goldfish", sig, target=target)
 
             # Wait for ACK (max 2 seconds)
