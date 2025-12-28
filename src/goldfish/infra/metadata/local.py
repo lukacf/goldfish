@@ -4,8 +4,11 @@ Uses a local JSON file to simulate Instance Metadata, allowing for TDD
 and local testing of the Overdrive sync logic.
 """
 
+import contextlib
+import fcntl
 import json
 import logging
+from collections.abc import Generator
 from pathlib import Path
 
 from goldfish.infra.metadata.base import MetadataBus, MetadataSignal
@@ -14,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class LocalMetadataBus(MetadataBus):
-    """Simulates Instance Metadata using a local JSON file."""
+    """Simulates Instance Metadata using a local JSON file with file locking."""
 
     def __init__(self, metadata_path: Path):
         self.path = metadata_path
@@ -25,19 +28,33 @@ class LocalMetadataBus(MetadataBus):
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text("{}")
 
+    @contextlib.contextmanager
+    def _atomic_update(self) -> Generator[dict, None, None]:
+        """Context manager for atomic read-modify-write operations."""
+        with open(self.path, "r+") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                content = f.read()
+                data = json.loads(content) if content else {}
+                yield data
+                f.seek(0)
+                f.write(json.dumps(data, indent=2))
+                f.truncate()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
     def _read(self) -> dict:
+        """Read data (no lock required for simple read, but safer with shared lock)."""
+        # For simplicity in local dev, we skip shared read locks,
+        # focusing on fixing the critical write race condition.
         try:
             return json.loads(self.path.read_text())  # type: ignore[no-any-return]
         except (json.JSONDecodeError, FileNotFoundError):
             return {}
 
-    def _write(self, data: dict) -> None:
-        self.path.write_text(json.dumps(data, indent=2))
-
     def set_signal(self, key: str, signal: MetadataSignal, target: str | None = None) -> None:
-        data = self._read()
-        data[f"{key}_signal"] = signal.model_dump(mode="json")
-        self._write(data)
+        with self._atomic_update() as data:
+            data[f"{key}_signal"] = signal.model_dump(mode="json")
         logger.debug(f"LocalMetadata set_signal: {key}={signal.request_id} target={target}")
 
     def get_signal(self, key: str) -> MetadataSignal | None:
@@ -48,14 +65,12 @@ class LocalMetadataBus(MetadataBus):
         return MetadataSignal(**sig_data)
 
     def clear_signal(self, key: str) -> None:
-        data = self._read()
-        data.pop(f"{key}_signal", None)
-        self._write(data)
+        with self._atomic_update() as data:
+            data.pop(f"{key}_signal", None)
 
     def set_ack(self, key: str, request_id: str) -> None:
-        data = self._read()
-        data[f"{key}_ack"] = request_id
-        self._write(data)
+        with self._atomic_update() as data:
+            data[f"{key}_ack"] = request_id
         logger.debug(f"LocalMetadata set_ack: {key}={request_id}")
 
     def get_ack(self, key: str) -> str | None:
