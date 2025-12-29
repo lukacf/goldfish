@@ -336,6 +336,17 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
                 logger.debug(f"Failed to trigger sync signal: {e}")
                 sync_status = f"error: {e}"
 
+        # If we got an ACK, ingest metrics/SVS now (best-effort).
+        # NOTE: For local backend, the LocalMetadataSyncer also ingests metrics,
+        # but doing it here makes `inspect_run` self-contained and reliable.
+        if sync_status == "synced":
+            try:
+                stage_exec = _get_stage_executor()
+                stage_exec.sync_metrics_if_running(run_id)
+                stage_exec.sync_svs_if_running(run_id)
+            except Exception as e:
+                logger.debug(f"Failed to sync metrics/SVS for {run_id}: {e}")
+
     # Set default includes if None
     if include is None:
         include = ["dashboard", "metadata"]
@@ -357,6 +368,7 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
     if "dashboard" in include:
         progress = row.get("progress")
         dashboard_metrics = ["loss", "accuracy", "val_loss", "val_accuracy", "ppl"]
+        run_config: dict[str, Any] = {}
         try:
             run_config = json.loads(row["config_json"]) if row.get("config_json") else {}
             if "dashboard_metrics" in run_config:
@@ -364,9 +376,24 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
         except Exception:
             pass
 
-        metric_trends = db.get_metrics_trends(run_id, dashboard_metrics)
         summary_rows = db.get_metrics_summary(run_id)
         summaries = {s["name"]: s for s in summary_rows}
+
+        # If no configured metrics are present but we have metrics, fall back to
+        # showing the most frequent ones (helps non-train stages).
+        if summaries:
+            has_any_requested = any(name in summaries for name in dashboard_metrics)
+            if not has_any_requested and "dashboard_metrics" not in (run_config or {}):
+                dashboard_metrics = [
+                    s["name"]
+                    for s in sorted(
+                        summary_rows,
+                        key=lambda r: (r.get("count") or 0),
+                        reverse=True,
+                    )[:8]
+                ]
+
+        metric_trends = db.get_metrics_trends(run_id, dashboard_metrics)
 
         synthesized_metrics = {}
         for name in dashboard_metrics:
@@ -394,11 +421,13 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
             if any(k in name.lower() for k in ["gpu", "vram", "memory"]):
                 health[name] = s["last_value"]
 
+        last_sync = row.get("last_metrics_sync_at") or row.get("started_at")
+
         result["dashboard"] = {
             "progress": progress,
             "metrics": synthesized_metrics,
             "health": health,
-            "last_sync": row.get("last_metrics_sync_at") or row.get("started_at"),
+            "last_sync": last_sync,
             "sync_status": sync_status,
         }
 
