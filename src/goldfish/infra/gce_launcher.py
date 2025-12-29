@@ -129,11 +129,24 @@ class GCELauncher:
         ]
         try:
             run_gcloud(cmd)
+            run_gcloud(
+                [
+                    "gcloud",
+                    "iam",
+                    "service-accounts",
+                    "add-iam-policy-binding",
+                    service_account,
+                    f"--member=serviceAccount:{service_account}",
+                    "--role=roles/iam.serviceAccountUser",
+                    f"--project={self.project_id}",
+                    "--quiet",
+                ]
+            )
         except GoldfishError as exc:
             raise GoldfishError(
                 "Failed to grant metadata ACK permissions for the instance service account. "
                 "Grant compute.instances.get + compute.instances.setMetadata (or roles/compute.instanceAdmin.v1) "
-                f"to {service_account} and retry."
+                f"and roles/iam.serviceAccountUser to {service_account} and retry."
             ) from exc
 
     def launch_instance(
