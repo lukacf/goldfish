@@ -2076,6 +2076,40 @@ echo "Stage completed successfully"
                         progress=StageRunProgress.FINALIZING,
                     )
                     self._finalize_stage_run(stage_run_id, backend, status)
+            elif status == "not_found":
+                row = self.db.get_stage_run(stage_run_id)
+                if not row:
+                    return status
+
+                not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
+                started_at = row.get("started_at")
+                elapsed = float(not_found_timeout)
+                if started_at:
+                    try:
+                        started_dt = datetime.fromisoformat(started_at)
+                        elapsed = (datetime.now(UTC) - started_dt).total_seconds()
+                    except ValueError:
+                        elapsed = float(not_found_timeout)
+
+                if elapsed < not_found_timeout:
+                    return status
+
+                exit_code = self.gce_launcher._get_exit_code(stage_run_id)
+                resolved = StageRunStatus.COMPLETED if exit_code == 0 else StageRunStatus.FAILED
+
+                current = self.db.get_stage_run(stage_run_id)
+                if current and current.get("status") not in terminal_statuses:
+                    error_msg = None
+                    if resolved == StageRunStatus.FAILED:
+                        error_msg = f"GCE instance {stage_run_id} not found after {not_found_timeout} seconds"
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id,
+                        status=StageRunStatus.RUNNING,
+                        progress=StageRunProgress.FINALIZING,
+                        error=error_msg,
+                    )
+                    self._finalize_stage_run(stage_run_id, backend, resolved)
+                return resolved
             return status
 
         return None
