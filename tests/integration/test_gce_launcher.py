@@ -82,10 +82,17 @@ def test_ensure_metadata_permissions_adds_binding(mock_run_gcloud):
 
     launcher._ensure_metadata_permissions()
 
-    cmd = mock_run_gcloud.call_args[0][0]
+    assert mock_run_gcloud.call_count == 2
+    cmd = mock_run_gcloud.call_args_list[0][0][0]
     assert cmd[:4] == ["gcloud", "projects", "add-iam-policy-binding", "test-project"]
     assert "--member=serviceAccount:svc@test.iam.gserviceaccount.com" in cmd
     assert "--role=roles/compute.instanceAdmin.v1" in cmd
+
+    cmd = mock_run_gcloud.call_args_list[1][0][0]
+    assert cmd[:4] == ["gcloud", "iam", "service-accounts", "add-iam-policy-binding"]
+    assert "svc@test.iam.gserviceaccount.com" in cmd
+    assert "--member=serviceAccount:svc@test.iam.gserviceaccount.com" in cmd
+    assert "--role=roles/iam.serviceAccountUser" in cmd
 
 
 def test_gce_launcher_requires_bucket_for_launch(launcher):
