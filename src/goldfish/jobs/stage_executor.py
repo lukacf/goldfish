@@ -249,7 +249,10 @@ class StageExecutor:
                     pipeline_name=pipeline_name,
                 )
 
-        # 3. Pre-run review (if enabled and not skipped)
+        # 3. Resolve inputs (with source metadata for lineage tracking)
+        inputs, input_sources, input_context = self._resolve_inputs(workspace, stage, inputs_override)
+
+        # 4. Pre-run review (if enabled and not skipped)
         review: RunReview | None = None
         if self.config.pre_run_review.enabled and not skip_review:
             review = self._perform_pre_run_review(
@@ -258,6 +261,7 @@ class StageExecutor:
                 pipeline=pipeline,
                 reason_structured=reason_structured,
                 git_sha=git_sha,
+                input_context=input_context,
             )
             if review and review.has_blocking_issues:
                 # Create failed stage run record with review
@@ -274,7 +278,7 @@ class StageExecutor:
                     preflight_warnings=preflight_warnings,
                 )
 
-        # 3b. Load stage config and apply override
+        # 5. Load stage config and apply override
         stage_config = self._load_stage_config(workspace, stage_name) or {}
         if config_override:
             # shallow merge override
@@ -289,10 +293,7 @@ class StageExecutor:
             config_hash=config_hash,
         )
 
-        # 3. Resolve inputs (with source metadata for lineage tracking)
-        inputs, input_sources = self._resolve_inputs(workspace, stage, inputs_override)
-
-        # 4. Create or update stage run record
+        # 6. Create or update stage run record
         if not stage_run_precreated:
             # Create new stage run record
             self._create_stage_run_record(
@@ -436,18 +437,21 @@ class StageExecutor:
         workspace: str,
         stage: StageDef,
         inputs_override: dict | None = None,
-    ) -> tuple[dict[str, str], dict[str, dict]]:
+    ) -> tuple[dict[str, str], dict[str, dict], list[dict]]:
         """Resolve input sources (dataset, signal, or override).
 
         Returns:
-            (inputs, sources) tuple where:
+            (inputs, sources, input_context) tuple where:
             - inputs: {input_name: source_location}
             - sources: {input_name: {source_stage_run_id, source_stage_version_id, source_type}}
+            - input_context: list of resolved input metadata for pre-run review
         """
         inputs: dict[str, str] = {}
         sources: dict[str, dict] = {}
+        input_context: list[dict] = []
 
         for input_name, input_def in stage.inputs.items():
+            ctx: dict[str, Any] = {"input": input_name, "consumer_stage": stage.name}
             # Check for override
             if inputs_override and input_name in inputs_override:
                 override_value = inputs_override[input_name]
@@ -456,14 +460,24 @@ class StageExecutor:
                 if source:
                     inputs[input_name] = source["gcs_location"]
                     sources[input_name] = {"source_type": "source", "source_name": override_value}
+                    ctx.update({"source_type": "source", "override": override_value})
                 else:
                     # Use as literal path
                     inputs[input_name] = override_value
                     sources[input_name] = {"source_type": "override"}
+                    ctx.update({"source_type": "override", "override": override_value})
+                input_context.append(ctx)
                 continue
 
             # Resolve precedence: from_stage first, then dataset
             if input_def.from_stage:
+                ctx.update(
+                    {
+                        "source_type": "stage",
+                        "from_stage": input_def.from_stage,
+                        "signal": input_def.signal or input_def.name,
+                    }
+                )
                 # Find output from previous stage
                 # Priority:
                 # 1. Most recent COMPLETED run with outcome='success'
@@ -512,6 +526,15 @@ class StageExecutor:
                     )
 
                 source_run_id = source_run["id"]
+                ctx.update(
+                    {
+                        "selected_run_id": source_run_id,
+                        "selected_run_status": source_run.get("status"),
+                        "selected_run_progress": source_run.get("progress"),
+                        "selected_run_started_at": source_run.get("started_at"),
+                        "selected_run_outcome": source_run.get("outcome"),
+                    }
+                )
 
                 # Get signal from that run
                 signals = self.db.list_signals(stage_run_id=source_run_id)
@@ -538,6 +561,23 @@ class StageExecutor:
                     "source_stage_version_id": source_run.get("stage_version_id"),
                 }
 
+                latest_runs = self.db.list_stage_runs(
+                    workspace_name=workspace, stage_name=input_def.from_stage, limit=1
+                )
+                if latest_runs:
+                    latest = latest_runs[0]
+                    ctx.update(
+                        {
+                            "latest_run_id": latest.get("id"),
+                            "latest_run_status": latest.get("status"),
+                            "latest_run_progress": latest.get("progress"),
+                            "latest_run_started_at": latest.get("started_at"),
+                            "latest_run_outcome": latest.get("outcome"),
+                        }
+                    )
+
+                input_context.append(ctx)
+
             elif input_def.type == "dataset":
                 # External dataset
                 if self.dataset_registry is None:
@@ -545,6 +585,7 @@ class StageExecutor:
                 if input_def.dataset is None:
                     raise GoldfishError(f"Input '{input_name}' is type 'dataset' but no dataset specified")
                 dataset = self.dataset_registry.get_dataset(input_def.dataset)
+                ctx.update({"source_type": "dataset", "dataset": input_def.dataset})
                 if input_def.output_schema:
                     if getattr(dataset, "metadata_status", None) == "ok" and getattr(dataset, "metadata", None):
                         metadata = dataset.metadata
@@ -567,11 +608,12 @@ class StageExecutor:
                     "source_type": "dataset",
                     "dataset_name": input_def.dataset,
                 }
+                input_context.append(ctx)
 
             else:
                 raise GoldfishError(f"Cannot resolve input: {input_name}")
 
-        return inputs, sources
+        return inputs, sources, input_context
 
     def _get_svs_agent(self):
         """Get the configured SVS agent provider."""
@@ -2123,6 +2165,7 @@ echo "Stage completed successfully"
         pipeline: PipelineDef,
         reason_structured: dict | None,
         git_sha: str,
+        input_context: list[dict] | None = None,
     ) -> RunReview | None:
         """Perform pre-run review using Claude Agent SDK.
 
@@ -2167,6 +2210,7 @@ echo "Stage completed successfully"
                     stages=[stage_name],  # Review the specific stage
                     reason=run_reason,
                     diff_text=diff_text,
+                    input_context=input_context,
                     db=self.db,
                 )
             )

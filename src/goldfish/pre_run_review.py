@@ -10,6 +10,7 @@ import asyncio
 import logging
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -94,6 +95,9 @@ REVIEW_PROMPT = """You are reviewing an ML experiment before execution. Your job
 {diff_text}
 ```
 
+### Input Resolution (resolved sources)
+{input_resolution}
+
 {stage_sections}
 
 ## Your Task
@@ -110,6 +114,10 @@ Check each stage for:
    constructed keys (f-strings, loop variables), trace the actual key values. For `from_stage`
    inputs, use the Read tool to check `modules/<upstream_stage>.py` for actual output key names.
    Pay special attention to train/val/test split naming inconsistencies (e.g., 'valid' vs 'val').
+7. **Input freshness** - If a `from_stage` input resolves to an older run while a newer run of
+   that upstream stage is currently RUNNING or FINALIZING, this is a BLOCKING error. The run
+   should be paused/canceled and re-run after the newer upstream run completes, or use an
+   explicit inputs_override to pin the intended run.
 
 ## Output Format
 
@@ -194,6 +202,7 @@ class PreRunReviewer:
         stages: list[str],
         reason: RunReason | None = None,
         diff_text: str = "",
+        input_context: list[dict] | None = None,
     ) -> RunReview:
         """Review stages before execution.
 
@@ -201,6 +210,7 @@ class PreRunReviewer:
             stages: List of stage names to review
             reason: The RunReason explaining why this is being run
             diff_text: Git diff since last successful run
+            input_context: Resolved input metadata (for staleness checks)
 
         Returns:
             RunReview with findings
@@ -210,6 +220,7 @@ class PreRunReviewer:
         # Gather context
         pipeline_yaml = self._read_pipeline_yaml()
         stage_sections = self._build_stage_sections(stages)
+        input_resolution = self._format_input_resolution(input_context)
         run_reason_text = reason.to_markdown() if reason else "No reason provided"
 
         # Build prompt with escaped content
@@ -219,6 +230,7 @@ class PreRunReviewer:
             pipeline_yaml=escape_for_prompt(pipeline_yaml),
             run_reason=escape_for_prompt(run_reason_text),
             diff_text=escape_for_prompt(diff_text or "No changes (first run or diff unavailable)"),
+            input_resolution=escape_for_prompt(input_resolution),
             stage_sections=stage_sections,  # Content within sections is already escaped by _build_stage_sections
         )
 
@@ -285,6 +297,9 @@ class PreRunReviewer:
 
         # Parse the review
         issues = self._parse_review(review_text, stages)
+        auto_issues = self._detect_stale_inputs(input_context, stages)
+        if auto_issues:
+            issues.extend(auto_issues)
         has_errors = any(i.severity == ReviewSeverity.ERROR for i in issues)
 
         elapsed_ms = int((time.time() - start_time) * 1000)
@@ -313,6 +328,91 @@ class PreRunReviewer:
         """Read pipeline.yaml from workspace."""
         pipeline_path = self.workspace_path / "pipeline.yaml"
         return self._read_file_safe(pipeline_path, "# No pipeline.yaml found")
+
+    def _format_input_resolution(self, input_context: list[dict] | None) -> str:
+        """Format resolved input context for prompt inclusion."""
+        if not input_context:
+            return "No resolved input context provided."
+
+        lines = []
+        for ctx in input_context:
+            lines.append(f"- input: {ctx.get('input')}")
+            lines.append(f"  source_type: {ctx.get('source_type')}")
+            if ctx.get("from_stage"):
+                lines.append(f"  from_stage: {ctx.get('from_stage')}")
+                lines.append(f"  signal: {ctx.get('signal')}")
+            if ctx.get("dataset"):
+                lines.append(f"  dataset: {ctx.get('dataset')}")
+            if ctx.get("override"):
+                lines.append(f"  override: {ctx.get('override')}")
+            if ctx.get("selected_run_id"):
+                lines.append(f"  selected_run_id: {ctx.get('selected_run_id')}")
+                lines.append(f"  selected_run_status: {ctx.get('selected_run_status')}")
+                lines.append(f"  selected_run_progress: {ctx.get('selected_run_progress')}")
+                lines.append(f"  selected_run_started_at: {ctx.get('selected_run_started_at')}")
+                lines.append(f"  selected_run_outcome: {ctx.get('selected_run_outcome')}")
+            if ctx.get("latest_run_id"):
+                lines.append(f"  latest_run_id: {ctx.get('latest_run_id')}")
+                lines.append(f"  latest_run_status: {ctx.get('latest_run_status')}")
+                lines.append(f"  latest_run_progress: {ctx.get('latest_run_progress')}")
+                lines.append(f"  latest_run_started_at: {ctx.get('latest_run_started_at')}")
+                lines.append(f"  latest_run_outcome: {ctx.get('latest_run_outcome')}")
+        return "\n".join(lines)
+
+    def _detect_stale_inputs(self, input_context: list[dict] | None, stages: list[str]) -> list[ReviewIssue]:
+        """Detect stale from_stage inputs when a newer upstream run is active."""
+        if not input_context:
+            return []
+
+        issues: list[ReviewIssue] = []
+        default_stage = stages[0] if stages else "unknown"
+
+        for ctx in input_context:
+            if ctx.get("source_type") != "stage":
+                continue
+
+            # Ignore explicit overrides
+            if ctx.get("override"):
+                continue
+
+            selected_id = ctx.get("selected_run_id")
+            latest_id = ctx.get("latest_run_id")
+            if not selected_id or not latest_id or selected_id == latest_id:
+                continue
+
+            latest_status = str(ctx.get("latest_run_status") or "").lower()
+            latest_progress = str(ctx.get("latest_run_progress") or "").lower()
+            if latest_status != "running" and latest_progress not in {"launch", "build", "running", "finalizing"}:
+                continue
+
+            selected_started = ctx.get("selected_run_started_at")
+            latest_started = ctx.get("latest_run_started_at")
+            try:
+                if selected_started and latest_started:
+                    selected_dt = datetime.fromisoformat(str(selected_started))
+                    latest_dt = datetime.fromisoformat(str(latest_started))
+                    if latest_dt <= selected_dt:
+                        continue
+            except ValueError:
+                # If timestamps are malformed, still surface warning
+                pass
+
+            stage_name = ctx.get("consumer_stage") or default_stage
+            message = (
+                f"Input '{ctx.get('input')}' resolved to run {selected_id} from stage "
+                f"'{ctx.get('from_stage')}', but a newer run {latest_id} is still "
+                f"{ctx.get('latest_run_status') or ctx.get('latest_run_progress')}. "
+                "Wait for the newer run to complete or use inputs_override to pin the intended run."
+            )
+            issues.append(
+                ReviewIssue(
+                    severity=ReviewSeverity.ERROR,
+                    stage=str(stage_name),
+                    message=message,
+                )
+            )
+
+        return issues
 
     def _build_stage_sections(self, stages: list[str]) -> str:
         """Build detailed sections for each stage being reviewed."""
@@ -527,6 +627,7 @@ async def review_before_run(
     stages: list[str],
     reason: RunReason | None = None,
     diff_text: str = "",
+    input_context: list[dict] | None = None,
     db: Database | None = None,
 ) -> RunReview:
     """Convenience function to perform pre-run review.
@@ -539,6 +640,7 @@ async def review_before_run(
         stages: List of stage names to review
         reason: The RunReason explaining why this is being run
         diff_text: Git diff since last successful run
+        input_context: Resolved input metadata for staleness checks
         db: Database for looking up last successful run
 
     Returns:
@@ -551,4 +653,4 @@ async def review_before_run(
         dev_repo_path=dev_repo_path,
         db=db,
     )
-    return await reviewer.review(stages=stages, reason=reason, diff_text=diff_text)
+    return await reviewer.review(stages=stages, reason=reason, diff_text=diff_text, input_context=input_context)
