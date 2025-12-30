@@ -343,6 +343,61 @@ class TestPreRunReviewerReview:
                 assert diff_text in call_args.context["prompt"]
 
     @pytest.mark.asyncio
+    async def test_review_includes_input_resolution(self, reviewer: PreRunReviewer) -> None:
+        """Review includes resolved input context."""
+        from goldfish.svs.agent import AgentResult
+
+        mock_result = AgentResult(decision="approved", raw_output="## train\nNo issues found.")
+        input_context = [
+            {
+                "input": "tokens",
+                "source_type": "stage",
+                "from_stage": "compute_state_features",
+                "signal": "tokens",
+                "selected_run_id": "stage-old",
+                "selected_run_started_at": "2025-12-28T00:00:00+00:00",
+                "latest_run_id": "stage-new",
+                "latest_run_status": "running",
+                "latest_run_started_at": "2025-12-29T00:00:00+00:00",
+                "consumer_stage": "train",
+            }
+        ]
+        with patch.object(ClaudeCodeProvider, "run", return_value=mock_result) as mock_run:
+            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+                await reviewer.review(["train"], input_context=input_context)
+                call_args = mock_run.call_args[0][0]
+                prompt = call_args.context["prompt"]
+                assert "Input Resolution" in prompt
+                assert "stage-old" in prompt
+                assert "stage-new" in prompt
+
+    @pytest.mark.asyncio
+    async def test_review_blocks_stale_inputs(self, reviewer: PreRunReviewer) -> None:
+        """Review blocks when newer upstream run is still running."""
+        from goldfish.svs.agent import AgentResult
+
+        mock_result = AgentResult(decision="approved", raw_output="## train\nNo issues found.")
+        input_context = [
+            {
+                "input": "tokens",
+                "source_type": "stage",
+                "from_stage": "compute_state_features",
+                "signal": "tokens",
+                "selected_run_id": "stage-old",
+                "selected_run_started_at": "2025-12-28T00:00:00+00:00",
+                "latest_run_id": "stage-new",
+                "latest_run_status": "running",
+                "latest_run_started_at": "2025-12-29T00:00:00+00:00",
+                "consumer_stage": "train",
+            }
+        ]
+        with patch.object(ClaudeCodeProvider, "run", return_value=mock_result):
+            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
+                review = await reviewer.review(["train"], input_context=input_context)
+                assert review.approved is False
+                assert any(issue.severity == ReviewSeverity.ERROR for issue in review.issues)
+
+    @pytest.mark.asyncio
     async def test_review_handles_exception(self, reviewer: PreRunReviewer) -> None:
         """Review handles Claude API exceptions gracefully."""
         with patch.object(ClaudeCodeProvider, "run", side_effect=RuntimeError("API error")):
