@@ -263,6 +263,10 @@ class StageExecutor:
                 git_sha=git_sha,
                 input_context=input_context,
             )
+            if review:
+                # Record review in SVS reviews table
+                self._record_pre_run_review(stage_run_id, review)
+
             if review and review.has_blocking_issues:
                 # Create failed stage run record with review
                 return self._create_blocked_stage_run(
@@ -2302,6 +2306,40 @@ echo "Stage completed successfully"
         except Exception as e:
             logger.warning(f"Failed to get diff: {e}")
             return ""
+
+    def _record_pre_run_review(self, stage_run_id: str, review: RunReview) -> None:
+        """Record a pre-run review in the SVS reviews table.
+
+        Args:
+            stage_run_id: Stage run ID
+            review: The RunReview to record
+        """
+        import hashlib
+
+        now = datetime.now(UTC).isoformat()
+        # Create hash of the full review text as prompt hash for deduplication/tracking
+        prompt_hash = hashlib.sha256(review.full_review.encode()).hexdigest()
+
+        decision = "approved"
+        if not review.approved:
+            decision = "blocked"
+        elif any(i.severity == ReviewSeverity.WARNING for i in review.issues):
+            decision = "warned"
+
+        try:
+            self.db.create_svs_review(
+                stage_run_id=stage_run_id,
+                review_type="pre_run",
+                model_used=self.config.pre_run_review.model,
+                prompt_hash=prompt_hash,
+                decision=decision,
+                reviewed_at=now,
+                response_text=review.full_review,
+                parsed_findings=json.dumps([i.model_dump(mode="json") for i in review.issues]),
+                duration_ms=review.review_time_ms,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to record pre-run review for {stage_run_id}: {e}")
 
     def _create_blocked_stage_run(
         self,

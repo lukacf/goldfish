@@ -361,6 +361,7 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
                 "status": row["status"],
                 "started_at": row["started_at"],
                 "completed_at": row["completed_at"],
+                "error": row.get("error"),
             }
         )
 
@@ -449,9 +450,31 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
         svs_data = None
         preflight_errors = json.loads(row["preflight_errors_json"]) if row.get("preflight_errors_json") else []
         preflight_warnings = json.loads(row["preflight_warnings_json"]) if row.get("preflight_warnings_json") else []
-        if preflight_errors or preflight_warnings or row.get("svs_findings_json"):
+
+        # Get pre-run reviews from svs_reviews table
+        pre_run_reviews = db.get_svs_reviews(stage_run_id=run_id, review_type="pre_run")
+        formatted_pre_run = []
+        for r in pre_run_reviews:
+            parsed = None
+            if r.get("parsed_findings"):
+                try:
+                    parsed = json.loads(str(r["parsed_findings"]))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            formatted_pre_run.append(
+                {
+                    "decision": r["decision"],
+                    "model": r["model_used"],
+                    "findings": parsed,
+                    "full_text": r.get("response_text"),
+                }
+            )
+
+        if preflight_errors or preflight_warnings or row.get("svs_findings_json") or formatted_pre_run:
             svs_data = {
                 "preflight": {"errors": preflight_errors, "warnings": preflight_warnings},
+                "pre_run": formatted_pre_run,
                 "during_run": None,
                 "post_run": None,
             }
@@ -588,7 +611,15 @@ def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = 
             else:
                 log_content = "Logs not available"
         except Exception as e:
-            log_content = f"[Error fetching logs: {e}]"
+            # If backend lookup fails, and run failed, use error field
+            if row.get("status") == StageRunStatus.FAILED and row.get("error"):
+                log_content = f"Execution failed before logs were available.\n\nError:\n{row['error']}"
+            else:
+                log_content = f"[Error fetching logs: {e}]"
+
+    # If run failed and we still have no logs, use error message from DB
+    if not log_content and row.get("status") == StageRunStatus.FAILED and row.get("error"):
+        log_content = f"No execution logs found.\n\nError from system:\n{row['error']}"
 
     # Handle follow mode - return only new content since last cursor position
     if follow:
