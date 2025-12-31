@@ -326,25 +326,19 @@ class TestCopyBasedHibernate:
         assert result.success is True
 
         # Verify changes were synced to branch by checking out the branch
-        # Create a temp worktree to verify (branch has goldfish/ prefix)
-        verify_path = dev_repo / "_verify"
-        subprocess.run(
-            ["git", "worktree", "add", str(verify_path), "goldfish/feature-sync"],
-            cwd=dev_repo,
-            capture_output=True,
-            check=True,
-        )
-
-        try:
-            assert (verify_path / "new_file.py").exists()
-            assert "Modified main" in (verify_path / "code" / "main.py").read_text()
-        finally:
-            # Cleanup verify worktree
-            subprocess.run(
-                ["git", "worktree", "remove", str(verify_path), "--force"],
+        # Use git show to verify without needing a worktree
+        def git_show(path: str) -> str:
+            res = subprocess.run(
+                ["git", "show", f"goldfish/feature-sync:{path}"],
                 cwd=dev_repo,
                 capture_output=True,
+                text=True,
+                check=True,
             )
+            return res.stdout
+
+        assert git_show("new_file.py") == "# New feature code"
+        assert "Modified main" in git_show("code/main.py")
 
     def test_hibernate_removes_slot_directory(self, copy_mount_setup):
         """Hibernate should remove the slot directory."""
@@ -435,22 +429,16 @@ class TestCopyBasedHibernate:
         )
 
         # Verify deletion synced to branch (branch has goldfish/ prefix)
-        verify_path = dev_repo / "_verify_del"
-        subprocess.run(
-            ["git", "worktree", "add", str(verify_path), "goldfish/feature-del"],
+        # Use git ls-tree to verify file is gone without needing a worktree
+        res = subprocess.run(
+            ["git", "ls-tree", "-r", "goldfish/feature-del", "--name-only"],
             cwd=dev_repo,
             capture_output=True,
+            text=True,
             check=True,
         )
-
-        try:
-            assert not (verify_path / "code" / "utils.py").exists(), "Deleted file should be removed from branch"
-        finally:
-            subprocess.run(
-                ["git", "worktree", "remove", str(verify_path), "--force"],
-                cwd=dev_repo,
-                capture_output=True,
-            )
+        files = res.stdout.strip().split("\n")
+        assert "code/utils.py" not in files, "Deleted file should be removed from branch"
 
 
 class TestCopyBasedRoundTrip:

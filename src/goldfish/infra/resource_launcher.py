@@ -56,13 +56,16 @@ class LaunchResult:
     artifact_uri: str | None = None  # GCS URI for artifacts
 
 
-def run_gcloud(cmd: list[str], *, allow_capacity: bool = False, check: bool = True) -> subprocess.CompletedProcess:
+def run_gcloud(
+    cmd: list[str], *, allow_capacity: bool = False, check: bool = True, timeout: int = 60
+) -> subprocess.CompletedProcess:
     """Run gcloud command with capacity error detection.
 
     Args:
         cmd: Command list (e.g., ["gcloud", "compute", "instances", "create", ...])
         allow_capacity: If True, raise CapacityError on capacity issues
         check: Raise exception on non-zero exit code
+        timeout: Command timeout in seconds (default 60)
 
     Returns:
         CompletedProcess
@@ -71,7 +74,12 @@ def run_gcloud(cmd: list[str], *, allow_capacity: bool = False, check: bool = Tr
         CapacityError: If allow_capacity=True and capacity error detected
         GoldfishError: If check=True and command fails (non-capacity)
     """
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if check:
+            raise GoldfishError(f"gcloud command timed out after {timeout}s: {' '.join(cmd)}") from None
+        return subprocess.CompletedProcess(cmd, 1, "", f"Timed out after {timeout}s")
 
     if result.returncode == 0:
         return result

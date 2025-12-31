@@ -550,7 +550,7 @@ class GitLayer:
     def diff_slot_against_sha(self, slot_path: Path, workspace: str, mounted_sha: str) -> dict:
         """Diff a copy-based slot against its mounted SHA.
 
-        Creates a temp worktree at mounted_sha, diffs the slot against it,
+        Re-uses or creates a temp worktree at mounted_sha, diffs the slot against it,
         and returns the result.
 
         Args:
@@ -565,18 +565,14 @@ class GitLayer:
         temp_worktree = self.dev_repo / ".goldfish" / "tmp-diff" / workspace
         temp_worktree.parent.mkdir(parents=True, exist_ok=True)
 
-        # Clean up any existing temp worktree
-        if temp_worktree.exists():
-            try:
-                self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
-            except GoldfishError:
-                pass
-            if temp_worktree.exists():
-                shutil.rmtree(temp_worktree)
-
         try:
-            # Create worktree at the mounted SHA
-            self._run_git("worktree", "add", "--detach", str(temp_worktree), mounted_sha)
+            if not temp_worktree.exists():
+                self._run_git("worktree", "add", "--detach", str(temp_worktree), mounted_sha)
+            else:
+                # Ensure it's on the correct SHA
+                self._run_git("checkout", "--detach", mounted_sha, cwd=temp_worktree)
+                self._run_git("reset", "--hard", mounted_sha, cwd=temp_worktree)
+                self._run_git("clean", "-fd", cwd=temp_worktree)
 
             # Use diff to compare slot against worktree
             # Exclude .goldfish-mount, STATE.md, and other goldfish files
@@ -649,26 +645,28 @@ class GitLayer:
             summary = f"{len(files_changed)} file(s) changed"
 
             return {
-                "has_changes": True,
+                "has_changes": has_changes,
                 "summary": summary,
-                "files_changed": [f.split(" ", 1)[1] for f in files_changed],  # Remove status prefix
+                "files_changed": files_changed,
                 "diff_text": diff_text,
             }
 
-        finally:
-            # Clean up temp worktree
-            try:
-                self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
-            except GoldfishError:
-                pass
+        except Exception as e:
+            logger.warning(f"Diff failed for {workspace}: {e}")
             if temp_worktree.exists():
-                shutil.rmtree(temp_worktree, ignore_errors=True)
+                try:
+                    self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
+                except GoldfishError:
+                    pass
+                if temp_worktree.exists():
+                    shutil.rmtree(temp_worktree, ignore_errors=True)
+            raise
 
     def is_slot_dirty(self, slot_path: Path, workspace: str, compare_sha: str) -> bool:
         """Check if slot has changes compared to a git SHA.
 
-        Lightweight version of diff_slot_against_sha that only returns bool.
-        Uses diff -rq for quick comparison without computing full diff text.
+        Re-uses or creates a temp worktree at compare_sha, diffs the slot against it,
+        and returns the result.
 
         Args:
             slot_path: Path to the slot directory
@@ -682,18 +680,14 @@ class GitLayer:
         temp_worktree = self.dev_repo / ".goldfish" / "tmp-dirty" / workspace
         temp_worktree.parent.mkdir(parents=True, exist_ok=True)
 
-        # Clean up any existing temp worktree
-        if temp_worktree.exists():
-            try:
-                self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
-            except GoldfishError:
-                pass
-            if temp_worktree.exists():
-                shutil.rmtree(temp_worktree)
-
         try:
-            # Create worktree at the compare SHA
-            self._run_git("worktree", "add", "--detach", str(temp_worktree), compare_sha)
+            if not temp_worktree.exists():
+                self._run_git("worktree", "add", "--detach", str(temp_worktree), compare_sha)
+            else:
+                # Ensure it's on the correct SHA
+                self._run_git("checkout", "--detach", compare_sha, cwd=temp_worktree)
+                self._run_git("reset", "--hard", compare_sha, cwd=temp_worktree)
+                self._run_git("clean", "-fd", cwd=temp_worktree)
 
             # Exclude goldfish metadata and common artifacts
             exclude_patterns = [
@@ -716,18 +710,17 @@ class GitLayer:
             # diff returns 0 if identical, 1 if differences
             return result.returncode != 0
 
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Dirty check failed for {workspace}: {e}")
+            if temp_worktree.exists():
+                try:
+                    self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
+                except GoldfishError:
+                    pass
+                if temp_worktree.exists():
+                    shutil.rmtree(temp_worktree, ignore_errors=True)
             # On any error, assume dirty to be safe
             return True
-
-        finally:
-            # Clean up temp worktree
-            try:
-                self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
-            except GoldfishError:
-                pass
-            if temp_worktree.exists():
-                shutil.rmtree(temp_worktree, ignore_errors=True)
 
     def get_head_sha_from_branch(self, branch: str) -> str:
         """Get HEAD SHA from a branch (without needing a worktree).
@@ -980,17 +973,33 @@ class GitLayer:
         temp_worktree = self.dev_repo / ".goldfish" / "tmp-sync" / workspace_name
         temp_worktree.parent.mkdir(parents=True, exist_ok=True)
 
-        # Clean up any existing temp worktree
-        if temp_worktree.exists():
-            try:
-                self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
-            except GoldfishError:
-                pass
-            if temp_worktree.exists():
-                shutil.rmtree(temp_worktree)
-
         try:
-            self._run_git("worktree", "add", str(temp_worktree), branch)
+            # Re-use or create temp worktree
+            if not temp_worktree.exists():
+                try:
+                    self._run_git("worktree", "add", str(temp_worktree), branch)
+                except GoldfishError as e:
+                    if "already checked out" in str(e).lower() or "already exists" in str(e).lower():
+                        # Try to find where it's checked out
+                        stdout, _ = self._run_git("worktree", "list", "--porcelain")
+                        # Format: worktree /path/to/dir\nHEAD sha\nbranch refs/heads/branch\n\n
+                        # We just want to know if temp_worktree is indeed a worktree
+                        if temp_worktree.exists() and (temp_worktree / ".git").exists():
+                            logger.info(f"Reusing existing worktree at {temp_worktree} for {branch}")
+                        else:
+                            # Not where we expected, or corrupted. Force remove and retry.
+                            logger.warning(f"Worktree for {branch} exists elsewhere or is corrupt. Cleaning up.")
+                            self._run_git("worktree", "prune")
+                            if temp_worktree.exists():
+                                shutil.rmtree(temp_worktree, ignore_errors=True)
+                            self._run_git("worktree", "add", str(temp_worktree), branch)
+                    else:
+                        raise
+
+            # Ensure it's on the correct branch and clean
+            self._run_git("checkout", "-B", branch, cwd=temp_worktree)
+            self._run_git("reset", "--hard", f"origin/{branch}" if self.has_remote() else branch, cwd=temp_worktree)
+            self._run_git("clean", "-fd", cwd=temp_worktree)
 
             # Sync with delete: mirror slot to worktree (respecting .gitignore)
             self._sync_directory(
@@ -1017,8 +1026,9 @@ class GitLayer:
 
             return new_sha
 
-        finally:
-            # Clean up temp worktree
+        except Exception as e:
+            logger.warning(f"Failed to sync {workspace_name}: {e}")
+            # If sync fails, best to remove the worktree so next attempt starts fresh
             if temp_worktree.exists():
                 try:
                     self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
@@ -1026,6 +1036,7 @@ class GitLayer:
                     pass
                 if temp_worktree.exists():
                     shutil.rmtree(temp_worktree, ignore_errors=True)
+            raise
 
     def copy_unmount_workspace(self, slot_path: Path, workspace_name: str, commit_msg: str) -> str:
         """Sync changes and remove slot directory.
