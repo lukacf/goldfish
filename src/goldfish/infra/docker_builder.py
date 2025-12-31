@@ -266,7 +266,10 @@ CMD ["/bin/bash"]
                 result = subprocess.run(build_cmd, capture_output=True, text=True, check=False)
 
                 if result.returncode != 0:
-                    raise GoldfishError(f"Docker build failed: {result.stderr}")
+                    # Capture last few lines of log to provide more context than just the header
+                    lines = (result.stderr or "").splitlines()
+                    tail = "\n".join(lines[-20:]) if len(lines) > 20 else result.stderr
+                    raise GoldfishError(f"Docker build failed (last 20 lines):\n{tail}")
 
                 return image_tag
 

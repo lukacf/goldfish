@@ -65,7 +65,14 @@ class TestProfileResolutionInExecutor:
             "us-central1-a",
             "us-central1-b",
             "us-central1-c",
+            "us-central1-f",
+            "us-east1-b",
+            "us-east1-c",
+            "us-west1-a",
+            "us-west1-b",
             "us-west4-a",
+            "europe-west4-a",
+            "europe-west4-b",
         ]
 
     def test_resolve_profile_with_override(self):
