@@ -755,7 +755,7 @@ def list_runs(
                 {
                     "run_id": None,  # No run_id yet - still queued
                     "stage": q["stage_name"],
-                    "status": "queued",
+                    "status": "pre-run check",
                     "started": None,
                     "error": None,
                 }

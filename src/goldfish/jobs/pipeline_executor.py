@@ -243,7 +243,7 @@ class PipelineExecutor:
         queued_stages = [
             {
                 "stage": stage.name,
-                "status": "queued",
+                "status": "pre-run check",
                 "pipeline_run_id": pipeline_run_id,
             }
             for stage in stages_to_execute
@@ -252,7 +252,7 @@ class PipelineExecutor:
         return {
             "pipeline_run_id": pipeline_run_id,
             "stages_queued": [s.name for s in stages_to_execute],
-            "status": "Pipeline queued. Use list_runs(pipeline_run_id=...) to check progress.",
+            "status": "Pipeline started. Performing pre-run review... Use list_runs(pipeline_run_id=...) to check progress.",
             "queued": queued_stages,
         }
 
