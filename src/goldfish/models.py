@@ -44,8 +44,8 @@ class StageRunStatus(str, Enum):
 class StageRunProgress(str, Enum):
     """Progress values for stage_runs.progress column."""
 
-    BUILD = "build"  # Building Docker image
-    LAUNCH = "launch"  # Launching container/instance
+    BUILD = "pre-run check (build)"  # Building Docker image
+    LAUNCH = "pre-run check (launch)"  # Launching container/instance
     RUNNING = "running"  # Executing stage code
     FINALIZING = "finalizing"  # Recording outputs, fetching logs
 

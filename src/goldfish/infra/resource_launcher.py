@@ -149,19 +149,21 @@ def mode_order(resource: dict[str, Any], preference: str, force_mode: str | None
     Returns:
         List of modes to try (e.g., ["spot", "on_demand"])
     """
+    preempt_allowed = resource.get("preemptible_allowed") or resource.get("preemptible", False)
+
     if force_mode == "spot":
-        return ["spot"] if resource.get("preemptible_allowed") else []
+        return ["spot"] if preempt_allowed else []
 
     if force_mode == "on_demand":
-        return ["on_demand"] if resource.get("on_demand_allowed") else []
+        return ["on_demand"] if resource.get("on_demand_allowed", True) else []
 
     preferred = ["spot", "on_demand"] if preference == "spot_first" else ["on_demand", "spot"]
 
     modes: list[str] = []
     for mode in preferred:
-        if mode == "spot" and resource.get("preemptible_allowed"):
+        if mode == "spot" and preempt_allowed:
             modes.append("spot")
-        if mode == "on_demand" and resource.get("on_demand_allowed"):
+        if mode == "on_demand" and resource.get("on_demand_allowed", True):
             modes.append("on_demand")
 
     return modes
@@ -487,7 +489,7 @@ class ResourceLauncher:
             metadata_entries.append("install-nvidia-driver=True")
 
         if preemptible:
-            cmd.append("--preemptible")
+            cmd.append("--provisioning-model=SPOT")
 
         if metadata_entries:
             cmd.append("--metadata=" + ",".join(metadata_entries))

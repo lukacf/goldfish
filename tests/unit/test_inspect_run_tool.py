@@ -151,6 +151,7 @@ def test_inspect_run_pending_when_ack_missing():
 
 def test_inspect_run_skips_sync_when_launching():
     """GCE runs in launch/build should not report timeout sync."""
+    from goldfish.models import StageRunProgress
     from goldfish.server_tools.execution_tools import inspect_run
 
     run_id = "stage-abcd1234"
@@ -165,7 +166,7 @@ def test_inspect_run_skips_sync_when_launching():
         "config_json": "{}",
         "inputs_json": "{}",
         "outputs_json": "[]",
-        "progress": "launch",
+        "progress": StageRunProgress.LAUNCH,
         "reason_json": None,
         "backend_type": "gce",
         "backend_handle": "instance-1",

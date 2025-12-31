@@ -487,7 +487,7 @@ class TestAsyncQueueSemantics:
 
         # run_stages() with async_mode=True only queues stages
         assert len(result["queued"]) == 1
-        assert result["queued"][0]["status"] == "queued"
+        assert result["queued"][0]["status"] == "pre-run check"
 
         # Process queue to actually launch the stage
         launched = executor._process_pipeline_queue_once(
