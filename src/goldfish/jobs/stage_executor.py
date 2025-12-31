@@ -159,6 +159,8 @@ class StageExecutor:
         self._svs_sync_lock = threading.Lock()
         self._gcs_client: GCSClient | None = None
         self._gcs_client_lock = threading.Lock()
+        self._refresh_lock = threading.Lock()
+        self._refreshing_runs: set[str] = set()
 
     def run_stage(
         self,
@@ -2081,6 +2083,21 @@ echo "Stage completed successfully"
 
     def refresh_status_once(self, stage_run_id: str) -> str | None:
         """Single backend check to advance status/logs/outputs without blocking."""
+        with self._refresh_lock:
+            if stage_run_id in self._refreshing_runs:
+                # Already being refreshed by another thread
+                row = self.db.get_stage_run(stage_run_id)
+                return row.get("status") if row else None
+            self._refreshing_runs.add(stage_run_id)
+
+        try:
+            return self._refresh_status_once_unlocked(stage_run_id)
+        finally:
+            with self._refresh_lock:
+                self._refreshing_runs.remove(stage_run_id)
+
+    def _refresh_status_once_unlocked(self, stage_run_id: str) -> str | None:
+        """Internal implementation of refresh_status_once without locking."""
         backend = self.config.jobs.backend
         terminal_statuses = (StageRunStatus.COMPLETED, StageRunStatus.FAILED, StageRunStatus.CANCELED)
 

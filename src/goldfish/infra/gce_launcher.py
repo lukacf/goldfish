@@ -905,7 +905,11 @@ class GCELauncher:
                     with proc.stdout:
                         stdout_output = _collect(proc.stdout, since_dt)
                 finally:
-                    proc.wait()  # Always clean up process
+                    try:
+                        proc.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
 
                 # Check return code - if gcloud failed, try legacy format
                 if proc.returncode != 0:
@@ -934,7 +938,11 @@ class GCELauncher:
                             with proc2.stdout:
                                 stderr_output = _collect(proc2.stdout, since_dt)
                     finally:
-                        proc2.wait()  # Always clean up
+                        try:
+                            proc2.wait(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            proc2.kill()
+                            proc2.wait()
                 except Exception:
                     pass  # stderr.log may not exist
 
@@ -958,7 +966,11 @@ class GCELauncher:
                         with proc.stdout:
                             output = _collect(proc.stdout, since_dt)
                     finally:
-                        proc.wait()  # Always clean up
+                        try:
+                            proc.wait(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait()
                     if proc.returncode == 0:
                         return output
                 except Exception:
