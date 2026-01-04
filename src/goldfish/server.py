@@ -267,7 +267,6 @@ from goldfish.server_tools.execution_tools import (  # noqa: F401, E402
     logs,
     mark_outcome,
     run,
-    run_status,
 )
 from goldfish.server_tools.logging_tools import (  # noqa: F401, E402
     search_goldfish_logs,

@@ -83,8 +83,12 @@ class TestInputResolution:
 class TestInputResolutionOutcome:
     """Test outcome-aware input resolution (success vs bad_results)."""
 
-    def test_resolve_input_prioritizes_success(self, test_db, test_config):
-        """Should prioritize most recent 'success' over newer unreviewed runs."""
+    def test_resolve_input_prefers_newest_non_bad(self, test_db, test_config):
+        """Should prefer newest COMPLETED run that isn't marked 'bad_results'.
+
+        Freshness matters more than explicit 'success' marking - unreviewed runs
+        are valid and should be used if they're newer. Only 'bad_results' is skipped.
+        """
         # 1. Setup runs for stage 'preprocess'
         with test_db._conn() as conn:
             conn.execute("PRAGMA foreign_keys = OFF")
@@ -130,9 +134,9 @@ class TestInputResolutionOutcome:
         # Execute
         inputs, sources, _ = executor._resolve_inputs("w1", stage_def)
 
-        # Verify: should pick the 'success' run even if it's older than the unreviewed one
-        assert inputs["input_data"] == "gs://bucket/success"
-        assert sources["input_data"]["source_stage_run_id"] == "run-success"
+        # Verify: should pick the newer unreviewed run (freshness > explicit success)
+        assert inputs["input_data"] == "gs://bucket/new"
+        assert sources["input_data"]["source_stage_run_id"] == "run-new"
 
     def test_resolve_input_skips_bad_results(self, test_db, test_config):
         """Should skip runs marked as 'bad_results'."""

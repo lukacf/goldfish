@@ -460,6 +460,7 @@ class GoldfishDaemon:
                 JOIN pipeline_stage_queue psq ON psq.pipeline_run_id = pr.id
                 WHERE pr.status IN (?, ?)
                 AND psq.status IN (?, ?)
+                ORDER BY pr.started_at DESC
                 LIMIT 10
                 """,
                 (PipelineStatus.PENDING, PipelineStatus.RUNNING, PipelineStatus.PENDING, PipelineStatus.RUNNING),
@@ -535,6 +536,7 @@ class GoldfishDaemon:
             while not self.shutdown_event.is_set():
                 try:
                     self._check_orphaned_instances()
+                    self._cleanup_stalled_pipelines()
                 except Exception as e:
                     logger.exception("Instance monitor error: %s", e)
 
@@ -544,6 +546,41 @@ class GoldfishDaemon:
 
         self.instance_monitor_thread = threading.Thread(target=monitor_loop, daemon=True, name="instance-monitor")
         self.instance_monitor_thread.start()
+
+    def _cleanup_stalled_pipelines(self) -> None:
+        """Mark old running/pending pipelines as failed if they haven't progressed.
+
+        This prevents worker queue starvation by clearing 'zombie' runs that
+        stalled due to worker crashes, restarts, or unhandled errors.
+        """
+        # Stale threshold: 4 hours (generous for long-running experiments)
+        threshold = "4 hours"
+        with self._db._conn() as conn:
+            # 1. Clear stalled queue entries
+            conn.execute(
+                f"""
+                UPDATE pipeline_stage_queue
+                SET status = ?, error = ?
+                WHERE status IN (?, ?)
+                AND (claimed_at < datetime('now', '-{threshold}') OR (claimed_at IS NULL AND id IN (
+                    SELECT psq.id FROM pipeline_stage_queue psq
+                    JOIN pipeline_runs pr ON pr.id = psq.pipeline_run_id
+                    WHERE pr.started_at < datetime('now', '-{threshold}')
+                )))
+                """,
+                (PipelineStatus.FAILED, "Stalled (auto-cleanup)", PipelineStatus.PENDING, PipelineStatus.RUNNING),
+            )
+
+            # 2. Clear stalled pipeline runs
+            conn.execute(
+                f"""
+                UPDATE pipeline_runs
+                SET status = ?, error = ?
+                WHERE status IN (?, ?)
+                AND started_at < datetime('now', '-{threshold}')
+                """,
+                (PipelineStatus.FAILED, "Stalled (auto-cleanup)", PipelineStatus.PENDING, PipelineStatus.RUNNING),
+            )
 
     def _check_if_preempted(self, instance_name: str, project_id: str) -> bool:
         """Check if a GCE instance was preempted.
