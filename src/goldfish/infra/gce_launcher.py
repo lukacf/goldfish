@@ -101,7 +101,7 @@ class GCELauncher:
                 self.project_id,
                 "--format=value(projectNumber)",
             ]
-            result = run_gcloud(cmd)
+            result = run_gcloud(cmd, project_id=self.project_id)
             self._project_number = result.stdout.strip()
         if not self._project_number:
             return None
@@ -128,7 +128,7 @@ class GCELauncher:
             "--quiet",
         ]
         try:
-            run_gcloud(cmd)
+            run_gcloud(cmd, project_id=self.project_id)
             run_gcloud(
                 [
                     "gcloud",
@@ -140,7 +140,8 @@ class GCELauncher:
                     "--role=roles/iam.serviceAccountUser",
                     f"--project={self.project_id}",
                     "--quiet",
-                ]
+                ],
+                project_id=self.project_id,
             )
         except GoldfishError as exc:
             raise GoldfishError(
@@ -531,7 +532,7 @@ class GCELauncher:
         if self.project_id:
             cmd.append(f"--project={self.project_id}")
 
-        run_gcloud(cmd)
+        run_gcloud(cmd, project_id=self.project_id)
 
     def delete_disk(self, disk_name: str, zone: str) -> None:
         """Delete a persistent disk.
@@ -567,7 +568,7 @@ class GCELauncher:
         if self.project_id:
             cmd.append(f"--project={self.project_id}")
 
-        run_gcloud(cmd)
+        run_gcloud(cmd, project_id=self.project_id)
 
     def sync_to_gcs(self, local_path: Path, gcs_uri: str) -> None:
         """Sync local directory to GCS.
@@ -579,7 +580,10 @@ class GCELauncher:
         Raises:
             GoldfishError: If sync fails
         """
-        cmd = ["gsutil", "-m", "rsync", "-r", str(local_path), gcs_uri]
+        cmd = ["gsutil"]
+        if self.project_id:
+            cmd.extend(["-o", f"GSUtil:project_id={self.project_id}"])
+        cmd.extend(["-m", "rsync", "-r", str(local_path), gcs_uri])
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
@@ -596,7 +600,10 @@ class GCELauncher:
             GoldfishError: If sync fails
         """
         local_path.mkdir(parents=True, exist_ok=True)
-        cmd = ["gsutil", "-m", "rsync", "-r", gcs_uri, str(local_path)]
+        cmd = ["gsutil"]
+        if self.project_id:
+            cmd.extend(["-o", f"GSUtil:project_id={self.project_id}"])
+        cmd.extend(["-m", "rsync", "-r", gcs_uri, str(local_path)])
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
@@ -629,7 +636,7 @@ class GCELauncher:
         if self.project_id:
             cmd.append(f"--project={self.project_id}")
 
-        result = run_gcloud(cmd, check=False)
+        result = run_gcloud(cmd, check=False, project_id=self.project_id)
 
         if result.returncode == 0:
             status = result.stdout.strip()
@@ -693,7 +700,7 @@ class GCELauncher:
         if self.project_id:
             cmd.append(f"--project={self.project_id}")
 
-        result = run_gcloud(cmd, check=False)
+        result = run_gcloud(cmd, check=False, project_id=self.project_id)
         if result.returncode == 0:
             return self.default_zone
 
@@ -709,7 +716,7 @@ class GCELauncher:
         if self.project_id:
             cmd_list.append(f"--project={self.project_id}")
 
-        result = run_gcloud(cmd_list, check=False)
+        result = run_gcloud(cmd_list, check=False, project_id=self.project_id)
         if result.returncode == 0:
             zone = result.stdout.strip()
             return zone or None
@@ -741,8 +748,13 @@ class GCELauncher:
 
         for attempt in range(1, max_attempts + 1):
             try:
+                cmd = ["gsutil"]
+                if self.project_id:
+                    cmd.extend(["-o", f"GSUtil:project_id={self.project_id}"])
+                cmd.extend(["cat", gcs_path])
+
                 result = subprocess.run(
-                    ["gsutil", "cat", gcs_path],
+                    cmd,
                     capture_output=True,
                     text=True,
                     check=True,
@@ -893,8 +905,12 @@ class GCELauncher:
                 logger.debug("Fetching logs from %s", stdout_path)
 
                 # Fetch stdout using gcloud storage (faster than gsutil)
+                cmd = ["gcloud", "storage", "cat", stdout_path]
+                if self.project_id:
+                    cmd.append(f"--project={self.project_id}")
+
                 proc = subprocess.Popen(
-                    ["gcloud", "storage", "cat", stdout_path],
+                    cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -927,8 +943,12 @@ class GCELauncher:
                 # Fetch stderr (may not exist for older runs)
                 stderr_output = ""
                 try:
+                    cmd2 = ["gcloud", "storage", "cat", stderr_path]
+                    if self.project_id:
+                        cmd2.append(f"--project={self.project_id}")
+
                     proc2 = subprocess.Popen(
-                        ["gcloud", "storage", "cat", stderr_path],
+                        cmd2,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.DEVNULL,
                         text=True,
@@ -955,8 +975,12 @@ class GCELauncher:
                 logger.debug("_fetch_gcs_logs failed for new format: %s", e)
                 # Try legacy train.log format
                 try:
+                    cmd_legacy = ["gcloud", "storage", "cat", f"{self.bucket_uri}/runs/{instance_name}/logs/train.log"]
+                    if self.project_id:
+                        cmd_legacy.append(f"--project={self.project_id}")
+
                     proc = subprocess.Popen(
-                        ["gcloud", "storage", "cat", f"{self.bucket_uri}/runs/{instance_name}/logs/train.log"],
+                        cmd_legacy,
                         stdout=subprocess.PIPE,
                         text=True,
                     )
@@ -1006,7 +1030,7 @@ class GCELauncher:
             if self.project_id:
                 cmd.append(f"--project={self.project_id}")
 
-            gcloud_result = run_gcloud(cmd, check=False)
+            gcloud_result = run_gcloud(cmd, check=False, project_id=self.project_id)
             return _collect(gcloud_result.stdout.splitlines(keepends=True), since_dt)
         except Exception as e:
             return f"Failed to retrieve logs: {e}"
@@ -1039,7 +1063,7 @@ class GCELauncher:
         if self.project_id:
             cmd.append(f"--project={self.project_id}")
 
-        run_gcloud(cmd)
+        run_gcloud(cmd, project_id=self.project_id)
 
     def delete_instance(self, instance_name: str) -> None:
         """Delete GCE instance and boot disk.

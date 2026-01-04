@@ -12,8 +12,13 @@ class LineageManager:
         self.db = db
         self.workspace_manager = workspace_manager
 
-    def get_workspace_lineage(self, workspace: str) -> dict:
-        """Get full lineage for workspace.
+    def get_workspace_lineage(
+        self,
+        workspace: str,
+        version_limit: int | None = None,
+        version_offset: int | None = None,
+    ) -> dict:
+        """Get lineage for workspace with paginated version history.
 
         Returns:
             {
@@ -22,6 +27,7 @@ class LineageManager:
                 "parent": str | None,
                 "parent_version": str | None,
                 "description": str,
+                "version_count": int,
                 "versions": [
                     {
                         "version": str,
@@ -30,7 +36,8 @@ class LineageManager:
                         "created_by": str,
                         "created_at": str,
                         "job_id": str | None,
-                        "description": str
+                        "description": str,
+                        "message": str  # Alias for description
                     },
                     ...
                 ],
@@ -51,11 +58,44 @@ class LineageManager:
         if not lineage_row:
             raise GoldfishError(f"Workspace '{workspace}' not found")
 
-        # Get versions
-        versions = self.db.list_versions(workspace)
+        # Get total version count
+        all_versions = self.db.list_versions(workspace)
+        version_count = len(all_versions)
+
+        # Get limited versions (reversed order: newest first is better for limited views)
+        # We fetch them ASC from DB then reverse or just change DB query to DESC.
+        # Let's change DB query to DESC in our call.
+        with self.db._conn() as conn:
+            limit_clause = f"LIMIT {version_limit}" if version_limit is not None else ""
+            offset_clause = f"OFFSET {version_offset}" if version_offset is not None else ""
+            rows = conn.execute(
+                f"""
+                SELECT * FROM workspace_versions
+                WHERE workspace_name = ?
+                AND pruned_at IS NULL
+                ORDER BY created_at DESC
+                {limit_clause} {offset_clause}
+                """,
+                (workspace,),
+            ).fetchall()
+            versions = [dict(row) for row in rows]
+
+        # Add 'message' alias for description to help agents
+        for v in versions:
+            v["message"] = v.get("description")
 
         # Get branches (child workspaces)
-        branches = self.db.get_workspace_branches(workspace)
+        branches_raw = self.db.get_workspace_branches(workspace)
+        # Transform to documented format (workspace_name -> workspace)
+        branches = [
+            {
+                "workspace": b["workspace_name"],
+                "branched_from": b.get("parent_version"),
+                "branched_at": b.get("created_at"),
+                "description": b.get("description"),
+            }
+            for b in branches_raw
+        ]
 
         return {
             "name": workspace,
@@ -63,27 +103,9 @@ class LineageManager:
             "parent": lineage_row["parent_workspace"],
             "parent_version": lineage_row["parent_version"],
             "description": lineage_row["description"],
-            "versions": [
-                {
-                    "version": v["version"],
-                    "git_tag": v["git_tag"],
-                    "git_sha": v["git_sha"],
-                    "created_by": v["created_by"],
-                    "created_at": v["created_at"],
-                    "job_id": v.get("job_id"),
-                    "description": v.get("description"),
-                }
-                for v in versions
-            ],
-            "branches": [
-                {
-                    "workspace": b["workspace_name"],
-                    "branched_from": b["parent_version"],
-                    "branched_at": b["created_at"],
-                    "description": b["description"],
-                }
-                for b in branches
-            ],
+            "version_count": version_count,
+            "versions": versions,
+            "branches": branches,
         }
 
     def get_version_diff(self, workspace: str, from_version: str, to_version: str) -> dict:

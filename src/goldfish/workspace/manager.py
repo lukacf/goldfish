@@ -288,7 +288,7 @@ class WorkspaceManager:
             return result
         return "# Project\n\nSTATE.md not yet initialized"
 
-    def _write_workspace_state_md(self, slot_path: Path, workspace: str, slot: str, event: str | None = None) -> None:
+    def refresh_workspace_state_md(self, slot_path: Path, workspace: str, slot: str, event: str | None = None) -> None:
         """Write per-workspace STATE.md to slot directory.
 
         This provides workspace-specific context for Claude's compaction recovery.
@@ -308,10 +308,11 @@ class WorkspaceManager:
         lines.append("## Status")
         lines.append(f"- Mounted to: {slot}")
 
-        # Get version info
+        # Get version info (newest first for Status display)
         versions = self.db.list_versions(workspace)
         if versions:
-            latest = versions[0]
+            # list_versions returns ASC, so latest is the last one
+            latest = versions[-1]
             lines.append(f"- Current version: {latest['version']}")
             lines.append(f"- Total versions: {len(versions)}")
         else:
@@ -328,10 +329,11 @@ class WorkspaceManager:
             lines.append(f"- {parent_info}")
             lines.append("")
 
-        # Recent versions (up to 5)
+        # Recent versions (up to 5, newest first)
         if versions:
             lines.append("## Version History")
-            for v in versions[:5]:
+            newest_versions = list(reversed(versions))[:5]
+            for v in newest_versions:
                 desc = v.get("description", "")
                 created = v.get("created_at", "")
                 if created and isinstance(created, str) and len(created) > 10:
@@ -340,7 +342,7 @@ class WorkspaceManager:
                 if created:
                     line += f" ({created})"
                 if desc:
-                    line += f": {desc[:50]}"
+                    line += f": {desc}"
                 lines.append(line)
             if len(versions) > 5:
                 lines.append(f"- ... and {len(versions) - 5} more")
@@ -357,7 +359,7 @@ class WorkspaceManager:
                 if timestamp and isinstance(timestamp, str) and len(timestamp) > 16:
                     timestamp = timestamp[11:16]  # Just time HH:MM
                 op = a.get("operation", "unknown")
-                reason_text = a.get("reason", "")[:40]
+                reason_text = a.get("reason", "")
                 lines.append(f"- [{timestamp}] {op}: {reason_text}")
         else:
             lines.append("- No recent actions")
@@ -447,7 +449,7 @@ class WorkspaceManager:
         )
 
         # Write per-workspace STATE.md to slot
-        self._write_workspace_state_md(slot_path, workspace, slot, event=f"Mounted: {reason}")
+        self.refresh_workspace_state_md(slot_path, workspace, slot, event=f"Mounted: {reason}")
 
         # Update global STATE.md
         if self.state_manager:
@@ -734,7 +736,7 @@ class WorkspaceManager:
         )
 
         # Update per-workspace STATE.md
-        self._write_workspace_state_md(slot_path, workspace, slot, event=f"Version {version}: {message[:30]}")
+        self.refresh_workspace_state_md(slot_path, workspace, slot, event=f"Version {version}: {message[:30]}")
 
         # Update global STATE.md
         if self.state_manager:
@@ -848,7 +850,7 @@ class WorkspaceManager:
         )
 
         # 6. Update per-workspace STATE.md
-        self._write_workspace_state_md(slot_path, workspace, slot, event=f"Version {next_version} for {stage_name}")
+        self.refresh_workspace_state_md(slot_path, workspace, slot, event=f"Version {next_version} for {stage_name}")
 
         return next_version, git_sha
 

@@ -315,6 +315,8 @@ class LogThoughtResponse(BaseModel):
     logged: bool
     thought: str
     timestamp: datetime
+    workspace: str | None = None
+    run_id: str | None = None
 
 
 # --- Diff Response ---
@@ -581,6 +583,7 @@ class GetRunResponse(BaseModel):
     config: dict
     reason: dict | None = None
     svs: dict | None = None
+    thoughts: list[AuditEntry] | None = None
 
 
 class CancelRunResponse(BaseModel):

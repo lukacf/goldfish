@@ -180,6 +180,12 @@ def load_input(name: str, format: str | None = None) -> Any:
     if not input_path.exists() and not input_path.with_suffix(".npy").exists():
         location = input_config.get("location")
         if location:
+            # Check for failed override resolution (dictionary passed as string)
+            if isinstance(location, str) and location.startswith("{") and "from_" in location:
+                raise ValueError(
+                    f"Input '{name}' has unresolved override: {location}. "
+                    "This usually means the specified run_id or signal could not be found."
+                )
             input_path = Path(location)
 
     # Auto-load based on format

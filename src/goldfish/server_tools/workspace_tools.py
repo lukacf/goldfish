@@ -134,13 +134,16 @@ def status() -> dict:
 
 
 @mcp.tool()
-def inspect_workspace(name: str) -> dict:
+def inspect_workspace(name: str, version_limit: int = 10, version_offset: int = 0) -> dict:
     """Get a comprehensive view of a workspace.
 
     Combines metadata, lineage (parent/branches), goal, and pipeline definition.
+    Version history is paginated (newest first).
 
     Args:
         name: Workspace name or slot (e.g., "baseline" or "w1")
+        version_limit: Max number of versions to return (default 10)
+        version_offset: Skip this many versions (default 0)
     """
     db = _get_db()
     workspace_manager = _get_workspace_manager()
@@ -155,7 +158,11 @@ def inspect_workspace(name: str) -> dict:
 
     # 2. Lineage (History and Branches)
     lineage_mgr = LineageManager(db=db, workspace_manager=workspace_manager)
-    lineage = lineage_mgr.get_workspace_lineage(workspace_name)
+    lineage = lineage_mgr.get_workspace_lineage(
+        workspace_name,
+        version_limit=version_limit,
+        version_offset=version_offset,
+    )
 
     # 3. Pipeline Info
     pipeline_manager = _get_pipeline_manager()
@@ -163,6 +170,14 @@ def inspect_workspace(name: str) -> dict:
         pipeline_def = pipeline_manager.get_pipeline(workspace_name)
     except Exception:
         pipeline_def = None
+
+    # 4. Refresh STATE.md on disk if mounted
+    if ws_info.is_mounted and ws_info.mounted_slot:
+        try:
+            slot_path = workspace_manager.get_slot_path(ws_info.mounted_slot)
+            workspace_manager.refresh_workspace_state_md(slot_path, workspace_name, ws_info.mounted_slot)
+        except Exception as e:
+            logger.warning(f"Failed to refresh STATE.md for {workspace_name}: {e}")
 
     return {
         "name": workspace_name,
@@ -184,6 +199,8 @@ def manage_versions(
     reason: str | None = None,
     from_version: str | None = None,
     to_version: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
 ) -> dict:
     """Unified tool for version tagging, pruning, and listing.
 
@@ -194,14 +211,16 @@ def manage_versions(
         tag: Tag name for tag/untag actions
         reason: Why performing this action (for prune)
         from_version / to_version: Range for bulk pruning
+        limit: Max versions to return for action='list' (default 50)
+        offset: Skip versions for action='list' (default 0)
     """
     db = _get_db()
     validate_workspace_name(workspace)
     config = _get_config()
 
     if action == "list":
-        versions = db.list_versions(workspace, include_pruned=True)
-        return {"workspace": workspace, "versions": versions}
+        versions = db.list_versions(workspace, include_pruned=True, limit=limit, offset=offset)
+        return {"workspace": workspace, "versions": versions, "limit": limit, "offset": offset}
 
     elif action == "tag":
         if not version or not tag:

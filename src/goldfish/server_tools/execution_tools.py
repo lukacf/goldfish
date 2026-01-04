@@ -266,11 +266,17 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
 
     Args:
         run_id: The stage run ID (e.g., "stage-abc123")
-        include: List of data to include. Defaults to ["dashboard", "metadata"].
-                Options: ["dashboard", "metadata", "manifest", "provenance", "svs"]
+        include: List of data to include. Defaults to ["dashboard", "metadata", "thoughts"].
+                Options: ["dashboard", "metadata", "manifest", "provenance", "svs", "thoughts", "attempt"]
 
     Returns:
         Dict with synthesized run data.
+
+    Related tools:
+    - list_runs(): Find run IDs for a workspace/stage
+    - list_all_runs(): Find run IDs across all workspaces
+    - compare_runs(): Compare two runs side-by-side
+    - logs(): Get execution logs for a run
     """
     db = _get_db()
     workspace_manager = _get_workspace_manager()
@@ -349,7 +355,7 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
 
     # Set default includes if None
     if include is None:
-        include = ["dashboard", "metadata"]
+        include = ["dashboard", "metadata", "thoughts"]
 
     result: dict[str, Any] = {"run_id": run_id}
 
@@ -488,16 +494,29 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
 
         result["svs"] = svs_data
 
+    if "thoughts" in include:
+        thought_rows = db.get_run_thoughts(run_id)
+        result["thoughts"] = [
+            {
+                "timestamp": r["timestamp"],
+                "thought": r["reason"],
+            }
+            for r in thought_rows
+        ]
+
+    # Attempt context - shows "You are on attempt #3, 2 failures so far"
+    if "attempt" in include:
+        attempt_num = row.get("attempt_num")
+        if attempt_num:
+            attempt_context = db.get_attempt_context(
+                workspace_name=row["workspace_name"],
+                stage_name=row["stage_name"],
+                attempt_num=attempt_num,
+            )
+            if attempt_context:
+                result["attempt_context"] = attempt_context
+
     return cast(dict, result)
-
-
-@mcp.tool()
-def run_status(run_id: str) -> dict:
-    """Dashboard view of a run (Alias for inspect_run with summary view).
-
-    Use this for a quick progress check, health status, and metric trends.
-    """
-    return inspect_run(run_id, include=["dashboard"])  # type: ignore[no-any-return]
 
 
 @mcp.tool()
@@ -506,6 +525,10 @@ def get_run_provenance(run_id: str) -> dict:
 
     Answers: "Which input versions produced this output?"
     Recursively traces back to source datasets.
+
+    Related tools:
+    - inspect_run(include=["provenance"]): Same data plus metrics, status, and more
+    - compare_runs(): Compare two runs including their inputs
     """
     db = _get_db()
     workspace_manager = _get_workspace_manager()
@@ -760,11 +783,11 @@ def list_runs(
 ) -> dict:
     """List runs (newest first) - compact view.
 
-    Returns a compact summary of recent runs. Use get_run(run_id) for full details.
+    Returns a compact summary of recent runs for a specific workspace.
     When filtering by pipeline_run_id, also shows queued stages that haven't started yet.
 
     Args:
-        workspace: Filter by workspace name
+        workspace: Filter by workspace name or slot (e.g., "baseline" or "w1")
         stage: Filter by stage name
         status: Filter by status (pending, running, completed, failed, canceled, queued)
         pipeline_run_id: Filter by pipeline run
@@ -773,27 +796,25 @@ def list_runs(
 
     Returns:
         Dict with compact runs list showing: run_id, stage, status, progress, started_at
+
+    Related tools:
+    - list_all_runs(): View runs across ALL workspaces
+    - inspect_run(): Get full details for a specific run
+    - compare_runs(): Compare two runs side-by-side
+    - dashboard(): Quick overview including failed and active runs
     """
     db = _get_db()
+    workspace_manager = _get_workspace_manager()
     compact_runs = []
 
-    # When filtering by pipeline_run_id, first show queued stages that haven't started
-    queued_stages = []
-    if pipeline_run_id and offset == 0:
-        queued_stages = db.get_queued_stages_for_pipeline(pipeline_run_id)
-        for q in queued_stages:
-            compact_runs.append(
-                {
-                    "run_id": None,  # No run_id yet - still queued
-                    "stage": q["stage_name"],
-                    "status": "pre-run check",
-                    "started": None,
-                    "error": None,
-                }
-            )
+    # Resolve workspace slot if provided
+    workspace_name = workspace
+    if workspace:
+        workspace_name = workspace_manager.get_workspace_for_slot(workspace) or workspace
 
+    # 1. Fetch actual stage runs
     rows = db.list_stage_runs_with_total(
-        workspace_name=workspace,
+        workspace_name=workspace_name,
         stage_name=stage,
         status=status,
         pipeline_run_id=pipeline_run_id,
@@ -802,7 +823,32 @@ def list_runs(
     )
     total = rows[0]["total_count"] if rows else 0
 
-    # Compact view: just essential fields, one line per run
+    # 2. When filtering by pipeline_run_id, also show queued stages that haven't started
+    # We fetch these AFTER actual runs to handle the race condition where a run is created
+    # but the queue hasn't been updated with the run_id yet.
+    queued_to_show = []
+    if pipeline_run_id and offset == 0:
+        # Get names of stages that already have run records in this pipeline
+        existing_stage_names = {r["stage_name"] for r in rows}
+
+        all_queued = db.get_queued_stages_for_pipeline(pipeline_run_id)
+        for q in all_queued:
+            # Only show if not already present in actual runs
+            if q["stage_name"] not in existing_stage_names:
+                queued_to_show.append(
+                    {
+                        "run_id": None,
+                        "stage": q["stage_name"],
+                        "status": "pre-run check",
+                        "started": None,
+                        "error": None,
+                    }
+                )
+
+    # Start with queued stages (they are logically "next")
+    compact_runs.extend(queued_to_show)
+
+    # 3. Compact view: just essential fields, one line per run
     for r in rows:
         # Build compact status string
         status_str = r["status"]
@@ -832,7 +878,7 @@ def list_runs(
         )
 
     # Adjust total to include queued stages
-    total_with_queued = total + len(queued_stages)
+    total_with_queued = total + len(queued_to_show)
 
     result: dict = {
         "runs": compact_runs,
@@ -898,4 +944,156 @@ def mark_outcome(
         "message": "Attempt closed - next run will start a new attempt"
         if outcome == "success"
         else "Run marked as bad_results - still in current attempt",
+    }
+
+
+@mcp.tool()
+def compare_runs(run_id_a: str, run_id_b: str) -> dict:
+    """Compare two stage runs side-by-side.
+
+    Shows differences in config, metrics, status, and outcomes between two runs.
+    Useful for understanding why one run succeeded and another failed,
+    or what changed between experiments.
+
+    Args:
+        run_id_a: First run ID (the "baseline" run)
+        run_id_b: Second run ID (the "comparison" run)
+
+    Returns:
+        dict with:
+        - run_a: Summary of first run (workspace, stage, status, outcome, error)
+        - run_b: Summary of second run
+        - config_diff: Dict of config keys that differ, with values from each run
+        - metrics_diff: Dict of metrics that differ, with values and delta
+        - same_stage: Whether both runs are from the same stage
+    """
+    import json
+
+    db = _get_db()
+
+    # Get both runs
+    run_a = db.get_stage_run(run_id_a)
+    if not run_a:
+        return {"error": f"Run not found: {run_id_a}"}
+
+    run_b = db.get_stage_run(run_id_b)
+    if not run_b:
+        return {"error": f"Run not found: {run_id_b}"}
+
+    # Parse configs
+    try:
+        config_a = json.loads(run_a.get("config_json") or "{}")
+    except json.JSONDecodeError:
+        config_a = {}
+    try:
+        config_b = json.loads(run_b.get("config_json") or "{}")
+    except json.JSONDecodeError:
+        config_b = {}
+
+    # Find config differences
+    all_keys = set(config_a.keys()) | set(config_b.keys())
+    config_diff = {}
+    for key in all_keys:
+        val_a = config_a.get(key)
+        val_b = config_b.get(key)
+        if val_a != val_b:
+            config_diff[key] = {"run_a": val_a, "run_b": val_b}
+
+    # Get metrics summaries
+    metrics_a = {m["name"]: m for m in db.get_metrics_summary(run_id_a)}
+    metrics_b = {m["name"]: m for m in db.get_metrics_summary(run_id_b)}
+
+    # Find metric differences
+    all_metrics = set(metrics_a.keys()) | set(metrics_b.keys())
+    metrics_diff: dict[str, dict] = {}
+    empty_metrics: dict = {}
+    for name in all_metrics:
+        m_a = metrics_a.get(name) or empty_metrics
+        m_b = metrics_b.get(name) or empty_metrics
+        val_a = m_a.get("last_value")
+        val_b = m_b.get("last_value")
+
+        if val_a is not None or val_b is not None:
+            entry = {"run_a": val_a, "run_b": val_b}
+            if val_a is not None and val_b is not None:
+                entry["delta"] = val_b - val_a
+            metrics_diff[name] = entry
+
+    # Build run summaries
+    run_a_summary = {
+        "run_id": run_id_a,
+        "workspace": run_a["workspace_name"],
+        "stage": run_a["stage_name"],
+        "status": run_a["status"],
+        "outcome": run_a.get("outcome"),
+        "error": run_a.get("error"),
+        "started_at": run_a.get("started_at"),
+        "completed_at": run_a.get("completed_at"),
+    }
+
+    run_b_summary = {
+        "run_id": run_id_b,
+        "workspace": run_b["workspace_name"],
+        "stage": run_b["stage_name"],
+        "status": run_b["status"],
+        "outcome": run_b.get("outcome"),
+        "error": run_b.get("error"),
+        "started_at": run_b.get("started_at"),
+        "completed_at": run_b.get("completed_at"),
+    }
+
+    return {
+        "run_a": run_a_summary,
+        "run_b": run_b_summary,
+        "config_diff": config_diff,
+        "metrics_diff": metrics_diff,
+        "same_stage": run_a["stage_name"] == run_b["stage_name"],
+        "same_workspace": run_a["workspace_name"] == run_b["workspace_name"],
+    }
+
+
+@mcp.tool()
+def list_all_runs(
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """List runs across ALL workspaces (newest first).
+
+    Unlike list_runs(), this shows a cross-workspace timeline of experiments.
+    Useful for getting a global view of "what did I try everywhere?"
+
+    Args:
+        status: Optional filter by status (pending, running, completed, failed, canceled)
+        limit: Maximum runs to return (default 50)
+        offset: Pagination offset (default 0)
+
+    Returns:
+        dict with:
+        - runs: List of runs with workspace, stage, status, outcome, timestamps
+        - total: Total count of matching runs (for pagination)
+    """
+    db = _get_db()
+
+    rows = db.list_all_stage_runs(status=status, limit=limit, offset=offset)
+    total = rows[0]["total_count"] if rows else 0
+
+    runs = []
+    for row in rows:
+        runs.append(
+            {
+                "run_id": row["id"],
+                "workspace": row["workspace_name"],
+                "stage": row["stage_name"],
+                "status": row["status"],
+                "outcome": row.get("outcome"),
+                "error": row.get("error"),
+                "started_at": row.get("started_at"),
+                "completed_at": row.get("completed_at"),
+            }
+        )
+
+    return {
+        "runs": runs,
+        "total": total,
     }

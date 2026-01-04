@@ -381,6 +381,11 @@ class PreRunReviewer:
                 continue
 
             latest_status = str(ctx.get("latest_run_status") or "").lower()
+
+            # If the newer run is already done, it's not stale - we should use it!
+            if latest_status in ("completed", "failed", "canceled"):
+                continue
+
             latest_progress = str(ctx.get("latest_run_progress") or "").lower()
             if latest_status != "running" and latest_progress not in {"launch", "build", "running", "finalizing"}:
                 continue

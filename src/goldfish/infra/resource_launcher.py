@@ -57,7 +57,12 @@ class LaunchResult:
 
 
 def run_gcloud(
-    cmd: list[str], *, allow_capacity: bool = False, check: bool = True, timeout: int = 60
+    cmd: list[str],
+    *,
+    allow_capacity: bool = False,
+    check: bool = True,
+    timeout: int = 60,
+    project_id: str | None = None,
 ) -> subprocess.CompletedProcess:
     """Run gcloud command with capacity error detection.
 
@@ -66,14 +71,14 @@ def run_gcloud(
         allow_capacity: If True, raise CapacityError on capacity issues
         check: Raise exception on non-zero exit code
         timeout: Command timeout in seconds (default 60)
+        project_id: Explicit GCP project ID to use
 
     Returns:
         CompletedProcess
-
-    Raises:
-        CapacityError: If allow_capacity=True and capacity error detected
-        GoldfishError: If check=True and command fails (non-capacity)
     """
+    if project_id and "--project" not in cmd:
+        cmd.append(f"--project={project_id}")
+
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -429,7 +434,7 @@ class ResourceLauncher:
             if self.project_id:
                 cmd_disk.append(f"--project={self.project_id}")
 
-            run_gcloud(cmd_disk, allow_capacity=True)
+            run_gcloud(cmd_disk, allow_capacity=True, project_id=self.project_id)
             timings["disk_create_sec"] = round(time.time() - start, 2)
             scratch_attached = True
 
@@ -508,7 +513,7 @@ class ResourceLauncher:
         # Launch instance
         start = time.time()
         try:
-            run_gcloud(cmd, allow_capacity=True)
+            run_gcloud(cmd, allow_capacity=True, project_id=self.project_id)
         except CapacityError:
             if scratch_attached and disk_name:
                 cleanup_disk(disk_name, zone)
