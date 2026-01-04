@@ -99,11 +99,11 @@ PROJECT_ID=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.intern
 sync_final_logs() {
     echo "=== SYNCING FINAL LOGS BEFORE DELETION ==="
     # Only sync if GCS paths are configured (set by log_syncer_section)
-    if [[ -n "${GCS_STDOUT_PATH:-}" ]]; then
+    if [[ -n "${GCS_STDOUT_PATH:-}" && -s "${LOCAL_STDOUT:-/tmp/stdout.log}" ]]; then
         echo "Uploading final stdout.log..."
         timeout 30 gcloud storage cp "${LOCAL_STDOUT:-/tmp/stdout.log}" "$GCS_STDOUT_PATH" --quiet 2>/dev/null || echo "stdout upload failed"
     fi
-    if [[ -n "${GCS_STDERR_PATH:-}" ]]; then
+    if [[ -n "${GCS_STDERR_PATH:-}" && -s "${LOCAL_STDERR:-/tmp/stderr.log}" ]]; then
         echo "Uploading final stderr.log..."
         timeout 30 gcloud storage cp "${LOCAL_STDERR:-/tmp/stderr.log}" "$GCS_STDERR_PATH" --quiet 2>/dev/null || echo "stderr upload failed"
     fi
@@ -587,6 +587,62 @@ start_log_syncer() {{
 """
 
 
+def metadata_syncer_section(sync_interval: int = 1) -> str:
+    """Generate metadata syncer for Overdrive-style on-demand log refresh.
+
+    Args:
+        sync_interval: Seconds between metadata polls (default 1).
+
+    Returns:
+        Shell script fragment with start_metadata_syncer function.
+    """
+    return f"""
+# === METADATA SYNCER (Overdrive on-demand sync) ===
+METADATA_SYNC_INTERVAL={sync_interval}
+METADATA_SIGNAL_URL="http://metadata.google.internal/computeMetadata/v1/instance/attributes/goldfish"
+
+start_metadata_syncer() {{
+    (
+        set +e
+        LAST_ACK=""
+        LAST_SEEN=""
+        while true; do
+            SIG_JSON=$(curl -sf -H "Metadata-Flavor: Google" "$METADATA_SIGNAL_URL" || true)
+            if [[ -n "$SIG_JSON" ]]; then
+                CMD=$(printf "%s" "$SIG_JSON" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+                REQ_ID=$(printf "%s" "$SIG_JSON" | sed -n 's/.*"request_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+                if [[ "$CMD" == "sync" && -n "$REQ_ID" && "$REQ_ID" != "$LAST_SEEN" ]]; then
+                    sync_final_logs || true
+                    LAST_SEEN="$REQ_ID"
+                    ACK_OK=0
+                    if command -v gcloud >/dev/null 2>&1; then
+                        ACK_ERR=""
+                        if ACK_ERR=$(gcloud compute instances add-metadata "$INSTANCE_NAME" \
+                            --zone="$INSTANCE_ZONE" \
+                            --project="$PROJECT_ID" \
+                            --metadata "goldfish_ack=$REQ_ID" \
+                            --quiet 2>&1); then
+                            ACK_OK=1
+                        else
+                            echo "Failed to set goldfish_ack for $REQ_ID: $ACK_ERR"
+                        fi
+                    else
+                        echo "gcloud not available for metadata ack"
+                    fi
+                    if [[ "$ACK_OK" == "1" ]]; then
+                        LAST_ACK="$REQ_ID"
+                    fi
+                fi
+            fi
+            sleep "$METADATA_SYNC_INTERVAL"
+        done
+    ) &
+    METADATA_SYNCER_PID=$!
+    echo "Metadata syncer started (PID=$METADATA_SYNCER_PID, interval=${{METADATA_SYNC_INTERVAL}}s)"
+}}
+"""
+
+
 def build_startup_script(
     *,
     bucket: str,
@@ -688,6 +744,9 @@ def build_startup_script(
     if use_log_syncer and log_sync_interval is not None:
         parts.append(log_syncer_section(bucket, bucket_path, log_sync_interval))
 
+    # Add metadata syncer for on-demand Overdrive sync
+    parts.append(metadata_syncer_section())
+
     parts.extend(
         [
             "apt-get update -y",
@@ -695,6 +754,7 @@ def build_startup_script(
             "systemctl enable --now docker || true",
             'log_stage "docker_ready"',
             env_exports_block,
+            "start_metadata_syncer",
         ]
     )
 

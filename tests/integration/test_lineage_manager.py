@@ -28,8 +28,9 @@ class TestWorkspaceLineage:
         assert lineage["name"] == "test_ws"
         assert lineage["parent"] is None
         assert len(lineage["versions"]) == 2
-        assert lineage["versions"][0]["version"] == "v1"
-        assert lineage["versions"][1]["version"] == "v2"
+        # Versions are returned in DESC order (newest first)
+        assert lineage["versions"][0]["version"] == "v2"
+        assert lineage["versions"][1]["version"] == "v1"
 
     def test_get_workspace_lineage_with_parent(self, test_db):
         """Should show parent workspace relationship."""

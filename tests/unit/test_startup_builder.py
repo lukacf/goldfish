@@ -9,6 +9,7 @@ from goldfish.infra.startup_builder import (
     gcsfuse_section,
     gpu_driver_section,
     log_syncer_section,
+    metadata_syncer_section,
     stage_log_section,
 )
 
@@ -378,6 +379,41 @@ def test_build_startup_script_shutdown():
 
     assert "shutdown -h now" in script
     assert "exit $EXIT_CODE" in script
+
+
+def test_metadata_syncer_section_contains_metadata_endpoint():
+    """Metadata syncer should poll GCE metadata for goldfish signals."""
+    script = metadata_syncer_section()
+
+    assert "metadata.google.internal/computeMetadata/v1/instance/attributes/goldfish" in script
+    assert "Metadata-Flavor: Google" in script
+
+
+def test_metadata_syncer_section_sets_ack():
+    """Metadata syncer should ack sync requests via instance metadata."""
+    script = metadata_syncer_section()
+
+    assert "goldfish_ack" in script
+    assert "gcloud compute instances add-metadata" in script
+    assert "sync_final_logs" in script
+    assert "Failed to set goldfish_ack" in script
+    assert "LAST_SEEN" in script
+    assert 'LAST_ACK="$REQ_ID"' in script
+    assert '"$REQ_ID" != "$LAST_SEEN"' in script
+
+
+def test_build_startup_script_starts_metadata_syncer():
+    """Startup script should start metadata syncer in background."""
+    script = build_startup_script(
+        bucket="test-bucket",
+        bucket_prefix="",
+        run_path="runs/test",
+        image="test-image",
+        entrypoint="/bin/bash",
+        env_map={},
+    )
+
+    assert "start_metadata_syncer" in script
 
 
 def test_build_startup_script_multiple_env_vars():

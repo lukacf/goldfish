@@ -21,14 +21,8 @@ async def test_svs_tools_registered_on_server():
     tool_names = [tool.name for tool in tools]
 
     expected_svs_tools = [
-        "list_failure_patterns_tool",
-        "get_failure_pattern_tool",
-        "approve_pattern_tool",
-        "reject_pattern_tool",
-        "update_pattern_tool",
-        "get_svs_reviews_tool",
-        "get_run_svs_findings_tool",
-        "review_pending_patterns_tool",
+        "manage_patterns",
+        "get_run_svs_findings",
     ]
 
     for expected in expected_svs_tools:

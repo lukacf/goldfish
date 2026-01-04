@@ -435,6 +435,58 @@ class Database:
             rows = conn.execute("SELECT * FROM audit ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
             return [cast(AuditRow, dict(row)) for row in rows]
 
+    def get_run_thoughts(self, run_id: str) -> list[AuditRow]:
+        """Get all thoughts associated with a specific run."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM audit
+                WHERE operation = 'thought'
+                AND json_extract(details, '$.run_id') = ?
+                ORDER BY timestamp ASC
+                """,
+                (run_id,),
+            ).fetchall()
+            return [cast(AuditRow, dict(row)) for row in rows]
+
+    def get_workspace_thoughts(self, workspace: str, limit: int = 50, offset: int = 0) -> list[AuditRow]:
+        """Get all thoughts associated with a workspace.
+
+        Args:
+            workspace: Workspace name to filter by
+            limit: Maximum number of thoughts to return
+            offset: Number of thoughts to skip (for pagination)
+
+        Returns:
+            List of audit rows containing thoughts for this workspace
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM audit
+                WHERE operation = 'thought'
+                AND workspace = ?
+                ORDER BY timestamp DESC
+                LIMIT ? OFFSET ?
+                """,
+                (workspace, limit, offset),
+            ).fetchall()
+            return [cast(AuditRow, dict(row)) for row in rows]
+
+    def count_workspace_thoughts(self, workspace: str) -> int:
+        """Count total thoughts for a workspace."""
+        with self._conn() as conn:
+            result = conn.execute(
+                """
+                SELECT COUNT(*) FROM audit
+                WHERE operation = 'thought'
+                AND workspace = ?
+                """,
+                (workspace,),
+            ).fetchone()
+            count: int = result[0] if result else 0
+            return count
+
     # --- Source operations ---
 
     def create_source(
@@ -1188,33 +1240,46 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
-    def list_versions(self, workspace_name: str, include_pruned: bool = False) -> list[dict]:
-        """List all versions for a workspace.
+    def list_versions(
+        self,
+        workspace_name: str,
+        include_pruned: bool = False,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> list[dict]:
+        """List versions for a workspace with pagination support.
 
         Args:
             workspace_name: Workspace name
             include_pruned: If True, include pruned versions in the list
+            limit: Maximum number of versions to return
+            offset: Number of versions to skip
 
         Returns:
             List of version dicts, ordered by creation time
         """
+        limit_clause = f"LIMIT {limit}" if limit is not None else ""
+        offset_clause = f"OFFSET {offset}" if offset is not None else ""
+
         with self._conn() as conn:
             if include_pruned:
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT * FROM workspace_versions
                     WHERE workspace_name = ?
                     ORDER BY created_at ASC
+                    {limit_clause} {offset_clause}
                     """,
                     (workspace_name,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT * FROM workspace_versions
                     WHERE workspace_name = ?
                     AND pruned_at IS NULL
                     ORDER BY created_at ASC
+                    {limit_clause} {offset_clause}
                     """,
                     (workspace_name,),
                 ).fetchall()
@@ -2058,6 +2123,60 @@ class Database:
 
             return attempts
 
+    def get_attempt_context(self, workspace_name: str, stage_name: str, attempt_num: int) -> dict | None:
+        """Get context about a specific attempt.
+
+        Args:
+            workspace_name: Workspace name
+            stage_name: Stage name
+            attempt_num: Attempt number to get context for
+
+        Returns:
+            Dict with attempt summary or None if not found
+        """
+        query = """
+            SELECT
+                COUNT(*) as run_count,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as completed_count,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as failed_count,
+                SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) as success_count,
+                SUM(CASE WHEN outcome = 'bad_results' THEN 1 ELSE 0 END) as bad_results_count
+            FROM stage_runs
+            WHERE workspace_name = ?
+            AND stage_name = ?
+            AND attempt_num = ?
+        """
+        params = [
+            StageRunStatus.COMPLETED,
+            StageRunStatus.FAILED,
+            workspace_name,
+            stage_name,
+            attempt_num,
+        ]
+
+        with self._conn() as conn:
+            row = conn.execute(query, params).fetchone()
+            if not row or row["run_count"] == 0:
+                return None
+
+            # Determine attempt status
+            if row["success_count"] > 0:
+                status = "closed"  # Has a successful run
+            elif row["run_count"] == row["failed_count"]:
+                status = "all_failed"  # All runs crashed
+            else:
+                status = "open"  # Still iterating
+
+            return {
+                "attempt": attempt_num,
+                "runs_in_attempt": row["run_count"],
+                "completed": row["completed_count"],
+                "failed": row["failed_count"],
+                "success": row["success_count"],
+                "bad_results": row["bad_results_count"],
+                "status": status,
+            }
+
     def update_stage_run_status(
         self,
         stage_run_id: str,
@@ -2238,6 +2357,101 @@ class Database:
             row = conn.execute(query, params).fetchone()
             count: int = row[0] if row else 0
             return count
+
+    # --- Dashboard methods ---
+
+    def get_recent_failed_runs(self, limit: int = 10) -> list[dict]:
+        """Get recently failed stage runs across all workspaces.
+
+        Args:
+            limit: Maximum number of runs to return
+
+        Returns:
+            List of failed runs with workspace, stage, error, and timestamp
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, workspace_name, stage_name, status, error, completed_at
+                FROM stage_runs
+                WHERE status = ?
+                ORDER BY completed_at DESC
+                LIMIT ?
+                """,
+                (StageRunStatus.FAILED, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_active_runs(self) -> list[dict]:
+        """Get all currently running or pending stage runs.
+
+        Returns:
+            List of active runs with progress info
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, workspace_name, stage_name, status, progress, started_at
+                FROM stage_runs
+                WHERE status IN (?, ?)
+                ORDER BY started_at DESC
+                """,
+                (StageRunStatus.RUNNING, StageRunStatus.PENDING),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_recent_outcomes(self, limit: int = 10) -> list[dict]:
+        """Get recent run outcomes for trend visibility.
+
+        Args:
+            limit: Maximum number of outcomes to return
+
+        Returns:
+            List of recent outcomes (success/bad_results) with metadata
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT workspace_name, stage_name, outcome, completed_at
+                FROM stage_runs
+                WHERE outcome IS NOT NULL
+                AND status = ?
+                ORDER BY completed_at DESC
+                LIMIT ?
+                """,
+                (StageRunStatus.COMPLETED, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_all_stage_runs(
+        self,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        """List stage runs across ALL workspaces (newest first).
+
+        Args:
+            status: Optional status filter
+            limit: Maximum runs to return
+            offset: Pagination offset
+
+        Returns:
+            List of runs with total_count included via window function
+        """
+        query = "SELECT *, COUNT(*) OVER() AS total_count FROM stage_runs WHERE 1=1"
+        params: list = []
+
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+
+        query += " ORDER BY started_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        with self._conn() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
 
     def get_queued_stages_for_pipeline(self, pipeline_run_id: str) -> list[dict]:
         """Get queued stages from pipeline_stage_queue that don't have stage_runs yet.
@@ -3352,6 +3566,56 @@ class Database:
             rows = conn.execute(query, params).fetchall()
 
             return [cast(MetricsSummaryRow, dict(row)) for row in rows]
+
+    def get_metrics_trends(
+        self,
+        stage_run_id: str,
+        metric_names: list[str] | None = None,
+    ) -> dict[str, list[float]]:
+        """Get the two most recent values for each metric to calculate trends.
+
+        Args:
+            stage_run_id: Stage run ID to filter by
+            metric_names: Optional list of metric names to filter by
+
+        Returns:
+            Dict mapping metric name to list of values [prev, last] or [last]
+        """
+        with self._conn() as conn:
+            query = """
+                WITH RankedMetrics AS (
+                    SELECT
+                        name,
+                        value,
+                        ROW_NUMBER() OVER (PARTITION BY name ORDER BY timestamp DESC, id DESC) as rank
+                    FROM run_metrics
+                    WHERE stage_run_id = ?
+            """
+            params: list[Any] = [stage_run_id]
+
+            if metric_names:
+                placeholders = ",".join(["?"] * len(metric_names))
+                query += " AND name IN (" + placeholders + ")"
+                params.extend(metric_names)
+
+            query += """
+                )
+                SELECT name, value
+                FROM RankedMetrics
+                WHERE rank <= 2
+                ORDER BY name, rank DESC
+            """
+
+            rows = conn.execute(query, params).fetchall()
+
+            trends: dict[str, list[float]] = {}
+            for row in rows:
+                name = row["name"]
+                if name not in trends:
+                    trends[name] = []
+                trends[name].append(row["value"])
+
+            return trends
 
     def list_metric_names(
         self,
