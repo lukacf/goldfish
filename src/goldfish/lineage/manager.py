@@ -168,11 +168,14 @@ class LineageManager:
         explicit_inputs = self.db.list_signals(stage_run_id=stage_run_id, signal_type="input")
         legacy_inputs = self.db.list_signals(consumed_by=stage_run_id)
 
-        # Merge and deduplicate (by signal name and source)
+        # Merge and deduplicate (by signal name and producer run ID)
         inputs = []
         seen_inputs = set()
         for inp in explicit_inputs + legacy_inputs:
-            key = (inp["signal_name"], inp.get("source_stage_run_id") or inp.get("stage_run_id"))
+            # For legacy inputs (consumed_by match), the record's 'stage_run_id' is the producer.
+            # For explicit inputs, 'source_stage_run_id' is the producer.
+            producer_run_id = inp.get("source_stage_run_id") or inp.get("stage_run_id")
+            key = (inp["signal_name"], producer_run_id)
             if key not in seen_inputs:
                 inputs.append(inp)
                 seen_inputs.add(key)
