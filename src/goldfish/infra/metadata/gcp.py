@@ -77,6 +77,13 @@ class GCPMetadataBus(MetadataBus):
             # Format the signal as a string
             value = signal.model_dump_json()
 
+            # GCP instance metadata limit is 256KB
+            if len(value) > 256 * 1024:
+                raise GoldfishError(
+                    f"Metadata signal for key '{key}' exceeds 256KB limit ({len(value)} bytes). "
+                    "GCP instance metadata cannot store large blobs."
+                )
+
             # Use --metadata-from-file to avoid shell/gcloud escaping issues with JSON
             with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as tmp:
                 tmp.write(value)

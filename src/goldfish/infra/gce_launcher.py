@@ -73,6 +73,7 @@ class GCELauncher:
         self.ensure_metadata_permissions = ensure_metadata_permissions
         self.metadata_ack_role = metadata_ack_role
         self._project_number: str | None = None
+        self._zone_cache: dict[str, str] = {}  # Cache for instance zones
 
     @property
     def bucket_uri(self) -> str | None:
@@ -678,6 +679,7 @@ class GCELauncher:
         """Find which zone an instance is in.
 
         Tries default zone first, then searches all configured zones.
+        Caches results to avoid repeated API calls.
 
         Args:
             instance_name: Instance identifier
@@ -686,6 +688,10 @@ class GCELauncher:
             Zone name if found, None otherwise
         """
         instance_name = self._sanitize_name(instance_name)
+
+        # Check cache first
+        if instance_name in self._zone_cache:
+            return self._zone_cache[instance_name]
 
         # Try default zone first (fast path)
         cmd = [
@@ -702,6 +708,7 @@ class GCELauncher:
 
         result = run_gcloud(cmd, check=False, project_id=self.project_id)
         if result.returncode == 0:
+            self._zone_cache[instance_name] = self.default_zone
             return self.default_zone
 
         # Zone-agnostic lookup to avoid N calls
@@ -718,8 +725,10 @@ class GCELauncher:
 
         result = run_gcloud(cmd_list, check=False, project_id=self.project_id)
         if result.returncode == 0:
-            zone = result.stdout.strip()
-            return zone or None
+            zone: str = result.stdout.strip()
+            if zone:
+                self._zone_cache[instance_name] = zone
+                return zone
         return None
 
     def _get_exit_code(self, instance_name: str, max_attempts: int = 5, retry_delay: float = 2.0) -> int:
