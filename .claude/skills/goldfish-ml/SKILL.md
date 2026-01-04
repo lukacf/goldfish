@@ -1,6 +1,6 @@
 ---
 name: goldfish-ml
-description: This skill should be used when working with Goldfish ML, an MCP server for AI-driven machine learning experimentation. Use this skill when the user asks to create workspaces, run ML pipelines, manage datasets, track experiment lineage, or conduct any ML experimentation workflow. Goldfish provides 47 MCP tools for workspace management, pipeline execution, data management, version management, and provenance tracking.
+description: This skill should be used when working with Goldfish ML, an MCP server for AI-driven machine learning experimentation. Use this skill for workspace management, pipeline execution, data registry operations, and provenance tracking. Goldfish provides 24 master tools for efficient ML workflows.
 ---
 
 # Goldfish ML
@@ -55,13 +55,13 @@ START: What task?
   │     └─▶ run(workspace, stages=["train"]) or run(workspace) for all
   │
   ├─▶ "Check run status"
-  │     └─▶ list_runs() → get_run(run_id) → logs(run_id)
+  │     └─▶ list_runs() → inspect_run(run_id) → logs(run_id)
   │
   ├─▶ "Manage data"
-  │     └─▶ register_dataset() or list_sources() → get_source()
+  │     └─▶ register_source() or manage_sources(action="list")
   │
   ├─▶ "Track lineage"
-  │     └─▶ get_workspace_lineage() → get_stage_lineage() → get_run_provenance()
+  │     └─▶ inspect_workspace() → inspect_run(include=["provenance"])
   │
   └─▶ "Save progress / Switch context"
         └─▶ save_version() → hibernate() (auto-saves)
@@ -100,7 +100,7 @@ CSV requires `format_params`:
 ```
 
 Rules:
-- `delimiter` must be a single character from: `, ; | \\t :`.
+- `delimiter` must be a single character from: `, ; | \t :`.
 
 **Directory sources are rejected.**
 
@@ -163,9 +163,8 @@ File (blob):
 ### Tools that REQUIRE metadata
 
 - `register_source(..., reason, metadata)`
-- `register_dataset(..., format, metadata)`
 - `promote_artifact(..., reason, metadata)`
-- `update_source_metadata(source_name, metadata, reason)`
+- `manage_sources(action="update", ..., metadata)`
 
 Optional tool arguments (must match metadata if provided):
 - `format`
@@ -384,32 +383,9 @@ def main():
 - **Metric name cap:** Per run, unique metric names are capped (default 10,000) to prevent abuse.
 - **Artifacts:** `path` is **relative** to outputs dir; absolute paths and symlinks are rejected.
   `log_artifact` returns a backend URL if available.
-- **Live metrics:** `get_run_metrics` will attempt a best-effort live sync for running runs
-  (throttled by `GOLDFISH_METRICS_LIVE_SYNC_INTERVAL`).
+- **Live metrics:** `inspect_run` will attempt a best-effort live sync (Overdrive) for running runs.
 - **Auto-finalize:** `finish()` is optional but recommended in a `finally` block. Auto-finalize uses `atexit`
   and won’t run on SIGKILL/crash.
-- **Backend errors:** Use `had_backend_errors()` / `get_backend_errors()` to detect backend failures.
-
-**Tuning flush behavior:**
-- `GOLDFISH_METRICS_FLUSH_THRESHOLD` controls auto-flush (default 100).
-- `GOLDFISH_METRICS_FLUSH_INTERVAL` controls time-based auto-flush in seconds (default 30).
-- `GOLDFISH_METRICS_MAX_NAMES` caps unique metric names per run (default 10000).
-- `GOLDFISH_METRICS_MAX_FUTURE_DRIFT_SECONDS` controls allowed future timestamp drift (default 86400).
-- `GOLDFISH_METRICS_LIVE_SYNC` enables live DB sync for running runs (default true).
-- `GOLDFISH_METRICS_LIVE_SYNC_INTERVAL` controls live sync cadence in seconds (default 15).
-- `GOLDFISH_METRICS_MAX_OFFSET` caps pagination offset for metrics/artifacts (default 1,000,000).
-- `GOLDFISH_WANDB_ARTIFACT_MODE` set to `artifact` to use W&B Artifacts (default `file`).
-- `GOLDFISH_WANDB_ARTIFACT_TYPE` sets artifact type when using W&B Artifacts (default `artifact`).
-
-**Advanced (avoid global logger):**
-- `use_logger(custom_logger)` context manager routes calls to a specific `MetricsLogger`.
-
-**Querying metrics (server tools):**
-- `list_metric_names(run_id, metric_prefix=None)` to discover metrics without loading all data.
-- `get_run_metrics(run_id, limit=1000, offset=0, metric_name=None, metric_prefix=None,
-  artifact_limit=1000, artifact_offset=0)` for pagination. `limit=None` or `artifact_limit=None`
-  returns all and may include a warning for very large runs.
-- Optional `workspace=` parameter on both tools enforces run ownership.
 
 ### 4.5 SVS (Schema Contracts + Output Stats)
 
@@ -450,7 +426,7 @@ When in `warning` mode (default), contract mismatches log a warning but allow th
 
 **Preflight warnings & errors:**
 - When SVS is enabled, a preflight validation pass runs for every stage.
-- Errors block the run; warnings are recorded and surfaced via `get_run`.
+- Errors block the run; warnings are recorded and surfaced via `inspect_run(include=["svs"])`.
 
 **Key Semantic Checks:**
 - `entropy`: Shannon entropy of values (catches mode collapse or data corruption).
@@ -458,10 +434,7 @@ When in `warning` mode (default), contract mismatches log a warning but allow th
 - `vocab_utilization`: Fraction of vocab indices used (catches dead embeddings).
 - `unique_count`: Distinct values in sample.
 
-**Stats Storage:** Stats are recorded for every signal output in the `signal_lineage` table and can be queried via `get_outputs(run_id)`.
-
-**Live SVS sync:** `get_run(run_id)` performs a best‑effort live sync of SVS findings for running runs (throttled).
-- `GOLDFISH_SVS_LIVE_SYNC_INTERVAL` controls polling cadence in seconds (default 10).
+**Live SVS sync:** `inspect_run` performs a best‑effort live sync of SVS findings for running runs via the metadata bus.
 
 **Experimental self‑learning:**
 ```yaml
@@ -475,10 +448,10 @@ svs:
 1. List recent runs
    list_runs(workspace="lstm_baseline", status="running")
 
-2. Get run details (includes reason + SVS preflight/during/post findings)
-   get_run(run_id="stage-abc123")
+2. Get run details (includes dashboard + trends + health)
+   inspect_run(run_id="stage-abc123")
 
-3. Stream logs
+3. Stream logs (if dashboard is not enough)
    logs(run_id="stage-abc123", tail=500)
 
 4. Cancel if needed
@@ -491,65 +464,54 @@ Track exactly what produced what:
 
 ```
 # Full workspace history
-get_workspace_lineage("lstm_baseline")
+inspect_workspace("lstm_baseline")
 → versions, parent workspace, branches
 
 # Compare versions
-get_version_diff("lstm_baseline", from_version="v1", to_version="v3")
+diff(target="lstm_baseline", against="v1")
 → git commits, file changes
 
-# Trace run inputs recursively
-get_stage_lineage(run_id="stage-abc123")
-→ Which preprocessing version fed this training run
-
 # Full run provenance
-get_run_provenance(stage_run_id="stage-abc123")
+inspect_run(run_id="stage-abc123", include=["provenance"])
 → workspace, version, git SHA, config, inputs, outputs
 ```
 
-### 6. Version Tags & Pruning
+### 7. Version Tags & Pruning
 
 ML experiments generate many versions, most of which are failed attempts. Tags and pruning help manage this:
 
 **Tags** mark significant versions with memorable names:
 ```
 # Mark a milestone (can be applied retroactively to any version)
-tag_version(workspace="lstm_baseline", version="v24", tag_name="baseline-working")
-tag_version(workspace="lstm_baseline", version="v47", tag_name="best-model")
+manage_versions(workspace="lstm_baseline", action="tag", version="v24", tag="baseline-working")
+manage_versions(workspace="lstm_baseline", action="tag", version="v47", tag="best-model")
 
 # List all tags for a workspace
-list_tags(workspace="lstm_baseline")
-→ [{"version": "v24", "tag_name": "baseline-working"}, {"version": "v47", "tag_name": "best-model"}]
+manage_versions(workspace="lstm_baseline", action="list")
+→ [{"version": "v24", "tag_name": "baseline-working"}, ...]
 
 # Remove a tag
-untag_version(workspace="lstm_baseline", tag_name="baseline-working")
+manage_versions(workspace="lstm_baseline", action="untag", tag="baseline-working")
 ```
 
 **Pruning** hides noise versions while preserving audit trail:
 ```
 # Prune a single version (fails if tagged - tags are protected)
-prune_version(workspace="lstm_baseline", version="v5", reason="Failed experiment with wrong hyperparameters")
+manage_versions(workspace="lstm_baseline", action="prune", version="v5", reason="Failed experiment")
 
 # Prune a range of failed experiments
-prune_versions(workspace="lstm_baseline", from_version="v1", to_version="v23",
-               reason="All early experiments before baseline was established")
-
-# Prune everything before a tagged milestone
-prune_before_tag(workspace="lstm_baseline", tag_name="baseline-working",
-                 reason="Pruning all experiments before working baseline")
+manage_versions(workspace="lstm_baseline", action="prune", 
+                from_version="v1", to_version="v23",
+                reason="All early experiments before baseline")
 
 # Restore pruned versions if needed
-unprune_version(workspace="lstm_baseline", version="v5")
-unprune_versions(workspace="lstm_baseline", from_version="v1", to_version="v10")
-
-# Check pruning status
-get_pruned_count(workspace="lstm_baseline")
-→ {"count": 35}  # 35 versions hidden
+manage_versions(workspace="lstm_baseline", action="unprune", version="v5")
+manage_versions(workspace="lstm_baseline", action="unprune", from_version="v1", to_version="v10")
 ```
 
 **Key behaviors:**
 - Tagged versions are **protected** and cannot be pruned
-- Pruned versions don't appear in `list_versions()`, `status()`, or STATE.md
+- Pruned versions don't appear in `status()` or STATE.md
 - Version numbering continues unaffected (v1...v50 pruned, next is still v51)
 - Pruning is **reversible** via unprune
 
@@ -564,60 +526,35 @@ get_pruned_count(workspace="lstm_baseline")
 | `mount()` | Activate workspace in slot | slot, workspace |
 | `hibernate()` | Deactivate (auto-saves) | slot, reason |
 | `save_version()` | Create version save point | slot, message |
-| `get_workspace()` | Workspace details + pipeline | workspace |
-| `diff()` | Show uncommitted changes | slot |
+| `inspect_workspace()` | Workspace details + pipeline | name |
+| `diff()` | Show uncommitted changes | target, against |
 | `rollback()` | Revert to version | slot, version, reason |
 | `delete_workspace()` | Remove workspace | workspace, reason |
-| `list_workspaces()` | All workspaces | limit, offset |
 
 ### Execution
 
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
-| `run()` | Execute stages (with pre-run review) | workspace, stages, reason, wait |
-| `get_run()` | Run details | run_id |
-| `get_run_metrics()` | Query metrics + artifacts | run_id, metric_name, limit |
-| `list_metric_names()` | Discover metric names | run_id, metric_prefix |
+| `run()` | Execute stages (with pre-run review) | workspace, stages, reason |
+| `inspect_run()` | Run dashboard & details | run_id, include |
 | `logs()` | Container logs | run_id, tail, since |
 | `cancel()` | Stop run | run_id, reason |
 | `list_runs()` | Query runs | workspace, stage, status |
-| `get_outputs()` | Run outputs | run_id |
+| `mark_outcome()` | Classify result | run_id, outcome |
 
 ### Version Management (Tags & Pruning)
 
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
-| `tag_version()` | Name a version | workspace, version, tag_name |
-| `untag_version()` | Remove tag | workspace, tag_name |
-| `list_tags()` | All workspace tags | workspace |
-| `prune_version()` | Hide single version | workspace, version, reason |
-| `prune_versions()` | Hide version range | workspace, from/to_version, reason |
-| `prune_before_tag()` | Prune before milestone | workspace, tag_name, reason |
-| `unprune_version()` | Restore single version | workspace, version |
-| `unprune_versions()` | Restore version range | workspace, from/to_version |
-| `get_pruned_count()` | Count hidden versions | workspace |
+| `manage_versions()` | Unified tagging, pruning, listing | action, workspace, version, tag, from/to_version |
 
 ### Data Management
 
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
-| `register_dataset()` | Register data source | name, source, format |
-| `list_sources()` | Available sources | status, created_by |
-| `get_source()` | Source details | name |
-| `delete_source()` | Remove source | source_name, reason |
-| `get_source_lineage()` | Data provenance | source_name |
+| `register_source()` | Register data source | name, gcs_path, metadata |
+| `manage_sources()` | List, Get, Delete, Lineage | action, name, metadata |
 | `promote_artifact()` | Stage output → source | job_id, output_name |
-
-### Lineage & Provenance
-
-| Tool | Purpose | Key Parameters |
-|------|---------|----------------|
-| `get_workspace_lineage()` | Full history | workspace |
-| `get_version_diff()` | Compare versions | workspace, from/to |
-| `get_run_provenance()` | Exact run inputs | stage_run_id |
-| `get_stage_lineage()` | Upstream tree | run_id, max_depth |
-| `list_stage_versions()` | Stage version history | workspace, stage |
-| `find_runs_using_stage_version()` | Impact analysis | workspace, stage, version |
 
 ### Utility
 
@@ -625,10 +562,10 @@ get_pruned_count(workspace="lstm_baseline")
 |------|---------|----------------|
 | `initialize_project()` | New Goldfish project | project_name, project_root |
 | `reload_config()` | Hot-reload goldfish.yaml | None |
-| `get_audit_log()` | Operation history | limit, workspace |
+| `validate_config()` | Dry-run validation | workspace |
 | `log_thought()` | Record reasoning | thought |
-
-**Important:** After editing `goldfish.yaml`, always call `reload_config()` to apply changes without restarting the MCP server.
+| `manage_patterns()` | Manage SVS failure patterns | action, pattern_id |
+| `search_goldfish_logs()` | LogsQL search | query |
 
 ## Signal Types
 
@@ -662,62 +599,34 @@ For `compute.profile` in stage configs:
 2. mount("w1", "exp_v1")
 3. Edit code, run, analyze          # Creates v1, v2, v3... (many failures)
 4. Finally working!
-5. tag_version("exp_v1", "v24", "baseline-working")  # Mark milestone
+5. manage_versions(workspace="exp_v1", action="tag", version="v24", tag="baseline-working")
 6. Continue experimenting           # Creates v25, v26... (more failures)
-7. tag_version("exp_v1", "v47", "best-model")        # Mark best result
-8. prune_before_tag("exp_v1", "baseline-working", reason="Cleanup early failures")
+7. manage_versions(workspace="exp_v1", action="tag", version="v47", tag="best-model")
+8. manage_versions(workspace="exp_v1", action="prune", 
+                   from_version="v1", to_version="v23", 
+                   reason="Cleanup early failures")
 9. hibernate("w1", "Completed baseline")
-
-# Workspace now shows: v24 "baseline-working", v47 "best-model" (23 pruned)
-```
-
-### Pattern: Managing Experiment Clutter
-
-```
-# After many failed experiments, mark what matters
-tag_version("my_exp", "v15", "first-working")
-tag_version("my_exp", "v42", "best-accuracy")
-tag_version("my_exp", "v50", "final-submission")
-
-# Prune all the noise (cannot prune tagged versions)
-prune_versions("my_exp", "v1", "v14", reason="All failures before first working version")
-prune_versions("my_exp", "v16", "v41", reason="Iterations between first working and best")
-prune_versions("my_exp", "v43", "v49", reason="Final polish attempts")
-
-# Result: Only v15, v42, v50 visible; full history preserved if needed
 ```
 
 ### Pattern: Debug Failed Run
 
 ```
 1. list_runs(status="failed")
-2. get_run(run_id)           # See error, config
-3. logs(run_id, tail=500)    # Full error trace
-4. get_run_provenance(run_id) # What inputs were used
+2. inspect_run(run_id)             # See error, dashboard, trends
+3. logs(run_id, tail=500)          # Full error trace
+4. inspect_run(run_id, include=["provenance"]) # What inputs were used
 5. Fix code, run again
 ```
 
 ### Pattern: Reproduce Past Result
 
 ```
-1. get_run_provenance(stage_run_id)
+1. inspect_run(stage_run_id, include=["provenance"])
    → Returns: workspace, version, git_sha, config, inputs
 
-2. rollback(slot, snapshot_id)  # Restore exact code state
+2. rollback(slot, version)  # Restore exact code state
 
 3. run(workspace, stages, config_override)  # Re-run with same config
-```
-
-### Pattern: Impact Analysis
-
-```
-"If I change preprocessing, what's affected?"
-
-1. list_stage_versions("my_experiment", stage="preprocess")
-   → preprocessing-v1, v2, v3...
-
-2. find_runs_using_stage_version("my_experiment", "preprocess", 3)
-   → All training runs that consumed preprocessing-v3
 ```
 
 ## Audit & Context Recovery
@@ -727,13 +636,8 @@ Goldfish maintains full audit trails:
 ```
 log_thought("Switching to attention mechanism because...")
 
-get_audit_log(limit=20, workspace="lstm_baseline")
-→ All operations with reasons and timestamps
-```
-
-After context compaction, always start with:
-```
-status()  # Recover orientation: slots, jobs, STATE.md
+status()
+→ Shows recent audit history
 ```
 
 ## Troubleshooting & Recovery

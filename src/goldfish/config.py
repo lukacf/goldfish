@@ -99,6 +99,8 @@ class GCEConfig(BaseModel):
 
     # Service account (optional)
     service_account: str | None = None
+    ensure_metadata_permissions: bool = True
+    metadata_ack_role: str = "roles/compute.instanceAdmin.v1"
 
     # Runtime preferences
     gpu_preference: list[str] = Field(default_factory=lambda: ["h100", "a100", "none"])

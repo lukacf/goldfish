@@ -56,22 +56,35 @@ class LaunchResult:
     artifact_uri: str | None = None  # GCS URI for artifacts
 
 
-def run_gcloud(cmd: list[str], *, allow_capacity: bool = False, check: bool = True) -> subprocess.CompletedProcess:
+def run_gcloud(
+    cmd: list[str],
+    *,
+    allow_capacity: bool = False,
+    check: bool = True,
+    timeout: int = 60,
+    project_id: str | None = None,
+) -> subprocess.CompletedProcess:
     """Run gcloud command with capacity error detection.
 
     Args:
         cmd: Command list (e.g., ["gcloud", "compute", "instances", "create", ...])
         allow_capacity: If True, raise CapacityError on capacity issues
         check: Raise exception on non-zero exit code
+        timeout: Command timeout in seconds (default 60)
+        project_id: Explicit GCP project ID to use
 
     Returns:
         CompletedProcess
-
-    Raises:
-        CapacityError: If allow_capacity=True and capacity error detected
-        GoldfishError: If check=True and command fails (non-capacity)
     """
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    if project_id and "--project" not in cmd:
+        cmd.append(f"--project={project_id}")
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if check:
+            raise GoldfishError(f"gcloud command timed out after {timeout}s: {' '.join(cmd)}") from None
+        return subprocess.CompletedProcess(cmd, 1, "", f"Timed out after {timeout}s")
 
     if result.returncode == 0:
         return result
@@ -149,19 +162,21 @@ def mode_order(resource: dict[str, Any], preference: str, force_mode: str | None
     Returns:
         List of modes to try (e.g., ["spot", "on_demand"])
     """
+    preempt_allowed = resource.get("preemptible_allowed") or resource.get("preemptible", False)
+
     if force_mode == "spot":
-        return ["spot"] if resource.get("preemptible_allowed") else []
+        return ["spot"] if preempt_allowed else []
 
     if force_mode == "on_demand":
-        return ["on_demand"] if resource.get("on_demand_allowed") else []
+        return ["on_demand"] if resource.get("on_demand_allowed", True) else []
 
     preferred = ["spot", "on_demand"] if preference == "spot_first" else ["on_demand", "spot"]
 
     modes: list[str] = []
     for mode in preferred:
-        if mode == "spot" and resource.get("preemptible_allowed"):
+        if mode == "spot" and preempt_allowed:
             modes.append("spot")
-        if mode == "on_demand" and resource.get("on_demand_allowed"):
+        if mode == "on_demand" and resource.get("on_demand_allowed", True):
             modes.append("on_demand")
 
     return modes
@@ -221,6 +236,7 @@ class ResourceLauncher:
         backoff_multiplier: float = 1.5,
         max_attempts: int = 100,
         project_id: str | None = None,
+        service_account: str | None = None,
     ) -> None:
         if not resources:
             raise GoldfishError("resources list is empty")
@@ -236,6 +252,7 @@ class ResourceLauncher:
         self.backoff_multiplier = backoff_multiplier
         self.max_attempts = max_attempts
         self.project_id = project_id
+        self.service_account = service_account
 
         self.ordered_resources = order_resources(resources, self.gpu_preference, self.force_gpu)
 
@@ -417,7 +434,7 @@ class ResourceLauncher:
             if self.project_id:
                 cmd_disk.append(f"--project={self.project_id}")
 
-            run_gcloud(cmd_disk, allow_capacity=True)
+            run_gcloud(cmd_disk, allow_capacity=True, project_id=self.project_id)
             timings["disk_create_sec"] = round(time.time() - start, 2)
             scratch_attached = True
 
@@ -436,6 +453,8 @@ class ResourceLauncher:
             "--scopes=https://www.googleapis.com/auth/cloud-platform",
             "--quiet",
         ]
+        if self.service_account:
+            cmd.append(f"--service-account={self.service_account}")
 
         # Boot disk image
         boot_disk = resource.get("boot_disk", {})
@@ -483,7 +502,7 @@ class ResourceLauncher:
             metadata_entries.append("install-nvidia-driver=True")
 
         if preemptible:
-            cmd.append("--preemptible")
+            cmd.append("--provisioning-model=SPOT")
 
         if metadata_entries:
             cmd.append("--metadata=" + ",".join(metadata_entries))
@@ -494,7 +513,7 @@ class ResourceLauncher:
         # Launch instance
         start = time.time()
         try:
-            run_gcloud(cmd, allow_capacity=True)
+            run_gcloud(cmd, allow_capacity=True, project_id=self.project_id)
         except CapacityError:
             if scratch_attached and disk_name:
                 cleanup_disk(disk_name, zone)

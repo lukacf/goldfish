@@ -195,6 +195,42 @@ def test_resource_launcher_launch_success(mock_tempfile, mock_run_gcloud):
 
 @patch("goldfish.infra.resource_launcher.run_gcloud")
 @patch("goldfish.infra.resource_launcher.tempfile.NamedTemporaryFile")
+def test_resource_launcher_launch_sets_service_account(mock_tempfile, mock_run_gcloud):
+    """Should set service account on instance creation when configured."""
+    mock_temp = MagicMock()
+    mock_temp.name = "/tmp/startup.sh"
+    mock_tempfile.return_value.__enter__.return_value = mock_temp
+    mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
+
+    resources = [
+        {
+            "name": "test-resource",
+            "machine_type": "n1-standard-4",
+            "zones": ["us-central1-a"],
+            "gpu": {},
+            "preemptible_allowed": True,
+            "on_demand_allowed": True,
+            "boot_disk": {"size_gb": 100, "type": "pd-ssd"},
+        },
+    ]
+
+    launcher = ResourceLauncher(
+        resources=resources,
+        gpu_preference=["none"],
+        service_account="svc@test.iam.gserviceaccount.com",
+    )
+
+    launcher.launch(
+        instance_name="test-instance",
+        startup_script="#!/bin/bash\necho test",
+    )
+
+    cmd = mock_run_gcloud.call_args[0][0]
+    assert "--service-account=svc@test.iam.gserviceaccount.com" in cmd
+
+
+@patch("goldfish.infra.resource_launcher.run_gcloud")
+@patch("goldfish.infra.resource_launcher.tempfile.NamedTemporaryFile")
 @patch("goldfish.infra.resource_launcher.time.time")
 def test_resource_launcher_retry_on_capacity_error(mock_time, mock_tempfile, mock_run_gcloud):
     """Test that launcher retries on capacity errors."""

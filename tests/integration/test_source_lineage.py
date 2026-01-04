@@ -9,18 +9,17 @@ import pytest
 
 
 class TestGetSourceLineageTool:
-    """Tests for get_source_lineage tool."""
+    """Tests for manage_sources(action='lineage') tool."""
 
-    def test_get_source_lineage_tool_exists(self):
-        """Server should have get_source_lineage tool."""
+    def test_manage_sources_lineage_action_exists(self):
+        """Server should have manage_sources tool."""
         from goldfish import server
 
-        assert hasattr(server, "get_source_lineage")
+        assert hasattr(server, "manage_sources")
 
     def test_returns_lineage_for_external_source(self, temp_dir):
-        """get_source_lineage should return empty lineage for external source."""
+        """manage_sources should return empty lineage for external source."""
         from goldfish import server
-        from goldfish.models import SourceLineage
 
         mock_config = MagicMock()
         mock_db = MagicMock()
@@ -42,20 +41,19 @@ class TestGetSourceLineageTool:
         )
 
         try:
-            get_lineage_fn = (
-                server.get_source_lineage.fn if hasattr(server.get_source_lineage, "fn") else server.get_source_lineage
+            manage_sources_fn = (
+                server.manage_sources.fn if hasattr(server.manage_sources, "fn") else server.manage_sources
             )
-            result = get_lineage_fn(source_name="external_data")
+            result = manage_sources_fn(action="lineage", name="external_data")
 
-            assert isinstance(result, SourceLineage)
-            assert result.source_name == "external_data"
-            assert result.parent_sources == []
-            assert result.job_id is None
+            assert result["source_name"] == "external_data"
+            assert result["parents"] == []
+            assert result["job_id"] is None
         finally:
             server.reset_server()
 
     def test_returns_lineage_for_promoted_artifact(self, temp_dir):
-        """get_source_lineage should return parent sources and job for promoted artifact."""
+        """manage_sources should return parent sources and job for promoted artifact."""
         from goldfish import server
 
         mock_config = MagicMock()
@@ -89,31 +87,29 @@ class TestGetSourceLineageTool:
         )
 
         try:
-            get_lineage_fn = (
-                server.get_source_lineage.fn if hasattr(server.get_source_lineage, "fn") else server.get_source_lineage
+            manage_sources_fn = (
+                server.manage_sources.fn if hasattr(server.manage_sources, "fn") else server.manage_sources
             )
-            result = get_lineage_fn(source_name="promoted_v1")
+            result = manage_sources_fn(action="lineage", name="promoted_v1")
 
-            assert result.source_name == "promoted_v1"
-            assert "raw_data" in result.parent_sources
-            assert "config_data" in result.parent_sources
-            assert result.job_id == "job-abc123"
+            assert result["source_name"] == "promoted_v1"
+            assert "raw_data" in result["parents"]
+            assert "config_data" in result["parents"]
+            assert result["job_id"] == "job-abc123"
         finally:
             server.reset_server()
 
-    def test_raises_on_missing_source(self, temp_dir):
-        """get_source_lineage should raise SourceNotFoundError for missing source."""
+    def test_raises_on_missing_source_name(self, temp_dir):
+        """manage_sources should raise error if name missing for lineage action."""
         from goldfish import server
-        from goldfish.errors import SourceNotFoundError
+        from goldfish.errors import GoldfishError
 
         mock_config = MagicMock()
-        mock_db = MagicMock()
-        mock_db.source_exists.return_value = False
 
         server.configure_server(
             project_root=temp_dir,
             config=mock_config,
-            db=mock_db,
+            db=MagicMock(),
             workspace_manager=MagicMock(),
             state_manager=MagicMock(),
             job_launcher=MagicMock(),
@@ -125,16 +121,16 @@ class TestGetSourceLineageTool:
         )
 
         try:
-            get_lineage_fn = (
-                server.get_source_lineage.fn if hasattr(server.get_source_lineage, "fn") else server.get_source_lineage
+            manage_sources_fn = (
+                server.manage_sources.fn if hasattr(server.manage_sources, "fn") else server.manage_sources
             )
-            with pytest.raises(SourceNotFoundError):
-                get_lineage_fn(source_name="nonexistent_source")
+            with pytest.raises(GoldfishError):
+                manage_sources_fn(action="lineage")  # Missing name
         finally:
             server.reset_server()
 
     def test_validates_source_name(self, temp_dir):
-        """get_source_lineage should validate source name."""
+        """manage_sources should validate source name."""
         from goldfish import server
         from goldfish.validation import InvalidSourceNameError
 
@@ -155,10 +151,10 @@ class TestGetSourceLineageTool:
         )
 
         try:
-            get_lineage_fn = (
-                server.get_source_lineage.fn if hasattr(server.get_source_lineage, "fn") else server.get_source_lineage
+            manage_sources_fn = (
+                server.manage_sources.fn if hasattr(server.manage_sources, "fn") else server.manage_sources
             )
             with pytest.raises(InvalidSourceNameError):
-                get_lineage_fn(source_name="../invalid")
+                manage_sources_fn(action="lineage", name="../invalid")
         finally:
             server.reset_server()

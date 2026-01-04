@@ -69,7 +69,7 @@ class TestInputResolution:
 
         # Execute
         stage = pipeline_manager.get_pipeline.return_value.stages[0]
-        inputs, sources = executor._resolve_inputs("test_workspace", stage)
+        inputs, sources, _ = executor._resolve_inputs("test_workspace", stage)
 
         # Verify inputs
         assert inputs["raw_data"] == "gs://bucket/datasets/eurusd_raw_v3"
@@ -83,8 +83,12 @@ class TestInputResolution:
 class TestInputResolutionOutcome:
     """Test outcome-aware input resolution (success vs bad_results)."""
 
-    def test_resolve_input_prioritizes_success(self, test_db, test_config):
-        """Should prioritize most recent 'success' over newer unreviewed runs."""
+    def test_resolve_input_prefers_newest_non_bad(self, test_db, test_config):
+        """Should prefer newest COMPLETED run that isn't marked 'bad_results'.
+
+        Freshness matters more than explicit 'success' marking - unreviewed runs
+        are valid and should be used if they're newer. Only 'bad_results' is skipped.
+        """
         # 1. Setup runs for stage 'preprocess'
         with test_db._conn() as conn:
             conn.execute("PRAGMA foreign_keys = OFF")
@@ -128,11 +132,11 @@ class TestInputResolutionOutcome:
         )
 
         # Execute
-        inputs, sources = executor._resolve_inputs("w1", stage_def)
+        inputs, sources, _ = executor._resolve_inputs("w1", stage_def)
 
-        # Verify: should pick the 'success' run even if it's older than the unreviewed one
-        assert inputs["input_data"] == "gs://bucket/success"
-        assert sources["input_data"]["source_stage_run_id"] == "run-success"
+        # Verify: should pick the newer unreviewed run (freshness > explicit success)
+        assert inputs["input_data"] == "gs://bucket/new"
+        assert sources["input_data"]["source_stage_run_id"] == "run-new"
 
     def test_resolve_input_skips_bad_results(self, test_db, test_config):
         """Should skip runs marked as 'bad_results'."""
@@ -169,7 +173,7 @@ class TestInputResolutionOutcome:
             outputs={},
         )
 
-        inputs, sources = executor._resolve_inputs("w1", stage_def)
+        inputs, sources, _ = executor._resolve_inputs("w1", stage_def)
 
         assert inputs["input_data"] == "gs://bucket/good"
         assert sources["input_data"]["source_stage_run_id"] == "run-good"
@@ -209,7 +213,7 @@ class TestInputResolutionOutcome:
             outputs={},
         )
 
-        inputs, sources = executor._resolve_inputs("w1", stage_def)
+        inputs, sources, _ = executor._resolve_inputs("w1", stage_def)
 
         assert inputs["input_data"] == "gs://bucket/latest"
         assert sources["input_data"]["source_stage_run_id"] == "run-latest"
@@ -305,7 +309,7 @@ class TestInputResolutionOutcome:
         )
 
         stage = pipeline_manager.get_pipeline.return_value.stages[0]
-        inputs, sources = executor._resolve_inputs("test_workspace", stage)
+        inputs, sources, _ = executor._resolve_inputs("test_workspace", stage)
         assert inputs["raw_data"] == "gs://bucket/datasets/tokens_v1"
         assert sources["raw_data"]["source_type"] == "dataset"
 
@@ -350,7 +354,7 @@ class TestInputResolutionOutcome:
 
         # Execute
         stage = pipeline_manager.get_pipeline.return_value.stages[1]
-        inputs, sources = executor._resolve_inputs("test_workspace", stage)
+        inputs, sources, _ = executor._resolve_inputs("test_workspace", stage)
 
         # Verify inputs
         assert inputs["features"] == "gs://bucket/runs/stage-abc123/features"
@@ -384,7 +388,7 @@ class TestInputResolutionOutcome:
 
         # Execute with override
         stage = pipeline_manager.get_pipeline.return_value.stages[0]
-        inputs, sources = executor._resolve_inputs(
+        inputs, sources, _ = executor._resolve_inputs(
             "test_workspace", stage, inputs_override={"raw_data": "gs://bucket/debug/test_data.csv"}
         )
 

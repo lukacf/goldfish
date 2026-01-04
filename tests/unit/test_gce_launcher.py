@@ -140,7 +140,7 @@ class TestGetExitCode:
         assert result == 0
 
     def test_get_exit_code_correct_gcs_path(self, launcher):
-        """Should construct correct GCS path with gs:// prefix."""
+        """Should construct correct GCS path with gs:// prefix and project_id."""
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,
@@ -151,7 +151,14 @@ class TestGetExitCode:
             # but _get_exit_code should use bucket_uri which adds gs://
             launcher._get_exit_code("stage-abc123")
             args = mock_run.call_args[0][0]
-            assert args == ["gsutil", "cat", "gs://test-bucket/runs/stage-abc123/logs/exit_code.txt"]
+            # Includes -o GSUtil:project_id=... when project_id is set
+            assert args == [
+                "gsutil",
+                "-o",
+                "GSUtil:project_id=test-project",
+                "cat",
+                "gs://test-bucket/runs/stage-abc123/logs/exit_code.txt",
+            ]
 
     def test_get_exit_code_handles_bucket_with_prefix(self, launcher):
         """Should work correctly when bucket already has gs:// prefix."""
@@ -164,8 +171,14 @@ class TestGetExitCode:
             )
             launcher._get_exit_code("stage-abc123")
             args = mock_run.call_args[0][0]
-            # Should NOT double the gs:// prefix
-            assert args == ["gsutil", "cat", "gs://already-prefixed-bucket/runs/stage-abc123/logs/exit_code.txt"]
+            # Should NOT double the gs:// prefix, includes project_id option
+            assert args == [
+                "gsutil",
+                "-o",
+                "GSUtil:project_id=test-project",
+                "cat",
+                "gs://already-prefixed-bucket/runs/stage-abc123/logs/exit_code.txt",
+            ]
 
 
 class TestGetInstanceLogs:
@@ -180,7 +193,7 @@ class TestGetInstanceLogs:
         """Create a GCE launcher with mocked config."""
         with patch("goldfish.infra.gce_launcher.GCELauncher.__init__", lambda x, y: None):
             launcher = GCELauncher(MagicMock())
-            launcher.bucket = "mlm-artifacts-bucket"  # Without gs:// prefix (realistic)
+            launcher.bucket = "test-artifacts-bucket"  # Without gs:// prefix (realistic)
             launcher.project_id = "test-project"
             launcher.default_zone = "us-central1-a"
             launcher.zones = ["us-central1-a"]
@@ -189,11 +202,11 @@ class TestGetInstanceLogs:
     def test_get_instance_logs_uses_bucket_uri(self, launcher):
         """REGRESSION: get_instance_logs must use bucket_uri not bucket directly.
 
-        This test documents the bug where bucket="mlm-artifacts-bucket" was used
+        This test documents the bug where bucket="test-artifacts-bucket" was used
         directly in gsutil commands, resulting in invalid paths like:
-            gsutil cat mlm-artifacts-bucket/runs/stage-xxx/logs/stdout.log
+            gsutil cat test-artifacts-bucket/runs/stage-xxx/logs/stdout.log
         instead of:
-            gsutil cat gs://mlm-artifacts-bucket/runs/stage-xxx/logs/stdout.log
+            gsutil cat gs://test-artifacts-bucket/runs/stage-xxx/logs/stdout.log
         """
         with (
             patch("subprocess.Popen") as mock_popen,
@@ -219,7 +232,7 @@ class TestGetInstanceLogs:
             assert call_args[2] == "cat"
             # CRITICAL: Must have gs:// prefix
             assert call_args[3].startswith("gs://"), f"GCS path missing gs:// prefix: {call_args[3]}"
-            assert call_args[3] == "gs://mlm-artifacts-bucket/runs/stage-abc123/logs/stdout.log"
+            assert call_args[3] == "gs://test-artifacts-bucket/runs/stage-abc123/logs/stdout.log"
 
     def test_get_instance_logs_bucket_with_prefix_no_double(self, launcher):
         """Should not double gs:// prefix when bucket already has it."""
@@ -260,7 +273,7 @@ class TestMapGceStatusIntegration:
         with patch("goldfish.infra.gce_launcher.GCELauncher.__init__", lambda x, y: None):
             launcher = GCELauncher(MagicMock())
             # Realistic bucket name without gs:// prefix (as stored in config)
-            launcher.bucket = "mlm-artifacts-king-dev"
+            launcher.bucket = "test-artifacts-bucket"
             launcher.project_id = "test-project"
             return launcher
 
@@ -285,9 +298,15 @@ class TestMapGceStatusIntegration:
             # Must return COMPLETED, not FAILED
             assert status == StageRunStatus.COMPLETED, f"TERMINATED with exit_code=0 should be COMPLETED, got {status}"
 
-            # Verify correct GCS path was used
+            # Verify correct GCS path was used (includes project_id option)
             call_args = mock_run.call_args[0][0]
-            assert call_args == ["gsutil", "cat", "gs://your-bucket/runs/stage-68043eed/logs/exit_code.txt"]
+            assert call_args == [
+                "gsutil",
+                "-o",
+                "GSUtil:project_id=test-project",
+                "cat",
+                "gs://test-artifacts-bucket/runs/stage-68043eed/logs/exit_code.txt",
+            ]
 
     def test_terminated_with_exit_code_nonzero_returns_failed(self, launcher):
         """TERMINATED instance with non-zero exit code should return FAILED."""

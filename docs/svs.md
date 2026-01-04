@@ -335,9 +335,8 @@ SVS feedback is surfaced via existing **run status** tools, alongside metrics an
 **Mechanism:**
 - Container emits SVS findings during execution.
 - StageExecutor aggregates findings into `stage_runs.svs_findings_json`.
-- Dev‑side Claude polls with existing tools:
-  - `get_run_status(...)`
-  - `get_stage_run(...)`
+- Dev‑side Claude polls with the master tool:
+  - `inspect_run(run_id, include=["svs"])`
 
 **SVS payload (in stage_runs.svs_findings_json):**
 ```json
@@ -1055,41 +1054,20 @@ async def review_pending_patterns():
         pattern_manager.update_status(pattern.id, decision)
 ```
 
-**CLI for pattern management:**
+**Management via Master Tool:**
 
 ```bash
 # List pending patterns for manual review
-goldfish list-failure-patterns --status=pending
+manage_patterns(action="list", status="pending")
 
 # Approve pattern
-goldfish approve-pattern pattern-abc123
+manage_patterns(action="approve", pattern_id="pattern-abc123")
 
 # Reject pattern
-goldfish reject-pattern pattern-abc123 --reason="Infrastructure error"
+manage_patterns(action="reject", pattern_id="pattern-abc123", reason="Infrastructure error")
 
 # Run librarian agent
-goldfish review-pending-patterns
-```
-
----
-
-## CLI for Knowledge Management
-
-```bash
-# Query patterns
-goldfish list-failure-patterns --stage=tokenization --severity=HIGH
-
-# Show specific pattern with provenance
-goldfish show-failure-pattern pattern-abc123
-
-# Edit pattern
-goldfish edit-failure-pattern pattern-abc123 --symptom="Updated description"
-
-# Disable pattern
-goldfish edit-failure-pattern pattern-abc123 --enabled=false
-
-# Link back to source run (provenance!)
-goldfish show-run $(goldfish show-failure-pattern pattern-abc123 --field=source_run_id)
+manage_patterns(action="review")
 ```
 
 ---
