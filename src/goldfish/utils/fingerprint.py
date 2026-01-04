@@ -52,12 +52,31 @@ def calculate_fingerprint(path: Path) -> dict[str, Any]:
                     "dtype": str(data.dtype),
                 }
             )
-            # Add deep stats only for small files (< 100MB) to keep it fast
+            # Add deep stats
+            # Thresholds:
+            # - < 100MB: Full stats (fast enough for small tensors)
+            # - >= 100MB: Reservoir sampling (O(1) vs O(N) memory/time)
             if file_size < 100 * 1024 * 1024:
                 stats["mean"] = float(np.mean(data))
                 stats["std"] = float(np.std(data))
+                stats["sampled"] = False
             else:
-                logger.debug("Skipping deep stats for large .npy (%d bytes)", file_size)
+                # Reservoir sampling for large tensors
+                # We sample 10,000 elements to get a stable estimate
+                sample_size = 10000
+                total_elements = data.size
+                if total_elements > sample_size:
+                    # Flatten and sample
+                    indices = np.random.choice(total_elements, sample_size, replace=False)
+                    sample = data.flat[indices]
+                    stats["mean"] = float(np.mean(sample))
+                    stats["std"] = float(np.std(sample))
+                    stats["sampled"] = True
+                    logger.debug("Using reservoir sampling for large .npy (%d bytes)", file_size)
+                else:
+                    stats["mean"] = float(np.mean(data))
+                    stats["std"] = float(np.std(data))
+                    stats["sampled"] = False
         except ImportError:
             logger.debug("Numpy not found; skipping .npy deep fingerprint")
         except Exception as e:
