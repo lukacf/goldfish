@@ -351,7 +351,7 @@ def test_build_image_passes_version_build_arg(tmp_path, monkeypatch):
 
     captured_cmds = []
 
-    def fake_run(cmd, capture_output=True, text=True, check=False):
+    def fake_run(cmd, capture_output=True, text=True, check=False, timeout=None):
         captured_cmds.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -392,7 +392,7 @@ def test_build_image_copies_metrics_module(tmp_path, monkeypatch):
     (workspace_path / "modules" / "train.py").write_text("from goldfish.metrics import log_metric")
     (workspace_path / "configs").mkdir()
 
-    def fake_run(cmd, capture_output=True, text=True, check=False):
+    def fake_run(cmd, capture_output=True, text=True, check=False, timeout=None):
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)

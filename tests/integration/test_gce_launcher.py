@@ -16,6 +16,8 @@ def launcher():
         project_id="test-project",
         zone="us-central1-a",
         bucket="gs://test-bucket",
+        service_account="svc@test.iam.gserviceaccount.com",
+        ensure_metadata_permissions=False,
         resources=[
             {
                 "name": "cpu-resource",
@@ -45,12 +47,52 @@ def test_gce_launcher_init():
         project_id="test-project",
         zone="us-west1-a",
         bucket="gs://my-bucket",
+        service_account="svc@test.iam.gserviceaccount.com",
+        ensure_metadata_permissions=False,
     )
 
     assert launcher.project_id == "test-project"
     assert launcher.default_zone == "us-west1-a"
     assert launcher.bucket == "gs://my-bucket"
     assert launcher.resources == []
+    assert launcher.service_account == "svc@test.iam.gserviceaccount.com"
+
+
+@patch("goldfish.infra.gce_launcher.run_gcloud")
+def test_resolve_service_account_default(mock_run_gcloud):
+    """Should derive default compute service account when not provided."""
+    launcher = GCELauncher(project_id="test-project")
+    mock_run_gcloud.return_value = Mock(returncode=0, stdout="123456789012\n", stderr="")
+
+    assert launcher._resolve_service_account() == "123456789012-compute@developer.gserviceaccount.com"
+
+    cmd = mock_run_gcloud.call_args[0][0]
+    assert cmd[:3] == ["gcloud", "projects", "describe"]
+    assert "test-project" in cmd
+
+
+@patch("goldfish.infra.gce_launcher.run_gcloud")
+def test_ensure_metadata_permissions_adds_binding(mock_run_gcloud):
+    """Should add IAM binding for metadata ack role."""
+    launcher = GCELauncher(
+        project_id="test-project",
+        service_account="svc@test.iam.gserviceaccount.com",
+    )
+    mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
+
+    launcher._ensure_metadata_permissions()
+
+    assert mock_run_gcloud.call_count == 2
+    cmd = mock_run_gcloud.call_args_list[0][0][0]
+    assert cmd[:4] == ["gcloud", "projects", "add-iam-policy-binding", "test-project"]
+    assert "--member=serviceAccount:svc@test.iam.gserviceaccount.com" in cmd
+    assert "--role=roles/compute.instanceAdmin.v1" in cmd
+
+    cmd = mock_run_gcloud.call_args_list[1][0][0]
+    assert cmd[:4] == ["gcloud", "iam", "service-accounts", "add-iam-policy-binding"]
+    assert "svc@test.iam.gserviceaccount.com" in cmd
+    assert "--member=serviceAccount:svc@test.iam.gserviceaccount.com" in cmd
+    assert "--role=roles/iam.serviceAccountUser" in cmd
 
 
 def test_gce_launcher_requires_bucket_for_launch(launcher):
@@ -98,6 +140,11 @@ def test_launch_with_capacity_search(mock_build_startup, mock_resource_launcher_
     assert call_kwargs["bucket"] == "test-bucket"
     assert call_kwargs["run_path"] == "runs/test-run-123"
     assert call_kwargs["image"] == "test-image:latest"
+
+    # Verify ResourceLauncher was created with service account
+    mock_resource_launcher_class.assert_called_once()
+    _, rl_kwargs = mock_resource_launcher_class.call_args
+    assert rl_kwargs["service_account"] == "svc@test.iam.gserviceaccount.com"
 
 
 @patch("goldfish.infra.gce_launcher.ResourceLauncher")
@@ -162,6 +209,8 @@ def test_launch_with_goldfish_env_vars(mock_build_startup, mock_resource_launche
 
     # Verify ResourceLauncher was created and used
     mock_resource_launcher_class.assert_called_once()
+    _, call_kwargs = mock_resource_launcher_class.call_args
+    assert call_kwargs["service_account"] == "svc@test.iam.gserviceaccount.com"
     mock_launcher.launch.assert_called_once()
 
 
@@ -204,6 +253,7 @@ def test_launch_simple_no_gpu(mock_build_startup, mock_run_gcloud, mock_tempfile
     assert "test-run" in gcloud_cmd
     assert "--machine-type=n1-standard-8" in gcloud_cmd
     assert "--project=test-project" in gcloud_cmd
+    assert "--service-account=svc@test.iam.gserviceaccount.com" in gcloud_cmd
 
     # GPU flags should NOT be present
     assert not any("--accelerator" in str(arg) for arg in gcloud_cmd)
@@ -241,6 +291,7 @@ def test_launch_simple_with_gpu(mock_build_startup, mock_run_gcloud, mock_tempfi
     assert result == "gpu-run"
 
     # Verify GPU flags are present
+    mock_run_gcloud.assert_called_once()
     gcloud_cmd = mock_run_gcloud.call_args[0][0]
     assert "--accelerator" in gcloud_cmd
     assert "count=1,type=nvidia-tesla-a100" in "".join(gcloud_cmd)

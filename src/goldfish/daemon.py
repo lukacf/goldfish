@@ -34,6 +34,8 @@ from goldfish.context import ServerContext, set_context
 from goldfish.datasets.registry import DatasetRegistry
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError, ProjectNotInitializedError
+from goldfish.infra.metadata.base import MetadataBus
+from goldfish.infra.metadata.local import LocalMetadataBus
 from goldfish.jobs.launcher import JobLauncher
 from goldfish.jobs.pipeline_executor import PipelineExecutor
 from goldfish.jobs.stage_executor import StageExecutor
@@ -326,6 +328,18 @@ class GoldfishDaemon:
         )
         pipeline_executor = PipelineExecutor(stage_executor=stage_executor, pipeline_manager=pipeline_manager, db=db)
 
+        # Initialize MetadataBus (Cloud-native or Local simulation)
+        metadata_bus: MetadataBus
+        local_metadata_bus: LocalMetadataBus | None = None
+        if self.config.gce:
+            from goldfish.infra.metadata.gcp import GCPMetadataBus
+
+            metadata_bus = GCPMetadataBus()
+        else:
+            # Use a file in dev repo for local simulation
+            local_metadata_bus = LocalMetadataBus(self.dev_repo_path / ".metadata_bus.json")
+            metadata_bus = local_metadata_bus
+
         # Create and set context
         self.context = ServerContext(
             project_root=self.project_root,
@@ -339,8 +353,19 @@ class GoldfishDaemon:
             dataset_registry=dataset_registry,
             stage_executor=stage_executor,
             pipeline_executor=pipeline_executor,
+            metadata_bus=metadata_bus,
         )
         set_context(self.context)
+
+        # Start local metadata syncer for Overdrive parity in non-GCE environments
+        if local_metadata_bus is not None:
+            from goldfish.infra.metadata.local_syncer import LocalMetadataSyncer
+
+            self._local_metadata_syncer = LocalMetadataSyncer(
+                bus=local_metadata_bus,
+                stage_executor=stage_executor,
+            )
+            self._local_metadata_syncer.start()
 
         # Store references for worker
         self._db = db
@@ -435,6 +460,7 @@ class GoldfishDaemon:
                 JOIN pipeline_stage_queue psq ON psq.pipeline_run_id = pr.id
                 WHERE pr.status IN (?, ?)
                 AND psq.status IN (?, ?)
+                ORDER BY pr.started_at DESC
                 LIMIT 10
                 """,
                 (PipelineStatus.PENDING, PipelineStatus.RUNNING, PipelineStatus.PENDING, PipelineStatus.RUNNING),
@@ -510,6 +536,7 @@ class GoldfishDaemon:
             while not self.shutdown_event.is_set():
                 try:
                     self._check_orphaned_instances()
+                    self._cleanup_stalled_pipelines()
                 except Exception as e:
                     logger.exception("Instance monitor error: %s", e)
 
@@ -519,6 +546,41 @@ class GoldfishDaemon:
 
         self.instance_monitor_thread = threading.Thread(target=monitor_loop, daemon=True, name="instance-monitor")
         self.instance_monitor_thread.start()
+
+    def _cleanup_stalled_pipelines(self) -> None:
+        """Mark old running/pending pipelines as failed if they haven't progressed.
+
+        This prevents worker queue starvation by clearing 'zombie' runs that
+        stalled due to worker crashes, restarts, or unhandled errors.
+        """
+        # Stale threshold: 4 hours (generous for long-running experiments)
+        threshold = "4 hours"
+        with self._db._conn() as conn:
+            # 1. Clear stalled queue entries
+            conn.execute(
+                f"""
+                UPDATE pipeline_stage_queue
+                SET status = ?, error = ?
+                WHERE status IN (?, ?)
+                AND (claimed_at < datetime('now', '-{threshold}') OR (claimed_at IS NULL AND id IN (
+                    SELECT psq.id FROM pipeline_stage_queue psq
+                    JOIN pipeline_runs pr ON pr.id = psq.pipeline_run_id
+                    WHERE pr.started_at < datetime('now', '-{threshold}')
+                )))
+                """,
+                (PipelineStatus.FAILED, "Stalled (auto-cleanup)", PipelineStatus.PENDING, PipelineStatus.RUNNING),
+            )
+
+            # 2. Clear stalled pipeline runs
+            conn.execute(
+                f"""
+                UPDATE pipeline_runs
+                SET status = ?, error = ?
+                WHERE status IN (?, ?)
+                AND started_at < datetime('now', '-{threshold}')
+                """,
+                (PipelineStatus.FAILED, "Stalled (auto-cleanup)", PipelineStatus.PENDING, PipelineStatus.RUNNING),
+            )
 
     def _check_if_preempted(self, instance_name: str, project_id: str) -> bool:
         """Check if a GCE instance was preempted.

@@ -40,7 +40,7 @@ from goldfish.models import (
 )
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.pipeline.validator import validate_pipeline_run
-from goldfish.svs.contract import resolve_config_params, validate_input_schema_against_metadata
+from goldfish.svs.contract import resolve_config_params
 from goldfish.svs.manifest import read_svs_manifests
 from goldfish.svs.post_run import run_post_run_review
 from goldfish.utils import parse_optional_datetime
@@ -110,6 +110,9 @@ class StageExecutor:
         gce_zones = None
         gce_resources: list[dict[str, Any]] = []
         gce_gpu_preference = None
+        gce_service_account = None
+        gce_ensure_metadata_permissions = True
+        gce_metadata_ack_role = "roles/compute.instanceAdmin.v1"
 
         if config.gcs:
             gce_bucket = config.gcs.bucket
@@ -127,6 +130,9 @@ class StageExecutor:
                 gce_zone = config.gce.zones[0]
                 gce_zones = config.gce.zones  # Pass all zones for multi-zone lookups
             gce_gpu_preference = config.gce.gpu_preference
+            gce_service_account = config.gce.service_account
+            gce_ensure_metadata_permissions = config.gce.ensure_metadata_permissions
+            gce_metadata_ack_role = config.gce.metadata_ack_role
 
             # Resolve artifact_registry from config or auto-generate from project
             self.artifact_registry = config.gce.effective_artifact_registry
@@ -141,6 +147,9 @@ class StageExecutor:
             resources=gce_resources,  # Will be set per-stage
             zones=gce_zones,
             gpu_preference=gce_gpu_preference,
+            service_account=gce_service_account,
+            ensure_metadata_permissions=gce_ensure_metadata_permissions,
+            metadata_ack_role=gce_metadata_ack_role,
         )
 
         # Live metrics sync state (per run)
@@ -150,6 +159,8 @@ class StageExecutor:
         self._svs_sync_lock = threading.Lock()
         self._gcs_client: GCSClient | None = None
         self._gcs_client_lock = threading.Lock()
+        self._refresh_lock = threading.Lock()
+        self._refreshing_runs: set[str] = set()
 
     def run_stage(
         self,
@@ -240,38 +251,12 @@ class StageExecutor:
                     pipeline_name=pipeline_name,
                 )
 
-        # 3. Pre-run review (if enabled and not skipped)
-        review: RunReview | None = None
-        if self.config.pre_run_review.enabled and not skip_review:
-            review = self._perform_pre_run_review(
-                workspace=workspace,
-                stage_name=stage_name,
-                pipeline=pipeline,
-                reason_structured=reason_structured,
-                git_sha=git_sha,
-            )
-            if review and review.has_blocking_issues:
-                # Create failed stage run record with review
-                return self._create_blocked_stage_run(
-                    stage_run_id=stage_run_id,
-                    workspace=workspace,
-                    version=version,
-                    stage_name=stage_name,
-                    review=review,
-                    reason=reason,
-                    reason_structured=reason_structured,
-                    pipeline_run_id=pipeline_run_id,
-                    pipeline_name=pipeline_name,
-                    preflight_warnings=preflight_warnings,
-                )
-
-        # 3b. Load stage config and apply override
+        # 2c. Load stage config and apply override early
         stage_config = self._load_stage_config(workspace, stage_name) or {}
         if config_override:
-            # shallow merge override
             stage_config.update(config_override)
 
-        # 2c. Compute config hash and get/create stage version
+        # 2d. Compute stage version
         config_hash = compute_config_hash(stage_config)
         stage_version_id, stage_version_num, _ = self.db.get_or_create_stage_version(
             workspace=workspace,
@@ -280,45 +265,87 @@ class StageExecutor:
             config_hash=config_hash,
         )
 
-        # 3. Resolve inputs (with source metadata for lineage tracking)
-        inputs, input_sources = self._resolve_inputs(workspace, stage, inputs_override)
-
-        # 4. Create or update stage run record
+        # 2e. Create placeholder record IMMEDIATELY (to satisfy FKs for review/audit)
         if not stage_run_precreated:
-            # Create new stage run record
             self._create_stage_run_record(
                 stage_run_id=stage_run_id,
                 workspace=workspace,
                 version=version,
                 stage_name=stage_name,
                 stage_version_id=stage_version_id,
-                inputs=inputs,
-                input_sources=input_sources,
+                inputs={},  # Resolved later
+                input_sources={},
                 config_override=config_override,
                 reason=reason,
                 reason_structured=reason_structured,
                 pipeline_run_id=pipeline_run_id,
                 pipeline_name=pipeline_name,
-                profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
-                hints=stage_config.get("hints"),
+                profile=None,
+                hints=None,
                 config=stage_config,
                 preflight_errors=preflight_errors,
                 preflight_warnings=preflight_warnings,
             )
-        else:
-            # Update existing queued stage run record with resolved values
-            self._update_queued_stage_run(
-                stage_run_id=stage_run_id,
-                version=version,
-                stage_version_id=stage_version_id,
-                inputs=inputs,
-                input_sources=input_sources,
-                config=stage_config,
-                profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
-                hints=stage_config.get("hints"),
-                preflight_warnings=preflight_warnings,
-                preflight_errors=preflight_errors,
+
+        # 3. Resolve inputs
+        inputs, input_sources, input_context = self._resolve_inputs(
+            workspace, stage, inputs_override, pipeline_run_id=pipeline_run_id
+        )
+
+        # 4. Pre-run review
+        review: RunReview | None = None
+        if self.config.pre_run_review.enabled and not skip_review:
+            review = self._perform_pre_run_review(
+                workspace=workspace,
+                stage_name=stage_name,
+                pipeline=pipeline,
+                reason_structured=reason_structured,
+                git_sha=git_sha,
+                input_context=input_context,
             )
+            if review:
+                self._record_pre_run_review(stage_run_id, review)
+
+            if review and review.has_blocking_issues:
+                # Update status to FAILED (record already exists)
+                # Build error message with review summary and specific issues
+                error_msg = f"Pre-run review blocked: {review.summary}"
+                if review.error_count > 0:
+                    error_details = []
+                    for issue in review.issues:
+                        if issue.severity == ReviewSeverity.ERROR:
+                            loc = f"{issue.file}:{issue.line}" if issue.file and issue.line else (issue.file or "")
+                            error_details.append(f"  - {loc}: {issue.message}" if loc else f"  - {issue.message}")
+                    if error_details:
+                        error_msg += "\n\nErrors:\n" + "\n".join(error_details[:5])
+
+                self.db.update_stage_run_status(stage_run_id, StageRunStatus.FAILED, error=error_msg)
+                return StageRunInfo(
+                    stage_run_id=stage_run_id,
+                    pipeline_run_id=pipeline_run_id,
+                    workspace=workspace,
+                    pipeline=pipeline_name,
+                    version=version,
+                    stage=stage_name,
+                    status=StageRunStatus.FAILED,
+                    started_at=datetime.now(UTC),
+                    completed_at=datetime.now(UTC),
+                    error=error_msg,
+                )
+
+        # 5. Update record with resolved values
+        self._update_queued_stage_run(
+            stage_run_id=stage_run_id,
+            version=version,
+            stage_version_id=stage_version_id,
+            inputs=inputs,
+            input_sources=input_sources,
+            config=stage_config,
+            profile=stage_config.get("compute", {}).get("profile"),
+            hints=stage_config.get("hints"),
+            preflight_warnings=preflight_warnings,
+            preflight_errors=preflight_errors,
+        )
 
         try:
             # Emit phase progress: building image
@@ -427,94 +454,144 @@ class StageExecutor:
         workspace: str,
         stage: StageDef,
         inputs_override: dict | None = None,
-    ) -> tuple[dict[str, str], dict[str, dict]]:
-        """Resolve input sources (dataset, signal, or override).
+        pipeline_run_id: str | None = None,
+    ) -> tuple[dict[str, str], dict[str, dict], list[dict]]:
+        """Resolve all input sources for a stage.
+
+        Args:
+            workspace: Workspace name
+            stage: Stage definition
+            inputs_override: Optional dict of input name -> source/path overrides
+            pipeline_run_id: Optional ID of the parent pipeline run
 
         Returns:
-            (inputs, sources) tuple where:
             - inputs: {input_name: source_location}
             - sources: {input_name: {source_stage_run_id, source_stage_version_id, source_type}}
+            - input_context: list of resolved input metadata for pre-run review
         """
         inputs: dict[str, str] = {}
         sources: dict[str, dict] = {}
+        input_context: list[dict] = []
 
         for input_name, input_def in stage.inputs.items():
+            ctx: dict[str, Any] = {"input": input_name, "consumer_stage": stage.name}
             # Check for override
             if inputs_override and input_name in inputs_override:
                 override_value = inputs_override[input_name]
-                # Try to resolve as a registered source name first
-                source = self.db.get_source(override_value)
-                if source:
-                    inputs[input_name] = source["gcs_location"]
-                    sources[input_name] = {"source_type": "source", "source_name": override_value}
-                else:
-                    # Use as literal path
-                    inputs[input_name] = override_value
-                    sources[input_name] = {"source_type": "override"}
+
+                # 1. Try to resolve as a stage run ID or explicit run/signal dict
+                source_run_id = None
+                signal_name = input_def.signal or input_def.name
+
+                if isinstance(override_value, str) and override_value.startswith("stage-"):
+                    source_run_id = override_value
+                elif isinstance(override_value, dict):
+                    # Support both 'from_run' (internal) and 'run_id' (user-friendly)
+                    source_run_id = override_value.get("from_run") or override_value.get("run_id")
+                    if "signal" in override_value:
+                        signal_name = override_value["signal"]
+
+                if source_run_id:
+                    signals = self.db.list_signals(stage_run_id=source_run_id)
+                    signal = next((s for s in signals if s["signal_name"] == signal_name), None)
+
+                    if signal:
+                        inputs[input_name] = signal["storage_location"]
+                        sources[input_name] = {
+                            "source_type": "stage",
+                            "source_stage_run_id": source_run_id,
+                            "source_stage_version_id": None,
+                        }
+                        ctx.update({"source_type": "stage", "override": override_value, "run_id": source_run_id})
+                        input_context.append(ctx)
+                        continue
+
+                # 2. Try to resolve as a registered source name (only if string)
+                if isinstance(override_value, str | int):
+                    source = self.db.get_source(str(override_value))
+                    if source:
+                        inputs[input_name] = source["gcs_location"]
+                        sources[input_name] = {"source_type": "source", "source_name": str(override_value)}
+                        ctx.update({"source_type": "source", "override": override_value})
+                        input_context.append(ctx)
+                        continue
+
+                # 3. Use as literal path (fallback)
+                inputs[input_name] = str(override_value)
+                sources[input_name] = {"source_type": "override"}
+                ctx.update({"source_type": "override", "override": override_value})
+                input_context.append(ctx)
                 continue
 
             # Resolve precedence: from_stage first, then dataset
             if input_def.from_stage:
-                # Find output from previous stage
-                # Priority:
-                # 1. Most recent COMPLETED run with outcome='success'
-                # 2. Most recent COMPLETED run with outcome IS NULL (unreviewed)
-                # Skip any run with outcome != 'success' and not NULL (e.g., 'bad_results')
-                stage_runs = self.db.list_stage_runs(
-                    workspace_name=workspace, stage_name=input_def.from_stage, status=StageRunStatus.COMPLETED
+                ctx.update(
+                    {
+                        "source_type": "stage",
+                        "from_stage": input_def.from_stage,
+                        "signal": input_def.signal or input_def.name,
+                    }
                 )
 
                 source_run = None
-                skipped_bad = 0
-                for run in stage_runs:
-                    outcome = run.get("outcome")
-                    if outcome == "success":
+
+                # Priority 1: Use the run from the SAME pipeline invocation if available
+                if pipeline_run_id:
+                    p_runs = self.db.list_stage_runs(
+                        pipeline_run_id=pipeline_run_id,
+                        stage_name=input_def.from_stage,
+                        status=StageRunStatus.COMPLETED,
+                    )
+                    if p_runs:
+                        source_run = p_runs[0]  # Most recent in this pipeline
+
+                # Priority 2: Use most recent globally successful or unreviewed run
+                if not source_run:
+                    # Find output from previous stage
+                    # Priority: Most recent COMPLETED run that is NOT 'bad_results'
+                    stage_runs = self.db.list_stage_runs(
+                        workspace_name=workspace, stage_name=input_def.from_stage, status=StageRunStatus.COMPLETED
+                    )
+
+                    for run in stage_runs:
+                        outcome = run.get("outcome")
+                        if outcome == "bad_results":
+                            continue
+
+                        # Found the most recent valid run (success or None/unreviewed)
                         source_run = run
                         break
-                    if outcome is None:
-                        # Fallback candidate (keep looking for an explicit 'success')
-                        if source_run is None:
-                            source_run = run
-                        # Continue searching for a 'success' outcome in previous runs
-                        continue
 
-                    # If we reach here, outcome is set but not 'success' (e.g., 'bad_results')
-                    skipped_bad += 1
-
-                if skipped_bad > 0:
-                    logger.warning(
-                        "Stage '%s': skipped %d COMPLETED runs with non-success outcome for input '%s'",
-                        stage.name,
-                        skipped_bad,
-                        input_name,
-                    )
+                    skipped_bad = sum(1 for r in stage_runs if r.get("outcome") == "bad_results")
+                    if skipped_bad > 0:
+                        logger.warning(
+                            "Stage '%s': skipped %d COMPLETED runs with bad_results outcome for input '%s'",
+                            stage.name,
+                            skipped_bad,
+                            input_name,
+                        )
 
                 if not source_run:
                     raise GoldfishError(
                         f"No successful or unreviewed COMPLETED run found for stage '{input_def.from_stage}'"
                     )
 
-                if source_run.get("outcome") is None:
-                    logger.info(
-                        "Stage '%s': using unreviewed run %s for input '%s' (no run marked 'success' found)",
-                        stage.name,
-                        source_run["id"],
-                        input_name,
-                    )
-
                 source_run_id = source_run["id"]
+                ctx.update(
+                    {
+                        "selected_run_id": source_run_id,
+                        "selected_run_status": source_run.get("status"),
+                        "selected_run_progress": source_run.get("progress"),
+                        "selected_run_started_at": source_run.get("started_at"),
+                        "selected_run_outcome": source_run.get("outcome"),
+                    }
+                )
 
                 # Get signal from that run
                 signals = self.db.list_signals(stage_run_id=source_run_id)
-                # Use explicit signal name if specified, otherwise default to input name
                 signal_name = input_def.signal or input_def.name
 
-                signal = None
-                for s in signals:
-                    if s["signal_name"] == signal_name:
-                        signal = s
-                        break
-
+                signal = next((s for s in signals if s["signal_name"] == signal_name), None)
                 if not signal:
                     available = [s["signal_name"] for s in signals]
                     raise GoldfishError(
@@ -529,6 +606,22 @@ class StageExecutor:
                     "source_stage_version_id": source_run.get("stage_version_id"),
                 }
 
+                latest_runs = self.db.list_stage_runs(
+                    workspace_name=workspace, stage_name=input_def.from_stage, limit=1
+                )
+                if latest_runs:
+                    latest = latest_runs[0]
+                    ctx.update(
+                        {
+                            "latest_run_id": latest.get("id"),
+                            "latest_run_status": latest.get("status"),
+                            "latest_run_progress": latest.get("progress"),
+                            "latest_run_started_at": latest.get("started_at"),
+                            "latest_run_outcome": latest.get("outcome"),
+                        }
+                    )
+                input_context.append(ctx)
+
             elif input_def.type == "dataset":
                 # External dataset
                 if self.dataset_registry is None:
@@ -536,7 +629,10 @@ class StageExecutor:
                 if input_def.dataset is None:
                     raise GoldfishError(f"Input '{input_name}' is type 'dataset' but no dataset specified")
                 dataset = self.dataset_registry.get_dataset(input_def.dataset)
+                ctx.update({"source_type": "dataset", "dataset": input_def.dataset})
                 if input_def.output_schema:
+                    from goldfish.svs.contract import validate_input_schema_against_metadata
+
                     if getattr(dataset, "metadata_status", None) == "ok" and getattr(dataset, "metadata", None):
                         metadata = dataset.metadata
                         assert metadata is not None  # Checked above
@@ -558,11 +654,12 @@ class StageExecutor:
                     "source_type": "dataset",
                     "dataset_name": input_def.dataset,
                 }
+                input_context.append(ctx)
 
             else:
                 raise GoldfishError(f"Cannot resolve input: {input_name}")
 
-        return inputs, sources
+        return inputs, sources, input_context
 
     def _get_svs_agent(self):
         """Get the configured SVS agent provider."""
@@ -1496,6 +1593,12 @@ class StageExecutor:
                 version=version,
             )
 
+            # Cleanup local image after successful push to prevent bloat
+            try:
+                self.docker_builder.remove_image(local_image_tag)
+            except Exception:
+                pass
+
             return registry_image_tag
 
         return local_image_tag
@@ -1660,6 +1763,13 @@ class StageExecutor:
             "XDG_CACHE_HOME": "/app/.cache",
         }
 
+        # Overdrive defaults: unbuffered stdout + faster metrics flush
+        goldfish_env.setdefault("PYTHONUNBUFFERED", os.environ.get("PYTHONUNBUFFERED", "1"))
+        goldfish_env.setdefault(
+            "GOLDFISH_METRICS_FLUSH_INTERVAL",
+            os.environ.get("GOLDFISH_METRICS_FLUSH_INTERVAL", "5"),
+        )
+
         # Add git SHA if available
         if git_sha:
             goldfish_env["GOLDFISH_GIT_SHA"] = git_sha
@@ -1679,8 +1789,6 @@ class StageExecutor:
                     goldfish_env["GOLDFISH_WANDB_ENTITY"] = wandb_config["entity"]
 
         # Passthrough WANDB_API_KEY from host environment if set
-        import os
-
         if "WANDB_API_KEY" in os.environ:
             goldfish_env["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
 
@@ -2021,6 +2129,21 @@ echo "Stage completed successfully"
 
     def refresh_status_once(self, stage_run_id: str) -> str | None:
         """Single backend check to advance status/logs/outputs without blocking."""
+        with self._refresh_lock:
+            if stage_run_id in self._refreshing_runs:
+                # Already being refreshed by another thread
+                row = self.db.get_stage_run(stage_run_id)
+                return row.get("status") if row else None
+            self._refreshing_runs.add(stage_run_id)
+
+        try:
+            return self._refresh_status_once_unlocked(stage_run_id)
+        finally:
+            with self._refresh_lock:
+                self._refreshing_runs.remove(stage_run_id)
+
+    def _refresh_status_once_unlocked(self, stage_run_id: str) -> str | None:
+        """Internal implementation of refresh_status_once without locking."""
         backend = self.config.jobs.backend
         terminal_statuses = (StageRunStatus.COMPLETED, StageRunStatus.FAILED, StageRunStatus.CANCELED)
 
@@ -2062,6 +2185,40 @@ echo "Stage completed successfully"
                         progress=StageRunProgress.FINALIZING,
                     )
                     self._finalize_stage_run(stage_run_id, backend, status)
+            elif status == "not_found":
+                row = self.db.get_stage_run(stage_run_id)
+                if not row:
+                    return status
+
+                not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
+                started_at = row.get("started_at")
+                elapsed = float(not_found_timeout)
+                if started_at:
+                    try:
+                        started_dt = datetime.fromisoformat(started_at)
+                        elapsed = (datetime.now(UTC) - started_dt).total_seconds()
+                    except ValueError:
+                        elapsed = float(not_found_timeout)
+
+                if elapsed < not_found_timeout:
+                    return status
+
+                exit_code = self.gce_launcher._get_exit_code(stage_run_id)
+                resolved = StageRunStatus.COMPLETED if exit_code == 0 else StageRunStatus.FAILED
+
+                current = self.db.get_stage_run(stage_run_id)
+                if current and current.get("status") not in terminal_statuses:
+                    error_msg = None
+                    if resolved == StageRunStatus.FAILED:
+                        error_msg = f"GCE instance {stage_run_id} not found after {not_found_timeout} seconds"
+                    self.db.update_stage_run_status(
+                        stage_run_id=stage_run_id,
+                        status=StageRunStatus.RUNNING,
+                        progress=StageRunProgress.FINALIZING,
+                        error=error_msg,
+                    )
+                    self._finalize_stage_run(stage_run_id, backend, resolved)
+                return resolved
             return status
 
         return None
@@ -2075,6 +2232,7 @@ echo "Stage completed successfully"
         pipeline: PipelineDef,
         reason_structured: dict | None,
         git_sha: str,
+        input_context: list[dict] | None = None,
     ) -> RunReview | None:
         """Perform pre-run review using Claude Agent SDK.
 
@@ -2119,6 +2277,7 @@ echo "Stage completed successfully"
                     stages=[stage_name],  # Review the specific stage
                     reason=run_reason,
                     diff_text=diff_text,
+                    input_context=input_context,
                     db=self.db,
                 )
             )
@@ -2210,6 +2369,40 @@ echo "Stage completed successfully"
         except Exception as e:
             logger.warning(f"Failed to get diff: {e}")
             return ""
+
+    def _record_pre_run_review(self, stage_run_id: str, review: RunReview) -> None:
+        """Record a pre-run review in the SVS reviews table.
+
+        Args:
+            stage_run_id: Stage run ID
+            review: The RunReview to record
+        """
+        import hashlib
+
+        now = datetime.now(UTC).isoformat()
+        # Create hash of the full review text as prompt hash for deduplication/tracking
+        prompt_hash = hashlib.sha256(review.full_review.encode()).hexdigest()
+
+        decision = "approved"
+        if not review.approved:
+            decision = "blocked"
+        elif any(i.severity == ReviewSeverity.WARNING for i in review.issues):
+            decision = "warned"
+
+        try:
+            self.db.create_svs_review(
+                stage_run_id=stage_run_id,
+                review_type="pre_run",
+                model_used=self.config.pre_run_review.model,
+                prompt_hash=prompt_hash,
+                decision=decision,
+                reviewed_at=now,
+                response_text=review.full_review,
+                parsed_findings=json.dumps([i.model_dump(mode="json") for i in review.issues]),
+                duration_ms=review.review_time_ms,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to record pre-run review for {stage_run_id}: {e}")
 
     def _create_blocked_stage_run(
         self,

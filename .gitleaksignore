@@ -1,0 +1,4 @@
+# False positive from git diff colorization
+# The detected "secret" is ANSI escape codes, not actual secrets
+tests/integration/test_input_resolution_regression.py:generic-api-key:119
+tests/integration/test_input_resolution_regression.py:generic-api-key:126

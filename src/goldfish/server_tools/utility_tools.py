@@ -3,28 +3,19 @@
 Extracted from server.py for better organization.
 """
 
-import json
 import logging
 from datetime import datetime
 
 from goldfish.errors import validate_reason
 from goldfish.models import (
-    AuditEntry,
-    AuditLogResponse,
     LogThoughtResponse,
-    StatusResponse,
 )
 from goldfish.server_core import (
     _get_config,
     _get_db,
     _get_state_manager,
-    _get_state_md,
     _get_workspace_manager,
     mcp,
-)
-from goldfish.utils import parse_datetime
-from goldfish.validation import (
-    validate_workspace_name,
 )
 
 logger = logging.getLogger("goldfish.server")
@@ -142,84 +133,7 @@ def reload_config() -> dict:
 
 
 @mcp.tool()
-def status() -> StatusResponse:
-    """Get current status: slots, jobs, sources, and STATE.md content.
-
-    Returns complete context for orientation after context compaction.
-    Call this first when resuming work.
-    """
-    from goldfish.context import has_context
-
-    # Debug logging
-    try:
-        with open("/tmp/goldfish_status.log", "a") as f:
-            f.write(f"status() called, has_context={has_context()}\n")
-    except OSError:
-        pass
-
-    config = _get_config()
-    db = _get_db()
-    workspace_manager = _get_workspace_manager()
-
-    slots = workspace_manager.get_all_slots()
-    active_jobs_raw = db.get_active_jobs()
-
-    from goldfish.jobs.conversion import job_dict_to_info
-
-    active_jobs = [job_dict_to_info(j, db) for j in active_jobs_raw]
-
-    source_count = len(db.list_sources())
-    state_md = _get_state_md()
-
-    return StatusResponse(
-        project_name=config.project_name,
-        slots=slots,
-        active_jobs=active_jobs,
-        source_count=source_count,
-        state_md=state_md,
-    )
-
-
-@mcp.tool()
-def get_audit_log(
-    limit: int = 20,
-    workspace: str | None = None,
-) -> AuditLogResponse:
-    """Get recent audit trail entries.
-
-    Shows what operations have been performed and why.
-
-    Args:
-        limit: Maximum number of entries to return (default 20)
-        workspace: Optional filter by workspace name
-    """
-    db = _get_db()
-
-    entries = db.get_recent_audit(limit=limit)
-
-    # Filter by workspace if specified
-    if workspace:
-        validate_workspace_name(workspace)
-        entries = [e for e in entries if e.get("workspace") == workspace]
-
-    audit_entries = [
-        AuditEntry(
-            id=e["id"],
-            timestamp=parse_datetime(e["timestamp"]),
-            operation=e["operation"],
-            slot=e.get("slot"),
-            workspace=e.get("workspace"),
-            reason=e["reason"],
-            details=json.loads(e["details"]) if e["details"] else None,
-        )
-        for e in entries
-    ]
-
-    return AuditLogResponse(entries=audit_entries, count=len(audit_entries))
-
-
-@mcp.tool()
-def log_thought(thought: str) -> LogThoughtResponse:
+def log_thought(thought: str, workspace: str | None = None, run_id: str | None = None) -> LogThoughtResponse:
     """Record reasoning for the audit trail.
 
     Use this to document why you're making decisions.
@@ -227,6 +141,8 @@ def log_thought(thought: str) -> LogThoughtResponse:
 
     Args:
         thought: Your reasoning or decision rationale (min 15 chars)
+        workspace: Optional workspace name or slot to associate this thought with.
+        run_id: Optional stage run ID to associate this thought with.
     """
     config = _get_config()
     db = _get_db()
@@ -234,95 +150,191 @@ def log_thought(thought: str) -> LogThoughtResponse:
 
     validate_reason(thought, config.audit.min_reason_length)
 
+    # Associate with workspace if provided
+    ws_name = None
+    if workspace:
+        # Resolve slot/workspace name
+        ws_manager = _get_workspace_manager()
+        ws_name = ws_manager.get_workspace_for_slot(workspace) or workspace
+
     db.log_audit(
         operation="thought",
         reason=thought,
+        workspace=ws_name,
+        details={"run_id": run_id} if run_id else None,
     )
 
-    # Truncate for STATE.md display
-    truncated = thought[:50] + "..." if len(thought) > 50 else thought
-    state_manager.add_action(f"Thought: {truncated}")
+    # Record in STATE.md (no truncation per user request)
+    state_manager.add_action(f"Thought: {thought}")
 
     return LogThoughtResponse(
         logged=True,
         thought=thought,
         timestamp=datetime.now(),
+        workspace=ws_name,
+        run_id=run_id,
     )
 
 
 @mcp.tool()
-def build_base_images(
-    image_type: str | None = None,
-    push: bool = True,
-    no_cache: bool = False,
-) -> dict:
-    """Build and push pre-built base images to Artifact Registry.
+def get_workspace_thoughts(workspace: str, limit: int = 50, offset: int = 0) -> dict:
+    """Get all thoughts logged for a workspace.
 
-    Base images contain common ML libraries (numpy, pandas, torch, etc.)
-    so workspaces don't need to include a requirements.txt for standard dependencies.
+    Retrieves thoughts that were logged using log_thought() with this workspace.
+    Useful for recovering context and understanding prior reasoning.
 
     Args:
-        image_type: "cpu", "gpu", or None for both (default: build both)
-        push: Push to Artifact Registry after build (default: True)
-        no_cache: Force rebuild without Docker cache (default: False)
+        workspace: Workspace name or slot (e.g., "baseline" or "w1")
+        limit: Maximum number of thoughts to return (default 50)
+        offset: Number of thoughts to skip for pagination (default 0)
 
     Returns:
-        dict with success status and image tags
+        dict with:
+        - workspace: The resolved workspace name
+        - thoughts: List of thought entries with timestamp, thought text, and optional run_id
+        - total: Total count of thoughts for this workspace
+
+    Related tools:
+    - log_thought(): Record new thoughts
+    - inspect_run(include=["thoughts"]): Get thoughts for a specific run
+    - inspect_workspace(): Get workspace context including goal and history
     """
-    from goldfish.infra.base_images import build_base_image, push_base_image
-    from goldfish.infra.profiles import BASE_IMAGE_VERSION, get_base_image_names
+    import json
 
-    config = _get_config()
+    db = _get_db()
+    ws_manager = _get_workspace_manager()
 
-    # Determine which images to build
-    if image_type:
-        if image_type not in ("cpu", "gpu"):
-            return {"success": False, "error": f"Invalid image_type: {image_type}. Must be 'cpu' or 'gpu'"}
-        types_to_build = [image_type]
-    else:
-        types_to_build = ["cpu", "gpu"]
+    # Resolve slot to workspace name
+    ws_name = ws_manager.get_workspace_for_slot(workspace) or workspace
 
-    # Get registry URL
-    registry_url = None
-    if config.gce:
-        registry_url = config.gce.artifact_registry
-        if not registry_url:
-            try:
-                project_id = config.gce.effective_project_id
-                registry_url = f"us-docker.pkg.dev/{project_id}/goldfish"
-            except ValueError:
-                pass
+    # Get thoughts from database
+    thought_rows = db.get_workspace_thoughts(ws_name, limit=limit, offset=offset)
+    total = db.count_workspace_thoughts(ws_name)
 
-    if push and not registry_url:
-        return {
-            "success": False,
-            "error": "Cannot push images: no artifact registry configured. Set gce.artifact_registry in goldfish.yaml",
+    # Format thoughts for response
+    thoughts = []
+    for row in thought_rows:
+        thought_entry = {
+            "timestamp": row["timestamp"],
+            "thought": row["reason"],
         }
+        # Extract run_id from details if present
+        details_str = row.get("details")
+        if details_str:
+            try:
+                details = json.loads(details_str)
+                if details.get("run_id"):
+                    thought_entry["run_id"] = details["run_id"]
+            except (json.JSONDecodeError, TypeError):
+                pass
+        thoughts.append(thought_entry)
 
-    images: dict[str, dict[str, str]] = {}
-    descriptions = get_base_image_names()
+    return {
+        "workspace": ws_name,
+        "thoughts": thoughts,
+        "total": total,
+    }
 
-    for img_type in types_to_build:
-        try:
-            # Build locally
-            local_tag = build_base_image(img_type, no_cache=no_cache)
-            result: dict[str, str] = {
-                "local_tag": local_tag,
-                "description": descriptions.get(f"goldfish-base-{img_type}", ""),
-            }
 
-            # Push to registry if requested
-            if push and registry_url:
-                registry_tag = push_base_image(img_type, registry_url)
-                result["registry_tag"] = registry_tag
+@mcp.tool()
+def dashboard() -> dict:
+    """Get a quick overview of system state for situational awareness.
 
-            images[img_type] = result
+    Returns a summary designed for rapid understanding of:
+    - What's broken (failed runs)
+    - What's running (active runs)
+    - Workspace status (mounted, dirty state)
+    - Recent outcomes (success/bad_results trends)
 
-        except Exception as e:
-            images[img_type] = {"error": str(e)}
-            return {"success": False, "images": images, "version": BASE_IMAGE_VERSION}
+    Unlike status(), this tool focuses on actionable information
+    rather than audit trails.
 
-    return {"success": True, "images": images, "version": BASE_IMAGE_VERSION}
+    Returns:
+        dict with:
+        - failed_runs: Recent failed runs with error messages
+        - active_runs: Currently running or pending stages
+        - workspaces: Workspace summary with dirty status
+        - source_count: Total registered data sources
+        - recent_outcomes: Recent run outcomes for trend visibility
+
+    Related tools:
+    - status(): Global state including STATE.md and audit trail
+    - list_all_runs(): Complete run history across workspaces
+    - inspect_run(): Full details for a specific run
+    """
+    from goldfish.workspace.manager import DirtyState
+
+    db = _get_db()
+    ws_manager = _get_workspace_manager()
+
+    # Get failed runs
+    failed_rows = db.get_recent_failed_runs(limit=10)
+    failed_runs = [
+        {
+            "run_id": row["id"],
+            "workspace": row["workspace_name"],
+            "stage": row["stage_name"],
+            "error": row.get("error", "Unknown error"),
+            "completed_at": row.get("completed_at"),
+        }
+        for row in failed_rows
+    ]
+
+    # Get active runs
+    active_rows = db.get_active_runs()
+    active_runs = [
+        {
+            "run_id": row["id"],
+            "workspace": row["workspace_name"],
+            "stage": row["stage_name"],
+            "status": row["status"],
+            "progress": row.get("progress"),
+            "started_at": row.get("started_at"),
+        }
+        for row in active_rows
+    ]
+
+    # Get workspace summary with dirty status
+    workspaces = []
+    for ws_info in ws_manager.list_workspaces(limit=50):
+        ws_entry = {
+            "name": ws_info.name,
+            "is_mounted": ws_info.is_mounted,
+            "slot": ws_info.mounted_slot,
+            "goal": ws_info.goal,
+            "dirty": False,  # default
+        }
+        # Get dirty status if mounted
+        if ws_info.is_mounted and ws_info.mounted_slot:
+            try:
+                slot_info = ws_manager.get_slot_info(ws_info.mounted_slot)
+                ws_entry["dirty"] = slot_info.dirty == DirtyState.DIRTY
+            except Exception:
+                pass
+        workspaces.append(ws_entry)
+
+    # Get source count
+    source_count = db.count_sources()
+
+    # Get recent outcomes
+    outcome_rows = db.get_recent_outcomes(limit=10)
+    recent_outcomes = [
+        {
+            "workspace": row["workspace_name"],
+            "stage": row["stage_name"],
+            "outcome": row["outcome"],
+            "completed_at": row.get("completed_at"),
+        }
+        for row in outcome_rows
+    ]
+
+    return {
+        "failed_runs": failed_runs,
+        "active_runs": active_runs,
+        "workspaces": workspaces,
+        "source_count": source_count,
+        "recent_outcomes": recent_outcomes,
+    }
 
 
 @mcp.tool()

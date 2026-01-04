@@ -18,6 +18,7 @@ from goldfish.state.state_md import StateManager
 
 if TYPE_CHECKING:
     from goldfish.datasets.registry import DatasetRegistry
+    from goldfish.infra.metadata.base import MetadataBus
     from goldfish.jobs.launcher import JobLauncher
     from goldfish.jobs.pipeline_executor import PipelineExecutor
     from goldfish.jobs.stage_executor import StageExecutor
@@ -47,6 +48,7 @@ class ServerContext:
     dataset_registry: DatasetRegistry
     stage_executor: StageExecutor
     pipeline_executor: PipelineExecutor
+    metadata_bus: MetadataBus
 
     def get_state_md(self) -> str:
         """Regenerate and return STATE.md content."""
