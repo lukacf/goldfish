@@ -1,5 +1,6 @@
 """Docker image building for Goldfish stage execution."""
 
+import logging
 import re
 import shutil
 import subprocess
@@ -7,6 +8,8 @@ import tempfile
 from pathlib import Path
 
 from goldfish.errors import GoldfishError
+
+logger = logging.getLogger(__name__)
 
 # Paths to goldfish runtime modules (relative to this file)
 GOLDFISH_IO_PATH = Path(__file__).parent.parent / "io" / "__init__.py"
@@ -263,7 +266,10 @@ CMD ["/bin/bash"]
             build_cmd.append(str(build_context))
 
             try:
-                result = subprocess.run(build_cmd, capture_output=True, text=True, check=False)
+                # Set a 15-minute timeout for the build process to avoid hanging the daemon
+                # if Docker Desktop stalls or network is extremely slow.
+                timeout_sec = 15 * 60
+                result = subprocess.run(build_cmd, capture_output=True, text=True, check=False, timeout=timeout_sec)
 
                 if result.returncode != 0:
                     # Capture last few lines of log to provide more context than just the header
@@ -329,7 +335,13 @@ CMD ["/bin/bash"]
                 raise GoldfishError(f"Docker tag failed: {tag_result.stderr}")
 
             # Push to registry
-            push_result = subprocess.run(["docker", "push", registry_tag], capture_output=True, text=True, check=False)
+            push_result = subprocess.run(
+                ["docker", "push", registry_tag],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15 * 60,
+            )
 
             if push_result.returncode != 0:
                 raise GoldfishError(f"Docker push failed: {push_result.stderr}")
@@ -338,6 +350,17 @@ CMD ["/bin/bash"]
 
         except FileNotFoundError as err:
             raise GoldfishError("Docker not found. Please install Docker to push images.") from err
+
+    def remove_image(self, image_tag: str) -> None:
+        """Remove local Docker image.
+
+        Args:
+            image_tag: Tag of the image to remove
+        """
+        try:
+            subprocess.run(["docker", "rmi", image_tag], capture_output=True, check=False)
+        except Exception as e:
+            logger.debug(f"Failed to remove image {image_tag}: {e}")
 
     def _generate_image_tag(self, workspace_name: str, version: str) -> str:
         """Generate Docker image tag.

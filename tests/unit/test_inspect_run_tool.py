@@ -188,3 +188,82 @@ def test_inspect_run_skips_sync_when_launching():
     assert result["dashboard"]["sync_status"] == "starting"
     mock_stage_exec.refresh_status_once.assert_called_once_with(run_id)
     mock_bus.set_signal.assert_not_called()
+
+
+def test_inspect_run_includes_thoughts():
+    """Test that inspect_run correctly fetches and includes thoughts."""
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-a1b2c3d4"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "progress": "100%",
+        "reason_json": None,
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    # Mock thoughts in audit trail
+    mock_db.get_run_thoughts.return_value = [
+        {"timestamp": "2025-12-27T10:05:00Z", "reason": "Initial reasoning about hyperparameters."},
+        {"timestamp": "2025-12-27T10:30:00Z", "reason": "Adjusting learning rate due to slow convergence."},
+    ]
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id)
+
+    assert "thoughts" in result
+    assert len(result["thoughts"]) == 2
+    assert result["thoughts"][0]["thought"] == "Initial reasoning about hyperparameters."
+    assert result["thoughts"][1]["thought"] == "Adjusting learning rate due to slow convergence."
+    mock_db.get_run_thoughts.assert_called_once_with(run_id)
+
+
+def test_inspect_run_includes_attempt_info():
+    """Test that inspect_run includes attempt context when requested."""
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-abc123"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "baseline",
+        "stage_name": "train",
+        "status": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "progress": "100%",
+        "reason_json": None,
+        "attempt_num": 3,
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+    mock_db.get_attempt_context.return_value = {
+        "attempt": 3,
+        "runs_in_attempt": 5,
+        "completed": 4,
+        "failed": 1,
+        "success": 0,
+        "bad_results": 0,
+        "status": "open",
+    }
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["metadata", "attempt"])
+
+    assert "attempt_context" in result
+    assert result["attempt_context"]["attempt"] == 3
+    assert result["attempt_context"]["runs_in_attempt"] == 5
+    assert result["attempt_context"]["status"] == "open"

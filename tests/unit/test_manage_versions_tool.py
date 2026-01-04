@@ -43,7 +43,7 @@ def test_manage_versions_list():
 
     assert result["workspace"] == "w1"
     assert len(result["versions"]) == 2
-    mock_db.list_versions.assert_called_once_with("w1", include_pruned=True)
+    mock_db.list_versions.assert_called_once_with("w1", include_pruned=True, limit=50, offset=0)
 
 
 def test_manage_versions_tag_success():
