@@ -72,25 +72,23 @@ if __name__ == "__main__":
 
 Goldfish provides I/O helpers for stages running in containers.
 
-### load_input(name)
+### load_input(name, format)
 
 Load an input signal by name.
 
 ```python
 from goldfish.io import load_input
 
-# Load numpy array (type: npy)
-features = load_input("features")  # Returns np.ndarray
+# Auto-load based on signal type
+features = load_input("features")
 
-# Load CSV (type: csv)
-df = load_input("data")  # Returns pd.DataFrame
-
-# Load directory (type: directory)
-model_path = load_input("checkpoint")  # Returns Path to dir
-
-# Load file (type: file)
-config_path = load_input("config")  # Returns Path to file
+# Optional: Override format
+df = load_input("raw_data", format="csv")
 ```
+
+**Parameters:**
+- `name`: Signal name from `pipeline.yaml`
+- `format`: (Optional) Explicit format override (`npy`, `csv`, `directory`, `file`, `dataset`)
 
 **Input mapping:**
 | Signal Type | Returned Type |
@@ -101,73 +99,79 @@ config_path = load_input("config")  # Returns Path to file
 | `file` | `pathlib.Path` |
 | `dataset` | `pathlib.Path` to the dataset directory |
 
-### Loading Dataset Inputs
+---
 
-When a stage input is `type: dataset`, it references a registered dataset:
+### save_output(name, data, artifact)
 
-```yaml
-# In pipeline.yaml
-stages:
-  - name: train
-    inputs:
-      tokens:
-        type: dataset
-        dataset: v37-tokens    # Name of registered dataset
-    outputs:
-      model:
-        type: directory
-```
-
-In the stage module:
-
-```python
-from goldfish.io import load_input
-
-def main():
-    # Returns Path to the dataset directory
-    tokens_path = load_input("tokens")
-
-    # Load data from the directory
-    # (structure depends on how dataset was created)
-    import numpy as np
-    train_data = np.load(tokens_path / "train.npy")
-    val_data = np.load(tokens_path / "val.npy")
-```
-
-**Register datasets before use:**
-```
-register_dataset(
-    name="v37-tokens",
-    source="gs://my-bucket/datasets/v37-tokens/",
-    description="Tokenized training data v37",
-    format="directory"
-)
-```
-
-### save_output(name, data)
-
-Save an output signal.
+Save an output signal or artifact. **Only supports `npy` and `csv` formats.**
 
 ```python
 from goldfish.io import save_output
-import numpy as np
-import pandas as pd
 
-# Save numpy array (type: npy)
-embeddings = np.array([...])
+# Save numpy array (format: npy)
 save_output("embeddings", embeddings)
 
-# Save DataFrame (type: csv)
-results = pd.DataFrame({...})
-save_output("results", results)
+# Save pandas DataFrame (format: csv)
+save_output("metrics", metrics_df)
 
-# Save directory (type: directory)
-# Copy entire directory contents
-save_output("model", "/path/to/model_dir")
-
-# Save single file (type: file)
-save_output("config", "/path/to/config.json")
+# Save permanent artifact (promoted to registry)
+save_output("model", "/path/to/model", artifact=True)
 ```
+
+**Parameters:**
+- `name`: Output name from `pipeline.yaml`
+- `data`: Object to save (numpy array or pandas DataFrame)
+- `artifact`: (Optional) If `True`, marks this output as a permanent artifact for registry promotion
+
+**Supported Formats:**
+| Format | Data Type | Auto-save |
+|--------|-----------|-----------|
+| `npy` | `np.ndarray` | Yes |
+| `csv` | `pd.DataFrame` | Yes |
+| `file` | - | No, use `get_output_path()` |
+| `directory` | - | No, use `get_output_path()` |
+
+**For `file` or `directory` formats, use `get_output_path()` instead:**
+```python
+# WRONG - will raise ValueError for file/directory formats
+save_output("my_file", data)  # ValueError!
+
+# CORRECT - use get_output_path() for manual saving
+path = get_output_path("my_file")
+with open(path, "wb") as f:
+    f.write(data)
+```
+
+---
+
+### get_input_path(name)
+
+Get the physical local path for an input. Useful for manual loading with libraries like `torch` or `cv2`.
+
+```python
+from goldfish.io import get_input_path
+import torch
+
+path = get_input_path("checkpoint")
+model = torch.load(path / "model.pt")
+```
+
+---
+
+### get_output_path(name)
+
+Get the physical local path to write outputs. Goldfish will automatically upload content from this path after the stage completes.
+
+```python
+from goldfish.io import get_output_path
+
+# Create and save a multi-file output
+path = get_output_path("plots")
+plt.savefig(path / "loss.png")
+plt.savefig(path / "accuracy.png")
+```
+
+---
 
 ### get_config()
 
@@ -187,7 +191,7 @@ The SVS Runtime API allows stages to interact with background AI monitoring.
 
 ### runtime_log(message, level)
 
-Write a structured log line explicitly for AI monitoring.
+Write a structured log line for both AI monitoring and human debugging.
 
 ```python
 from goldfish.io import runtime_log
@@ -199,9 +203,13 @@ runtime_log("Gradient norm is stable, training looks healthy")
 runtime_log("Loss is flatlining, considering early stop", level="WARN")
 ```
 
-**Notes:**
-- These logs go to `.goldfish/logs.txt` and are distinct from standard `stdout`.
-- The `DuringRunMonitor` uses these logs as its primary input for qualitative review.
+**Dual Purpose:**
+1. **AI Monitoring**: Logs are written to `.goldfish/logs.txt` where the `DuringRunMonitor` analyzes them for anomalies (OOM, NaN, loss divergence) and can request early termination.
+2. **Human Visibility**: Logs are also printed to stdout, so they appear in the `logs()` tool for real-time debugging.
+
+**When to use:**
+- Use `runtime_log()` for important status updates you want both AI and humans to see
+- Use regular `print()` for verbose debug output that doesn't need AI analysis
 
 ### should_stop()
 
