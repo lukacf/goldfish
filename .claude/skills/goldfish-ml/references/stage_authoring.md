@@ -72,7 +72,11 @@ if __name__ == "__main__":
 
 Goldfish provides I/O helpers for stages running in containers.
 
-### load_input(name, format)
+### load_input(name, format) -> Any
+
+```python
+def load_input(name: str, format: str | None = None) -> np.ndarray | pd.DataFrame | Path
+```
 
 Load an input signal by name.
 
@@ -101,7 +105,11 @@ df = load_input("raw_data", format="csv")
 
 ---
 
-### save_output(name, data, artifact)
+### save_output(name, data, artifact) -> Path | None
+
+```python
+def save_output(name: str, data: Any, artifact: bool = False) -> Path | None
+```
 
 Save an output signal or artifact. **Only supports `npy` and `csv` formats.**
 
@@ -137,38 +145,62 @@ save_output("model", "/path/to/model", artifact=True)
 save_output("my_file", data)  # ValueError!
 
 # CORRECT - use get_output_path() for manual saving
-path = get_output_path("my_file")
-with open(path, "wb") as f:
+path = get_output_path("my_file")  # Returns directory Path
+with open(path / "data.bin", "wb") as f:  # Write file inside directory
     f.write(data)
 ```
 
 ---
 
-### get_input_path(name)
+### get_input_path(name) -> Path
 
-Get the physical local path for an input. Useful for manual loading with libraries like `torch` or `cv2`.
+```python
+def get_input_path(name: str) -> Path
+```
+
+Get the physical local path for an input. **Takes only 1 argument.** Useful for manual loading with libraries like `torch` or `cv2`.
 
 ```python
 from goldfish.io import get_input_path
 import torch
 
-path = get_input_path("checkpoint")
+path = get_input_path("checkpoint")  # Returns Path to /mnt/inputs/checkpoint/
 model = torch.load(path / "model.pt")
 ```
 
 ---
 
-### get_output_path(name)
+### get_output_path(name) -> Path
 
-Get the physical local path to write outputs. Goldfish will automatically upload content from this path after the stage completes.
+```python
+def get_output_path(name: str) -> Path
+```
+
+Get the physical local path to write outputs. **Takes only 1 argument** - the output name from pipeline.yaml. Returns a `Path` object. Goldfish will automatically upload content from this path after the stage completes.
 
 ```python
 from goldfish.io import get_output_path
 
-# Create and save a multi-file output
-path = get_output_path("plots")
+# Single file output (type: file)
+path = get_output_path("encoded_data")  # Returns Path, e.g., /mnt/outputs/encoded_data/
+with open(path / "data.bin", "wb") as f:
+    f.write(binary_data)
+
+# Multi-file output (type: directory)
+path = get_output_path("plots")  # Returns Path, e.g., /mnt/outputs/plots/
 plt.savefig(path / "loss.png")
 plt.savefig(path / "accuracy.png")
+```
+
+**Common mistake:** Do NOT pass a filename as second argument:
+```python
+# WRONG - get_output_path takes only 1 argument!
+path = get_output_path("data", "data.bin")  # TypeError!
+
+# CORRECT
+path = get_output_path("data")
+with open(path / "data.bin", "wb") as f:
+    ...
 ```
 
 ---
