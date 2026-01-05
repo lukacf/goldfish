@@ -51,13 +51,13 @@ def manage_patterns(
     if not pattern_id:
         raise GoldfishError("pattern_id is required for this action")
 
-        if action == "get":
-            p = db.get_failure_pattern(pattern_id)
+    if action == "get":
+        p = db.get_failure_pattern(pattern_id)
 
-            if not p:
-                raise GoldfishError(f"Pattern not found: {pattern_id}")
+        if not p:
+            raise GoldfishError(f"Pattern not found: {pattern_id}")
 
-            return _pattern_to_dict(p)
+        return _pattern_to_dict(p)
 
     if action == "approve":
         manager.approve_pattern(pattern_id)

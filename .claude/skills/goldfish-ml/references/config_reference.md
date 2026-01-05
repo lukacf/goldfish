@@ -109,6 +109,41 @@ jobs:
   backend: gce                      # "gce" or "local"
   experiments_dir: experiments      # Default: "experiments"
 
+# SVS (Semantic Validation System) Settings
+svs:
+  enabled: true                     # Global master switch
+  domain: default                   # default, nlp_tokenizer, image_embeddings, tabular_features
+  default_policy: warn              # fail, warn, ignore
+  default_enforcement: warning      # blocking, warning, silent
+  
+  # Statistics collection (mechanistic)
+  stats_enabled: true
+  
+  # AI reviews
+  ai_pre_run_enabled: true
+  ai_post_run_enabled: true
+  ai_during_run_enabled: true
+  
+  # During-run monitoring parameters
+  ai_during_run_interval_seconds: 300
+  ai_during_run_min_metrics: 200
+  ai_during_run_auto_stop: false
+  
+  # Agent configuration
+  agent_provider: claude_code       # claude_code, codex_cli, gemini_cli, null
+  agent_model: opus
+  agent_timeout: 120
+  agent_max_turns: 3
+  rate_limit_per_hour: 60
+
+# Metrics configuration
+metrics:
+  backend: wandb                    # wandb, local
+  wandb:
+    project: market-lm
+    entity: my-team
+    artifact_mode: file             # file or artifact
+
 # Project invariants (enforced rules)
 invariants:
   - "All training must use versioned datasets"
@@ -361,3 +396,37 @@ Some settings can be overridden via environment:
 | `GOLDFISH_PROJECT_ROOT` | Project root path |
 | `GOOGLE_CLOUD_PROJECT` | GCE project_id (fallback) |
 | `CLOUDSDK_CORE_PROJECT` | GCE project_id (fallback) |
+
+## SVS Configuration (Semantic Validation)
+
+The `svs` section controls code quality oversight and monitoring.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Master switch for all SVS features |
+| `domain` | `default` | Preset for checks/thresholds (see below) |
+| `ai_pre_run_enabled` | `true` | Enable AI code review before `run()` |
+| `ai_post_run_enabled` | `true` | Enable AI output review after completion |
+| `ai_during_run_enabled`| `true` | Enable background AI monitoring during execution |
+| `agent_provider` | `claude_code` | AI backend: `claude_code`, `codex_cli`, `gemini_cli`, `null` |
+| `agent_model` | - | Optional model override for the provider |
+| `rate_limit_per_hour` | `60` | Max total AI requests per hour |
+
+### During-Run Parameters
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `ai_during_run_interval_seconds` | `300` | Frequency of background reviews |
+| `ai_during_run_min_metrics` | `200` | Data points required before first review |
+| `ai_during_run_auto_stop` | `false` | If true, SVS will termination run if critical anomaly detected |
+
+## Metrics Configuration
+
+Goldfish can sync metrics to external backends like Weights & Biases.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `backend` | `local` | `local` or `wandb` |
+| `wandb.project` | - | W&B project name |
+| `wandb.entity` | - | W&B team/user name |
+| `wandb.artifact_mode` | `file` | Use `artifact` for full W&B artifact lineage |

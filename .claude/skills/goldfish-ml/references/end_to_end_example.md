@@ -27,16 +27,37 @@ Verify configuration:
 reload_config()
 ```
 
-## Step 2: Register Dataset
+## Step 2: Register Source
 
 Register the tokenized training data:
 
 ```
-register_dataset(
+register_source(
     name="v37-tokens",
-    source="gs://mlm-artifacts-bucket/unified-v37/tokens/",
+    gcs_path="gs://mlm-artifacts-bucket/unified-v37/tokens/",
     description="Tokenized training data from unified-v37 preprocessing",
-    format="directory"
+    reason="Initializing training data for 1B LM baseline",
+    metadata={
+        "schema_version": 1,
+        "description": "Tokenized training data from unified-v37 preprocessing",
+        "source": {
+            "format": "directory",
+            "size_bytes": 10737418240,
+            "created_at": "2025-12-24T12:00:00Z"
+        },
+        "schema": {
+            "kind": "tensor",
+            "primary_array": "tokens",
+            "arrays": {
+                "tokens": {
+                    "role": "features",
+                    "shape": [null],
+                    "dtype": "int32",
+                    "feature_names": { "kind": "none", "reason": "token sequence" }
+                }
+            }
+        }
+    }
 )
 ```
 
@@ -323,7 +344,7 @@ save_version("w1", "Training complete - 1B model trained on V37")
 # Returns version="v1"
 
 # Tag this as a significant milestone for easy reference
-tag_version("1b-8k-lm", "v1", "initial-training-complete")
+manage_versions(workspace="1b-8k-lm", action="tag", version="v1", tag="initial-training-complete")
 ```
 
 Hibernate workspace:
@@ -335,16 +356,16 @@ hibernate("w1", "Completed 1B-8k LM training experiment")
 
 ```
 1. reload_config()                                    # Verify config
-2. register_dataset("v37-tokens", ...)               # Register data
-3. create_workspace("1b-8k-lm", goal="...")          # Create workspace
-4. mount("w1", "1b-8k-lm", reason="...")             # Mount to slot
+2. register_source("v37-tokens", ...)                # Register data
+3. create_workspace("1b-8k-lm", goal="...", reason="...") # Create workspace
+4. mount("1b-8k-lm", "w1", reason="...")             # Mount to slot
 5. [Create files: pipeline.yaml, configs/train.yaml, modules/train.py]
 6. run("w1", stages=["train"], reason={...})         # Launch training (structured reason)
 7. logs("stage-abc123", tail=100)                    # Monitor
-8. get_run("stage-abc123")                           # Check status
+8. inspect_run("stage-abc123")                       # Check status
 9. get_outputs("stage-abc123")                       # Get results
 10. save_version("w1", "Training complete")          # Save progress
-11. tag_version("1b-8k-lm", "v1", "baseline")        # Tag milestone
+11. manage_versions(..., action="tag", ...)          # Tag milestone
 12. hibernate("w1", "Done with experiment")          # Clean up
 ```
 
@@ -443,7 +464,7 @@ run("w1", reason={
 save_version("w1", "First working training configuration")
 # Returns v16
 
-tag_version("1b-8k-lm", "v16", "first-working")
+manage_versions(workspace="1b-8k-lm", action="tag", version="v16", tag="first-working")
 ```
 
 ### Phase 3: Optimization Iterations
@@ -477,7 +498,7 @@ run("w1", reason={
 # SUCCESS: Perplexity 2.87!
 
 save_version("w1", "Best model configuration found")
-tag_version("1b-8k-lm", "v31", "best-model")
+manage_versions(workspace="1b-8k-lm", action="tag", version="v31", tag="best-model")
 ```
 
 ### Phase 4: Clean Up History
@@ -485,28 +506,21 @@ tag_version("1b-8k-lm", "v31", "best-model")
 ```
 # Now we have v1-v31 but only v16 and v31 matter
 # List what we've tagged
-list_tags("1b-8k-lm")
-# Returns: [{"version": "v16", "tag_name": "first-working"},
-#           {"version": "v31", "tag_name": "best-model"}]
+manage_versions(workspace="1b-8k-lm", action="list")
 
 # Prune all the noise before first working version
-prune_before_tag("1b-8k-lm", "first-working",
+manage_versions(workspace="1b-8k-lm", action="prune_before_tag", tag="first-working",
     reason="Pruning all failed initial attempts before first working config")
 # Prunes v1-v15 (15 versions)
 
 # Prune the iterations between milestones
-prune_versions("1b-8k-lm", "v17", "v30",
+manage_versions(workspace="1b-8k-lm", action="prune", from_version="v17", to_version="v30",
     reason="Pruning optimization iterations between milestones")
 # Prunes v17-v30 (14 versions)
 
-# Check cleanup status
-get_pruned_count("1b-8k-lm")
-# Returns: {"count": 29}
-
-# Now get_workspace_lineage shows clean history:
+# Now inspect_workspace shows clean history:
 # - v16 "first-working"
 # - v31 "best-model" (current)
-# (29 versions pruned)
 ```
 
 ### Phase 5: Continue Development
@@ -520,10 +534,10 @@ run("w1", reason={
 # Creates v32 (not v3!)
 
 # Tag more milestones as you go
-tag_version("1b-8k-lm", "v35", "production-candidate")
+manage_versions(workspace="1b-8k-lm", action="tag", version="v35", tag="production-candidate")
 
 # Later, clean up again
-prune_versions("1b-8k-lm", "v32", "v34",
+manage_versions(workspace="1b-8k-lm", action="prune", from_version="v32", to_version="v34",
     reason="Pruning failed experiments after best-model")
 ```
 
@@ -531,18 +545,18 @@ prune_versions("1b-8k-lm", "v32", "v34",
 
 ```
 # Tag milestones as you discover them
-tag_version(workspace, version, "meaningful-name")
+manage_versions(workspace, action="tag", version="v24", tag="meaningful-name")
 
 # Prune noise periodically
-prune_before_tag(workspace, "milestone", reason="...")  # Clean start
-prune_versions(workspace, "v_start", "v_end", reason="...")  # Between milestones
+manage_versions(workspace, action="prune_before_tag", tag="milestone", reason="...")  # Clean start
+manage_versions(workspace, action="prune", from_version="v1", to_version="v10", reason="...")  # Between milestones
 
 # Check status
-list_tags(workspace)  # What's significant
-get_pruned_count(workspace)  # How much noise hidden
+manage_versions(workspace, action="list")  # What's significant
+inspect_workspace(workspace)               # How much noise hidden
 
 # Restore if needed (pruning is reversible)
-unprune_version(workspace, "v5")  # If you need to review old work
+manage_versions(workspace, action="unprune", version="v5")  # If you need to review old work
 ```
 
 ### Key Benefits

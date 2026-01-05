@@ -43,13 +43,13 @@ Goldfish manages ML experiments through **six key abstractions**:
 START: What task?
   │
   ├─▶ "First time / Need orientation"
-  │     └─▶ status() → See slots, active jobs, STATE.md
+  │     └─▶ status() or dashboard() → See slots, active jobs, recent outcomes
   │
   ├─▶ "Start new experiment"
   │     └─▶ create_workspace() → mount() → Edit files → run()
   │
   ├─▶ "Continue existing work"
-  │     └─▶ status() → mount(slot, workspace) → Edit → run()
+  │     └─▶ status() → mount(workspace, slot, reason) → Edit → run()
   │
   ├─▶ "Run ML training"
   │     └─▶ run(workspace, stages=["train"]) or run(workspace) for all
@@ -181,10 +181,10 @@ Missing or invalid metadata is rejected.
 
 ```
 1. Create workspace with clear goal
-   create_workspace(name="lstm_baseline", goal="Train LSTM for price prediction")
+   create_workspace(name="lstm_baseline", goal="Train LSTM for price prediction", reason="Starting new baseline experiment")
 
 2. Mount to edit slot
-   mount(slot="w1", workspace="lstm_baseline")
+   mount(workspace="lstm_baseline", slot="w1", reason="Begin preprocessing module development")
 
 3. Create workspace structure in workspaces/w1/:
 
@@ -206,48 +206,28 @@ Missing or invalid metadata is rejected.
        "description": "Baseline LSTM training",
        "hypothesis": "LSTM should achieve 85%+ accuracy"
    })
-
-   run("w1", stages=["train"], reason={
-       "description": "Testing larger batch size",
-       "hypothesis": "Batch size 64 will improve stability",
-       "approach": "Increased from 32 to 64",
-       "min_result": "Lower loss variance",
-       "goal": "Faster convergence with stable loss"
-   })
 ```
 
-### Pre-Run Review (Automatic)
+### SVS: Continuous Quality Oversight
 
-Before executing any stage, Goldfish automatically reviews your code using the configured SVS agent provider
-(default: Claude Code CLI):
+SVS (Semantic Validation System) provides three layers of protection:
 
-```
-run("w1", stages=["train"])
-→ Pre-run review activates
-→ Reviews: pipeline.yaml, modules/train.py, configs/train.yaml
-→ Checks for: undefined variables, logic errors, missing imports
-→ Blocks run if ERRORs found, allows with WARNINGs
+#### Layer 1: Pre-Run AI Review (Automatic)
+Before execution, an AI reviews code/config for logic errors, undefined variables, and anti-patterns.
+- **Blocked**: High-confidence errors found. Fix code and re-run.
+- **Warned**: Potential issues noted (e.g., no validation split). Proceed with caution.
+- **Bypass**: Use `run(..., skip_review=True)` if review is blocking safe code.
 
-Example review output:
-  ✗ BLOCKED: modules/train.py:12 - `learning_rate` undefined
-  ✗ BLOCKED: modules/train.py:15 - `metrics` never assigned
-  ⚠ WARNING: No validation split - training on full data
-```
+#### Layer 2: During-Run AI Monitoring
+A background monitor reviews metrics (`.goldfish/metrics.jsonl`) and runtime logs (`.goldfish/logs.txt`) every 5 minutes.
+- **Anomalies**: Detects diverging loss, exploding gradients, or stalled progress.
+- **Early Stop**: Can terminate runs early if `ai_during_run_auto_stop: true` in config.
+- **Usage**: Check progress with `inspect_run(run_id)`.
 
-**Recovery from BLOCKED status:**
-1. **Analyze findings**: Read the review output carefully. `BLOCKED` indicates high-confidence errors.
-2. **Fix the code/config**: Edit the offending files in your slot (e.g., `workspaces/w1/modules/train.py`).
-3. **Re-run**: Call `run()` again. Goldfish will perform a new review.
-4. **Dispute (rare)**: If you are certain a finding is a false positive, you can briefly explain why in the `reason` field of your next `run()` call, though the mechanistic block remains until fixed.
-5. **Disable (if permitted)**: If the validation system is being too restrictive, you can disable it in `goldfish.yaml` via `svs.enabled: false`.
-
-**Benefits:**
-- Catches bugs before wasting GPU time
-- Reviews use experiment context (diff, hypothesis, config)
-- Fails open (approves on timeout/error) to avoid blocking
-- Can be disabled: `svs.ai_pre_run_enabled: false` (or `svs.enabled: false`) in goldfish.yaml
-
-Requires the selected CLI to be installed and authenticated on the host.
+#### Layer 3: Output Contract Enforcement
+Enforces schema contracts (shape, dtype) and computes output stats (entropy, null ratio).
+- **Silent Failures**: Catches mode collapse (low entropy) or data corruption (NaN spikes).
+- **View**: Findings appear in `inspect_run(include=["svs"])`.
 
 ### 2. Pipeline Structure
 
@@ -313,32 +293,29 @@ stages:
 
 ### 3. Stage Implementation Pattern
 
-Stage modules follow a consistent pattern:
+Stage modules follow a consistent pattern. **Using `goldfish.io` and the Metrics API is MANDATORY for observability and monitoring to function.**
 
 ```python
 # modules/train.py
-from goldfish.io import load_input, save_output, heartbeat
+from goldfish.io import load_input, save_output, runtime_log, should_stop
 
 def main():
-    # Load inputs (from /mnt/inputs/)
-    features = load_input("features")  # Returns numpy array
-
-    # Training logic with heartbeat for long-running jobs
+    # MANDATORY: Use goldfish.io for ALL signal I/O
+    features = load_input("features")
+    
     for epoch in range(epochs):
-        heartbeat(f"Training epoch {epoch}")  # Signal "I'm alive"
-        train_epoch(model, features)
+        # 1. Logic
+        # ...
+        
+        # 2. Monitoring support (MANDATORY for AI oversight)
+        runtime_log(f"Epoch {epoch} loss: {l:.4f}")
+        if should_stop():
+             print("Early stop requested by SVS")
+             break
 
-    # Save outputs (to /mnt/outputs/)
+    # MANDATORY: Use save_output for persistent artifacts
     save_output("model", model_dir)
-
-if __name__ == "__main__":
-    main()
 ```
-
-**Heartbeat API**: Call `heartbeat()` periodically in long-running computations to prevent the job from being terminated due to inactivity. 
-- **Default Timeout**: 600 seconds (10 minutes).
-- **Configuration**: Increase this via `compute.heartbeat_timeout_seconds` in the stage-specific YAML config.
-- **Auto-Termination**: If the supervisor detects a stale heartbeat, it will terminate the container to free up resources.
 
 ### 4. Metrics API (Stage Code)
 
@@ -444,233 +421,298 @@ svs:
 
 ### 5. Monitoring Runs
 
+
+
 ```
-1. List recent runs
-   list_runs(workspace="lstm_baseline", status="running")
 
-2. Get run details (includes dashboard + trends + health)
-   inspect_run(run_id="stage-abc123")
+1. Get overview
 
-3. Stream logs (if dashboard is not enough)
-   logs(run_id="stage-abc123", tail=500)
+   dashboard() → orientation on active/failed runs
+
+
+
+2. Detailed status (PRIMARY TOOL)
+
+   inspect_run(run_id) → trends, progress, SVS findings. This is the master tool for result analysis.
+
+
+
+3. Debugging / Low-level logs (SECONDARY TOOL)
+
+   logs(run_id, follow=True) → return only NEW logs since last call. Use if dashboard/trends are insufficient.
+
+
 
 4. Cancel if needed
-   cancel(run_id="stage-abc123", reason="Wrong hyperparameters")
+
+   cancel(run_id, reason="Wrong hyperparameters")
+
 ```
+
+
+
+
 
 ### 6. Lineage & Provenance
 
-Track exactly what produced what:
+
 
 ```
-# Full workspace history
-inspect_workspace("lstm_baseline")
-→ versions, parent workspace, branches
 
-# Compare versions
-diff(target="lstm_baseline", against="v1")
-→ git commits, file changes
+# Full workspace context
+
+inspect_workspace("baseline")
+
+
+
+# Side-by-side comparison
+
+compare_runs(run_id_a="stage-1", run_id_b="stage-2")
+
+
 
 # Full run provenance
-inspect_run(run_id="stage-abc123", include=["provenance"])
-→ workspace, version, git SHA, config, inputs, outputs
+
+inspect_run(run_id, include=["provenance"])
+
 ```
 
-### 7. Version Tags & Pruning
 
-ML experiments generate many versions, most of which are failed attempts. Tags and pruning help manage this:
 
-**Tags** mark significant versions with memorable names:
-```
-# Mark a milestone (can be applied retroactively to any version)
-manage_versions(workspace="lstm_baseline", action="tag", version="v24", tag="baseline-working")
-manage_versions(workspace="lstm_baseline", action="tag", version="v47", tag="best-model")
+### 7. Version Management (Tags & Pruning)
 
-# List all tags for a workspace
-manage_versions(workspace="lstm_baseline", action="list")
-→ [{"version": "v24", "tag_name": "baseline-working"}, ...]
 
-# Remove a tag
-manage_versions(workspace="lstm_baseline", action="untag", tag="baseline-working")
+
 ```
 
-**Pruning** hides noise versions while preserving audit trail:
-```
-# Prune a single version (fails if tagged - tags are protected)
-manage_versions(workspace="lstm_baseline", action="prune", version="v5", reason="Failed experiment")
+# Mark a milestone
 
-# Prune a range of failed experiments
-manage_versions(workspace="lstm_baseline", action="prune", 
-                from_version="v1", to_version="v23",
-                reason="All early experiments before baseline")
+manage_versions(workspace="exp_v1", action="tag", version="v24", tag="baseline-v1")
 
-# Restore pruned versions if needed
-manage_versions(workspace="lstm_baseline", action="unprune", version="v5")
-manage_versions(workspace="lstm_baseline", action="unprune", from_version="v1", to_version="v10")
+
+
+# Clean up failed experiments
+
+manage_versions(workspace="exp_v1", action="prune", 
+
+                from_version="v1", to_version="v23", 
+
+                reason="Cleanup noise")
+
+
+
+# List history including milestones
+
+manage_versions(workspace="exp_v1", action="list")
+
 ```
+
+
 
 **Key behaviors:**
+
 - Tagged versions are **protected** and cannot be pruned
+
 - Pruned versions don't appear in `status()` or STATE.md
-- Version numbering continues unaffected (v1...v50 pruned, next is still v51)
+
+- Version numbering continues unaffected
+
 - Pruning is **reversible** via unprune
 
-## Tool Reference
 
-### Workspace Management
+
+## Master Tool Reference (24)
+
+
+
+### Workspace
+
+
 
 | Tool | Purpose | Key Parameters |
+
 |------|---------|----------------|
-| `status()` | Orientation - slots, jobs, sources | None |
-| `create_workspace()` | New experiment | name, goal |
-| `mount()` | Activate workspace in slot | slot, workspace |
+
+| `status()` | orientation - slots, jobs, STATE.md | None |
+
+| `dashboard()` | Actionable summary of system health | None |
+
+| `create_workspace()` | New experiment | name, goal, reason |
+
+| `mount()` | Activate workspace in slot | workspace, slot, reason |
+
 | `hibernate()` | Deactivate (auto-saves) | slot, reason |
+
 | `save_version()` | Create version save point | slot, message |
-| `inspect_workspace()` | Workspace details + pipeline | name |
-| `diff()` | Show uncommitted changes | target, against |
+
+| `inspect_workspace()` | Master view of workspace history/DAG | name |
+
+| `diff()` | Compare slot, workspace, or versions | target, against |
+
 | `rollback()` | Revert to version | slot, version, reason |
+
 | `delete_workspace()` | Remove workspace | workspace, reason |
+
+
 
 ### Execution
 
+
+
 | Tool | Purpose | Key Parameters |
+
 |------|---------|----------------|
-| `run()` | Execute stages (with pre-run review) | workspace, stages, reason |
-| `inspect_run()` | Run dashboard & details | run_id, include |
-| `logs()` | Container logs | run_id, tail, since |
+
+| `run()` | Execute stages (with SVS pre-run) | workspace, stages, reason |
+
+| `inspect_run()` | Run master view (dashboard, manifest, svs) | run_id, include |
+
+| `logs()` | Container logs (supports follow mode) | run_id, tail, follow |
+
 | `cancel()` | Stop run | run_id, reason |
-| `list_runs()` | Query runs | workspace, stage, status |
-| `mark_outcome()` | Classify result | run_id, outcome |
 
-### Version Management (Tags & Pruning)
+| `list_runs()` | Workspace run history (compact) | workspace, stage |
+
+| `list_all_runs()` | Global experiment timeline | status, limit |
+
+| `mark_outcome()` | Classify produced results | run_id, outcome |
+
+| `compare_runs()` | Side-by-side run comparison | run_id_a, run_id_b |
+
+
+
+### Version Management
+
+
 
 | Tool | Purpose | Key Parameters |
+
 |------|---------|----------------|
-| `manage_versions()` | Unified tagging, pruning, listing | action, workspace, version, tag, from/to_version |
+
+| `manage_versions()` | Unified tagging, pruning, listing | action, workspace, version, tag |
+
+
 
 ### Data Management
 
+
+
 | Tool | Purpose | Key Parameters |
+
 |------|---------|----------------|
-| `register_source()` | Register data source | name, gcs_path, metadata |
-| `manage_sources()` | List, Get, Delete, Lineage | action, name, metadata |
-| `promote_artifact()` | Stage output → source | job_id, output_name |
+
+| `register_source()` | Register external GCS data | name, gcs_path, metadata |
+
+| `manage_sources()` | Registry management (list, get, lineage) | action, name |
+
+| `promote_artifact()` | Stage output → source | job_id, output_name, metadata |
+
+
 
 ### Utility
 
+
+
 | Tool | Purpose | Key Parameters |
+
 |------|---------|----------------|
-| `initialize_project()` | New Goldfish project | project_name, project_root |
-| `reload_config()` | Hot-reload goldfish.yaml | None |
-| `validate_config()` | Dry-run validation | workspace |
-| `log_thought()` | Record reasoning | thought |
-| `manage_patterns()` | Manage SVS failure patterns | action, pattern_id |
-| `search_goldfish_logs()` | LogsQL search | query |
 
-## Signal Types
+| `log_thought()` | Record reasoning in audit/STATE.md | thought, workspace |
 
-| Type | Format | Use Case |
-|------|--------|----------|
-| `dataset` | External | Registered project data |
-| `npy` | NumPy | Arrays, embeddings, tensors |
-| `csv` | Pandas | Tabular data |
-| `directory` | Dir | Model checkpoints, multi-file outputs |
-| `file` | Single | Configs, small outputs |
+| `manage_patterns()` | AI failure pattern knowledge base | action, pattern_id |
 
-## Resource Profiles
 
-For `compute.profile` in stage configs:
-
-| Profile | Hardware | Use Case |
-|---------|----------|----------|
-| `cpu-small` | 2 vCPU, 4GB | Light preprocessing |
-| `cpu-large` | 8 vCPU, 32GB | Heavy data processing |
-| `h100-spot` | H100 GPU, spot | Training (cost-effective) |
-| `h100-on-demand` | H100 GPU | Critical training |
-| `a100-spot` | A100 GPU, spot | Training alternative |
-| `a100-on-demand` | A100 GPU | Guaranteed availability |
-
-## Common Patterns
-
-### Pattern: Iterative Experimentation with Tags
-
-```
-1. create_workspace("exp_v1", "Baseline LSTM")
-2. mount("w1", "exp_v1")
-3. Edit code, run, analyze          # Creates v1, v2, v3... (many failures)
-4. Finally working!
-5. manage_versions(workspace="exp_v1", action="tag", version="v24", tag="baseline-working")
-6. Continue experimenting           # Creates v25, v26... (more failures)
-7. manage_versions(workspace="exp_v1", action="tag", version="v47", tag="best-model")
-8. manage_versions(workspace="exp_v1", action="prune", 
-                   from_version="v1", to_version="v23", 
-                   reason="Cleanup early failures")
-9. hibernate("w1", "Completed baseline")
-```
-
-### Pattern: Debug Failed Run
-
-```
-1. list_runs(status="failed")
-2. inspect_run(run_id)             # See error, dashboard, trends
-3. logs(run_id, tail=500)          # Full error trace
-4. inspect_run(run_id, include=["provenance"]) # What inputs were used
-5. Fix code, run again
-```
-
-### Pattern: Reproduce Past Result
-
-```
-1. inspect_run(stage_run_id, include=["provenance"])
-   → Returns: workspace, version, git_sha, config, inputs
-
-2. rollback(slot, version)  # Restore exact code state
-
-3. run(workspace, stages, config_override)  # Re-run with same config
-```
-
-## Audit & Context Recovery
-
-Goldfish maintains full audit trails:
-
-```
-log_thought("Switching to attention mechanism because...")
-
-status()
-→ Shows recent audit history
-```
 
 ## Troubleshooting & Recovery
 
-### SVS Pre-Run Blocks
-If `run()` returns a `BLOCKED` status:
-1. **Examine Findings**: Read the error messages in the tool output. They pin-point specific lines and logic flaws.
-2. **Apply Fixes**: Edit the code or config in your workspace slot.
-3. **Re-run**: Simply call `run()` again.
-4. **Bypass (Caution)**: If a finding is truly a false positive, you can use `run(..., skip_review=True)` to bypass the AI review for that specific execution. Only use this if you are certain the code is safe.
+
+
+### SVS Blocks
+
+If `run()` returns a `BLOCKED` status: Fix the reported code/config errors in your workspace slot and call `run()` again. Use `skip_review=True` ONLY as a last resort for safe code misidentified as faulty.
+
+
 
 ### Long-Running Job Failures
-- **Timeout**: If a job is terminated with `TIMEOUT`, increase the `timeout` in `goldfish.yaml` (global) or the `hints.timeout` in the stage config (per-stage).
-- **Heartbeat Stale**: If the logs show "Supervisor: Heartbeat stale", your code is not calling `heartbeat()` frequently enough. Ensure it's called at least every 10 minutes (default) or increase `compute.heartbeat_timeout_seconds` in the stage config.
+
+- **Heartbeat Stale**: Ensure your code calls `heartbeat()` (default: 10 min timeout).
+
+- **SVS Stop**: Check `inspect_run(include=["svs"])` to see why background monitor stopped the run.
+
+
 
 ## Common Failure Patterns (Knowledge Base)
 
+
+
 Goldfish auto-extracts failure patterns to prevent regression. Be aware of these common ML anti-patterns:
 
+
+
 - **Silent Feature Degradation**: Picking up "junk" signals (like sine waves from a test generator) instead of real market features. Goldfish flags this via low entropy checks.
+
 - **Label/Token Desynchronization**: In NLP/Time-series BPE, labels must be updated when tokens are merged. Failure to do so results in silent MI gating failure.
+
 - **Horizon Mismatch**: Using 5-minute forward labels to mine patterns that only exist at 1Hz. Results in extremely low Mutual Information (MI).
+
 - **Tool Assumption Mismatch**: Feeding dense labels to a tool expecting sequence-level labels. Many tools silently fall back to "dumb" modes when input shapes don't match.
+
+
 
 ## Best Practices
 
+
+
+
+
+
+
 1. **Always provide clear goals** when creating workspaces
+
+
+
 2. **Save versions frequently** with descriptive messages
-3. **Tag significant milestones** (e.g., "first-working", "best-model", "submitted")
-4. **Prune failed experiments** to reduce clutter after reaching milestones
+
+
+
+3. **Tag significant milestones** (using `manage_versions(action="tag")`)
+
+
+
+4. **Prune failed experiments** to reduce clutter (using `manage_versions(action="prune")`)
+
+
+
 5. **Use descriptive stage names** that reflect the operation
-6. **Register datasets** before referencing in pipelines
-7. **Check status()** after context recovery
+
+
+
+6. **Register external data** using `register_source()` before referencing in pipelines
+
+
+
+7. **Check status() or dashboard()** after context recovery
+
+
+
 8. **Use log_thought()** to document decisions
-9. **Monitor long runs** with logs() and list_runs()
+
+
+
+9. **Monitor runs with inspect_run()** (primary) and dashboard()/logs() (secondary)
+
+
+
 10. **Provide structured reasons** for runs with hypothesis and approach
+
+
+
+11. **MANDATORY: Always use `goldfish.io` and `goldfish.metrics`** for I/O and telemetry. AI monitoring will fail without them.
+
+
+
+
+
+
+
+
