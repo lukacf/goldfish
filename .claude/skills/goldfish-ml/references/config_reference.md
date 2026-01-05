@@ -127,14 +127,36 @@ svs:
   # During-run monitoring parameters
   ai_during_run_interval_seconds: 300
   ai_during_run_min_metrics: 200
+  ai_during_run_min_log_lines: 20
+  ai_during_run_max_runs_per_hour: 12
   ai_during_run_auto_stop: false
   
-  # Agent configuration
+  # Log filtering for AI monitoring
+  ai_during_run_log_filters:
+    - "(ERROR|WARN|EXCEPTION|Traceback)"
+    - "(CUDA|OOM|nan|inf|segfault|Killed|RuntimeError)"
+    - "(loss=|ppl=|acc=|val_|train_|dir_)"
+  ai_during_run_log_max_lines: 200
+  ai_during_run_log_max_bytes: 16384
+  ai_during_run_log_file_max_bytes: 10000000
+  ai_during_run_summary_max_chars: 1200
+
+  # Pre-run review specific configuration
+  pre_run_review:
+    enabled: true
+    model: opus
+    timeout_seconds: 120
+    max_turns: 3
+
+  # Agent configuration (shared by all AI tasks)
   agent_provider: claude_code       # claude_code, codex_cli, gemini_cli, null
   agent_model: opus
   agent_timeout: 120
   agent_max_turns: 3
   rate_limit_per_hour: 60
+
+  # Self-learning failure patterns
+  auto_learn_failures: false
 
 # Metrics configuration
 metrics:
@@ -405,12 +427,21 @@ The `svs` section controls code quality oversight and monitoring.
 |-------|---------|-------------|
 | `enabled` | `true` | Master switch for all SVS features |
 | `domain` | `default` | Preset for checks/thresholds (see below) |
+| `stats_enabled` | `true` | Enable mechanistic stats collection (entropy, nulls, etc.) |
 | `ai_pre_run_enabled` | `true` | Enable AI code review before `run()` |
 | `ai_post_run_enabled` | `true` | Enable AI output review after completion |
 | `ai_during_run_enabled`| `true` | Enable background AI monitoring during execution |
-| `agent_provider` | `claude_code` | AI backend: `claude_code`, `codex_cli`, `gemini_cli`, `null` |
-| `agent_model` | - | Optional model override for the provider |
-| `rate_limit_per_hour` | `60` | Max total AI requests per hour |
+
+### Domain Profiles
+
+Domain profiles provide optimized thresholds and policies for common ML tasks. Each profile enables specific checks:
+
+| Profile | Target Data | Typical Checks & Guarantees |
+|---------|-------------|-----------------------------|
+| `default` | General purpose | Validates data existence, file formats, and basic type safety. |
+| `nlp_tokenizer` | Tokenizer outputs | Checks for **high entropy** (no mode collapse), **vocab utilization** (no dead tokens), and strict **null ratio** limits. |
+| `image_embeddings`| Latent vectors | Monitors **variance** and **sparsity** to detect representation collapse or dead units. |
+| `tabular_features`| Preprocessed CSVs | Enforces **column data types**, **missing value** thresholds, and **top-1 frequency** limits to catch data leaks. |
 
 ### During-Run Parameters
 
