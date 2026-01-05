@@ -309,6 +309,11 @@ def get_backend_errors() -> list[str]:
     return logger.get_backend_errors()
 
 
+def get_logger() -> MetricsLogger | None:
+    """Get the active MetricsLogger instance, if any."""
+    return _logger_context.get() or _global_logger
+
+
 __all__ = [
     "log_metric",
     "log_metrics",
@@ -316,6 +321,7 @@ __all__ = [
     "log_artifacts",
     "finish",
     "use_logger",
+    "get_logger",
     "had_backend_errors",
     "get_backend_errors",
 ]

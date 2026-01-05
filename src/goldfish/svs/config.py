@@ -71,6 +71,23 @@ class SVSConfig(BaseModel):
     # AI reviews
     ai_pre_run_enabled: bool = True
     ai_post_run_enabled: bool = True
+    ai_during_run_enabled: bool = True
+    ai_during_run_interval_seconds: int = Field(default=300, ge=60)
+    ai_during_run_min_metrics: int = Field(default=200, ge=10)
+    ai_during_run_min_log_lines: int = Field(default=20, ge=0)
+    ai_during_run_max_runs_per_hour: int = Field(default=12, ge=1)
+    ai_during_run_auto_stop: bool = False
+    ai_during_run_log_filters: list[str] = Field(
+        default_factory=lambda: [
+            r"(ERROR|WARN|EXCEPTION|Traceback)",
+            r"(CUDA|OOM|nan|inf|segfault|Killed|RuntimeError)",
+            r"(loss=|ppl=|acc=|val_|train_|dir_)",
+        ]
+    )
+    ai_during_run_log_max_lines: int = Field(default=200, ge=10)
+    ai_during_run_log_max_bytes: int = Field(default=16384, ge=1024)
+    ai_during_run_log_file_max_bytes: int = Field(default=10_000_000, ge=100_000)
+    ai_during_run_summary_max_chars: int = Field(default=1200, ge=100)
 
     # Agent settings
     agent_provider: Literal["claude_code", "codex_cli", "gemini_cli", "null"] = "claude_code"
