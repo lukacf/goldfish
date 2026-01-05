@@ -19,6 +19,7 @@ import logging
 import os
 import runpy
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -180,6 +181,17 @@ def _svs_finalize() -> None:
             pass
 
 
+def _get_outputs_dir() -> Path:
+    """Get outputs directory (configurable for testing)."""
+    return Path(os.environ.get("GOLDFISH_OUTPUTS_DIR", "/mnt/outputs"))
+
+
+def _during_run_enabled() -> bool:
+    """Check if during-run AI monitoring is enabled."""
+    config = _load_svs_config()
+    return config.enabled and getattr(config, "ai_during_run_enabled", False)
+
+
 def run_stage_with_svs(module_main: Callable[[], int | None]) -> int:
     """Wrap user's main() with guaranteed SVS hooks.
 
@@ -208,7 +220,32 @@ def run_stage_with_svs(module_main: Callable[[], int | None]) -> int:
     # This ensures finalization on SIGTERM or normal process exit
     atexit.register(_svs_finalize)
 
+    # Write SVS context to disk if provided via env var
+    svs_context_json = os.environ.get("GOLDFISH_SVS_CONTEXT")
+    if svs_context_json:
+        try:
+            outputs_dir = _get_outputs_dir()
+            goldfish_dir = outputs_dir / ".goldfish"
+            goldfish_dir.mkdir(parents=True, exist_ok=True)
+            (goldfish_dir / "svs_context.json").write_text(svs_context_json)
+        except Exception as e:
+            logger.error(f"Failed to write SVS context to disk: {e}")
+
+    # Start during-run monitor if enabled (deferred to avoid fork issues)
+    monitor = None
+
     try:
+        if _during_run_enabled():
+            try:
+                from goldfish.svs.during_run_monitor import DuringRunMonitor
+
+                # Small delay to let ML frameworks initialize (avoids issues with fork/multiprocessing)
+                time.sleep(1.0)
+                monitor = DuringRunMonitor(_load_svs_config(), _get_outputs_dir())
+                monitor.start()
+            except Exception as e:
+                logger.error(f"Failed to start during-run monitor: {e}")
+
         # Run user's main function
         exit_code = module_main()
 
@@ -219,6 +256,13 @@ def run_stage_with_svs(module_main: Callable[[], int | None]) -> int:
         return exit_code
 
     finally:
+        # Stop monitor if started
+        if monitor:
+            try:
+                monitor.stop(timeout=10.0)
+            except Exception as e:
+                logger.error(f"Failed to stop during-run monitor: {e}")
+
         # Ensure finalization happens even on exception
         # This is defense-in-depth - finalize will be called by both
         # the finally block and potentially by atexit
