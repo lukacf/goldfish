@@ -230,6 +230,8 @@ class DuringRunMonitor(threading.Thread):
             context={
                 "prompt": prompt,
                 "output_format": "json",
+                "model": self.config.agent_model,
+                "max_turns": self.config.agent_max_turns,
                 "timeout_seconds": self.config.agent_timeout,
             },
             stats=None,  # We pass stats in the prompt
