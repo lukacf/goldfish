@@ -398,6 +398,7 @@ class StageExecutor:
                 output_configs,
                 user_config=stage_config,
                 git_sha=git_sha,
+                run_reason=reason_structured,
             )
         except Exception as e:
             # Mark failed immediately with error and re-raise
@@ -1165,8 +1166,8 @@ class StageExecutor:
             bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
             gcs_prefix = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/outputs/.goldfish/"
 
-            # We use a simplified approach: just try to download the two known files
-            for filename in ["svs_stats.json", "svs_findings.json"]:
+            # We use a simplified approach: just try to download the known manifest files
+            for filename in ["svs_stats.json", "svs_findings.json", "svs_findings_during.json"]:
                 dest = temp_dir / ".goldfish" / filename
                 self._download_metrics_from_gcs(gcs_prefix + filename, dest)
 
@@ -1560,8 +1561,10 @@ class StageExecutor:
 
             findings_dest = temp_dir / ".goldfish" / "svs_findings.json"
             stats_dest = temp_dir / ".goldfish" / "svs_stats.json"
+            during_dest = temp_dir / ".goldfish" / "svs_findings_during.json"
             self._download_metrics_from_gcs(gcs_prefix + "svs_findings.json", findings_dest)
             self._download_metrics_from_gcs(gcs_prefix + "svs_stats.json", stats_dest)
+            self._download_metrics_from_gcs(gcs_prefix + "svs_findings_during.json", during_dest)
             outputs_dir = temp_dir
         else:
             return
@@ -1779,6 +1782,7 @@ class StageExecutor:
         output_configs: dict | None = None,
         user_config: dict | None = None,
         git_sha: str | None = None,
+        run_reason: dict | None = None,
     ):
         """Launch Docker container (local) or GCE instance."""
         backend = self.config.jobs.backend
@@ -1790,6 +1794,19 @@ class StageExecutor:
         stage_config["inputs"] = input_configs or inputs
         stage_config["outputs"] = output_configs or {}
 
+        # Build SVS context for during-run AI monitoring
+        svs_context = {
+            "run_reason": run_reason or {},
+            "stage_name": stage_name,
+            "outputs": {
+                name: {
+                    "type": cfg.get("type"),
+                    "schema": cfg.get("schema"),
+                }
+                for name, cfg in (output_configs or {}).items()
+            },
+        }
+
         # Build Goldfish environment variables for metrics and provenance
         goldfish_env = {
             "GOLDFISH_PROJECT_NAME": self.config.project_name,
@@ -1799,6 +1816,7 @@ class StageExecutor:
             "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
             "GOLDFISH_STAGE_CONFIG": json.dumps(stage_config),
             "GOLDFISH_SVS_CONFIG": json.dumps(self.config.svs.model_dump()),
+            "GOLDFISH_SVS_CONTEXT": json.dumps(svs_context),
             "GOLDFISH_SVS_STATS_ENABLED": "true"
             if self.config.svs.enabled and self.config.svs.stats_enabled
             else "false",

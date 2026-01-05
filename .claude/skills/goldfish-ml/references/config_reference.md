@@ -109,6 +109,63 @@ jobs:
   backend: gce                      # "gce" or "local"
   experiments_dir: experiments      # Default: "experiments"
 
+# SVS (Semantic Validation System) Settings
+svs:
+  enabled: true                     # Global master switch
+  domain: default                   # default, nlp_tokenizer, image_embeddings, tabular_features
+  default_policy: warn              # fail, warn, ignore
+  default_enforcement: warning      # blocking, warning, silent
+  
+  # Statistics collection (mechanistic)
+  stats_enabled: true
+  
+  # AI reviews
+  ai_pre_run_enabled: true
+  ai_post_run_enabled: true
+  ai_during_run_enabled: true
+  
+  # During-run monitoring parameters
+  ai_during_run_interval_seconds: 300
+  ai_during_run_min_metrics: 200
+  ai_during_run_min_log_lines: 20
+  ai_during_run_max_runs_per_hour: 12
+  ai_during_run_auto_stop: false
+  
+  # Log filtering for AI monitoring
+  ai_during_run_log_filters:
+    - "(ERROR|WARN|EXCEPTION|Traceback)"
+    - "(CUDA|OOM|nan|inf|segfault|Killed|RuntimeError)"
+    - "(loss=|ppl=|acc=|val_|train_|dir_)"
+  ai_during_run_log_max_lines: 200
+  ai_during_run_log_max_bytes: 16384
+  ai_during_run_log_file_max_bytes: 10000000
+  ai_during_run_summary_max_chars: 1200
+
+  # Pre-run review specific configuration
+  pre_run_review:
+    enabled: true
+    model: opus
+    timeout_seconds: 120
+    max_turns: 3
+
+  # Agent configuration (shared by all AI tasks)
+  agent_provider: claude_code       # claude_code, codex_cli, gemini_cli, null
+  agent_model: opus
+  agent_timeout: 120
+  agent_max_turns: 3
+  rate_limit_per_hour: 60
+
+  # Self-learning failure patterns
+  auto_learn_failures: false
+
+# Metrics configuration
+metrics:
+  backend: wandb                    # wandb, local
+  wandb:
+    project: market-lm
+    entity: my-team
+    artifact_mode: file             # file or artifact
+
 # Project invariants (enforced rules)
 invariants:
   - "All training must use versioned datasets"
@@ -361,3 +418,46 @@ Some settings can be overridden via environment:
 | `GOLDFISH_PROJECT_ROOT` | Project root path |
 | `GOOGLE_CLOUD_PROJECT` | GCE project_id (fallback) |
 | `CLOUDSDK_CORE_PROJECT` | GCE project_id (fallback) |
+
+## SVS Configuration (Semantic Validation)
+
+The `svs` section controls code quality oversight and monitoring.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Master switch for all SVS features |
+| `domain` | `default` | Preset for checks/thresholds (see below) |
+| `stats_enabled` | `true` | Enable mechanistic stats collection (entropy, nulls, etc.) |
+| `ai_pre_run_enabled` | `true` | Enable AI code review before `run()` |
+| `ai_post_run_enabled` | `true` | Enable AI output review after completion |
+| `ai_during_run_enabled`| `true` | Enable background AI monitoring during execution |
+
+### Domain Profiles
+
+Domain profiles provide optimized thresholds and policies for common ML tasks. Each profile enables specific checks:
+
+| Profile | Target Data | Typical Checks & Guarantees |
+|---------|-------------|-----------------------------|
+| `default` | General purpose | Validates data existence, file formats, and basic type safety. |
+| `nlp_tokenizer` | Tokenizer outputs | Checks for **high entropy** (no mode collapse), **vocab utilization** (no dead tokens), and strict **null ratio** limits. |
+| `image_embeddings`| Latent vectors | Monitors **variance** and **sparsity** to detect representation collapse or dead units. |
+| `tabular_features`| Preprocessed CSVs | Enforces **column data types**, **missing value** thresholds, and **top-1 frequency** limits to catch data leaks. |
+
+### During-Run Parameters
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `ai_during_run_interval_seconds` | `300` | Frequency of background reviews |
+| `ai_during_run_min_metrics` | `200` | Data points required before first review |
+| `ai_during_run_auto_stop` | `false` | If true, SVS will termination run if critical anomaly detected |
+
+## Metrics Configuration
+
+Goldfish can sync metrics to external backends like Weights & Biases.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `backend` | `local` | `local` or `wandb` |
+| `wandb.project` | - | W&B project name |
+| `wandb.entity` | - | W&B team/user name |
+| `wandb.artifact_mode` | `file` | Use `artifact` for full W&B artifact lineage |

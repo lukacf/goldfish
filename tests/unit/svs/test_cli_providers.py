@@ -30,7 +30,7 @@ class TestClaudeCodeProvider:
         provider = ClaudeCodeProvider(binary="/usr/local/bin/claude")
         request = AgentRequest(
             prompt="Test prompt",
-            model="claude-3-5-sonnet",
+            model="opus",
             max_turns=5,
             timeout_seconds=60,
         )
@@ -44,7 +44,7 @@ class TestClaudeCodeProvider:
         assert "-p" in cmd
         assert "Test prompt" in cmd
         assert "--model" in cmd
-        assert "claude-3-5-sonnet" in cmd
+        assert "opus" in cmd
         assert "--max-turns" in cmd
         assert "5" in cmd
         assert kwargs["timeout"] == 60
