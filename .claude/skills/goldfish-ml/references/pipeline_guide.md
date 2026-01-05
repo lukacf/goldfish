@@ -44,7 +44,7 @@ Input-only signal referencing registered datasets.
 inputs:
   raw_data:
     type: dataset
-    dataset: sales_v1      # Must be registered via register_dataset()
+    dataset: sales_v1      # Must be registered via register_source()
 ```
 
 ### NPY (NumPy Arrays)

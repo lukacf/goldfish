@@ -181,6 +181,57 @@ learning_rate = config.get("learning_rate", 0.001)
 batch_size = config.get("batch_size", 32)
 ```
 
+## SVS Runtime API (Monitoring)
+
+The SVS Runtime API allows stages to interact with background AI monitoring.
+
+### runtime_log(message, level)
+
+Write a structured log line explicitly for AI monitoring.
+
+```python
+from goldfish.io import runtime_log
+
+# Signal progress to the AI monitor
+runtime_log("Gradient norm is stable, training looks healthy")
+
+# Log warnings the AI should notice
+runtime_log("Loss is flatlining, considering early stop", level="WARN")
+```
+
+**Notes:**
+- These logs go to `.goldfish/logs.txt` and are distinct from standard `stdout`.
+- The `DuringRunMonitor` uses these logs as its primary input for qualitative review.
+
+### should_stop()
+
+Check if the background AI monitor has requested early termination.
+
+```python
+from goldfish.io import should_stop
+
+for epoch in range(epochs):
+    # ... training logic ...
+    
+    if should_stop():
+        print("SVS requested early termination. Saving best model and exiting.")
+        save_output("model", best_model)
+        break
+```
+
+### flush_metrics()
+
+Manually trigger a flush of metrics to disk to make them available for background review.
+
+```python
+from goldfish.io import flush_metrics
+
+# Use before should_stop() to ensure AI sees latest data
+flush_metrics()
+if should_stop():
+    # ...
+```
+
 ## Container Environment
 
 Stages run in Docker containers with specific mount points:
