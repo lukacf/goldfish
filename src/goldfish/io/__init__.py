@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -555,6 +556,63 @@ def _get_heartbeat_path() -> Path:
 
 
 # =============================================================================
+# SVS Runtime API - During-run monitoring
+# =============================================================================
+
+
+def runtime_log(message: str, level: str = "INFO") -> None:
+    """Write a structured log line for during-run AI monitoring.
+
+    Logs are written to .goldfish/logs.txt in the outputs directory.
+    This file is monitored by the SVS DuringRunMonitor.
+
+    The log file is automatically capped at 10MB to prevent disk exhaustion.
+    """
+    outputs_dir = _get_outputs_dir()
+    logs_file = outputs_dir / ".goldfish" / "logs.txt"
+
+    try:
+        logs_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Cap log file size (10MB)
+        if logs_file.exists() and logs_file.stat().st_size > 10_000_000:
+            # Simple truncation: keep the last 5MB
+            content = logs_file.read_text()
+            half = len(content) // 2
+            logs_file.write_text(content[half:])
+
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        with open(logs_file, "a") as f:
+            f.write(f"[{timestamp}] {level}: {message}\n")
+    except Exception as e:
+        # Best effort, don't crash the stage for logging failures
+        logger.debug(f"Failed to write runtime log: {e}")
+
+
+def flush_metrics() -> None:
+    """Flush buffered metrics to disk for SVS visibility.
+
+    Call this to ensure recent metrics are available for during-run AI review.
+    """
+    from goldfish.metrics import get_logger
+
+    logger_inst = get_logger()
+    if logger_inst:
+        logger_inst.flush()
+
+
+def should_stop() -> bool:
+    """Check if SVS requested early termination.
+
+    Returns:
+        True if SVS DuringRunMonitor requested a stop.
+    """
+    from goldfish.svs.runtime import should_stop as _should_stop
+
+    return _should_stop()
+
+
+# =============================================================================
 # Metrics API - Re-export for convenience
 # =============================================================================
 
@@ -569,6 +627,10 @@ __all__ = [
     "heartbeat",
     "get_heartbeat_age",
     "read_heartbeat",
+    # SVS Runtime functions
+    "runtime_log",
+    "flush_metrics",
+    "should_stop",
     # Metrics functions
     "log_metric",
     "log_metrics",
