@@ -118,6 +118,10 @@ Check each stage for:
    that upstream stage is currently RUNNING or FINALIZING, this is a BLOCKING error. The run
    should be paused/canceled and re-run after the newer upstream run completes, or use an
    explicit inputs_override to pin the intended run.
+8. **Output format/API mismatch** - `save_output()` only supports `npy` (numpy) and `csv` (pandas)
+   formats. For `file` or `directory` output types declared in pipeline.yaml, the code MUST use
+   `get_output_path()` instead and save manually. Using `save_output()` with file/directory formats
+   will raise ValueError at runtime. This is a BLOCKING error.
 
 ## Output Format
 

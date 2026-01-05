@@ -563,11 +563,27 @@ def _get_heartbeat_path() -> Path:
 def runtime_log(message: str, level: str = "INFO") -> None:
     """Write a structured log line for during-run AI monitoring.
 
-    Logs are written to .goldfish/logs.txt in the outputs directory.
-    This file is monitored by the SVS DuringRunMonitor.
+    This function serves two purposes:
+    1. Writes to .goldfish/logs.txt for the SVS DuringRunMonitor (AI anomaly detection)
+    2. Prints to stdout so logs appear in the logs() tool for human debugging
+
+    The DuringRunMonitor periodically analyzes these logs to detect training anomalies
+    (OOM, NaN, loss divergence) and can request early termination if critical issues
+    are found.
+
+    Args:
+        message: The log message to write
+        level: Log level (INFO, WARN, ERROR, etc.)
 
     The log file is automatically capped at 10MB to prevent disk exhaustion.
     """
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    formatted_line = f"[{timestamp}] {level}: {message}"
+
+    # Print to stdout for human visibility via logs() tool
+    print(formatted_line, flush=True)
+
+    # Also write to .goldfish/logs.txt for AI monitoring
     outputs_dir = _get_outputs_dir()
     logs_file = outputs_dir / ".goldfish" / "logs.txt"
 
@@ -581,9 +597,8 @@ def runtime_log(message: str, level: str = "INFO") -> None:
             half = len(content) // 2
             logs_file.write_text(content[half:])
 
-        timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
         with open(logs_file, "a") as f:
-            f.write(f"[{timestamp}] {level}: {message}\n")
+            f.write(f"{formatted_line}\n")
     except Exception as e:
         # Best effort, don't crash the stage for logging failures
         logger.debug(f"Failed to write runtime log: {e}")
