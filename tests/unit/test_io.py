@@ -153,3 +153,61 @@ class TestLoadInputWithCsv:
         assert isinstance(result, pd.DataFrame)
         assert list(result.columns) == ["a", "b", "c"]
         assert len(result) == 2
+
+
+class TestRuntimeLog:
+    """Test runtime_log function."""
+
+    def test_runtime_log_prints_to_stdout(self, tmp_path, monkeypatch, capsys):
+        """Regression: runtime_log must print to stdout for visibility in logs() tool.
+
+        Bug: runtime_log only wrote to .goldfish/logs.txt, making logs invisible
+        during execution since logs() tool reads from stdout.
+        Fix: runtime_log now also prints to stdout with flush=True.
+        """
+        from goldfish.io import runtime_log
+
+        # Setup outputs directory
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(outputs_dir))
+
+        # Call runtime_log
+        runtime_log("Test message", level="INFO")
+
+        # Verify it printed to stdout
+        captured = capsys.readouterr()
+        assert "INFO: Test message" in captured.out
+        assert captured.out.endswith("\n")
+
+    def test_runtime_log_writes_to_file(self, tmp_path, monkeypatch):
+        """Test that runtime_log still writes to .goldfish/logs.txt for AI monitoring."""
+        from goldfish.io import runtime_log
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(outputs_dir))
+
+        runtime_log("Test message for AI", level="WARN")
+
+        # Verify file was created and contains the message
+        logs_file = outputs_dir / ".goldfish" / "logs.txt"
+        assert logs_file.exists()
+        content = logs_file.read_text()
+        assert "WARN: Test message for AI" in content
+
+    def test_runtime_log_includes_timestamp(self, tmp_path, monkeypatch, capsys):
+        """Test that runtime_log includes timestamp in output."""
+        from goldfish.io import runtime_log
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        monkeypatch.setenv("GOLDFISH_OUTPUTS_DIR", str(outputs_dir))
+
+        runtime_log("Timestamped message")
+
+        captured = capsys.readouterr()
+        # Should have format: [YYYY-MM-DD HH:MM:SS] LEVEL: message
+        assert "[" in captured.out
+        assert "]" in captured.out
+        assert "INFO: Timestamped message" in captured.out

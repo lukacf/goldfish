@@ -267,3 +267,76 @@ def test_inspect_run_includes_attempt_info():
     assert result["attempt_context"]["attempt"] == 3
     assert result["attempt_context"]["runs_in_attempt"] == 5
     assert result["attempt_context"]["status"] == "open"
+
+
+def test_inspect_run_refetches_row_after_sync():
+    """Regression: inspect_run must re-fetch row after sync to get updated timestamps.
+
+    Bug: inspect_run fetched the row before sync, then used it to build the response.
+    This caused last_sync to show stale values even when sync succeeded.
+    Fix: Re-fetch the row after sync_metrics_if_running() updates the database.
+    """
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-abcdef12"
+
+    # Initial row with old timestamp
+    initial_row = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "running",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": None,
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "progress": "running",
+        "reason_json": None,
+        "backend_type": "gce",
+        "backend_handle": "instance-1",
+        "last_metrics_sync_at": None,  # No sync yet
+    }
+
+    # Updated row after sync (what should be returned after re-fetch)
+    updated_row = {
+        **initial_row,
+        "last_metrics_sync_at": "2025-12-27T10:30:00Z",  # Updated by sync
+    }
+
+    mock_db = MagicMock()
+    # First call returns initial row, second call (after sync) returns updated row
+    mock_db.get_stage_run.side_effect = [initial_row, initial_row, updated_row]
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    mock_bus = MagicMock()
+    # get_ack will return our known req_id to simulate successful ACK
+    mock_bus.get_ack.return_value = "abc12345"
+
+    mock_stage_exec = MagicMock()
+    mock_stage_exec.gce_launcher._find_instance_zone.return_value = "us-west1-b"
+
+    # Mock UUID to return a known value so ack comparison works
+    # uuid.uuid4() returns UUID, str(uuid) is like "abc12345-...", [:8] = "abc12345"
+    mock_uuid_obj = MagicMock()
+    mock_uuid_obj.__str__ = MagicMock(return_value="abc12345-1234-1234-1234-123456789abc")
+
+    with (
+        patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db),
+        patch("goldfish.server_tools.execution_tools._get_metadata_bus", return_value=mock_bus),
+        patch("goldfish.server_tools.execution_tools._get_stage_executor", return_value=mock_stage_exec),
+        patch("goldfish.server_tools.execution_tools._overdrive_ack_timeout", return_value=0.5),
+        patch("uuid.uuid4", return_value=mock_uuid_obj),
+    ):
+        result = inspect_run(run_id)
+
+    # Verify sync was called
+    mock_stage_exec.sync_metrics_if_running.assert_called_once_with(run_id)
+
+    # Verify row was re-fetched (3 calls: initial, refresh_status_once refresh, after sync)
+    assert mock_db.get_stage_run.call_count == 3
+
+    # The critical assertion: last_sync should reflect the UPDATED timestamp
+    assert result["dashboard"]["last_sync"] == "2025-12-27T10:30:00Z"
+    assert result["dashboard"]["sync_status"] == "synced"

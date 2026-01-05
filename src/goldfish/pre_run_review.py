@@ -118,6 +118,16 @@ Check each stage for:
    that upstream stage is currently RUNNING or FINALIZING, this is a BLOCKING error. The run
    should be paused/canceled and re-run after the newer upstream run completes, or use an
    explicit inputs_override to pin the intended run.
+8. **Output format/API mismatch** - `save_output()` only supports `npy` (numpy) and `csv` (pandas)
+   formats. For `file` or `directory` output types declared in pipeline.yaml, the code MUST use
+   `get_output_path()` instead and save manually. Using `save_output()` with file/directory formats
+   will raise ValueError at runtime. This is a BLOCKING error.
+9. **goldfish.io function signatures** - Check exact signatures:
+   - `get_output_path(name)` - takes 1 arg, returns Path (directory). NOT `get_output_path(name, filename)`!
+   - `get_input_path(name)` - takes 1 arg, returns Path. NOT `get_input_path(name, filename)`!
+   - `save_output(name, data, artifact=False)` - 2-3 args
+   - `load_input(name, format=None)` - 1-2 args
+   Wrong argument count is a BLOCKING error (TypeError at runtime).
 
 ## Output Format
 

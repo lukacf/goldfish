@@ -134,4 +134,53 @@ def read_svs_manifests(outputs_dir: Path) -> dict[str, Any]:
     else:
         result["missing"].append("svs_findings.json")
 
+    # 3. Read during-run AI findings (from DuringRunMonitor)
+    during_ai_path = goldfish_dir / "svs_findings_during.json"
+    if during_ai_path.exists():
+        try:
+            data = json.loads(during_ai_path.read_text())
+            ai_history = data.get("history", [])
+            if isinstance(ai_history, list) and ai_history:
+                # Merge into existing during_run history
+                if not result["during_run"]:
+                    result["during_run"] = {"decision": "approved", "history": []}
+
+                # Tag each AI finding with [AI] and add to history
+                severity_rank = {
+                    "BLOCK": 2,
+                    "ERROR": 2,
+                    "WARN": 1,
+                    "WARNING": 1,
+                }
+                current_decision = result["during_run"].get("decision", "approved")
+
+                for entry in ai_history:
+                    # History from DuringRunMonitor has a slightly different format
+                    # { timestamp: ..., findings: [ { check, severity, summary }, ... ] }
+                    findings = entry.get("findings", [])
+                    for f in findings:
+                        severity = str(f.get("severity", "")).upper()
+                        # Update decision based on AI findings
+                        if severity_rank.get(severity, 0) == 2:
+                            current_decision = "blocked"
+                        elif severity_rank.get(severity, 0) == 1 and current_decision != "blocked":
+                            current_decision = "warned"
+
+                        # Create entry compatible with history format
+                        result["during_run"]["history"].append(
+                            {
+                                "phase": "during_run",
+                                "severity": f.get("severity"),
+                                "check": f"AI: {f.get('check')}",
+                                "summary": f.get("summary"),
+                                "timestamp": entry.get("timestamp"),
+                                "step": entry.get("step"),
+                            }
+                        )
+
+                result["during_run"]["decision"] = current_decision
+        except json.JSONDecodeError as e:
+            logger.error(f"Corrupt svs_findings_during.json: {e}")
+            result["missing"].append("svs_findings_during.json (corrupt)")
+
     return result

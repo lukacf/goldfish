@@ -353,6 +353,11 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
             except Exception as e:
                 logger.debug(f"Failed to sync metrics/SVS for {run_id}: {e}")
 
+            # Re-fetch row after sync to get updated timestamps (last_metrics_sync_at)
+            refreshed = db.get_stage_run(run_id)
+            if refreshed:
+                row = refreshed
+
     # Set default includes if None
     if include is None:
         include = ["dashboard", "metadata", "thoughts"]
