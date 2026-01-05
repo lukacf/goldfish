@@ -1,6 +1,6 @@
 ---
 name: goldfish-ml
-description: This skill should be used when working with Goldfish ML, an MCP server for AI-driven machine learning experimentation. Use this skill for workspace management, pipeline execution, data registry operations, and provenance tracking. Goldfish provides 24 master tools for efficient ML workflows.
+description: This skill should be used when working with Goldfish ML, an MCP server for AI-driven machine learning experimentation. Use this skill for workspace management, pipeline execution, data registry operations, and provenance tracking. Goldfish provides 31 master tools for efficient ML workflows.
 ---
 
 # Goldfish ML
@@ -521,7 +521,11 @@ manage_versions(workspace="exp_v1", action="list")
 
 
 
-## Master Tool Reference (24)
+## Master Tool Reference (31)
+
+
+
+
 
 
 
@@ -529,29 +533,59 @@ manage_versions(workspace="exp_v1", action="list")
 
 
 
+
+
+
+
 | Tool | Purpose | Key Parameters |
+
+
 
 |------|---------|----------------|
 
-| `status()` | orientation - slots, jobs, STATE.md | None |
+
+
+| `status()` | Orientation - slots, jobs, STATE.md | None |
+
+
 
 | `dashboard()` | Actionable summary of system health | None |
 
-| `create_workspace()` | New experiment | name, goal, reason |
+
+
+| `create_workspace()` | New experiment from main | name, goal, reason |
+
+
 
 | `mount()` | Activate workspace in slot | workspace, slot, reason |
 
+
+
 | `hibernate()` | Deactivate (auto-saves) | slot, reason |
+
+
 
 | `save_version()` | Create version save point | slot, message |
 
+
+
 | `inspect_workspace()` | Master view of workspace history/DAG | name |
+
+
 
 | `diff()` | Compare slot, workspace, or versions | target, against |
 
-| `rollback()` | Revert to version | slot, version, reason |
 
-| `delete_workspace()` | Remove workspace | workspace, reason |
+
+| `rollback()` | Revert slot to version | slot, version, reason |
+
+
+
+| `delete_workspace()` | Remove workspace (irreversible) | workspace, reason |
+
+
+
+
 
 
 
@@ -559,25 +593,51 @@ manage_versions(workspace="exp_v1", action="list")
 
 
 
+
+
+
+
 | Tool | Purpose | Key Parameters |
+
+
 
 |------|---------|----------------|
 
+
+
 | `run()` | Execute stages (with SVS pre-run) | workspace, stages, reason |
+
+
 
 | `inspect_run()` | Run master view (dashboard, manifest, svs) | run_id, include |
 
+
+
 | `logs()` | Container logs (supports follow mode) | run_id, tail, follow |
 
-| `cancel()` | Stop run | run_id, reason |
+
+
+| `cancel()` | Stop a running stage | run_id, reason |
+
+
 
 | `list_runs()` | Workspace run history (compact) | workspace, stage |
 
+
+
 | `list_all_runs()` | Global experiment timeline | status, limit |
 
-| `mark_outcome()` | Classify produced results | run_id, outcome |
+
+
+| `mark_outcome()` | Indicate result quality (success/bad) | run_id, outcome |
+
+
 
 | `compare_runs()` | Side-by-side run comparison | run_id_a, run_id_b |
+
+
+
+
 
 
 
@@ -585,11 +645,23 @@ manage_versions(workspace="exp_v1", action="list")
 
 
 
+
+
+
+
 | Tool | Purpose | Key Parameters |
+
+
 
 |------|---------|----------------|
 
+
+
 | `manage_versions()` | Unified tagging, pruning, listing | action, workspace, version, tag |
+
+
+
+
 
 
 
@@ -597,15 +669,31 @@ manage_versions(workspace="exp_v1", action="list")
 
 
 
+
+
+
+
 | Tool | Purpose | Key Parameters |
+
+
 
 |------|---------|----------------|
 
+
+
 | `register_source()` | Register external GCS data | name, gcs_path, metadata |
+
+
 
 | `manage_sources()` | Registry management (list, get, lineage) | action, name |
 
-| `promote_artifact()` | Stage output → source | job_id, output_name, metadata |
+
+
+| `promote_artifact()` | Stage output → reusable source | job_id, output_name, metadata |
+
+
+
+
 
 
 
@@ -613,13 +701,51 @@ manage_versions(workspace="exp_v1", action="list")
 
 
 
+
+
+
+
 | Tool | Purpose | Key Parameters |
+
+
 
 |------|---------|----------------|
 
-| `log_thought()` | Record reasoning in audit/STATE.md | thought, workspace |
+
+
+| `validate_config()` | Check YAML files for errors/typos | workspace |
+
+
+
+| `log_thought()` | Record reasoning in audit/STATE.md | thought, workspace, run_id |
+
+
+
+| `get_workspace_thoughts()` | Retrieve thoughts for a workspace | workspace |
+
+
 
 | `manage_patterns()` | AI failure pattern knowledge base | action, pattern_id |
+
+
+
+| `search_goldfish_logs()` | LogsQL search via VictoriaLogs | query |
+
+
+
+| `initialize_project()` | Setup new Goldfish project | project_name, project_root |
+
+
+
+| `reload_config()` | Hot-reload goldfish.yaml | None |
+
+
+
+| `get_audit_log()` | View recent state changes | limit, workspace |
+
+
+
+
 
 
 

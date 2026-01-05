@@ -13,7 +13,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from goldfish.svs.config import SVSConfig
@@ -58,12 +58,15 @@ class DuringRunMonitor(threading.Thread):
             return
         try:
             state = json.loads(self.state_file.read_text())
+            if not isinstance(state, dict):
+                logger.warning("Monitor state is not a dict, ignoring")
+                return
             self.metrics_offset = state.get("metrics_offset", 0)
             self.logs_offset = state.get("logs_offset", 0)
             self.last_review_time = state.get("last_review_time", 0.0)
             self.reviews_this_hour = state.get("reviews_this_hour", 0)
             self.hour_start = state.get("hour_start", time.time())
-        except Exception as e:
+        except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"Failed to load monitor state: {e}")
 
     def _save_state(self) -> None:
@@ -79,7 +82,7 @@ class DuringRunMonitor(threading.Thread):
             temp_path = self.state_file.with_suffix(".tmp")
             temp_path.write_text(json.dumps(state, indent=2))
             temp_path.rename(self.state_file)
-        except Exception as e:
+        except OSError as e:
             logger.error(f"Failed to save monitor state: {e}")
 
     def stop(self, timeout: float = 10.0) -> None:
@@ -95,7 +98,7 @@ class DuringRunMonitor(threading.Thread):
         while not self._stop_event.is_set():
             try:
                 self._check_and_review()
-            except Exception as e:
+            except Exception as e:  # Intentionally broad - monitor must not crash
                 logger.error(f"Error in during-run monitor: {e}", exc_info=True)
 
             # Wait for interval or stop event
@@ -150,7 +153,7 @@ class DuringRunMonitor(threading.Thread):
         if not self.metrics_file.exists():
             return [], 0
 
-        metrics = []
+        metrics: list[dict[str, Any]] = []
         offset = self.metrics_offset
         try:
             with open(self.metrics_file) as f:
@@ -158,12 +161,12 @@ class DuringRunMonitor(threading.Thread):
                 for line in f:
                     try:
                         data = json.loads(line)
-                        if data.get("type") == "metric":
+                        if isinstance(data, dict) and data.get("type") == "metric":
                             metrics.append(data)
                     except json.JSONDecodeError:
                         continue
                 offset = f.tell()
-        except Exception as e:
+        except OSError as e:
             logger.error(f"Failed to read metrics: {e}")
 
         return metrics, offset
@@ -173,25 +176,23 @@ class DuringRunMonitor(threading.Thread):
         if not self.logs_file.exists():
             return "", 0
 
-        # Handle log truncation
-        try:
-            file_size = self.logs_file.stat().st_size
-            if file_size < self.logs_offset:
-                logger.info(f"Log file truncated ({file_size} < {self.logs_offset}), resetting offset")
-                self.logs_offset = 0
-        except Exception:
-            pass
-
         lines = []
         offset = self.logs_offset
         try:
             with open(self.logs_file) as f:
+                # Handle truncation atomically: check size AFTER opening file
+                # This avoids TOCTOU race between stat() and open()
+                f.seek(0, 2)  # Seek to end
+                file_size = f.tell()
+                if file_size < offset:
+                    logger.info(f"Log file truncated ({file_size} < {offset}), resetting offset")
+                    offset = 0
                 f.seek(offset)
                 for line in f:
                     if self._should_keep_log_line(line):
                         lines.append(line)
                 offset = f.tell()
-        except Exception as e:
+        except OSError as e:
             logger.error(f"Failed to read logs: {e}")
 
         # Enforce max lines (before bytes)
@@ -256,7 +257,7 @@ class DuringRunMonitor(threading.Thread):
                 self._request_stop(parsed.get("stop_reason", "AI detected critical anomaly"))
 
             return True
-        except Exception as e:
+        except (OSError, TimeoutError, RuntimeError) as e:
             logger.error(f"Error calling AI agent: {e}")
             return False
 
@@ -265,8 +266,12 @@ class DuringRunMonitor(threading.Thread):
         if not self.context_file.exists():
             return {}
         try:
-            return cast("dict[str, Any]", json.loads(self.context_file.read_text()))
-        except Exception:
+            data = json.loads(self.context_file.read_text())
+            if not isinstance(data, dict):
+                logger.warning("Stage context is not a dict, ignoring")
+                return {}
+            return data
+        except (json.JSONDecodeError, OSError):
             return {}
 
     def _summarize_metrics(self, metrics: list[dict]) -> str:
@@ -336,21 +341,27 @@ Respond ONLY with a JSON block fenced with ```json:
 """
         return prompt
 
-    def _parse_json_response(self, text: str) -> dict | None:
+    def _parse_json_response(self, text: str) -> dict[str, Any] | None:
         """Extract and parse JSON from fenced blocks."""
         match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
         if not match:
             # Try raw JSON if no fence
             try:
-                return cast("dict", json.loads(text))
-            except Exception:
+                data = json.loads(text)
+                if not isinstance(data, dict):
+                    return None
+                return data
+            except json.JSONDecodeError:
                 return None
         try:
-            return cast("dict", json.loads(match.group(1)))
-        except Exception:
+            data = json.loads(match.group(1))
+            if not isinstance(data, dict):
+                return None
+            return data
+        except json.JSONDecodeError:
             return None
 
-    def _save_findings(self, parsed: dict) -> None:
+    def _save_findings(self, parsed: dict[str, Any]) -> None:
         """Save AI findings to svs_findings_during.json."""
         findings = parsed.get("findings", [])
         if not findings:
@@ -363,11 +374,13 @@ Respond ONLY with a JSON block fenced with ```json:
             "stop_reason": parsed.get("stop_reason"),
         }
 
-        data = {"version": 1, "history": []}
+        data: dict[str, Any] = {"version": 1, "history": []}
         if self.findings_file.exists():
             try:
-                data = cast("dict", json.loads(self.findings_file.read_text()))
-            except Exception:
+                loaded = json.loads(self.findings_file.read_text())
+                if isinstance(loaded, dict):
+                    data = loaded
+            except (json.JSONDecodeError, OSError):
                 pass
 
         history = data.setdefault("history", [])
@@ -378,7 +391,7 @@ Respond ONLY with a JSON block fenced with ```json:
             temp_path = self.findings_file.with_suffix(".tmp")
             temp_path.write_text(json.dumps(data, indent=2))
             temp_path.rename(self.findings_file)
-        except Exception as e:
+        except OSError as e:
             logger.error(f"Failed to save findings: {e}")
 
     def _request_stop(self, reason: str) -> None:
@@ -388,5 +401,5 @@ Respond ONLY with a JSON block fenced with ```json:
             temp_path = self.stop_requested_file.with_suffix(".tmp")
             temp_path.write_text(reason)
             temp_path.rename(self.stop_requested_file)
-        except Exception as e:
+        except OSError as e:
             logger.error(f"Failed to request stop: {e}")

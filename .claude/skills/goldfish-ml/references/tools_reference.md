@@ -1,12 +1,13 @@
 # Goldfish MCP Tools Reference
 
-Complete API documentation for the 24 master Goldfish MCP tools organized by category.
+Complete API documentation for the 31 master Goldfish MCP tools organized by category.
 
 ## Workspace Management Tools
 
 ### status()
 
-Get current system status. **Call this first when starting or recovering context.**
+Get current system status orientation. **Call this first when starting or recovering context.**
+Returns which workspaces are mounted, active jobs, recent audit trail, and full STATE.md.
 
 **Parameters:** None
 
@@ -17,6 +18,7 @@ StatusResponse:
   slots: list[SlotInfo]      # w1, w2, etc. with mount status
   active_jobs: list[JobInfo] # Currently running jobs
   source_count: int          # Number of registered sources
+  recent_audit: list[dict]   # Last 5 state-changing operations
   state_md: str              # Full STATE.md content
 ```
 
@@ -24,20 +26,21 @@ StatusResponse:
 
 ### dashboard()
 
-Get a quick overview of system state for situational awareness. **Call this to see what needs attention.**
+Get a quick overview of system state for situational awareness. **Call this to see what needs immediate attention.**
+Focuses on failed runs, active runs, and recent outcomes.
 
 **Returns:**
-- failed_runs: Recent failures with error messages.
-- active_runs: Currently running or pending stages.
-- workspaces: Workspace list with dirty status.
-- source_count: Total registered sources.
-- recent_outcomes: Success/bad_results trends.
+- `failed_runs`: Recent failures with error messages.
+- `active_runs`: Currently running or pending stages.
+- `workspaces`: Workspace list with dirty status.
+- `source_count`: Total registered sources.
+- `recent_outcomes`: Success/bad_results trends.
 
 ---
 
-### create_workspace(name, goal, reason, fork_from)
+### create_workspace(name, goal, reason)
 
-Create a new experiment workspace.
+Create a new experiment workspace from main.
 
 **Parameters:**
 | Parameter | Type | Required | Description |
@@ -45,7 +48,6 @@ Create a new experiment workspace.
 | `name` | str | Yes | Workspace identifier (alphanumeric + underscore/hyphen) |
 | `goal` | str | Yes | Clear description of experiment objective |
 | `reason` | str | Yes | Why this workspace is needed (min 15 chars) |
-| `fork_from` | str | No | Existing workspace to branch from |
 
 ---
 
@@ -76,7 +78,7 @@ Deactivate a workspace slot. Auto-checkpoints if dirty.
 
 ### save_version(slot, message)
 
-Create a version of the current slot state. **This is the primary way to create save points.**
+Create a version of the current slot state. **Primary way to create save points.**
 
 **Parameters:**
 | Parameter | Type | Required | Description |
@@ -88,7 +90,7 @@ Create a version of the current slot state. **This is the primary way to create 
 
 ### inspect_workspace(name, version_limit, version_offset)
 
-Get a comprehensive, orientation-friendly view of a workspace. **Call this to understand a workspace's context.**
+Get a comprehensive view of a workspace including history and pipeline.
 
 **Parameters:**
 | Parameter | Type | Required | Default | Description |
@@ -103,24 +105,11 @@ Get a comprehensive, orientation-friendly view of a workspace. **Call this to un
 
 Compare changes between targets (slots, workspaces, or versions).
 
-**Parameters:**
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `target` | str | Yes | Primary target (e.g., "w1", "baseline@v2") |
-| `against` | str | No | Optional target to compare against |
-
 ---
 
 ### rollback(slot, version, reason)
 
 Revert workspace to a previous version.
-
-**Parameters:**
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `slot` | str | Yes | Slot to rollback |
-| `version` | str | Yes | Target version (e.g., "v1", "v2") |
-| `reason` | str | Yes | Why rolling back (min 15 chars) |
 
 ---
 
@@ -141,16 +130,13 @@ Execute pipeline stages. **The primary execution tool.**
 |-----------|------|----------|---------|-------------|
 | `workspace` | str | Yes | - | Workspace name or slot (e.g., "w1") |
 | `stages` | list[str] | No | None | Stages to run (None = all) |
-| `reason` | str \| dict | No | None | Why running (min 15 chars description) |
-
-**Structured Reason:**
-Pass a dictionary for better tracking: `{"description": "...", "hypothesis": "...", "approach": "...", "goal": "..."}`
+| `reason` | str \| dict | No | None | Why running (min 15 chars description or dict) |
 
 ---
 
 ### inspect_run(run_id, include)
 
-Get full details of a specific run. **Master tool for analyzing results.**
+Get a comprehensive, synthesized view of a run results and health.
 
 **Parameters:**
 | Parameter | Type | Required | Default | Description |
@@ -174,7 +160,7 @@ Get container logs from a run. Supports follow mode for cursor-based streaming.
 
 ### mark_outcome(run_id, outcome)
 
-Indicate if a completed run was successful or produced garbage.
+Indicate if a completed run produced good results or garbage.
 
 ---
 
@@ -192,7 +178,7 @@ List recent runs for a workspace (compact view).
 
 ### list_all_runs(status, limit, offset)
 
-Get a global experiment timeline across ALL workspaces. **Call this to see overall progress.**
+Get a global experiment timeline across ALL workspaces.
 
 ---
 
@@ -222,21 +208,68 @@ Register an external data source (GCS location).
 
 ### promote_artifact(job_id, output_name, source_name, reason, metadata)
 
-Promote a stage run output to a reusable, versioned data source.
+Promote a stage run output to a reusable data source.
 
 ---
 
 ## Utility Tools
 
-### log_thought(thought, workspace)
+### validate_config(workspace)
+
+Validate `goldfish.yaml` and pipeline/stage configs for typos and errors.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `workspace` | str | No | Optional workspace to validate pipeline files |
+
+---
+
+### log_thought(thought, workspace, run_id)
 
 Record reasoning for the audit trail and STATE.md.
 
 ---
 
+### get_workspace_thoughts(workspace, limit, offset)
+
+Get all thoughts logged for a specific workspace.
+
+**Parameters:**
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `workspace` | str | Yes | - | Workspace name or slot |
+| `limit` | int | No | 50 | Max thoughts to return |
+
+---
+
 ### manage_patterns(action, pattern_id, status, reason, dry_run)
 
-Manage the AI failure pattern registry (self-learning system).
+Manage the AI failure pattern registry.
+
+---
+
+### search_goldfish_logs(query, show_guide)
+
+Search centralized Goldfish logs using LogsQL via VictoriaLogs.
+
+---
+
+### initialize_project(project_name, project_root, from_existing)
+
+Initialize a new Goldfish project in the specified directory. **First-time setup only.**
+
+---
+
+### reload_config()
+
+Reload configuration from `goldfish.yaml` without restarting the server.
+
+---
+
+### get_audit_log(limit, workspace)
+
+Get recent audit trail entries for compliance and history.
 
 ---
 
