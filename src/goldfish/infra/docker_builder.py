@@ -19,6 +19,7 @@ GOLDFISH_SVS_PATH = Path(__file__).parent.parent / "svs"
 GOLDFISH_VALIDATION_PATH = Path(__file__).parent.parent / "validation.py"
 GOLDFISH_ERRORS_PATH = Path(__file__).parent.parent / "errors.py"
 GOLDFISH_UTILS_PATH = Path(__file__).parent.parent / "utils"
+GOLDFISH_RUST_PATH = Path(__file__).parent.parent.parent.parent / "goldfish-rust"
 
 # Default base image when none specified (backwards compatibility)
 DEFAULT_BASE_IMAGE = "python:3.11-slim"
@@ -99,6 +100,8 @@ class DockerBuilder:
         # Check for optional files/directories
         has_requirements = (workspace_dir / "requirements.txt").exists()
         has_loaders = (workspace_dir / "loaders").exists()
+        has_entrypoints = (workspace_dir / "entrypoints").exists()
+        has_goldfish_rust = GOLDFISH_RUST_PATH.exists()
 
         # Detect image type to determine user handling
         # - Jupyter images (quay.io/jupyter/*) run as non-root user (jovyan, uid 1000)
@@ -147,12 +150,16 @@ RUN echo "Building version: ${VERSION}"
 COPY --chown=1000:100 goldfish_io/ /app/goldfish_io/
 ENV PYTHONPATH="/app/goldfish_io:/app/modules:/app:${PYTHONPATH}"
 
-# Copy workspace code
-COPY --chown=1000:100 modules/ /app/modules/
-COPY --chown=1000:100 configs/ /app/configs/
+        # Copy workspace code
+        COPY --chown=1000:100 modules/ /app/modules/
+        COPY --chown=1000:100 configs/ /app/configs/
 """
         if has_loaders:
             dockerfile += "COPY --chown=1000:100 loaders/ /app/loaders/\n"
+        if has_entrypoints:
+            dockerfile += "COPY --chown=1000:100 entrypoints/ /app/entrypoints/\n"
+        if has_goldfish_rust:
+            dockerfile += "COPY --chown=1000:100 goldfish-rust/ /app/goldfish-rust/\n"
 
         dockerfile += """
 WORKDIR /app
@@ -209,6 +216,16 @@ CMD ["/bin/bash"]
 
             if (workspace_dir / "loaders").exists():
                 shutil.copytree(workspace_dir / "loaders", build_context / "loaders")
+
+            if (workspace_dir / "entrypoints").exists():
+                shutil.copytree(workspace_dir / "entrypoints", build_context / "entrypoints")
+
+            if GOLDFISH_RUST_PATH.exists():
+                shutil.copytree(
+                    GOLDFISH_RUST_PATH,
+                    build_context / "goldfish-rust",
+                    ignore=shutil.ignore_patterns("target", ".git", "__pycache__"),
+                )
 
             # Copy goldfish.io module into build context
             # This creates a goldfish/io package structure so `from goldfish.io import ...` works

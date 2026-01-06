@@ -156,8 +156,8 @@ Start your review now:
 STAGE_SECTION_TEMPLATE = """
 ### Stage: {stage_name}
 
-#### Module: modules/{stage_name}.py
-```python
+#### Module: {module_path}
+```{module_lang}
 {module_content}
 ```
 
@@ -439,6 +439,12 @@ class PreRunReviewer:
                 continue
 
             module_path = self.workspace_path / "modules" / f"{stage}.py"
+            module_lang = "python"
+            if not module_path.exists():
+                rust_path = self.workspace_path / "modules" / f"{stage}.rs"
+                if rust_path.exists():
+                    module_path = rust_path
+                    module_lang = "rust"
             config_path = self.workspace_path / "configs" / f"{stage}.yaml"
 
             module_content = self._read_file_safe(module_path, "# Module not found")
@@ -446,6 +452,8 @@ class PreRunReviewer:
 
             section = STAGE_SECTION_TEMPLATE.format(
                 stage_name=escape_for_prompt(stage),
+                module_path=escape_for_prompt(str(module_path.relative_to(self.workspace_path))),
+                module_lang=module_lang,
                 module_content=escape_for_prompt(module_content),
                 config_content=escape_for_prompt(config_content),
             )

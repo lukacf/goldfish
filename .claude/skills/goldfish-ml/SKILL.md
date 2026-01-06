@@ -366,7 +366,7 @@ def main():
 
 ### 4.1 Rust Stage Implementation (Alternative)
 
-For performance-critical stages, you can use the **Rust SDK** (`goldfish-rust`) instead of Python. The API mirrors the Python version.
+For performance-critical stages, you can use the **Rust SDK** (`goldfish-rust`) instead of Python. The API mirrors the Python version and **Rust stages are first-class** (can be mixed with Python stages in the same pipeline).
 
 **Add to Cargo.toml:**
 ```toml
@@ -374,9 +374,16 @@ For performance-critical stages, you can use the **Rust SDK** (`goldfish-rust`) 
 goldfish-rust = { path = "../goldfish-rust" }  # or from registry when published
 ```
 
+**Pipeline.yaml (Rust stage):**
+```yaml
+stages:
+  - name: encode
+    runtime: rust   # per-stage runtime (can interleave with python)
+```
+
 **Basic stage pattern:**
 ```rust
-// modules/train/src/main.rs
+// modules/train.rs
 use goldfish_rust::{init, load_input, save_output, OutputData, GoldfishError};
 use goldfish_rust::{runtime_log, heartbeat, log_metric, log_artifact, should_stop};
 
@@ -410,6 +417,13 @@ fn main() -> Result<(), GoldfishError> {
 }
 ```
 
+**Rust source convention (symmetric to Python):**
+- Python stage → `modules/<stage>.py`
+- Rust stage → `modules/<stage>.rs` (**required**)
+  - Goldfish compiles this at runtime and runs the resulting binary.
+  - Optional: `modules/<stage>.Cargo.toml` to add dependencies or customize build.
+  - Custom base images must include `cargo`; Goldfish base images already do.
+
 **Key Rust API functions:**
 
 | Function | Purpose |
@@ -442,6 +456,8 @@ OutputData::MultiTensor(HashMap<String, OutputData>)
 **Multi-array autosave:** `OutputData::MultiTensor` is auto-saved only when the output format is `directory` (or default `file`). Each array is written as `outputs/<signal>/<array_name>.npy`. Stats are recorded as `signal.array` in `svs_stats.json`. Note: `save_output` does **not** write `.npz` files.
 
 **save_output + Path:** `OutputData::Path` with schema validation only works for `directory` outputs with `arrays` schema—Goldfish loads `.npz`/`.npy` files inside the directory to validate. For other schema types, use in-memory `OutputData` variants.
+
+**Entrypoints:** Rust stages do **not** need an explicit `entrypoints/<stage>` file. Goldfish compiles `modules/<stage>.rs` and runs the compiled binary under `entrypoints/` automatically. Use `entrypoint:` in pipeline.yaml only if you need a custom binary path.
 
 **Type extraction:**
 ```rust
@@ -936,8 +952,6 @@ Goldfish auto-extracts failure patterns to prevent regression. Be aware of these
 
 
 11. **MANDATORY: Always use `goldfish.io` and `goldfish.metrics`** for I/O and telemetry. AI monitoring will fail without them.
-
-
 
 
 

@@ -246,6 +246,48 @@ stages:
 
         manager.hibernate(slot="w1", reason="Done with validate test")
 
+    def test_validate_config_rust_entrypoint_no_module_warning(self, e2e_setup):
+        """validate_config should not warn about missing .py when runtime is rust."""
+        from goldfish.config_validation import validate_project_config
+
+        manager = e2e_setup["manager"]
+        project_root = e2e_setup["project_root"]
+
+        manager.create_workspace(
+            name="rust-entrypoint-test", goal="Rust entrypoint validation", reason="Testing rust runtime"
+        )
+        manager.mount(workspace="rust-entrypoint-test", slot="w1", reason="Testing rust runtime")
+
+        slot_path = project_root / "workspaces" / "w1"
+
+        (slot_path / "pipeline.yaml").write_text(
+            """
+name: rust-entrypoint-test
+stages:
+  - name: encode
+    runtime: rust
+    outputs:
+      data: {type: npy, schema: null}
+"""
+        )
+
+        modules_dir = slot_path / "modules"
+        modules_dir.mkdir(exist_ok=True)
+        (modules_dir / "encode.rs").write_text("fn main() {}")
+
+        manager.save_version(slot="w1", message="Add rust entrypoint pipeline")
+
+        result = validate_project_config(
+            project_root=project_root,
+            workspace_path=slot_path,
+            workspace_name="w1",
+        )
+
+        assert result["valid"] is True
+        assert not any("encode" in w and "module not found" in w for w in result["warnings"])
+
+        manager.hibernate(slot="w1", reason="Done with rust entrypoint test")
+
     def test_validate_config_catches_yaml_syntax_error(self, e2e_setup):
         """validate_config should catch YAML syntax errors in stage configs."""
         from goldfish.config_validation import validate_project_config

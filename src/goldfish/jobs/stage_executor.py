@@ -399,6 +399,8 @@ class StageExecutor:
                 user_config=stage_config,
                 git_sha=git_sha,
                 run_reason=reason_structured,
+                runtime=stage.runtime,
+                entrypoint=stage.entrypoint,
             )
         except Exception as e:
             # Mark failed immediately with error and re-raise
@@ -1771,6 +1773,76 @@ class StageExecutor:
             return 30
         return 60
 
+    def _build_entrypoint_script(self, stage_name: str, runtime: str | None, entrypoint: str | None) -> str:
+        runtime_name = runtime or "python"
+        if runtime_name == "rust":
+            entrypoint_rel = entrypoint or f"entrypoints/{stage_name}"
+            entrypoint_path = f"/app/{entrypoint_rel}"
+            module_path = f"/app/modules/{stage_name}.rs"
+            cargo_override = f"/app/modules/{stage_name}.Cargo.toml"
+            build_dir = f"/app/.goldfish_rust_build/{stage_name}"
+            return f"""#!/bin/bash
+set -euo pipefail
+
+echo "Running stage: {stage_name} (rust)"
+cd /app
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "cargo not found in image. Use a goldfish-base image or install Rust in your base image." >&2
+  exit 1
+fi
+
+if [ ! -d "/app/goldfish-rust" ]; then
+  echo "goldfish-rust crate not found at /app/goldfish-rust. Ensure it is included in the build context." >&2
+  exit 1
+fi
+
+if [ ! -f "{module_path}" ]; then
+  echo "Rust module not found: {module_path}" >&2
+  exit 1
+fi
+
+mkdir -p "{build_dir}/src" "/app/entrypoints"
+mkdir -p "$(dirname "{entrypoint_path}")"
+cp "{module_path}" "{build_dir}/src/main.rs"
+
+if [ -f "{cargo_override}" ]; then
+  cp "{cargo_override}" "{build_dir}/Cargo.toml"
+else
+  cat > "{build_dir}/Cargo.toml" <<'CARGO_EOF'
+[package]
+name = "{stage_name}"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+goldfish-rust = {{ path = "/app/goldfish-rust" }}
+CARGO_EOF
+fi
+
+cargo build --release --manifest-path "{build_dir}/Cargo.toml"
+cp "{build_dir}/target/release/{stage_name}" "{entrypoint_path}"
+chmod +x "{entrypoint_path}"
+
+exec "{entrypoint_path}"
+"""
+        if runtime_name != "python":
+            raise GoldfishError(f"Unsupported runtime '{runtime_name}' for stage '{stage_name}'")
+
+        return f"""#!/bin/bash
+set -euo pipefail
+
+echo "Running stage: {stage_name}"
+cd /app
+python - <<'PY'
+from goldfish.io.bootstrap import run_module_with_svs
+import sys
+sys.exit(run_module_with_svs("modules.{stage_name}"))
+PY
+
+echo "Stage completed successfully"
+"""
+
     def _launch_container(
         self,
         stage_run_id: str,
@@ -1783,6 +1855,8 @@ class StageExecutor:
         user_config: dict | None = None,
         git_sha: str | None = None,
         run_reason: dict | None = None,
+        runtime: str | None = None,
+        entrypoint: str | None = None,
     ):
         """Launch Docker container (local) or GCE instance."""
         backend = self.config.jobs.backend
@@ -1865,19 +1939,7 @@ class StageExecutor:
             outputs_dir.mkdir(exist_ok=True)
 
             # Generate entrypoint script
-            entrypoint_script = f"""#!/bin/bash
-set -euo pipefail
-
-echo "Running stage: {stage_name}"
-cd /app
-python - <<'PY'
-from goldfish.io.bootstrap import run_module_with_svs
-import sys
-sys.exit(run_module_with_svs("modules.{stage_name}"))
-PY
-
-echo "Stage completed successfully"
-"""
+            entrypoint_script = self._build_entrypoint_script(stage_name, runtime, entrypoint)
 
             # Launch container using LocalExecutor
             self.local_executor.launch_container(
@@ -1920,19 +1982,7 @@ echo "Stage completed successfully"
             self.gce_launcher.launch_instance(
                 image_tag=image_tag,
                 stage_run_id=stage_run_id,
-                entrypoint_script=f"""#!/bin/bash
-set -euo pipefail
-
-echo "Running stage: {stage_name}"
-cd /app
-python - <<'PY'
-from goldfish.io.bootstrap import run_module_with_svs
-import sys
-sys.exit(run_module_with_svs("modules.{stage_name}"))
-PY
-
-echo "Stage completed successfully"
-""",
+                entrypoint_script=self._build_entrypoint_script(stage_name, runtime, entrypoint),
                 stage_config=stage_config,
                 work_dir=self.dev_repo / ".goldfish" / "runs" / stage_run_id,
                 machine_type=machine_type,
