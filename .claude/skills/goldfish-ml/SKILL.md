@@ -362,7 +362,99 @@ def main():
   `log_artifact` returns a backend URL if available.
 - **Live metrics:** `inspect_run` will attempt a best-effort live sync (Overdrive) for running runs.
 - **Auto-finalize:** `finish()` is optional but recommended in a `finally` block. Auto-finalize uses `atexit`
-  and won’t run on SIGKILL/crash.
+  and won't run on SIGKILL/crash.
+
+### 4.1 Rust Stage Implementation (Alternative)
+
+For performance-critical stages, you can use the **Rust SDK** (`goldfish-rust`) instead of Python. The API mirrors the Python version.
+
+**Add to Cargo.toml:**
+```toml
+[dependencies]
+goldfish-rust = { path = "../goldfish-rust" }  # or from registry when published
+```
+
+**Basic stage pattern:**
+```rust
+// modules/train/src/main.rs
+use goldfish_rust::{init, load_input, save_output, OutputData, GoldfishError};
+use goldfish_rust::{runtime_log, heartbeat, log_metric, should_stop};
+
+fn main() -> Result<(), GoldfishError> {
+    let _guard = init();  // RAII: auto-finalizes SVS stats on drop
+
+    // Load inputs (returns OutputData enum)
+    let features = load_input("features", None)?;
+    let arr = features.into_tensor_f32().expect("expected f32 tensor");
+
+    for epoch in 0..epochs {
+        // Training logic...
+
+        // Monitoring (MANDATORY for AI oversight)
+        runtime_log(&format!("Epoch {} loss: {:.4}", epoch, loss), "INFO");
+        log_metric("train/loss", loss, Some(epoch as i64));
+        heartbeat(Some(&format!("Epoch {}/{}", epoch, epochs)), false);
+
+        if should_stop() {
+            println!("Early stop requested by SVS");
+            break;
+        }
+    }
+
+    // Save outputs
+    save_output("model", OutputData::Path(model_dir), false)?;
+    Ok(())
+}
+```
+
+**Key Rust API functions:**
+
+| Function | Purpose |
+|----------|---------|
+| `init()` | Returns RAII guard that finalizes SVS on drop |
+| `load_input(name, format)` | Load input signal → `OutputData` |
+| `save_output(name, data, artifact)` | Save output with schema validation |
+| `runtime_log(msg, level)` | Structured log for AI monitoring |
+| `heartbeat(msg, force)` | Prevent inactivity timeout |
+| `log_metric(name, value, step)` | Record scalar metric |
+| `log_metrics(map, step)` | Record multiple metrics |
+| `should_stop()` | Check if SVS requested early termination |
+
+**OutputData variants:**
+```rust
+OutputData::TensorF32(ArrayD<f32>)
+OutputData::TensorF64(ArrayD<f64>)
+OutputData::TensorI64(ArrayD<i64>)
+OutputData::TensorI32(ArrayD<i32>)
+OutputData::TensorU8(ArrayD<u8>)
+OutputData::Json(serde_json::Value)
+OutputData::Tabular(polars::DataFrame)
+OutputData::Path(PathBuf)
+OutputData::MultiTensor(HashMap<String, OutputData>)
+```
+
+**Type extraction:**
+```rust
+// Borrow (no move)
+if let Some(arr) = data.as_tensor_f32() { ... }
+
+// Take ownership (returns Err(self) if wrong type)
+let arr = data.into_tensor_f32().expect("expected f32");
+```
+
+**NPZ support:**
+```rust
+use goldfish_rust::{load_npz, load_npz_array};
+
+let npz = load_npz("model.npz")?;
+let weights = npz.get("weights");  // borrow
+let bias = npz.take("bias");       // take ownership
+
+// Or load single array directly
+let weights = load_npz_array("model.npz", "weights")?;
+```
+
+**Security:** The Rust SDK includes path traversal protection, NPY header size limits (1MB), and NPZ decompression bomb protection (1GB per entry).
 
 ### 4.5 SVS (Schema Contracts + Output Stats)
 
