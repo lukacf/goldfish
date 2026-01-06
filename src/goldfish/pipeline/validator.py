@@ -107,10 +107,16 @@ def validate_pipeline_run(
         if not stage_def:
             continue
 
-        # Check module exists
-        module_path = workspace_path / "modules" / f"{stage_name}.py"
-        if not module_path.exists():
-            errors.append(f"Stage '{stage_name}': module not found at modules/{stage_name}.py")
+        # Check module exists (python vs rust runtime)
+        runtime = stage_def.runtime or "python"
+        if runtime == "rust":
+            module_path = workspace_path / "modules" / f"{stage_name}.rs"
+            if not module_path.exists():
+                errors.append(f"Stage '{stage_name}': module not found at modules/{stage_name}.rs")
+        else:
+            module_path = workspace_path / "modules" / f"{stage_name}.py"
+            if not module_path.exists():
+                errors.append(f"Stage '{stage_name}': module not found at modules/{stage_name}.py")
 
         # Check config file (optional but check for YAML errors)
         config_path = workspace_path / "configs" / f"{stage_name}.yaml"

@@ -112,7 +112,7 @@ Check each stage for:
 5. **Hypothesis coherence** - does the code actually test what's claimed?
 6. **Key/column name mismatches** - When code accesses arrays or dataframes with dynamically
    constructed keys (f-strings, loop variables), trace the actual key values. For `from_stage`
-   inputs, use the Read tool to check `modules/<upstream_stage>.py` for actual output key names.
+   inputs, use the Read tool to check `modules/<upstream_stage>.py` or `.rs` for actual output key names.
    Pay special attention to train/val/test split naming inconsistencies (e.g., 'valid' vs 'val').
 7. **Input freshness** - If a `from_stage` input resolves to an older run while a newer run of
    that upstream stage is currently RUNNING or FINALIZING, this is a BLOCKING error. The run

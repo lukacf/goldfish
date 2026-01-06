@@ -190,7 +190,7 @@ class PipelineParser:
         """Validate pipeline definition.
 
         Checks:
-        - Stage files exist (modules/{stage}.py, configs/{stage}.yaml)
+        - Stage files exist (modules/{stage}.py or modules/{stage}.rs, configs/{stage}.yaml)
         - Signal types match (output type == input type)
         - No circular dependencies
         - Datasets exist in registry (if dataset_exists_fn provided)
