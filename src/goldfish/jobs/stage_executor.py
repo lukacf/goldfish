@@ -512,7 +512,15 @@ class StageExecutor:
                             source_run_id,
                             signal_name,
                         )
-                        ctx.update({"source_type": "stage", "override": override_value, "run_id": source_run_id})
+                        ctx.update(
+                            {
+                                "source_type": "stage",
+                                "override": override_value,
+                                "run_id": source_run_id,
+                                "storage_location": signal["storage_location"],
+                                "contents": self._list_storage_contents(signal["storage_location"]),
+                            }
+                        )
                         input_context.append(ctx)
                         continue
 
@@ -529,7 +537,14 @@ class StageExecutor:
                             override_value,
                             source["gcs_location"],
                         )
-                        ctx.update({"source_type": "source", "override": override_value})
+                        ctx.update(
+                            {
+                                "source_type": "source",
+                                "override": override_value,
+                                "storage_location": source["gcs_location"],
+                                "contents": self._list_storage_contents(source["gcs_location"]),
+                            }
+                        )
                         input_context.append(ctx)
                         continue
 
@@ -537,7 +552,14 @@ class StageExecutor:
                 inputs[input_name] = str(override_value)
                 sources[input_name] = {"source_type": "override"}
                 logger.info("Stage '%s': input '%s' OVERRIDDEN to path '%s'", stage.name, input_name, override_value)
-                ctx.update({"source_type": "override", "override": override_value})
+                ctx.update(
+                    {
+                        "source_type": "override",
+                        "override": override_value,
+                        "storage_location": str(override_value),
+                        "contents": self._list_storage_contents(str(override_value)),
+                    }
+                )
                 input_context.append(ctx)
                 continue
 
@@ -623,6 +645,12 @@ class StageExecutor:
                     "source_stage_run_id": source_run_id,
                     "source_stage_version_id": source_run.get("stage_version_id"),
                 }
+                ctx.update(
+                    {
+                        "storage_location": signal["storage_location"],
+                        "contents": self._list_storage_contents(signal["storage_location"]),
+                    }
+                )
                 logger.info(
                     "Stage '%s': input '%s' resolved to run %s (%s)",
                     stage.name,
@@ -679,6 +707,12 @@ class StageExecutor:
                     "source_type": "dataset",
                     "dataset_name": input_def.dataset,
                 }
+                ctx.update(
+                    {
+                        "storage_location": dataset.gcs_location,
+                        "contents": self._list_storage_contents(dataset.gcs_location),
+                    }
+                )
                 logger.info(
                     "Stage '%s': input '%s' resolved to dataset '%s' (%s)",
                     stage.name,
@@ -2594,6 +2628,79 @@ echo "Stage completed successfully"
             completed_at=parse_optional_datetime(now),
             error=error_msg,
         )
+
+    def _list_storage_contents(self, path: str, limit: int = 100) -> list[str]:
+        """List contents (files and folders) of a storage location.
+
+        Args:
+            path: Storage location (gs://... or local path)
+            limit: Maximum number of items to return
+
+        Returns:
+            List of paths relative to the input root
+        """
+        if not path:
+            return []
+
+        # 1. GCS Path
+        if path.startswith("gs://"):
+            try:
+                client, _ = self._get_gcs_client()
+                if client:
+                    bucket_name, prefix = path[5:].split("/", 1)
+                    bucket = client.bucket(bucket_name)
+                    blobs = bucket.list_blobs(prefix=prefix, max_results=limit)
+
+                    results = []
+                    for b in blobs:
+                        # Make path relative to the input root
+                        rel_path = b.name[len(prefix) :].lstrip("/")
+                        if rel_path:
+                            results.append(rel_path)
+                    return sorted(results)
+
+                # Fallback to gsutil
+                cmd = ["gsutil", "ls", "-r", path]
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if proc.returncode == 0:
+                    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+                    # gsutil ls -r returns absolute paths, strip the base
+                    results = []
+                    for ln in lines:
+                        if ln.startswith(path):
+                            rel = ln[len(path) :].lstrip("/")
+                            if rel:
+                                results.append(rel)
+                    return sorted(results)[:limit]
+            except Exception as e:
+                logger.debug(f"Failed to list GCS contents for {path}: {e}")
+                return [f"[Error listing GCS contents: {e}]"]
+
+        # 2. Local Path
+        try:
+            local_path = Path(path)
+            if not local_path.exists():
+                return ["[Path not found]"]
+
+            if local_path.is_file():
+                return [local_path.name]
+
+            if local_path.is_dir():
+                results = []
+                for p in local_path.rglob("*"):
+                    # Limit depth or count if needed, but rglob is usually fine for small dirs
+                    rel = str(p.relative_to(local_path))
+                    if p.is_dir():
+                        rel += "/"
+                    results.append(rel)
+                    if len(results) >= limit:
+                        break
+                return sorted(results)
+        except Exception as e:
+            logger.debug(f"Failed to list local contents for {path}: {e}")
+            return [f"[Error listing local contents: {e}]"]
+
+        return []
 
     def _create_preflight_blocked_stage_run(
         self,
