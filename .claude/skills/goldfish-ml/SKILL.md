@@ -378,10 +378,10 @@ goldfish-rust = { path = "../goldfish-rust" }  # or from registry when published
 ```rust
 // modules/train/src/main.rs
 use goldfish_rust::{init, load_input, save_output, OutputData, GoldfishError};
-use goldfish_rust::{runtime_log, heartbeat, log_metric, should_stop};
+use goldfish_rust::{runtime_log, heartbeat, log_metric, log_artifact, should_stop};
 
 fn main() -> Result<(), GoldfishError> {
-    let _guard = init();  // RAII: auto-finalizes SVS stats on drop
+    let _guard = init();  // RAII: finalizes SVS stats on drop (if enabled)
 
     // Load inputs (returns OutputData enum)
     let features = load_input("features", None)?;
@@ -403,6 +403,9 @@ fn main() -> Result<(), GoldfishError> {
 
     // Save outputs
     save_output("model", OutputData::Path(model_dir), false)?;
+
+    // Log artifact (path relative to outputs dir)
+    log_artifact("checkpoint", "model/checkpoint.pt");
     Ok(())
 }
 ```
@@ -411,14 +414,17 @@ fn main() -> Result<(), GoldfishError> {
 
 | Function | Purpose |
 |----------|---------|
-| `init()` | Returns RAII guard that finalizes SVS on drop |
-| `load_input(name, format)` | Load input signal → `OutputData` |
+| `init()` | Returns RAII guard that finalizes SVS stats on drop |
+| `load_input(name, format)` | Load input signal → `OutputData` (does NOT auto-load .npz) |
 | `save_output(name, data, artifact)` | Save output with schema validation |
 | `runtime_log(msg, level)` | Structured log for AI monitoring |
 | `heartbeat(msg, force)` | Prevent inactivity timeout |
 | `log_metric(name, value, step)` | Record scalar metric |
 | `log_metrics(map, step)` | Record multiple metrics |
+| `log_artifact(name, path)` | Record artifact (path relative to outputs dir) |
 | `should_stop()` | Check if SVS requested early termination |
+
+**SVS stats:** Stats are computed only when `GOLDFISH_SVS_STATS_ENABLED=true`. The `init()` guard finalizes stats on drop when enabled.
 
 **OutputData variants:**
 ```rust
@@ -433,6 +439,10 @@ OutputData::Path(PathBuf)
 OutputData::MultiTensor(HashMap<String, OutputData>)
 ```
 
+**Multi-array autosave:** `OutputData::MultiTensor` is auto-saved only when the output format is `directory` (or default `file`). Each array is written as `outputs/<signal>/<array_name>.npy`. Stats are recorded as `signal.array` in `svs_stats.json`. Note: `save_output` does **not** write `.npz` files.
+
+**save_output + Path:** `OutputData::Path` with schema validation only works for `directory` outputs with `arrays` schema—Goldfish loads `.npz`/`.npy` files inside the directory to validate. For other schema types, use in-memory `OutputData` variants.
+
 **Type extraction:**
 ```rust
 // Borrow (no move)
@@ -442,7 +452,7 @@ if let Some(arr) = data.as_tensor_f32() { ... }
 let arr = data.into_tensor_f32().expect("expected f32");
 ```
 
-**NPZ support:**
+**NPZ loading:** `load_input` does **not** auto-load `.npz` files. Use explicit functions:
 ```rust
 use goldfish_rust::{load_npz, load_npz_array};
 
