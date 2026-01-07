@@ -11,7 +11,7 @@
 If you discover a security vulnerability in Goldfish, please report it responsibly:
 
 1. **DO NOT** open a public GitHub issue for security vulnerabilities
-2. Email security concerns to the maintainers directly
+2. Email security concerns to: **security@goldfish-ml.dev**
 3. Include as much detail as possible:
    - Description of the vulnerability
    - Steps to reproduce
