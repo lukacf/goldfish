@@ -143,6 +143,46 @@ stages:
         assert len(errors) > 0
         assert any("preprocess.py" in err for err in errors)
 
+    def test_validate_rust_runtime_requires_entrypoint(self, temp_dir):
+        """Rust runtime should require a .rs module file instead of a Python module."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text(
+            """
+name: test_pipeline
+stages:
+  - name: encode
+    runtime: rust
+"""
+        )
+
+        modules_dir = temp_dir / "modules"
+        modules_dir.mkdir()
+        (modules_dir / "encode.rs").write_text("fn main() {}")
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        assert errors == []
+
+    def test_validate_rust_runtime_missing_entrypoint_fails(self, temp_dir):
+        """Rust runtime should fail validation if .rs module is missing."""
+        pipeline_yaml = temp_dir / "pipeline.yaml"
+        pipeline_yaml.write_text(
+            """
+name: test_pipeline
+stages:
+  - name: encode
+    runtime: rust
+"""
+        )
+
+        parser = PipelineParser()
+        pipeline = parser.parse(pipeline_yaml)
+        errors = parser.validate(pipeline, temp_dir, dataset_exists_fn=None)
+
+        assert any("modules/encode.rs" in err for err in errors)
+
     def test_validate_config_files_are_optional(self, temp_dir):
         """Config files are optional - validation should pass without them."""
         # Create pipeline

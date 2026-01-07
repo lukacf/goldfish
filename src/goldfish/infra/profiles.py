@@ -44,7 +44,7 @@ FALLBACK_BASE_IMAGE = "python:3.11-slim"
 # These include the full CUDA toolkit with nvrtc for Flash Attention support
 BASE_IMAGE_CPU = "goldfish-base-cpu"
 BASE_IMAGE_GPU = "goldfish-base-gpu"
-BASE_IMAGE_VERSION = "v2"
+BASE_IMAGE_VERSION = "v3"
 
 
 # Built-in resource profiles optimized for ML workloads
@@ -52,7 +52,7 @@ BASE_IMAGE_VERSION = "v2"
 BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
     # CPU-only profiles
     "cpu-small": {
-        "base_image": PUBLIC_BASE_IMAGE_CPU,  # GHCR public image with ML libs
+        "base_image": BASE_IMAGE_CPU,  # Custom image with ML libs and Rust
         "machine_type": "n2-standard-4",
         "gpu": {
             "type": "none",
@@ -77,7 +77,7 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         },
     },
     "cpu-large": {
-        "base_image": PUBLIC_BASE_IMAGE_CPU,  # GHCR public image with ML libs
+        "base_image": BASE_IMAGE_CPU,  # Custom image with ML libs and Rust
         "machine_type": "c4-highcpu-192",
         "gpu": {
             "type": "none",

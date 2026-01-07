@@ -98,19 +98,19 @@ class TestGetBaseImageNames:
 
 
 class TestProfilesHaveBaseImage:
-    """Tests that all built-in profiles have public base images."""
+    """Tests that all built-in profiles have base images."""
 
-    def test_cpu_small_has_public_image(self) -> None:
-        """cpu-small profile should use public CPU base image."""
+    def test_cpu_small_has_custom_image(self) -> None:
+        """cpu-small profile should use custom CPU base image."""
         from goldfish.infra.profiles import BUILTIN_PROFILES
 
-        assert BUILTIN_PROFILES["cpu-small"]["base_image"] == PUBLIC_BASE_IMAGE_CPU
+        assert BUILTIN_PROFILES["cpu-small"]["base_image"] == BASE_IMAGE_CPU
 
-    def test_cpu_large_has_public_image(self) -> None:
-        """cpu-large profile should use public CPU base image."""
+    def test_cpu_large_has_custom_image(self) -> None:
+        """cpu-large profile should use custom CPU base image."""
         from goldfish.infra.profiles import BUILTIN_PROFILES
 
-        assert BUILTIN_PROFILES["cpu-large"]["base_image"] == PUBLIC_BASE_IMAGE_CPU
+        assert BUILTIN_PROFILES["cpu-large"]["base_image"] == BASE_IMAGE_CPU
 
     def test_h100_spot_has_custom_gpu_image(self) -> None:
         """h100-spot profile should use custom GPU base image (with nvrtc for Flash Attention)."""

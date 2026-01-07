@@ -649,6 +649,45 @@ class TestStageExecution:
         assert "goldfish.io.bootstrap" in script
         assert "run_module_with_svs" in script
 
+    def test_launch_container_uses_rust_entrypoint(self, test_db, test_config, temp_dir):
+        """Rust runtime should execute the native entrypoint binary."""
+        config = test_config.model_copy(deep=True)
+        config.jobs.backend = "local"
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+            dataset_registry=None,
+        )
+
+        captured: dict[str, str] = {}
+
+        def _capture_launch(**kwargs):
+            captured["entrypoint_script"] = kwargs.get("entrypoint_script", "")
+
+        executor.local_executor.launch_container = MagicMock(side_effect=_capture_launch)
+
+        executor._launch_container(
+            stage_run_id="stage-rust123",
+            workspace="test_workspace",
+            stage_name="encode",
+            image_tag="goldfish-test",
+            inputs={},
+            input_configs={},
+            output_configs={},
+            user_config={},
+            runtime="rust",
+            entrypoint="entrypoints/encode",
+        )
+
+        script = captured.get("entrypoint_script", "")
+        assert "/app/entrypoints/encode" in script
+        assert "modules/encode.rs" in script
+        assert "run_module_with_svs" not in script
+
     def test_launch_container_sets_home_env_for_agent_cli(self, test_db, test_config, temp_dir):
         """Goldfish should set HOME/XDG paths so agent CLIs can write config."""
         config = test_config.model_copy(deep=True)

@@ -246,6 +246,48 @@ stages:
 
         manager.hibernate(slot="w1", reason="Done with validate test")
 
+    def test_validate_config_rust_entrypoint_no_module_warning(self, e2e_setup):
+        """validate_config should not warn about missing .py when runtime is rust."""
+        from goldfish.config_validation import validate_project_config
+
+        manager = e2e_setup["manager"]
+        project_root = e2e_setup["project_root"]
+
+        manager.create_workspace(
+            name="rust-entrypoint-test", goal="Rust entrypoint validation", reason="Testing rust runtime"
+        )
+        manager.mount(workspace="rust-entrypoint-test", slot="w1", reason="Testing rust runtime")
+
+        slot_path = project_root / "workspaces" / "w1"
+
+        (slot_path / "pipeline.yaml").write_text(
+            """
+name: rust-entrypoint-test
+stages:
+  - name: encode
+    runtime: rust
+    outputs:
+      data: {type: npy, schema: null}
+"""
+        )
+
+        modules_dir = slot_path / "modules"
+        modules_dir.mkdir(exist_ok=True)
+        (modules_dir / "encode.rs").write_text("fn main() {}")
+
+        manager.save_version(slot="w1", message="Add rust entrypoint pipeline")
+
+        result = validate_project_config(
+            project_root=project_root,
+            workspace_path=slot_path,
+            workspace_name="w1",
+        )
+
+        assert result["valid"] is True
+        assert not any("encode" in w and "module not found" in w for w in result["warnings"])
+
+        manager.hibernate(slot="w1", reason="Done with rust entrypoint test")
+
     def test_validate_config_catches_yaml_syntax_error(self, e2e_setup):
         """validate_config should catch YAML syntax errors in stage configs."""
         from goldfish.config_validation import validate_project_config
@@ -478,6 +520,98 @@ stages:
         assert any("module not found" in err for err in result["validation_errors"])
 
         manager.hibernate(slot="w1", reason="Done with module detection test")
+
+    def test_dry_run_rust_runtime_uses_rs_module(self, e2e_setup):
+        """dry_run should accept modules/<stage>.rs when runtime is rust."""
+        from goldfish.pipeline.validator import validate_pipeline_run
+
+        manager = e2e_setup["manager"]
+        project_root = e2e_setup["project_root"]
+        db = e2e_setup["db"]
+
+        manager.create_workspace(
+            name="dry-run-rust", goal="Test rust runtime module detection", reason="Testing rust runtime"
+        )
+        manager.mount(workspace="dry-run-rust", slot="w1", reason="Testing rust runtime")
+
+        slot_path = project_root / "workspaces" / "w1"
+
+        (slot_path / "pipeline.yaml").write_text(
+            """
+name: dry-run-rust-test
+stages:
+  - name: encode
+    runtime: rust
+    outputs:
+      data: {type: npy, schema: null}
+"""
+        )
+
+        (slot_path / "modules").mkdir(exist_ok=True)
+        (slot_path / "modules" / "encode.rs").write_text("fn main() {}")
+
+        manager.save_version(slot="w1", message="Add rust pipeline for dry run test")
+
+        result = validate_pipeline_run(
+            workspace_name="dry-run-rust",
+            workspace_path=slot_path,
+            db=db,
+            stages=None,
+            pipeline_name=None,
+            inputs_override={},
+        )
+
+        assert result["valid"] is True
+        assert not any("module not found" in err for err in result["validation_errors"])
+
+        manager.hibernate(slot="w1", reason="Done with rust runtime test")
+
+    def test_dry_run_rust_missing_module_fails_preflight(self, e2e_setup):
+        """dry_run should fail preflight when Rust module is missing."""
+        from goldfish.pipeline.validator import validate_pipeline_run
+
+        manager = e2e_setup["manager"]
+        project_root = e2e_setup["project_root"]
+        db = e2e_setup["db"]
+
+        manager.create_workspace(
+            name="dry-run-rust-missing", goal="Test missing Rust module detection", reason="Testing Rust preflight"
+        )
+        manager.mount(workspace="dry-run-rust-missing", slot="w1", reason="Testing Rust preflight")
+
+        slot_path = project_root / "workspaces" / "w1"
+
+        # Create pipeline with rust runtime but NO .rs module
+        (slot_path / "pipeline.yaml").write_text(
+            """
+name: dry-run-rust-missing-test
+stages:
+  - name: encode
+    runtime: rust
+    outputs:
+      data: {type: npy, schema: null}
+"""
+        )
+
+        (slot_path / "modules").mkdir(exist_ok=True)
+        # Intentionally NOT creating encode.rs
+
+        manager.save_version(slot="w1", message="Add rust pipeline without module")
+
+        result = validate_pipeline_run(
+            workspace_name="dry-run-rust-missing",
+            workspace_path=slot_path,
+            db=db,
+            stages=None,
+            pipeline_name=None,
+            inputs_override={},
+        )
+
+        # Should fail with missing Rust module error
+        assert result["valid"] is False
+        assert any("encode.rs" in err and "module not found" in err.lower() for err in result["validation_errors"])
+
+        manager.hibernate(slot="w1", reason="Done with rust missing module test")
 
     def test_dry_run_catches_dataset_schema_mismatch(self, e2e_setup):
         """dry_run should catch dataset metadata/schema mismatch."""

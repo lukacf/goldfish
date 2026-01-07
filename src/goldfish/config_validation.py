@@ -78,9 +78,15 @@ def validate_project_config(
                 parser = PipelineParser()
                 pipeline_def = parser.parse(pipeline_path)
                 for stage in pipeline_def.stages:
-                    module_path = workspace_path / "modules" / f"{stage.name}.py"
-                    if not module_path.exists():
-                        warnings.append(f"Stage '{stage.name}': module not found at modules/{stage.name}.py")
+                    runtime = stage.runtime or "python"
+                    if runtime == "rust":
+                        module_path = workspace_path / "modules" / f"{stage.name}.rs"
+                        if not module_path.exists():
+                            warnings.append(f"Stage '{stage.name}': module not found at modules/{stage.name}.rs")
+                    else:
+                        module_path = workspace_path / "modules" / f"{stage.name}.py"
+                        if not module_path.exists():
+                            warnings.append(f"Stage '{stage.name}': module not found at modules/{stage.name}.py")
             except Exception:
                 pass  # Already reported in pipeline validation
 
