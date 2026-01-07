@@ -21,6 +21,10 @@ use crate::error::{ConfigError, GoldfishError, IoError, Result, SchemaError};
 use crate::schema::{validate_output_data_against_schema, Schema};
 use crate::stats::enqueue_stats;
 
+/// Maximum number of arrays allowed in MultiTensor outputs or directory validation.
+/// Prevents memory exhaustion from malicious NPZ files with thousands of arrays.
+const MAX_MULTI_ARRAY_COUNT: usize = 100;
+
 /// Output data types that can be saved.
 #[derive(Clone, Debug)]
 pub enum OutputData {
@@ -426,6 +430,13 @@ pub fn save_output(name: &str, data: OutputData, artifact: bool) -> Result<()> {
                 SignalFormat::Directory | SignalFormat::File => {
                     // Multi-tensor outputs can be auto-saved as a directory of .npy files.
                     if let OutputData::MultiTensor(arrays) = &data {
+                        // Security: Limit number of arrays to prevent memory exhaustion
+                        if arrays.len() > MAX_MULTI_ARRAY_COUNT {
+                            return Err(GoldfishError::Io(IoError::TooManyArrays {
+                                count: arrays.len(),
+                                max: MAX_MULTI_ARRAY_COUNT,
+                            }));
+                        }
                         std::fs::create_dir_all(&output_path)?;
                         for (arr_name, arr_data) in arrays {
                             // Prevent path traversal in array names.

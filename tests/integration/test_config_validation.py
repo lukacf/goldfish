@@ -566,6 +566,53 @@ stages:
 
         manager.hibernate(slot="w1", reason="Done with rust runtime test")
 
+    def test_dry_run_rust_missing_module_fails_preflight(self, e2e_setup):
+        """dry_run should fail preflight when Rust module is missing."""
+        from goldfish.pipeline.validator import validate_pipeline_run
+
+        manager = e2e_setup["manager"]
+        project_root = e2e_setup["project_root"]
+        db = e2e_setup["db"]
+
+        manager.create_workspace(
+            name="dry-run-rust-missing", goal="Test missing Rust module detection", reason="Testing Rust preflight"
+        )
+        manager.mount(workspace="dry-run-rust-missing", slot="w1", reason="Testing Rust preflight")
+
+        slot_path = project_root / "workspaces" / "w1"
+
+        # Create pipeline with rust runtime but NO .rs module
+        (slot_path / "pipeline.yaml").write_text(
+            """
+name: dry-run-rust-missing-test
+stages:
+  - name: encode
+    runtime: rust
+    outputs:
+      data: {type: npy, schema: null}
+"""
+        )
+
+        (slot_path / "modules").mkdir(exist_ok=True)
+        # Intentionally NOT creating encode.rs
+
+        manager.save_version(slot="w1", message="Add rust pipeline without module")
+
+        result = validate_pipeline_run(
+            workspace_name="dry-run-rust-missing",
+            workspace_path=slot_path,
+            db=db,
+            stages=None,
+            pipeline_name=None,
+            inputs_override={},
+        )
+
+        # Should fail with missing Rust module error
+        assert result["valid"] is False
+        assert any("encode.rs" in err and "module not found" in err.lower() for err in result["validation_errors"])
+
+        manager.hibernate(slot="w1", reason="Done with rust missing module test")
+
     def test_dry_run_catches_dataset_schema_mismatch(self, e2e_setup):
         """dry_run should catch dataset metadata/schema mismatch."""
         from goldfish.pipeline.validator import validate_pipeline_run

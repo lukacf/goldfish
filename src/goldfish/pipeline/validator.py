@@ -107,16 +107,19 @@ def validate_pipeline_run(
         if not stage_def:
             continue
 
-        # Check module exists (python vs rust runtime)
-        runtime = stage_def.runtime or "python"
+        # Preflight check: Verify stage module exists before execution.
+        # For Python stages: modules/{stage_name}.py
+        # For Rust stages: modules/{stage_name}.rs (compiled at runtime in container)
+        # This catches missing modules early, before Docker build/launch.
+        runtime = stage_def.runtime  # Defaults to "python" in StageDef model
         if runtime == "rust":
             module_path = workspace_path / "modules" / f"{stage_name}.rs"
             if not module_path.exists():
-                errors.append(f"Stage '{stage_name}': module not found at modules/{stage_name}.rs")
+                errors.append(f"Stage '{stage_name}': Rust module not found at modules/{stage_name}.rs")
         else:
             module_path = workspace_path / "modules" / f"{stage_name}.py"
             if not module_path.exists():
-                errors.append(f"Stage '{stage_name}': module not found at modules/{stage_name}.py")
+                errors.append(f"Stage '{stage_name}': Python module not found at modules/{stage_name}.py")
 
         # Check config file (optional but check for YAML errors)
         config_path = workspace_path / "configs" / f"{stage_name}.yaml"

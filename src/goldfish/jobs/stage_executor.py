@@ -1807,9 +1807,16 @@ class StageExecutor:
             return 30
         return 60
 
-    def _build_entrypoint_script(self, stage_name: str, runtime: str | None, entrypoint: str | None) -> str:
-        runtime_name = runtime or "python"
-        if runtime_name == "rust":
+    def _build_entrypoint_script(self, stage_name: str, runtime: str, entrypoint: str | None) -> str:
+        """Build the entrypoint script for a stage.
+
+        For Rust stages: Compiles modules/{stage_name}.rs using cargo, then executes the binary.
+        For Python stages: Runs modules/{stage_name}.py via python -m.
+
+        The Rust compilation happens inside the container at runtime, enabling
+        the goldfish-rust crate to be linked against the container's environment.
+        """
+        if runtime == "rust":
             entrypoint_rel = entrypoint or f"entrypoints/{stage_name}"
             entrypoint_path = f"/app/{entrypoint_rel}"
             module_path = f"/app/modules/{stage_name}.rs"
@@ -1860,8 +1867,8 @@ chmod +x "{entrypoint_path}"
 
 exec "{entrypoint_path}"
 """
-        if runtime_name != "python":
-            raise GoldfishError(f"Unsupported runtime '{runtime_name}' for stage '{stage_name}'")
+        if runtime != "python":
+            raise GoldfishError(f"Unsupported runtime '{runtime}' for stage '{stage_name}'")
 
         return f"""#!/bin/bash
 set -euo pipefail
@@ -1889,7 +1896,7 @@ echo "Stage completed successfully"
         user_config: dict | None = None,
         git_sha: str | None = None,
         run_reason: dict | None = None,
-        runtime: str | None = None,
+        runtime: str = "python",
         entrypoint: str | None = None,
     ):
         """Launch Docker container (local) or GCE instance."""

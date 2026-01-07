@@ -22,6 +22,10 @@ use crate::io::OutputData;
 /// Protects against zip bomb attacks.
 const MAX_ENTRY_SIZE: u64 = 1_000_000_000;
 
+/// Maximum number of arrays allowed in an NPZ file.
+/// Protects against memory exhaustion from malicious files with thousands of arrays.
+const MAX_NPZ_ARRAYS: usize = 100;
+
 /// A loaded NPZ file containing multiple arrays.
 #[derive(Debug)]
 pub struct NpzFile {
@@ -105,9 +109,21 @@ pub fn load_npz<P: AsRef<Path>>(path: P) -> Result<NpzFile> {
         })
     })?;
 
+    // SECURITY: Limit number of entries to prevent memory exhaustion
+    let entry_count = archive.len();
+    if entry_count > MAX_NPZ_ARRAYS {
+        return Err(GoldfishError::Io(IoError::NpzError {
+            path: path.to_path_buf(),
+            message: format!(
+                "Security violation: NPZ file contains {} entries, maximum allowed: {}",
+                entry_count, MAX_NPZ_ARRAYS
+            ),
+        }));
+    }
+
     let mut arrays = HashMap::new();
 
-    for i in 0..archive.len() {
+    for i in 0..entry_count {
         let mut entry = archive.by_index(i).map_err(|e| {
             GoldfishError::Io(IoError::NpzError {
                 path: path.to_path_buf(),

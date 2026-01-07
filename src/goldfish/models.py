@@ -477,7 +477,7 @@ class StageDef(BaseModel):
     """Definition of a pipeline stage."""
 
     name: str
-    runtime: str | None = None
+    runtime: Literal["python", "rust"] = "python"
     entrypoint: str | None = None
     config_schema: dict[str, Any] | None = None
     inputs: dict[str, SignalDef] = Field(default_factory=dict)

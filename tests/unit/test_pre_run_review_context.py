@@ -105,3 +105,65 @@ def test_stage_executor_list_storage_contents_local():
         # _list_storage_contents includes directories in its output
         assert "subdir/" in results
         assert len(results) == 3
+
+
+def test_build_stage_sections_reads_rust_module():
+    """Test that _build_stage_sections reads .rs files and sets module_lang to rust."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "modules").mkdir()
+        (workspace / "configs").mkdir()
+
+        # Create a Rust module file
+        rust_code = """use goldfish_rust::prelude::*;
+
+fn main() {
+    let input = load_input::<f32>("data").unwrap();
+    save_output("result", &input).unwrap();
+}
+"""
+        (workspace / "modules" / "preprocess.rs").write_text(rust_code)
+
+        # Create PreRunReviewer instance
+        config = PreRunReviewConfig()
+        svs_config = SVSConfig()
+        reviewer = PreRunReviewer(config, svs_config, workspace, workspace)
+
+        # Build sections for the rust stage
+        result = reviewer._build_stage_sections(["preprocess"])
+
+        # Verify Rust module is read with correct language tag
+        # _build_stage_sections returns a joined string of all sections
+        assert isinstance(result, str)
+        assert "```rust" in result  # module_lang should be "rust"
+        assert "goldfish_rust::prelude" in result
+        assert "load_input" in result
+        assert "modules/preprocess.rs" in result
+
+
+def test_build_stage_sections_prefers_python_over_rust():
+    """Test that Python module is preferred when both .py and .rs exist."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = Path(tmpdir)
+        (workspace / "modules").mkdir()
+        (workspace / "configs").mkdir()
+
+        # Create both Python and Rust modules
+        (workspace / "modules" / "train.py").write_text("def main(): pass")
+        (workspace / "modules" / "train.rs").write_text("fn main() {}")
+
+        config = PreRunReviewConfig()
+        svs_config = SVSConfig()
+        reviewer = PreRunReviewer(config, svs_config, workspace, workspace)
+
+        result = reviewer._build_stage_sections(["train"])
+
+        # Should prefer Python
+        assert isinstance(result, str)
+        assert "```python" in result
+        assert "def main()" in result
+        assert "modules/train.py" in result

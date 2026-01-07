@@ -123,6 +123,10 @@ pub enum IoError {
     /// Cannot auto-save format.
     #[error("Cannot auto-save format '{format}'. Use get_output_path() for manual saving.")]
     CannotAutoSave { format: String },
+
+    /// Too many arrays in MultiTensor output.
+    #[error("Too many arrays ({count}) in output. Maximum allowed: {max}")]
+    TooManyArrays { count: usize, max: usize },
 }
 
 /// Schema validation errors.

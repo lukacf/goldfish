@@ -159,7 +159,17 @@ ENV PYTHONPATH="/app/goldfish_io:/app/modules:/app:${PYTHONPATH}"
         if has_entrypoints:
             dockerfile += "COPY --chown=1000:100 entrypoints/ /app/entrypoints/\n"
         if has_goldfish_rust:
-            dockerfile += "COPY --chown=1000:100 goldfish-rust/ /app/goldfish-rust/\n"
+            # Copy Cargo manifests first for dependency caching, then source
+            # This allows cargo to cache dependencies when only source changes
+            dockerfile += """
+# Cargo dependency caching: copy manifests first, build deps, then copy source
+COPY --chown=1000:100 goldfish-rust/Cargo.toml goldfish-rust/Cargo.lock /app/goldfish-rust/
+RUN mkdir -p /app/goldfish-rust/src && echo '// placeholder for dependency caching' > /app/goldfish-rust/src/lib.rs
+RUN if command -v cargo >/dev/null 2>&1; then \\
+      cd /app/goldfish-rust && cargo fetch 2>/dev/null || true; \\
+    fi
+COPY --chown=1000:100 goldfish-rust/src/ /app/goldfish-rust/src/
+"""
 
         dockerfile += """
 WORKDIR /app
