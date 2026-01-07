@@ -774,8 +774,12 @@ def build_startup_script(
     if disk_mounts:
         parts.append('log_stage "cache_ready"')
 
-    # Docker login and image pull
-    parts.append("gcloud auth configure-docker us-docker.pkg.dev --quiet || true")
+    # Docker login and image pull - extract registry domain from image
+    # Image format: <registry>/<project>/<repo>/<name>:<tag>
+    # e.g., us-docker.pkg.dev/my-project/goldfish/image:v1
+    registry_domain = image.split("/")[0] if "/" in image else ""
+    if registry_domain and "." in registry_domain:
+        parts.append(f"gcloud auth configure-docker {registry_domain} --quiet || true")
     parts.append('log_stage "docker_login"')
     parts.append(f"docker pull {image} || true")
     parts.append('log_stage "docker_pull"')
