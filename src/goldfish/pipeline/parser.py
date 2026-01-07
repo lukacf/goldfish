@@ -19,6 +19,17 @@ from goldfish.svs.contract import (
 )
 
 
+def _entrypoint_path_error(entrypoint: str) -> bool:
+    path = Path(entrypoint)
+    if path.is_absolute():
+        return True
+    if ".." in path.parts:
+        return True
+    if not path.parts or path.parts[0] != "entrypoints":
+        return True
+    return False
+
+
 class PipelineValidationError(GoldfishError):
     """Pipeline validation failed."""
 
@@ -179,7 +190,7 @@ class PipelineParser:
         """Validate pipeline definition.
 
         Checks:
-        - Stage files exist (modules/{stage}.py, configs/{stage}.yaml)
+        - Stage files exist (modules/{stage}.py or modules/{stage}.rs, configs/{stage}.yaml)
         - Signal types match (output type == input type)
         - No circular dependencies
         - Datasets exist in registry (if dataset_exists_fn provided)
@@ -200,10 +211,22 @@ class PipelineParser:
         available_signals: dict[str, SignalDef] = {}
 
         for stage in pipeline.stages:
+            runtime = stage.runtime or "python"
+            if runtime not in {"python", "rust"}:
+                errors.append(f"Stage '{stage.name}': runtime '{runtime}' unsupported (use 'python' or 'rust')")
+
             # Check module file exists (required)
-            module_path = workspace_path / "modules" / f"{stage.name}.py"
-            if not module_path.exists():
-                errors.append(f"Module not found for stage '{stage.name}': {module_path}")
+            if runtime == "rust":
+                module_path = workspace_path / "modules" / f"{stage.name}.rs"
+                if not module_path.exists():
+                    errors.append(f"Module not found for stage '{stage.name}': {module_path}")
+
+                if stage.entrypoint and _entrypoint_path_error(stage.entrypoint):
+                    errors.append(f"Stage '{stage.name}': entrypoint must be within entrypoints/ and relative")
+            else:
+                module_path = workspace_path / "modules" / f"{stage.name}.py"
+                if not module_path.exists():
+                    errors.append(f"Module not found for stage '{stage.name}': {module_path}")
             # Note: Config files (configs/{stage}.yaml) are optional - merge_stage_config handles them
 
             # SVS Preflight: Resolve config and validate types (if declared)
@@ -321,6 +344,11 @@ class PipelineParser:
 
         for stage in pipeline.stages:
             stage_data: dict[str, Any] = {"name": stage.name}
+
+            if stage.runtime:
+                stage_data["runtime"] = stage.runtime
+            if stage.entrypoint:
+                stage_data["entrypoint"] = stage.entrypoint
 
             if stage.inputs:
                 stage_data["inputs"] = {

@@ -112,7 +112,7 @@ Check each stage for:
 5. **Hypothesis coherence** - does the code actually test what's claimed?
 6. **Key/column name mismatches** - When code accesses arrays or dataframes with dynamically
    constructed keys (f-strings, loop variables), trace the actual key values. For `from_stage`
-   inputs, use the Read tool to check `modules/<upstream_stage>.py` for actual output key names.
+   inputs, use the Read tool to check `modules/<upstream_stage>.py` or `.rs` for actual output key names.
    Pay special attention to train/val/test split naming inconsistencies (e.g., 'valid' vs 'val').
 7. **Input freshness** - If a `from_stage` input resolves to an older run while a newer run of
    that upstream stage is currently RUNNING or FINALIZING, this is a BLOCKING error. The run
@@ -128,6 +128,14 @@ Check each stage for:
    - `save_output(name, data, artifact=False)` - 2-3 args
    - `load_input(name, format=None)` - 1-2 args
    Wrong argument count is a BLOCKING error (TypeError at runtime).
+10. **Storage vs. Code Mismatch** - Verify code logic against the `storage_location` and `contents` listing in Input Resolution.
+    - If an input resolves to a directory (indicated by a trailing `/` in `storage_location` or multiple files in `contents`) but the code assumes it is a file (e.g., using `open(path)`), this is a BLOCKING ERROR.
+    - If the code looks for a specific filename inside an input directory that is NOT present in the `contents` listing, flag it as a BLOCKING ERROR.
+    - `load_input()` returns the path exactly as shown in `storage_location`.
+11. **Config Type Safety** - Check for type mismatches in configuration usage.
+    - If code uses a config value in a mathematical operation or API that expects a number (e.g., `optimizer(lr=lr)`), verify it is cast to float/int.
+    - Config values from `get_config()` or environment variables may be strings (e.g., "3e-4").
+    - Usage like `lr = config['lr']` followed by `Adam(lr=lr)` without `float()` cast is a BLOCKING ERROR if the config source is not typed.
 
 ## Output Format
 
@@ -156,8 +164,8 @@ Start your review now:
 STAGE_SECTION_TEMPLATE = """
 ### Stage: {stage_name}
 
-#### Module: modules/{stage_name}.py
-```python
+#### Module: {module_path}
+```{module_lang}
 {module_content}
 ```
 
@@ -367,6 +375,19 @@ class PreRunReviewer:
                 lines.append(f"  latest_run_progress: {ctx.get('latest_run_progress')}")
                 lines.append(f"  latest_run_started_at: {ctx.get('latest_run_started_at')}")
                 lines.append(f"  latest_run_outcome: {ctx.get('latest_run_outcome')}")
+
+            if ctx.get("storage_location"):
+                lines.append(f"  storage_location: {ctx.get('storage_location')}")
+
+            contents = ctx.get("contents")
+            if contents:
+                lines.append("  contents:")
+                # List items, cap at 50 to keep prompt size manageable
+                for item in contents[:50]:
+                    lines.append(f"    - {item}")
+                if len(contents) > 50:
+                    lines.append(f"    - ... ({len(contents) - 50} more items)")
+
         return "\n".join(lines)
 
     def _detect_stale_inputs(self, input_context: list[dict] | None, stages: list[str]) -> list[ReviewIssue]:
@@ -439,6 +460,12 @@ class PreRunReviewer:
                 continue
 
             module_path = self.workspace_path / "modules" / f"{stage}.py"
+            module_lang = "python"
+            if not module_path.exists():
+                rust_path = self.workspace_path / "modules" / f"{stage}.rs"
+                if rust_path.exists():
+                    module_path = rust_path
+                    module_lang = "rust"
             config_path = self.workspace_path / "configs" / f"{stage}.yaml"
 
             module_content = self._read_file_safe(module_path, "# Module not found")
@@ -446,6 +473,8 @@ class PreRunReviewer:
 
             section = STAGE_SECTION_TEMPLATE.format(
                 stage_name=escape_for_prompt(stage),
+                module_path=escape_for_prompt(str(module_path.relative_to(self.workspace_path))),
+                module_lang=module_lang,
                 module_content=escape_for_prompt(module_content),
                 config_content=escape_for_prompt(config_content),
             )

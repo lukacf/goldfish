@@ -45,6 +45,7 @@ tests/deluxe/results/
 # Test coverage
 htmlcov/
 .coverage
+.coverage.*
 .pytest_cache/
 
 # Ruff cache

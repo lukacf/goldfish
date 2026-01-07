@@ -362,7 +362,125 @@ def main():
   `log_artifact` returns a backend URL if available.
 - **Live metrics:** `inspect_run` will attempt a best-effort live sync (Overdrive) for running runs.
 - **Auto-finalize:** `finish()` is optional but recommended in a `finally` block. Auto-finalize uses `atexit`
-  and won’t run on SIGKILL/crash.
+  and won't run on SIGKILL/crash.
+
+### 4.1 Rust Stage Implementation (Alternative)
+
+For performance-critical stages, you can use the **Rust SDK** (`goldfish-rust`) instead of Python. The API mirrors the Python version and **Rust stages are first-class** (can be mixed with Python stages in the same pipeline).
+
+**Add to Cargo.toml:**
+```toml
+[dependencies]
+goldfish-rust = { path = "../goldfish-rust" }  # or from registry when published
+```
+
+**Pipeline.yaml (Rust stage):**
+```yaml
+stages:
+  - name: encode
+    runtime: rust   # per-stage runtime (can interleave with python)
+```
+
+**Basic stage pattern:**
+```rust
+// modules/train.rs
+use goldfish_rust::{init, load_input, save_output, OutputData, GoldfishError};
+use goldfish_rust::{runtime_log, heartbeat, log_metric, log_artifact, should_stop};
+
+fn main() -> Result<(), GoldfishError> {
+    let _guard = init();  // RAII: finalizes SVS stats on drop (if enabled)
+
+    // Load inputs (returns OutputData enum)
+    let features = load_input("features", None)?;
+    let arr = features.into_tensor_f32().expect("expected f32 tensor");
+
+    for epoch in 0..epochs {
+        // Training logic...
+
+        // Monitoring (MANDATORY for AI oversight)
+        runtime_log(&format!("Epoch {} loss: {:.4}", epoch, loss), "INFO");
+        log_metric("train/loss", loss, Some(epoch as i64));
+        heartbeat(Some(&format!("Epoch {}/{}", epoch, epochs)), false);
+
+        if should_stop() {
+            println!("Early stop requested by SVS");
+            break;
+        }
+    }
+
+    // Save outputs
+    save_output("model", OutputData::Path(model_dir), false)?;
+
+    // Log artifact (path relative to outputs dir)
+    log_artifact("checkpoint", "model/checkpoint.pt");
+    Ok(())
+}
+```
+
+**Rust source convention (symmetric to Python):**
+- Python stage → `modules/<stage>.py`
+- Rust stage → `modules/<stage>.rs` (**required**)
+  - Goldfish compiles this at runtime and runs the resulting binary.
+  - Optional: `modules/<stage>.Cargo.toml` to add dependencies or customize build.
+  - Custom base images must include `cargo`; Goldfish base images already do.
+
+**Key Rust API functions:**
+
+| Function | Purpose |
+|----------|---------|
+| `init()` | Returns RAII guard that finalizes SVS stats on drop |
+| `load_input(name, format)` | Load input signal → `OutputData` (does NOT auto-load .npz) |
+| `save_output(name, data, artifact)` | Save output with schema validation |
+| `runtime_log(msg, level)` | Structured log for AI monitoring |
+| `heartbeat(msg, force)` | Prevent inactivity timeout |
+| `log_metric(name, value, step)` | Record scalar metric |
+| `log_metrics(map, step)` | Record multiple metrics |
+| `log_artifact(name, path)` | Record artifact (path relative to outputs dir) |
+| `should_stop()` | Check if SVS requested early termination |
+
+**SVS stats:** Stats are computed only when `GOLDFISH_SVS_STATS_ENABLED=true`. The `init()` guard finalizes stats on drop when enabled.
+
+**OutputData variants:**
+```rust
+OutputData::TensorF32(ArrayD<f32>)
+OutputData::TensorF64(ArrayD<f64>)
+OutputData::TensorI64(ArrayD<i64>)
+OutputData::TensorI32(ArrayD<i32>)
+OutputData::TensorU8(ArrayD<u8>)
+OutputData::Json(serde_json::Value)
+OutputData::Tabular(polars::DataFrame)
+OutputData::Path(PathBuf)
+OutputData::MultiTensor(HashMap<String, OutputData>)
+```
+
+**Multi-array autosave:** `OutputData::MultiTensor` is auto-saved only when the output format is `directory` (or default `file`). Each array is written as `outputs/<signal>/<array_name>.npy`. Stats are recorded as `signal.array` in `svs_stats.json`. Note: `save_output` does **not** write `.npz` files.
+
+**save_output + Path:** `OutputData::Path` with schema validation only works for `directory` outputs with `arrays` schema—Goldfish loads `.npz`/`.npy` files inside the directory to validate. For other schema types, use in-memory `OutputData` variants.
+
+**Entrypoints:** Rust stages do **not** need an explicit `entrypoints/<stage>` file. Goldfish compiles `modules/<stage>.rs` and runs the compiled binary under `entrypoints/` automatically. Use `entrypoint:` in pipeline.yaml only if you need a custom binary path.
+
+**Type extraction:**
+```rust
+// Borrow (no move)
+if let Some(arr) = data.as_tensor_f32() { ... }
+
+// Take ownership (returns Err(self) if wrong type)
+let arr = data.into_tensor_f32().expect("expected f32");
+```
+
+**NPZ loading:** `load_input` does **not** auto-load `.npz` files. Use explicit functions:
+```rust
+use goldfish_rust::{load_npz, load_npz_array};
+
+let npz = load_npz("model.npz")?;
+let weights = npz.get("weights");  // borrow
+let bias = npz.take("bias");       // take ownership
+
+// Or load single array directly
+let weights = load_npz_array("model.npz", "weights")?;
+```
+
+**Security:** The Rust SDK includes path traversal protection, NPY header size limits (1MB), and NPZ decompression bomb protection (1GB per entry).
 
 ### 4.5 SVS (Schema Contracts + Output Stats)
 
@@ -834,8 +952,6 @@ Goldfish auto-extracts failure patterns to prevent regression. Be aware of these
 
 
 11. **MANDATORY: Always use `goldfish.io` and `goldfish.metrics`** for I/O and telemetry. AI monitoring will fail without them.
-
-
 
 
 
