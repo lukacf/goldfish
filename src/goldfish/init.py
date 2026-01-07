@@ -80,14 +80,11 @@ def init_project(
 
     gce_project = os.getenv("GOLDFISH_GCE_PROJECT")
     if gce_project:
-        # Prefer explicit registry env, otherwise default to the project-scoped "goldfish" repo
-        artifact_registry = os.getenv(
-            "GOLDFISH_ARTIFACT_REGISTRY",
-            f"us-docker.pkg.dev/{gce_project}/goldfish",
-        )
+        # artifact_registry must be explicitly configured - no region-specific default
+        artifact_registry = os.getenv("GOLDFISH_ARTIFACT_REGISTRY")
         gce_config = GCEConfig(
             project_id=gce_project,
-            artifact_registry=artifact_registry,
+            artifact_registry=artifact_registry,  # None if not set - user must configure
         )
 
     # Create config

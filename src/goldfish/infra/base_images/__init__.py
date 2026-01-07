@@ -82,7 +82,8 @@ def push_base_image(image_type: str, registry_url: str) -> str:
     # Validate registry URL format
     if not registry_url or "://" in registry_url or "/" not in registry_url:
         raise GoldfishError(
-            f"Invalid artifact_registry URL: {registry_url}. " "Expected format: us-docker.pkg.dev/<project>/<repo>"
+            f"Invalid artifact_registry URL: {registry_url}. "
+            "Expected format: <region>-docker.pkg.dev/<project>/<repo>"
         )
 
     image_name = BASE_IMAGE_CPU if image_type == "cpu" else BASE_IMAGE_GPU

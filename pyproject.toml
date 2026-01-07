@@ -3,6 +3,7 @@ name = "goldfish"
 version = "0.1.0"
 description = "MCP server for ML experimentation - solves the goldfish memory problem for AI agents"
 readme = "README.md"
+license = {text = "AGPL-3.0-or-later"}
 requires-python = ">=3.11"
 dependencies = [
     "fastmcp>=0.1.0",

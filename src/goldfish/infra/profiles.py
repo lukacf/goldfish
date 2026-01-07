@@ -283,18 +283,32 @@ class ProfileResolver:
     """Resolves resource profiles with optional custom overrides.
 
     Handles merging built-in profiles with user-defined overrides from goldfish.yaml.
+    Global zones can be applied to all profiles for region customization.
     """
 
-    def __init__(self, profile_overrides: dict[str, dict[str, Any]] | None = None):
+    def __init__(
+        self,
+        profile_overrides: dict[str, dict[str, Any]] | None = None,
+        global_zones: list[str] | None = None,
+    ):
         """Initialize profile resolver.
 
         Args:
             profile_overrides: Optional dict of profile overrides from goldfish.yaml
+            global_zones: Optional global zone list to apply to all profiles.
+                         This allows users to customize regions without overriding
+                         every profile individually.
         """
         self.profile_overrides = profile_overrides or {}
+        self.global_zones = global_zones
 
     def resolve(self, name: str) -> dict[str, Any]:
         """Resolve a profile by name, applying any overrides.
+
+        Priority for zones (highest to lowest):
+        1. Profile-specific override in profile_overrides
+        2. Global zones from goldfish.yaml gce.zones
+        3. Built-in profile defaults
 
         Args:
             name: Profile name (e.g., "h100-spot")
@@ -309,6 +323,9 @@ class ProfileResolver:
         if name in self.profile_overrides and name not in BUILTIN_PROFILES:
             # Custom profile - use as-is
             profile = deepcopy(self.profile_overrides[name])
+            # Apply global zones if custom profile doesn't specify zones
+            if self.global_zones and "zones" not in profile:
+                profile["zones"] = list(self.global_zones)
             validate_profile(profile)
             profile["name"] = name  # Ensure name is included for ResourceLauncher
             return profile
@@ -323,6 +340,12 @@ class ProfileResolver:
         # Apply overrides if they exist
         if name in self.profile_overrides:
             profile = deep_merge(profile, self.profile_overrides[name])
+
+        # Apply global zones if not overridden (either by profile_overrides or custom profile)
+        # This allows users to set zones once in goldfish.yaml instead of per-profile
+        profile_has_zone_override = name in self.profile_overrides and "zones" in self.profile_overrides[name]
+        if self.global_zones and not profile_has_zone_override:
+            profile["zones"] = list(self.global_zones)
 
         validate_profile(profile)
         profile["name"] = name  # Ensure name is included for ResourceLauncher

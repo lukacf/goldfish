@@ -97,11 +97,16 @@ class StageExecutor:
         self.docker_builder = DockerBuilder(config)
         self.local_executor = LocalExecutor()
 
-        # Initialize profile resolver
+        # Initialize profile resolver with global zones support
         profile_overrides = None
+        global_zones = None
         if config.gce:
             profile_overrides = config.gce.effective_profile_overrides
-        self.profile_resolver = ProfileResolver(profile_overrides=profile_overrides)
+            global_zones = config.gce.zones  # Apply to all profiles
+        self.profile_resolver = ProfileResolver(
+            profile_overrides=profile_overrides,
+            global_zones=global_zones,
+        )
 
         # Initialize GCE launcher with full config
         gce_bucket = None
@@ -134,11 +139,16 @@ class StageExecutor:
             gce_ensure_metadata_permissions = config.gce.ensure_metadata_permissions
             gce_metadata_ack_role = config.gce.metadata_ack_role
 
-            # Resolve artifact_registry from config or auto-generate from project
+            # Resolve artifact_registry from config - required for GCE backend
             self.artifact_registry = config.gce.effective_artifact_registry
-            if not self.artifact_registry and gce_project:
-                self.artifact_registry = f"us-docker.pkg.dev/{gce_project}/goldfish"
-                logger.info(f"Auto-generated artifact_registry: {self.artifact_registry}")
+            if not self.artifact_registry:
+                raise GoldfishError(
+                    "GCE backend requires artifact_registry configuration. "
+                    "Add to goldfish.yaml:\n"
+                    "  gce:\n"
+                    "    artifact_registry: <region>-docker.pkg.dev/<project>/<repo>\n"
+                    "Example regions: us-docker, europe-docker, asia-docker"
+                )
 
         self.gce_launcher = GCELauncher(
             project_id=gce_project,

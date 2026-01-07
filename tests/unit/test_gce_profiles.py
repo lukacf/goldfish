@@ -196,3 +196,103 @@ class TestProfileValidation:
 
         with pytest.raises(ProfileValidationError, match="zones"):
             validate_profile(invalid_profile)
+
+
+class TestGlobalZones:
+    """Test global_zones parameter for region customization."""
+
+    def test_global_zones_applied_to_builtin_profile(self):
+        """Global zones should override built-in profile zones."""
+        resolver = ProfileResolver(
+            profile_overrides=None,
+            global_zones=["europe-west4-a", "europe-west4-b"],
+        )
+
+        profile = resolver.resolve("cpu-small")
+
+        # Global zones should replace built-in US zones
+        assert profile["zones"] == ["europe-west4-a", "europe-west4-b"]
+        # Other fields unchanged
+        assert profile["machine_type"] == BUILTIN_PROFILES["cpu-small"]["machine_type"]
+
+    def test_global_zones_not_applied_when_profile_override_has_zones(self):
+        """Profile-specific zone override takes precedence over global zones."""
+        overrides = {"cpu-small": {"zones": ["asia-east1-a"]}}
+        resolver = ProfileResolver(
+            profile_overrides=overrides,
+            global_zones=["europe-west4-a"],  # Should be ignored for cpu-small
+        )
+
+        profile = resolver.resolve("cpu-small")
+
+        # Profile override takes precedence
+        assert profile["zones"] == ["asia-east1-a"]
+
+    def test_global_zones_applied_to_profile_without_zone_override(self):
+        """Global zones applied to profiles without explicit zone override."""
+        overrides = {
+            "cpu-small": {"machine_type": "n2-standard-8"},  # Override machine, not zones
+        }
+        resolver = ProfileResolver(
+            profile_overrides=overrides,
+            global_zones=["europe-west4-a", "europe-west4-b"],
+        )
+
+        profile = resolver.resolve("cpu-small")
+
+        # Global zones applied (no zone override in profile_overrides)
+        assert profile["zones"] == ["europe-west4-a", "europe-west4-b"]
+        # Machine type override still applied
+        assert profile["machine_type"] == "n2-standard-8"
+
+    def test_global_zones_applied_to_custom_profile_without_zones(self):
+        """Global zones applied to custom profiles that don't specify zones."""
+        custom_profiles = {
+            "my-custom": {
+                "machine_type": "n2-standard-16",
+                # No zones specified - should use global_zones
+                "boot_disk": {"type": "pd-ssd", "size_gb": 100},
+                "data_disk": {"type": "pd-ssd", "size_gb": 500},
+                "gpu": {"type": "none", "count": 0},
+            }
+        }
+        resolver = ProfileResolver(
+            profile_overrides=custom_profiles,
+            global_zones=["europe-west4-a"],
+        )
+
+        profile = resolver.resolve("my-custom")
+
+        assert profile["zones"] == ["europe-west4-a"]
+
+    def test_global_zones_not_applied_when_custom_profile_has_zones(self):
+        """Custom profile zones take precedence over global zones."""
+        custom_profiles = {
+            "my-custom": {
+                "machine_type": "n2-standard-16",
+                "zones": ["asia-southeast1-a"],  # Explicit zones
+                "boot_disk": {"type": "pd-ssd", "size_gb": 100},
+                "data_disk": {"type": "pd-ssd", "size_gb": 500},
+                "gpu": {"type": "none", "count": 0},
+            }
+        }
+        resolver = ProfileResolver(
+            profile_overrides=custom_profiles,
+            global_zones=["europe-west4-a"],  # Should be ignored
+        )
+
+        profile = resolver.resolve("my-custom")
+
+        assert profile["zones"] == ["asia-southeast1-a"]
+
+    def test_no_global_zones_uses_builtin_defaults(self):
+        """Without global_zones, built-in profile zones remain unchanged."""
+        resolver = ProfileResolver(
+            profile_overrides=None,
+            global_zones=None,
+        )
+
+        profile = resolver.resolve("cpu-small")
+
+        # Should have original built-in zones
+        assert profile["zones"] == BUILTIN_PROFILES["cpu-small"]["zones"]
