@@ -48,7 +48,22 @@ BASE_IMAGE_VERSION = "v3"
 
 
 # Built-in resource profiles optimized for ML workloads
-# Based on legacy infra/gcp.yaml
+#
+# IMPORTANT: The zones listed in these profiles are EXAMPLES based on common
+# GPU availability patterns. Users MUST configure their own zones in goldfish.yaml:
+#
+#   gce:
+#     zones:
+#       - europe-west4-a
+#       - asia-southeast1-b
+#
+# The global zones setting overrides all profile defaults, allowing you to
+# target regions where YOU have GPU quota.
+#
+# See ProfileResolver.resolve() for zone priority:
+# 1. Profile-specific override in goldfish.yaml gce.profile_overrides
+# 2. Global zones from goldfish.yaml gce.zones
+# 3. Built-in defaults (below) - ONLY used if no config provided
 BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
     # CPU-only profiles
     "cpu-small": {

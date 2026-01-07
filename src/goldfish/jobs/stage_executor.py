@@ -95,7 +95,14 @@ class StageExecutor:
 
         # Initialize execution infrastructure
         self.docker_builder = DockerBuilder(config)
-        self.local_executor = LocalExecutor()
+
+        # Initialize local executor with configurable resource limits
+        # Config values override defaults; None means use LocalExecutor default
+        self.local_executor = LocalExecutor(
+            memory_limit=config.jobs.container_memory if config.jobs.container_memory else "4g",
+            cpu_limit=config.jobs.container_cpus if config.jobs.container_cpus else "2.0",
+            pids_limit=config.jobs.container_pids if config.jobs.container_pids else 100,
+        )
 
         # Initialize profile resolver with global zones support
         profile_overrides = None
@@ -111,8 +118,8 @@ class StageExecutor:
         # Initialize GCE launcher with full config
         gce_bucket = None
         gce_project = None
-        gce_zone = "us-central1-a"
-        gce_zones = None
+        gce_zone: str | None = None  # No US default - must be configured explicitly
+        gce_zones: list[str] | None = None
         gce_resources: list[dict[str, Any]] = []
         gce_gpu_preference = None
         gce_service_account = None
@@ -150,9 +157,22 @@ class StageExecutor:
                     "Example regions: us-docker, europe-docker, asia-docker"
                 )
 
+            # Zones are required for GCE backend - no US default
+            if not gce_zones:
+                raise GoldfishError(
+                    "GCE backend requires zones configuration. "
+                    "Add to goldfish.yaml:\n"
+                    "  gce:\n"
+                    "    zones:\n"
+                    "      - <region>-<zone>  # e.g., europe-west4-a\n"
+                    "Configure zones in regions where you have GPU quota."
+                )
+
+        # GCELauncher is always created but only used when backend="gce"
+        # For local backend, we pass a placeholder zone since it won't be used
         self.gce_launcher = GCELauncher(
             project_id=gce_project,
-            zone=gce_zone,
+            zone=gce_zone or "not-configured",  # Placeholder for local backend
             bucket=gce_bucket,
             resources=gce_resources,  # Will be set per-stage
             zones=gce_zones,
@@ -1696,64 +1716,6 @@ class StageExecutor:
             return registry_image_tag
 
         return local_image_tag
-
-    def _ensure_artifact_registry(self, project_id: str, repo_name: str) -> None:
-        """Ensure Artifact Registry repository exists, creating if needed.
-
-        Args:
-            project_id: GCP project ID
-            repo_name: Repository name (e.g., "goldfish")
-        """
-        import subprocess
-
-        # Check if repository exists
-        check_result = subprocess.run(
-            [
-                "gcloud",
-                "artifacts",
-                "repositories",
-                "describe",
-                repo_name,
-                f"--project={project_id}",
-                "--location=us",
-                "--format=value(name)",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        if check_result.returncode == 0:
-            logger.debug(f"Artifact Registry repository {repo_name} already exists")
-            return
-
-        # Create repository
-        logger.info(f"Creating Artifact Registry repository: {repo_name} in project {project_id}")
-        create_result = subprocess.run(
-            [
-                "gcloud",
-                "artifacts",
-                "repositories",
-                "create",
-                repo_name,
-                f"--project={project_id}",
-                "--location=us",
-                "--repository-format=docker",
-                "--description=Goldfish ML experiment images",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        if create_result.returncode != 0:
-            # Check if it was a race condition (already exists)
-            if "already exists" in create_result.stderr.lower():
-                logger.debug(f"Artifact Registry repository {repo_name} created by concurrent process")
-                return
-            raise GoldfishError(f"Failed to create Artifact Registry repository: {create_result.stderr}")
-
-        logger.info(f"Created Artifact Registry repository: us-docker.pkg.dev/{project_id}/{repo_name}")
 
     def _load_stage_config(self, workspace: str, stage_name: str) -> dict:
         """Load stage config from configs/{stage}.yaml.

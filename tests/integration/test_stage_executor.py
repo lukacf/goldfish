@@ -1379,3 +1379,202 @@ class TestProfileResolverIntegration:
         # h100-spot should use global zones (no profile override)
         profile = executor.profile_resolver.resolve("h100-spot")
         assert profile["zones"] == ["europe-west4-a"]
+
+
+class TestGCEZonesRequirement:
+    """Test that GCE backend requires zones to be configured."""
+
+    def test_gce_backend_requires_zones_configured(self, test_db, temp_dir):
+        """GCE backend should error if zones not configured - no US default."""
+        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
+
+        # Config with GCE backend but no zones configured
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path=str(temp_dir),
+            jobs=JobsConfig(backend="gce"),
+            gcs=GCSConfig(bucket="test-bucket"),
+            gce=GCEConfig(
+                project_id="my-project",
+                artifact_registry="europe-docker.pkg.dev/my-project/goldfish",
+                zones=None,  # Not configured!
+            ),
+        )
+
+        with pytest.raises(GoldfishError, match="zones"):
+            StageExecutor(
+                db=test_db,
+                config=config,
+                workspace_manager=MagicMock(),
+                pipeline_manager=MagicMock(),
+                project_root=temp_dir,
+            )
+
+    def test_gce_backend_accepts_configured_zones(self, test_db, temp_dir):
+        """GCE backend should work when zones are configured."""
+        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
+
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path=str(temp_dir),
+            jobs=JobsConfig(backend="gce"),
+            gcs=GCSConfig(bucket="test-bucket"),
+            gce=GCEConfig(
+                project_id="my-project",
+                artifact_registry="europe-docker.pkg.dev/my-project/goldfish",
+                zones=["europe-west4-a", "europe-west4-b"],  # Configured!
+            ),
+        )
+
+        # Should not raise
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+        )
+        assert executor.gce_launcher.zones == ["europe-west4-a", "europe-west4-b"]
+
+
+class TestLocalBackendRequirements:
+    """Test local backend configuration requirements."""
+
+    def test_local_backend_does_not_require_artifact_registry(self, test_db, temp_dir):
+        """Local backend should work without artifact_registry configured."""
+        from goldfish.config import GoldfishConfig, JobsConfig
+
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path=str(temp_dir),
+            jobs=JobsConfig(backend="local"),
+            # No GCE config, no artifact_registry
+        )
+
+        # Should not raise
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+        )
+        assert executor.artifact_registry is None
+
+    def test_local_backend_does_not_require_zones(self, test_db, temp_dir):
+        """Local backend should work without zones configured."""
+        from goldfish.config import GoldfishConfig, JobsConfig
+
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path=str(temp_dir),
+            jobs=JobsConfig(backend="local"),
+            # No GCE config, no zones
+        )
+
+        # Should not raise
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+        )
+        # Local executor should be created successfully
+        assert executor.local_executor is not None
+
+
+class TestLocalExecutorConfigFromYaml:
+    """Test LocalExecutor resource limits configurable via goldfish.yaml."""
+
+    def test_local_executor_uses_config_memory_limit(self, test_db, temp_dir):
+        """LocalExecutor should use memory_limit from config."""
+        from goldfish.config import GoldfishConfig, JobsConfig
+
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path=str(temp_dir),
+            jobs=JobsConfig(
+                backend="local",
+                container_memory="8g",  # Custom memory limit
+            ),
+        )
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+        )
+
+        assert executor.local_executor.memory_limit == "8g"
+
+    def test_local_executor_uses_config_cpu_limit(self, test_db, temp_dir):
+        """LocalExecutor should use cpu_limit from config."""
+        from goldfish.config import GoldfishConfig, JobsConfig
+
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path=str(temp_dir),
+            jobs=JobsConfig(
+                backend="local",
+                container_cpus="4.0",  # Custom CPU limit
+            ),
+        )
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+        )
+
+        assert executor.local_executor.cpu_limit == "4.0"
+
+    def test_local_executor_uses_config_pids_limit(self, test_db, temp_dir):
+        """LocalExecutor should use pids_limit from config."""
+        from goldfish.config import GoldfishConfig, JobsConfig
+
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path=str(temp_dir),
+            jobs=JobsConfig(
+                backend="local",
+                container_pids=200,  # Custom pids limit
+            ),
+        )
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+        )
+
+        assert executor.local_executor.pids_limit == 200
+
+    def test_local_executor_uses_defaults_when_not_configured(self, test_db, temp_dir):
+        """LocalExecutor should use defaults when config not specified."""
+        from goldfish.config import GoldfishConfig, JobsConfig
+
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path=str(temp_dir),
+            jobs=JobsConfig(backend="local"),  # No container limits specified
+        )
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+        )
+
+        # Should use LocalExecutor defaults
+        assert executor.local_executor.memory_limit == "4g"
+        assert executor.local_executor.cpu_limit == "2.0"
+        assert executor.local_executor.pids_limit == 100

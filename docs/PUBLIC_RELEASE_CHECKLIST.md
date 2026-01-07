@@ -147,21 +147,18 @@ These items should be resolved for a quality public release.
 
 ### 8. Address Proprietary Dependencies
 
-**Current State**: `claude-agent-sdk` is Anthropic proprietary.
+**Current State**: `claude-agent-sdk` was listed as a dependency but never imported.
 
 **Location**: `pyproject.toml`
 
-**Required Action**:
-- Document that SVS AI features require Anthropic API access
-- Make claude-agent-sdk an optional dependency
-- Provide graceful degradation when not installed
-- Document alternative AI providers (if supported)
-- Add feature flag for AI-powered reviews
+**Resolution**:
+- Removed `claude-agent-sdk` from dependencies (it was never used as a Python library)
+- AI pre-run review uses CLI binaries (claude, codex, gemini) via subprocess
+- This is documented in SECURITY.md under "AI Review Fail-Open"
+- Alternative providers already supported: Claude Code CLI, Codex CLI, Gemini CLI, or null (disabled)
+- Graceful degradation built-in: reviews fail-open on errors/timeouts
 
-**Files to Update**:
-- `pyproject.toml` (optional dependency group)
-- `src/goldfish/pre_run_review.py` (graceful handling)
-- Documentation
+**Status**: COMPLETE - Dependency removed since it was unused
 
 ---
 
@@ -318,7 +315,7 @@ The following items are planned for future releases but are **explicitly not in 
 ### Before Public Release (High Priority)
 - [x] Document GCP-only limitation
 - [x] Make container limits configurable
-- [ ] Address proprietary dependencies
+- [x] Address proprietary dependencies (removed unused claude-agent-sdk)
 - [ ] Create user documentation
 - [x] Create CONTRIBUTING.md
 - [x] Update README.md

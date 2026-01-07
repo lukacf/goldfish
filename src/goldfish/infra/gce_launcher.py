@@ -44,7 +44,7 @@ class GCELauncher:
     def __init__(
         self,
         project_id: str | None = None,
-        zone: str = "us-central1-a",
+        zone: str = "not-configured",  # Must be configured via goldfish.yaml gce.zones
         bucket: str | None = None,
         resources: list[dict[str, Any]] | None = None,
         zones: list[str] | None = None,
@@ -57,7 +57,7 @@ class GCELauncher:
 
         Args:
             project_id: GCP project ID (uses default if None)
-            zone: Default GCE zone (can be overridden per launch)
+            zone: Default GCE zone (must be configured in goldfish.yaml)
             bucket: GCS bucket for logs/artifacts (required for full functionality)
             resources: Resource catalog (list of resource dicts)
             zones: List of all available zones (for multi-zone lookups)
