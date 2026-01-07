@@ -1258,3 +1258,124 @@ class TestSourceNameResolution:
         result = test_db.get_source("my-dataset")
         assert result is not None
         assert result["gcs_location"] == "gs://bucket/my-dataset"
+
+
+class TestArtifactRegistryRequirement:
+    """Test artifact_registry is required for GCE backend."""
+
+    def test_gce_backend_requires_artifact_registry(self, test_db, temp_dir):
+        """GCE backend should error if artifact_registry not configured."""
+        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
+
+        # Config with GCE backend but no artifact_registry
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path=str(temp_dir),
+            jobs=JobsConfig(backend="gce"),
+            gcs=GCSConfig(bucket="test-bucket"),
+            gce=GCEConfig(
+                project_id="my-project",
+                artifact_registry=None,  # Not configured!
+            ),
+        )
+
+        with pytest.raises(GoldfishError, match="artifact_registry"):
+            StageExecutor(
+                db=test_db,
+                config=config,
+                workspace_manager=MagicMock(),
+                pipeline_manager=MagicMock(),
+                project_root=temp_dir,
+            )
+
+    def test_gce_backend_accepts_configured_artifact_registry(self, test_db, temp_dir):
+        """GCE backend should work when artifact_registry is configured."""
+        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
+
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path=str(temp_dir),
+            jobs=JobsConfig(backend="gce"),
+            gcs=GCSConfig(bucket="test-bucket"),
+            gce=GCEConfig(
+                project_id="my-project",
+                artifact_registry="europe-docker.pkg.dev/my-project/goldfish",
+            ),
+        )
+
+        # Should not raise
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+        )
+        assert executor.artifact_registry == "europe-docker.pkg.dev/my-project/goldfish"
+
+
+class TestProfileResolverIntegration:
+    """Test ProfileResolver receives global_zones from config."""
+
+    def test_global_zones_passed_to_profile_resolver(self, test_db, temp_dir):
+        """Global zones from gce.zones should be passed to ProfileResolver."""
+        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
+
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path=str(temp_dir),
+            jobs=JobsConfig(backend="gce"),
+            gcs=GCSConfig(bucket="test-bucket"),
+            gce=GCEConfig(
+                project_id="my-project",
+                artifact_registry="europe-docker.pkg.dev/my-project/goldfish",
+                zones=["europe-west4-a", "europe-west4-b"],  # Global zones
+            ),
+        )
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+        )
+
+        # Resolve a profile and check zones are from config
+        profile = executor.profile_resolver.resolve("cpu-small")
+        assert profile["zones"] == ["europe-west4-a", "europe-west4-b"]
+
+    def test_profile_override_zones_take_precedence(self, test_db, temp_dir):
+        """Profile-specific zone overrides should take precedence over global zones."""
+        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
+
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path=str(temp_dir),
+            jobs=JobsConfig(backend="gce"),
+            gcs=GCSConfig(bucket="test-bucket"),
+            gce=GCEConfig(
+                project_id="my-project",
+                artifact_registry="europe-docker.pkg.dev/my-project/goldfish",
+                zones=["europe-west4-a"],  # Global zones
+                profile_overrides={
+                    "cpu-small": {"zones": ["asia-east1-a"]},  # Profile-specific
+                },
+            ),
+        )
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+        )
+
+        # cpu-small should use profile-specific zones
+        profile = executor.profile_resolver.resolve("cpu-small")
+        assert profile["zones"] == ["asia-east1-a"]
+
+        # h100-spot should use global zones (no profile override)
+        profile = executor.profile_resolver.resolve("h100-spot")
+        assert profile["zones"] == ["europe-west4-a"]
