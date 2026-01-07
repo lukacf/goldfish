@@ -1300,6 +1300,7 @@ class TestArtifactRegistryRequirement:
             gce=GCEConfig(
                 project_id="my-project",
                 artifact_registry="europe-docker.pkg.dev/my-project/goldfish",
+                zones=["europe-west4-a"],  # Required for GCE backend
             ),
         )
 
