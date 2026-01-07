@@ -34,6 +34,11 @@ class JobsConfig(BaseModel):
     infra_path: str | None = None  # Path to infra scripts (e.g., "../goldfish/infra")
     experiments_dir: str = "experiments"  # Where to export experiments
 
+    # Local Docker container resource limits (for backend="local")
+    container_memory: str | None = None  # e.g., "4g", "8g" - Docker memory limit
+    container_cpus: str | None = None  # e.g., "2.0", "4.0" - Docker CPU limit
+    container_pids: int | None = None  # e.g., 100, 200 - Docker pids limit
+
 
 class GCSConfig(BaseModel):
     """GCS storage configuration."""

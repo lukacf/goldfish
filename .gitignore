@@ -41,6 +41,8 @@ Thumbs.db
 goldfish_autodiscovery.log
 tests/deluxe/*.log
 tests/deluxe/results/
+tests/e2e/deluxe/*.txt
+tests/e2e/deluxe/*.log
 
 # Test coverage
 htmlcov/

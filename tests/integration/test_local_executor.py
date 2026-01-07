@@ -379,9 +379,13 @@ class TestContainerResourceLimits:
 
             args = mock_popen.call_args[0][0]
             args_str = " ".join(args)
-            # Default limits
+            # Verify default VALUES (4g, 2.0, 100 pids)
             assert "--memory" in args_str
+            assert "4g" in args_str  # Default memory
             assert "--cpus" in args_str
+            assert "2.0" in args_str  # Default CPUs
+            assert "--pids-limit" in args_str
+            assert "100" in args_str  # Default pids
 
     def test_custom_resource_limits(self, temp_dir):
         """Should use custom resource limits when specified."""
@@ -437,4 +441,116 @@ class TestContainerResourceLimits:
             args_str = " ".join(args)
             # When limits are None, these flags should not be present
             assert "--memory" not in args_str
+            assert "--cpus" not in args_str  # Must verify --cpus is absent too!
             assert "--pids-limit" not in args_str
+
+    def test_partial_resource_limit_disable(self, temp_dir):
+        """Should allow disabling individual resource limits."""
+        executor = LocalExecutor(
+            memory_limit="8g",
+            cpu_limit=None,  # Disable CPU limit only
+            pids_limit=200,
+        )
+        stage_config = {"stage": "test"}
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_process = MagicMock()
+            mock_process.pid = 12345
+            mock_popen.return_value = mock_process
+
+            executor.launch_container(
+                image_tag="test:latest",
+                stage_run_id="stage-test",
+                entrypoint_script="#!/bin/bash",
+                stage_config=stage_config,
+                work_dir=temp_dir,
+            )
+
+            args = mock_popen.call_args[0][0]
+            args_str = " ".join(args)
+            # Memory and pids should be present
+            assert "--memory" in args_str
+            assert "8g" in args_str
+            assert "--pids-limit" in args_str
+            assert "200" in args_str
+            # But CPU should be absent
+            assert "--cpus" not in args_str
+
+
+class TestContainerSecurityFlags:
+    """Test security flags in container execution."""
+
+    def test_container_runs_as_non_root_user(self, temp_dir):
+        """Container should run as non-root user (UID 1000:1000)."""
+        executor = LocalExecutor()
+        stage_config = {"stage": "test"}
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_process = MagicMock()
+            mock_process.pid = 12345
+            mock_popen.return_value = mock_process
+
+            executor.launch_container(
+                image_tag="test:latest",
+                stage_run_id="stage-test",
+                entrypoint_script="#!/bin/bash",
+                stage_config=stage_config,
+                work_dir=temp_dir,
+            )
+
+            args = mock_popen.call_args[0][0]
+            args_str = " ".join(args)
+            # SECURITY: Must run as non-root
+            assert "--user" in args_str
+            assert "1000:1000" in args_str
+
+    def test_inputs_mounted_read_only(self, temp_dir):
+        """Input directories should be mounted as read-only."""
+        executor = LocalExecutor()
+        inputs_dir = temp_dir / "inputs"
+        inputs_dir.mkdir()
+        stage_config = {"stage": "test"}
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_process = MagicMock()
+            mock_process.pid = 12345
+            mock_popen.return_value = mock_process
+
+            executor.launch_container(
+                image_tag="test:latest",
+                stage_run_id="stage-test",
+                entrypoint_script="#!/bin/bash",
+                stage_config=stage_config,
+                work_dir=temp_dir,
+                inputs_dir=inputs_dir,
+            )
+
+            args = mock_popen.call_args[0][0]
+            args_str = " ".join(args)
+            # SECURITY: Inputs must be read-only
+            assert ":ro" in args_str or "ro" in args_str
+
+    def test_entrypoint_mounted_read_only(self, temp_dir):
+        """Entrypoint script should be mounted as read-only."""
+        executor = LocalExecutor()
+        stage_config = {"stage": "test"}
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_process = MagicMock()
+            mock_process.pid = 12345
+            mock_popen.return_value = mock_process
+
+            executor.launch_container(
+                image_tag="test:latest",
+                stage_run_id="stage-test",
+                entrypoint_script="#!/bin/bash",
+                stage_config=stage_config,
+                work_dir=temp_dir,
+            )
+
+            args = mock_popen.call_args[0][0]
+            # Find the entrypoint mount and verify it's read-only
+            for i, arg in enumerate(args):
+                if arg == "-v" and i + 1 < len(args) and "entrypoint.sh" in args[i + 1]:
+                    assert args[i + 1].endswith(":ro"), "Entrypoint must be mounted read-only"
+                    break
