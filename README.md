@@ -7,6 +7,9 @@
 [![AGPL-3.0 License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![CI](https://github.com/lukacf/goldfish/actions/workflows/ci.yml/badge.svg)](https://github.com/lukacf/goldfish/actions)
 
+> **Cloud Support**: V1 targets Google Cloud Platform (GCE + GCS + Artifact Registry).
+> Multi-cloud abstraction is on the roadmap but not yet implemented.
+
 ---
 
 ## The Bridge Between Agentic Code and Production Research
