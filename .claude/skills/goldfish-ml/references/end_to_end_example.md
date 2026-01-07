@@ -16,7 +16,7 @@ project_name: marketlm
 dev_repo_path: marketlm-dev
 
 gcs:
-  bucket: mlm-artifacts-bucket
+  bucket: my-goldfish-bucket
 
 gce:
   project_id: my-gcp-project
@@ -34,7 +34,7 @@ Register the tokenized training data:
 ```
 register_source(
     name="v37-tokens",
-    gcs_path="gs://mlm-artifacts-bucket/unified-v37/tokens/",
+    gcs_path="gs://my-goldfish-bucket/unified-v37/tokens/",
     description="Tokenized training data from unified-v37 preprocessing",
     reason="Initializing training data for 1B LM baseline",
     metadata={
@@ -291,7 +291,7 @@ Returns:
     "profile": "h100-spot",
     "status": "running",
     "inputs": {
-      "tokens": "gs://mlm-artifacts-bucket/unified-v37/tokens/"
+      "tokens": "gs://my-goldfish-bucket/unified-v37/tokens/"
     }
   }]
 }
@@ -325,8 +325,8 @@ Returns:
 ```json
 {
   "outputs": [
-    {"name": "model", "type": "directory", "location": "gs://mlm-artifacts-bucket/artifacts/..."},
-    {"name": "training_log", "type": "csv", "location": "gs://mlm-artifacts-bucket/artifacts/..."}
+    {"name": "model", "type": "directory", "location": "gs://my-goldfish-bucket/artifacts/..."},
+    {"name": "training_log", "type": "csv", "location": "gs://my-goldfish-bucket/artifacts/..."}
   ]
 }
 ```
