@@ -11,6 +11,23 @@ from goldfish.models import StageRunStatus
 class LocalExecutor:
     """Execute stage runs in Docker containers locally."""
 
+    def __init__(
+        self,
+        memory_limit: str | None = "4g",
+        cpu_limit: str | None = "2.0",
+        pids_limit: int | None = 100,
+    ):
+        """Initialize LocalExecutor with configurable resource limits.
+
+        Args:
+            memory_limit: Docker memory limit (e.g., "4g", "8g"). None to disable.
+            cpu_limit: Docker CPU limit (e.g., "2.0", "4.0"). None to disable.
+            pids_limit: Max number of processes. None to disable.
+        """
+        self.memory_limit = memory_limit
+        self.cpu_limit = cpu_limit
+        self.pids_limit = pids_limit
+
     def launch_container(
         self,
         image_tag: str,
@@ -53,17 +70,13 @@ class LocalExecutor:
             "--detach",  # Run in background
         ]
 
-        # SECURITY: Add resource limits to prevent DoS
-        docker_cmd.extend(
-            [
-                "--memory",
-                "4g",  # Limit memory to 4GB
-                "--cpus",
-                "2.0",  # Limit to 2 CPUs
-                "--pids-limit",
-                "100",  # Limit number of processes
-            ]
-        )
+        # SECURITY: Add resource limits to prevent DoS (configurable)
+        if self.memory_limit:
+            docker_cmd.extend(["--memory", self.memory_limit])
+        if self.cpu_limit:
+            docker_cmd.extend(["--cpus", self.cpu_limit])
+        if self.pids_limit:
+            docker_cmd.extend(["--pids-limit", str(self.pids_limit)])
 
         # SECURITY: Run as non-root user (UID 1000)
         docker_cmd.extend(["--user", "1000:1000"])

@@ -354,3 +354,87 @@ class TestContainerCleanup:
             args = mock_run.call_args[0][0]
             assert "docker" in args
             assert "rm" in args
+
+
+class TestContainerResourceLimits:
+    """Test configurable container resource limits."""
+
+    def test_default_resource_limits(self, temp_dir):
+        """Should use default resource limits when not specified."""
+        executor = LocalExecutor()
+        stage_config = {"stage": "test"}
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_process = MagicMock()
+            mock_process.pid = 12345
+            mock_popen.return_value = mock_process
+
+            executor.launch_container(
+                image_tag="test:latest",
+                stage_run_id="stage-test",
+                entrypoint_script="#!/bin/bash",
+                stage_config=stage_config,
+                work_dir=temp_dir,
+            )
+
+            args = mock_popen.call_args[0][0]
+            args_str = " ".join(args)
+            # Default limits
+            assert "--memory" in args_str
+            assert "--cpus" in args_str
+
+    def test_custom_resource_limits(self, temp_dir):
+        """Should use custom resource limits when specified."""
+        executor = LocalExecutor(
+            memory_limit="8g",
+            cpu_limit="4.0",
+            pids_limit=200,
+        )
+        stage_config = {"stage": "test"}
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_process = MagicMock()
+            mock_process.pid = 12345
+            mock_popen.return_value = mock_process
+
+            executor.launch_container(
+                image_tag="test:latest",
+                stage_run_id="stage-test",
+                entrypoint_script="#!/bin/bash",
+                stage_config=stage_config,
+                work_dir=temp_dir,
+            )
+
+            args = mock_popen.call_args[0][0]
+            args_str = " ".join(args)
+            assert "8g" in args_str
+            assert "4.0" in args_str
+            assert "200" in args_str
+
+    def test_disable_resource_limits(self, temp_dir):
+        """Should allow disabling resource limits entirely."""
+        executor = LocalExecutor(
+            memory_limit=None,
+            cpu_limit=None,
+            pids_limit=None,
+        )
+        stage_config = {"stage": "test"}
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_process = MagicMock()
+            mock_process.pid = 12345
+            mock_popen.return_value = mock_process
+
+            executor.launch_container(
+                image_tag="test:latest",
+                stage_run_id="stage-test",
+                entrypoint_script="#!/bin/bash",
+                stage_config=stage_config,
+                work_dir=temp_dir,
+            )
+
+            args = mock_popen.call_args[0][0]
+            args_str = " ".join(args)
+            # When limits are None, these flags should not be present
+            assert "--memory" not in args_str
+            assert "--pids-limit" not in args_str
