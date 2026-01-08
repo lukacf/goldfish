@@ -1033,6 +1033,36 @@ class GCELauncher:
         if not zone:
             return f"Instance {instance_name} not found in any configured zone"
 
+        def _filter_serial_noise(lines: list[str]) -> list[str]:
+            """Filter out noisy metadata syncer and startup script debug output."""
+            noise_patterns = [
+                "google_metadata_script_runner",
+                'Metadata key("startup-script")',
+                "SIG_JSON=",
+                "REQ_ID=",
+                "LAST_SEEN=",
+                "CMD=sync",
+                "curl -sf -H",
+                "metadata.google.internal",
+                "printf %s",
+                "sed -n",
+                "[[ sync ==",
+                "[[ -n ",
+                "sleep 1",
+                "sleep $",
+                "gcloud storage cp",
+                "kill -0",
+                "+ true",
+                "++ ",  # bash debug prefixes for subshells
+            ]
+            filtered = []
+            for line in lines:
+                # Skip lines that match any noise pattern
+                if any(pattern in line for pattern in noise_patterns):
+                    continue
+                filtered.append(line)
+            return filtered
+
         try:
             cmd = [
                 "gcloud",
@@ -1047,7 +1077,9 @@ class GCELauncher:
                 cmd.append(f"--project={self.project_id}")
 
             gcloud_result = run_gcloud(cmd, check=False, project_id=self.project_id)
-            return _collect(gcloud_result.stdout.splitlines(keepends=True), since_dt)
+            raw_lines = gcloud_result.stdout.splitlines(keepends=True)
+            filtered_lines = _filter_serial_noise(raw_lines)
+            return _collect(filtered_lines, since_dt)
         except Exception as e:
             return f"Failed to retrieve logs: {e}"
 
