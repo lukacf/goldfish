@@ -173,6 +173,7 @@ STAGE_SECTION_TEMPLATE = """
 ```yaml
 {config_content}
 ```
+{config_override_section}
 """
 
 
@@ -221,6 +222,7 @@ class PreRunReviewer:
         reason: RunReason | None = None,
         diff_text: str = "",
         input_context: list[dict] | None = None,
+        config_override: dict | None = None,
     ) -> RunReview:
         """Review stages before execution.
 
@@ -229,6 +231,7 @@ class PreRunReviewer:
             reason: The RunReason explaining why this is being run
             diff_text: Git diff since last successful run
             input_context: Resolved input metadata (for staleness checks)
+            config_override: Runtime config overrides (will take precedence over static config)
 
         Returns:
             RunReview with findings
@@ -237,7 +240,7 @@ class PreRunReviewer:
 
         # Gather context
         pipeline_yaml = self._read_pipeline_yaml()
-        stage_sections = self._build_stage_sections(stages)
+        stage_sections = self._build_stage_sections(stages, config_override)
         input_resolution = self._format_input_resolution(input_context)
         run_reason_text = reason.to_markdown() if reason else "No reason provided"
 
@@ -462,8 +465,10 @@ This is a test run to verify the AI review system works. You MUST:
 
         return issues
 
-    def _build_stage_sections(self, stages: list[str]) -> str:
+    def _build_stage_sections(self, stages: list[str], config_override: dict | None = None) -> str:
         """Build detailed sections for each stage being reviewed."""
+        import yaml
+
         sections = []
         for stage in stages:
             # Validate stage name to prevent path traversal
@@ -483,12 +488,30 @@ This is a test run to verify the AI review system works. You MUST:
             module_content = self._read_file_safe(module_path, "# Module not found")
             config_content = self._read_file_safe(config_path, "# No config file")
 
+            # Build config_override section if there are overrides for this stage
+            config_override_section = ""
+            if config_override:
+                # config_override can be {key: value} for single stage or {stage: {key: value}} for multi-stage
+                stage_overrides = config_override.get(stage, {})
+                if not stage_overrides and len(stages) == 1:
+                    # Single stage run - overrides apply directly
+                    stage_overrides = config_override
+                if stage_overrides:
+                    override_yaml = yaml.safe_dump(stage_overrides, default_flow_style=False)
+                    config_override_section = f"""
+#### Runtime Config Override (TAKES PRECEDENCE over static config)
+```yaml
+{escape_for_prompt(override_yaml.strip())}
+```
+"""
+
             section = STAGE_SECTION_TEMPLATE.format(
                 stage_name=escape_for_prompt(stage),
                 module_path=escape_for_prompt(str(module_path.relative_to(self.workspace_path))),
                 module_lang=module_lang,
                 module_content=escape_for_prompt(module_content),
                 config_content=escape_for_prompt(config_content),
+                config_override_section=config_override_section,
             )
             sections.append(section)
 
@@ -685,6 +708,7 @@ async def review_before_run(
     diff_text: str = "",
     input_context: list[dict] | None = None,
     db: Database | None = None,
+    config_override: dict | None = None,
 ) -> RunReview:
     """Convenience function to perform pre-run review.
 
@@ -698,6 +722,7 @@ async def review_before_run(
         diff_text: Git diff since last successful run
         input_context: Resolved input metadata for staleness checks
         db: Database for looking up last successful run
+        config_override: Runtime config overrides passed to run()
 
     Returns:
         RunReview with findings
@@ -709,4 +734,10 @@ async def review_before_run(
         dev_repo_path=dev_repo_path,
         db=db,
     )
-    return await reviewer.review(stages=stages, reason=reason, diff_text=diff_text, input_context=input_context)
+    return await reviewer.review(
+        stages=stages,
+        reason=reason,
+        diff_text=diff_text,
+        input_context=input_context,
+        config_override=config_override,
+    )

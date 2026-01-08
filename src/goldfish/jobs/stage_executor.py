@@ -326,6 +326,7 @@ class StageExecutor:
                 reason_structured=reason_structured,
                 git_sha=git_sha,
                 input_context=input_context,
+                config_override=config_override,
             )
             if review:
                 self._record_pre_run_review(stage_run_id, review)
@@ -2360,6 +2361,7 @@ echo "Stage completed successfully"
         reason_structured: dict | None,
         git_sha: str,
         input_context: list[dict] | None = None,
+        config_override: dict | None = None,
     ) -> RunReview | None:
         """Perform pre-run review using Claude Agent SDK.
 
@@ -2369,6 +2371,8 @@ echo "Stage completed successfully"
             pipeline: Pipeline definition (for context)
             reason_structured: Structured RunReason dict
             git_sha: Current git SHA for diff calculation
+            input_context: Resolved input metadata
+            config_override: Runtime config overrides
 
         Returns:
             RunReview with findings, or None if review couldn't be performed
@@ -2406,6 +2410,7 @@ echo "Stage completed successfully"
                     diff_text=diff_text,
                     input_context=input_context,
                     db=self.db,
+                    config_override=config_override,
                 )
             )
             # Log review result for visibility (not silent)
