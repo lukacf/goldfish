@@ -126,8 +126,17 @@ class GCEConfig(BaseModel):
 
     @property
     def effective_artifact_registry(self) -> str | None:
-        """Get artifact registry URL from either field."""
-        return self.artifact_registry or self.image_uri
+        """Get artifact registry URL from either field, or auto-generate from project_id."""
+        if self.artifact_registry:
+            return self.artifact_registry
+        if self.image_uri:
+            return self.image_uri
+        # Auto-generate from project_id if available
+        try:
+            project_id = self.effective_project_id
+            return f"us-docker.pkg.dev/{project_id}/goldfish"
+        except ValueError:
+            return None
 
     @property
     def effective_profile_overrides(self) -> dict[str, dict] | None:
@@ -241,6 +250,41 @@ class GoldfishConfig(BaseModel):
             gcs_bucket = data["gce"].pop("gcs_bucket", None)
             if gcs_bucket:
                 data["gcs"] = {"bucket": gcs_bucket}
+
+        # Migrate old profile_overrides format
+        if "gce" in data and isinstance(data["gce"], dict):
+            profile_overrides = data["gce"].get("profile_overrides") or data["gce"].get("profiles")
+            if profile_overrides and isinstance(profile_overrides, dict):
+                for _profile_name, profile in profile_overrides.items():
+                    if isinstance(profile, dict):
+                        # Migrate preemptible -> preemptible_allowed/on_demand_allowed
+                        if "preemptible" in profile and "preemptible_allowed" not in profile:
+                            is_preemptible = profile.pop("preemptible")
+                            profile["preemptible_allowed"] = bool(is_preemptible)
+                            # If preemptible=true, assume on_demand is also allowed unless explicitly set
+                            if "on_demand_allowed" not in profile:
+                                profile["on_demand_allowed"] = True
+
+                        # Migrate gpu.type to include gpu.accelerator if missing
+                        if "gpu" in profile and isinstance(profile["gpu"], dict):
+                            gpu = profile["gpu"]
+                            if "type" in gpu and "accelerator" not in gpu:
+                                # Map common GPU types to GCE accelerator names
+                                gpu_type_map = {
+                                    "nvidia-h100-80gb": "nvidia-h100-80gb",
+                                    "nvidia-tesla-a100": "nvidia-tesla-a100",
+                                    "nvidia-tesla-t4": "nvidia-tesla-t4",
+                                    "nvidia-tesla-v100": "nvidia-tesla-v100",
+                                    "h100": "nvidia-h100-80gb",
+                                    "a100": "nvidia-tesla-a100",
+                                    "t4": "nvidia-tesla-t4",
+                                    "v100": "nvidia-tesla-v100",
+                                    "none": None,
+                                }
+                                gpu_type = gpu["type"]
+                                gpu["accelerator"] = gpu_type_map.get(gpu_type, gpu_type)
+                            if "count" not in gpu:
+                                gpu["count"] = 1 if gpu.get("accelerator") else 0
 
         try:
             config = cls(**data)

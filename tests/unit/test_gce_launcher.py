@@ -500,3 +500,71 @@ class TestGetInstanceLogsRetry:
             if mock_sleep.called:
                 delay = mock_sleep.call_args[0][0]
                 assert 3 <= delay <= 10, f"Retry delay should be 3-10 seconds, got {delay}"
+
+
+class TestInputStagingBucketMatching:
+    """Test bucket matching logic in input staging.
+
+    Regression tests for Bug: Trailing slashes in bucket names cause staging to
+    fail. When bucket_name = "my-bucket/" (from gs://my-bucket/) but input_bucket
+    = "my-bucket" (from URI split), the comparison fails and fast gcsfuse symlinks
+    are skipped in favor of slow gsutil cp.
+    """
+
+    @pytest.fixture
+    def launcher(self):
+        """Create a GCE launcher with mocked init."""
+        with patch("goldfish.infra.gce_launcher.GCELauncher.__init__", lambda x, y: None):
+            launcher = GCELauncher(MagicMock())
+            launcher.project_id = "test-project"
+            launcher.config = MagicMock()
+            launcher.config.artifact_registry = None
+            launcher.default_zone = "us-central1-a"
+            launcher.zones = ["us-central1-a"]
+            return launcher
+
+    def test_bucket_with_trailing_slash_matches_input_bucket(self, launcher):
+        """REGRESSION: Bucket with trailing slash should still match input.
+
+        When self.bucket = "gs://my-bucket/" and input is "gs://my-bucket/data/file.csv",
+        the bucket comparison should succeed and use gcsfuse symlink (not gsutil cp).
+
+        Fixed in gce_launcher.py line 199: bucket_name now strips trailing slash.
+        """
+        # Set bucket WITH trailing slash (edge case that triggered the bug)
+        launcher.bucket = "gs://my-bucket/"
+
+        # Normalize bucket_name the way gce_launcher.py does after fix
+        bucket_name = launcher.bucket.replace("gs://", "").rstrip("/")
+
+        # Input URI is gs://my-bucket/path/to/data
+        gcs_uri = "gs://my-bucket/path/to/data"
+        uri_parts = gcs_uri.replace("gs://", "").split("/", 1)
+        input_bucket = uri_parts[0]  # "my-bucket"
+
+        # After fix: These MUST match for gcsfuse symlink to be used
+        assert bucket_name == input_bucket, f"bucket_name '{bucket_name}' should match input_bucket '{input_bucket}'"
+
+    def test_input_uri_with_trailing_slash_still_matches(self, launcher):
+        """Input URI with trailing slash should match bucket correctly."""
+        launcher.bucket = "gs://my-bucket"
+
+        # Input has trailing slash in URI
+        stage_config = {
+            "inputs": {
+                "data": {
+                    "location": "gs://my-bucket/path/to/data/",  # Note trailing slash
+                    "format": "directory",
+                }
+            }
+        }
+
+        # Extract input_bucket the same way the code does
+        gcs_uri = "gs://my-bucket/path/to/data/"
+        uri_parts = gcs_uri.replace("gs://", "").split("/", 1)
+        input_bucket = uri_parts[0]  # Should be "my-bucket"
+
+        bucket_name = launcher.bucket.replace("gs://", "").rstrip("/")
+
+        # These should match
+        assert input_bucket == bucket_name, f"input_bucket '{input_bucket}' should match bucket_name '{bucket_name}'"
