@@ -225,13 +225,21 @@ class GCELauncher:
                             f'ln -sf "{gcsfuse_path}" "/mnt/inputs/{input_name}"; '
                             f'else '
                             f'echo "DEBUG: gcsfuse path not found, falling back to gsutil cp" | tee -a {debug_log}; '
-                            f'gsutil -m cp -r "{gcs_uri.rstrip("/")}" "/mnt/inputs/{input_name}"; '
+                            f'if ! gsutil -m cp -r "{gcs_uri.rstrip("/")}" "/mnt/inputs/{input_name}"; then '
+                            f'echo "ERROR: Failed to stage input {input_name} from {gcs_uri}" | tee -a {debug_log} /tmp/stderr.log; '
+                            f'echo "The GCS path may not exist or you may lack permissions." | tee -a {debug_log} /tmp/stderr.log; '
+                            f'exit 1; fi; '
                             f'fi'
                         )
                     else:
                         # Different bucket - use gsutil to copy
                         pre_run_cmds.append(f'echo "DEBUG: Different bucket, using gsutil cp" | tee -a {debug_log}')
-                        pre_run_cmds.append(f'gsutil -m cp -r "{gcs_uri.rstrip("/")}" "/mnt/inputs/{input_name}"')
+                        pre_run_cmds.append(
+                            f'if ! gsutil -m cp -r "{gcs_uri.rstrip("/")}" "/mnt/inputs/{input_name}"; then '
+                            f'echo "ERROR: Failed to stage input {input_name} from {gcs_uri}" | tee -a {debug_log} /tmp/stderr.log; '
+                            f'echo "The GCS path may not exist or you may lack permissions." | tee -a {debug_log} /tmp/stderr.log; '
+                            f'exit 1; fi'
+                        )
 
         # Debug: show what's in /mnt/inputs after staging
         pre_run_cmds.append(f'echo "DEBUG: Contents of /mnt/inputs:" | tee -a {debug_log}')
