@@ -144,12 +144,16 @@ class GCELauncher:
                 ],
                 project_id=self.project_id,
             )
-        except GoldfishError as exc:
-            raise GoldfishError(
-                "Failed to grant metadata ACK permissions for the instance service account. "
-                "Grant compute.instances.get + compute.instances.setMetadata (or roles/compute.instanceAdmin.v1) "
-                f"and roles/iam.serviceAccountUser to {service_account} and retry."
-            ) from exc
+        except GoldfishError:
+            # Metadata ACK is optional - used for Overdrive on-demand log sync
+            # If we can't grant permissions, just warn and continue
+            logger.warning(
+                "Could not grant metadata ACK permissions to %s. "
+                "On-demand log sync (Overdrive) will not work. "
+                "To fix: grant roles/compute.instanceAdmin.v1 and roles/iam.serviceAccountUser, "
+                "or set gce.ensure_metadata_permissions: false in goldfish.yaml to suppress this warning.",
+                service_account,
+            )
 
     def launch_instance(
         self,
