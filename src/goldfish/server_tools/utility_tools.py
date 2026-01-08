@@ -3,6 +3,7 @@
 Extracted from server.py for better organization.
 """
 
+import json
 import logging
 from datetime import datetime
 
@@ -245,6 +246,7 @@ def dashboard() -> dict:
     - What's running (active runs)
     - Workspace status (mounted, dirty state)
     - Recent outcomes (success/bad_results trends)
+    - Recent AI reviews (SVS findings)
 
     Unlike status(), this tool focuses on actionable information
     rather than audit trails.
@@ -256,6 +258,7 @@ def dashboard() -> dict:
         - workspaces: Workspace summary with dirty status
         - source_count: Total registered data sources
         - recent_outcomes: Recent run outcomes for trend visibility
+        - recent_svs_reviews: Recent AI reviews with findings
 
     Related tools:
     - status(): Global state including STATE.md and audit trail
@@ -328,12 +331,40 @@ def dashboard() -> dict:
         for row in outcome_rows
     ]
 
+    # Get recent SVS reviews
+    svs_rows = db.get_recent_svs_reviews(limit=10)
+    recent_svs_reviews = []
+    for row in svs_rows:
+        # Parse findings count from JSON string
+        findings_count = 0
+        findings_json = row.get("parsed_findings")
+        if findings_json:
+            try:
+                findings = json.loads(findings_json)
+                if isinstance(findings, list):
+                    findings_count = len(findings)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        recent_svs_reviews.append(
+            {
+                "run_id": row["stage_run_id"],
+                "workspace": row.get("workspace_name"),
+                "stage": row.get("stage_name"),
+                "review_type": row["review_type"],
+                "decision": row["decision"],
+                "findings_count": findings_count,
+                "reviewed_at": row["reviewed_at"],
+            }
+        )
+
     return {
         "failed_runs": failed_runs,
         "active_runs": active_runs,
         "workspaces": workspaces,
         "source_count": source_count,
         "recent_outcomes": recent_outcomes,
+        "recent_svs_reviews": recent_svs_reviews,
     }
 
 
