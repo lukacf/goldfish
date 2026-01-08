@@ -3912,6 +3912,28 @@ class Database:
             ).fetchone()
             return cast(SVSReviewRow, dict(row)) if row else None
 
+    def get_recent_svs_reviews(self, limit: int = 10) -> list[SVSReviewRow]:
+        """Get recent SVS reviews across all runs.
+
+        Args:
+            limit: Maximum number of reviews to return
+
+        Returns:
+            List of recent SVSReviewRow dicts, newest first
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.*, s.workspace_name, s.stage_name
+                FROM svs_reviews r
+                JOIN stage_runs s ON r.stage_run_id = s.id
+                ORDER BY r.reviewed_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [cast(SVSReviewRow, dict(row)) for row in rows]
+
     def create_failure_pattern(
         self,
         pattern_id: str,
