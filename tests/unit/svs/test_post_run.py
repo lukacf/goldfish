@@ -715,6 +715,123 @@ class TestRunPostRunReviewRateLimiting:
         assert result.stats == stats
 
 
+class TestRunPostRunReviewRunContext:
+    """Test run_context handling in post-run review."""
+
+    def test_loads_run_context_from_file(self, tmp_path: Path):
+        """Should load run_context from svs_context.json when not provided."""
+        import json
+
+        from goldfish.svs.post_run import run_post_run_review
+
+        config = SVSConfig(ai_post_run_enabled=True)
+        agent = Mock(spec=AgentProvider)
+        agent.name = "test_agent"
+        agent.run.return_value = ReviewResult(
+            decision="approved",
+            findings=[],
+            response_text="All good",
+            duration_ms=100,
+        )
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        goldfish_dir = outputs_dir / ".goldfish"
+        goldfish_dir.mkdir()
+
+        # Write svs_context.json
+        context_data = {
+            "stage_name": "train",
+            "workspace": "experiment_1",
+            "config_override": {"epochs": 100},
+        }
+        (goldfish_dir / "svs_context.json").write_text(json.dumps(context_data))
+
+        run_post_run_review(
+            outputs_dir=outputs_dir,
+            stats={"file_count": 5},
+            config=config,
+            agent=agent,
+        )
+
+        # Verify run_context was included in the request
+        call_args = agent.run.call_args[0][0]
+        assert "run_context" in call_args.context
+        assert call_args.context["run_context"]["workspace"] == "experiment_1"
+        assert call_args.context["run_context"]["config_override"] == {"epochs": 100}
+
+    def test_uses_provided_run_context_over_file(self, tmp_path: Path):
+        """Should use provided run_context instead of reading from file."""
+        import json
+
+        from goldfish.svs.post_run import run_post_run_review
+
+        config = SVSConfig(ai_post_run_enabled=True)
+        agent = Mock(spec=AgentProvider)
+        agent.name = "test_agent"
+        agent.run.return_value = ReviewResult(
+            decision="approved",
+            findings=[],
+            response_text="All good",
+            duration_ms=100,
+        )
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        goldfish_dir = outputs_dir / ".goldfish"
+        goldfish_dir.mkdir()
+
+        # Write svs_context.json with different data
+        (goldfish_dir / "svs_context.json").write_text(json.dumps({"workspace": "from_file"}))
+
+        # Provide run_context directly
+        provided_context = {"workspace": "provided_context", "config_override": {"lr": 0.001}}
+        run_post_run_review(
+            outputs_dir=outputs_dir,
+            stats={"file_count": 5},
+            config=config,
+            agent=agent,
+            run_context=provided_context,
+        )
+
+        # Verify provided context was used
+        call_args = agent.run.call_args[0][0]
+        assert call_args.context["run_context"]["workspace"] == "provided_context"
+
+    def test_includes_run_context_in_request(self):
+        """Should include run_context in agent ReviewRequest."""
+        from goldfish.svs.post_run import run_post_run_review
+
+        config = SVSConfig(ai_post_run_enabled=True)
+        agent = Mock(spec=AgentProvider)
+        agent.name = "test_agent"
+        agent.run.return_value = ReviewResult(
+            decision="approved",
+            findings=[],
+            response_text="All good",
+            duration_ms=100,
+        )
+
+        run_context = {
+            "stage_name": "train",
+            "workspace": "my_experiment",
+            "config_override": {"batch_size": 32},
+            "inputs_override": {"data": "test_source"},
+            "run_reason": {"goal": "Test new architecture"},
+        }
+
+        run_post_run_review(
+            outputs_dir=Path("/tmp/outputs"),
+            stats={"file_count": 5},
+            config=config,
+            agent=agent,
+            run_context=run_context,
+        )
+
+        call_args = agent.run.call_args[0][0]
+        assert call_args.context["run_context"] == run_context
+
+
 class TestRunPostRunReviewIntegration:
     """Integration tests combining multiple features."""
 
