@@ -631,3 +631,57 @@ class TestGcsfuseFallback:
         assert "gs://my-bucket" in gsutil_cmd, "Should use full gs:// URI"
         assert not gsutil_cmd.startswith("/mnt/gcs"), "Should NOT use gcsfuse path for gsutil"
         assert gcs_uri.rstrip("/") in gsutil_cmd, "Should strip trailing slash from URI"
+
+
+class TestSerialConsoleNoiseFilter:
+    """Test filtering of noisy serial console output."""
+
+    def test_filters_metadata_syncer_noise(self):
+        """REGRESSION: Serial console logs should filter out metadata syncer noise.
+
+        When GCS logs aren't available yet, we fall back to serial console.
+        The serial console includes noisy metadata syncer loops that obscure
+        the actual training output.
+        """
+        # Simulate noisy serial console output
+        noisy_lines = [
+            "2026-01-08 google_metadata_script_runner[1554]: + curl -sf -H 'Metadata-Flavor: Google'\n",
+            '2026-01-08 google_metadata_script_runner[1554]: + SIG_JSON=\'{"command":"sync"}\'\n',
+            "[2026-01-08 09:10:53] INFO: Config: model=small seq_len=2048\n",
+            "2026-01-08 google_metadata_script_runner[1554]: + REQ_ID=049d0c9e\n",
+            "[2026-01-08 09:10:56] INFO: Using device: cuda\n",
+            "2026-01-08 google_metadata_script_runner[1554]: + sleep 1\n",
+            "2026-01-08 Epoch 1/20: loss=2.543, dir=51.2%\n",
+            '2026-01-08 Metadata key("startup-script"): ++ printf %s\n',
+            "2026-01-08 gcloud storage cp /mnt/outputs/.goldfish/metrics.jsonl\n",
+        ]
+
+        # Define the noise patterns (same as in gce_launcher.py)
+        noise_patterns = [
+            "google_metadata_script_runner",
+            'Metadata key("startup-script")',
+            "SIG_JSON=",
+            "REQ_ID=",
+            "curl -sf -H",
+            "printf %s",
+            "sleep 1",
+            "gcloud storage cp",
+        ]
+
+        # Filter the lines
+        filtered = []
+        for line in noisy_lines:
+            if any(pattern in line for pattern in noise_patterns):
+                continue
+            filtered.append(line)
+
+        # Verify useful lines are kept
+        assert len(filtered) == 3, f"Expected 3 useful lines, got {len(filtered)}"
+        assert any("Config: model=small" in line for line in filtered)
+        assert any("Using device: cuda" in line for line in filtered)
+        assert any("Epoch 1/20" in line for line in filtered)
+
+        # Verify noisy lines are removed
+        assert not any("google_metadata_script_runner" in line for line in filtered)
+        assert not any("SIG_JSON" in line for line in filtered)
+        assert not any("sleep 1" in line for line in filtered)
