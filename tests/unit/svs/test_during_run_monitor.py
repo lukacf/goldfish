@@ -135,3 +135,58 @@ def test_parse_json_response(mock_outputs_dir, config):
 
     # Test invalid JSON
     assert monitor._parse_json_response("not json") is None
+
+
+def test_build_prompt_includes_config_override(mock_outputs_dir, config):
+    """Prompt should include config_override when present in context."""
+    monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+    context = {
+        "stage_name": "train",
+        "workspace": "experiment_1",
+        "config_override": {"encoding": "6_2", "epochs": 50},
+        "run_reason": {"goal": "Test training"},
+    }
+
+    prompt = monitor._build_prompt(context, "loss: 0.5", "Training log")
+
+    assert "config_override" in prompt
+    assert '"encoding": "6_2"' in prompt
+    assert '"epochs": 50' in prompt
+
+
+def test_build_prompt_includes_inputs_override(mock_outputs_dir, config):
+    """Prompt should include inputs_override when present in context."""
+    monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+    context = {
+        "stage_name": "train",
+        "workspace": "experiment_1",
+        "inputs_override": {"features": "debug_features_v1"},
+        "run_reason": {},
+    }
+
+    prompt = monitor._build_prompt(context, "loss: 0.5", "Training log")
+
+    assert "inputs_override" in prompt
+    assert "debug_features_v1" in prompt
+
+
+def test_build_prompt_includes_run_command_format(mock_outputs_dir, config):
+    """Prompt should show run command in run() format."""
+    monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+    context = {
+        "stage_name": "train",
+        "workspace": "my_workspace",
+        "pipeline_name": "custom.yaml",
+        "run_reason": {},
+    }
+
+    prompt = monitor._build_prompt(context, "loss: 0.5", "Training log")
+
+    assert "## Run Command" in prompt
+    assert "run(" in prompt
+    assert "workspace=my_workspace" in prompt
+    assert "stage=train" in prompt
+    assert "pipeline=custom.yaml" in prompt

@@ -426,6 +426,9 @@ class StageExecutor:
                 run_reason=reason_structured,
                 runtime=stage.runtime,
                 entrypoint=stage.entrypoint,
+                config_override=config_override,
+                inputs_override=inputs_override,
+                pipeline_name=pipeline_name,
             )
         except Exception as e:
             # Mark failed immediately with error and re-raise
@@ -1865,6 +1868,9 @@ echo "Stage completed successfully"
         run_reason: dict | None = None,
         runtime: str = "python",
         entrypoint: str | None = None,
+        config_override: dict | None = None,
+        inputs_override: dict | None = None,
+        pipeline_name: str | None = None,
     ):
         """Launch Docker container (local) or GCE instance."""
         backend = self.config.jobs.backend
@@ -1877,9 +1883,14 @@ echo "Stage completed successfully"
         stage_config["outputs"] = output_configs or {}
 
         # Build SVS context for during-run AI monitoring
+        # Include full run command so AI reviewer sees runtime overrides
         svs_context = {
             "run_reason": run_reason or {},
             "stage_name": stage_name,
+            "workspace": workspace,
+            "pipeline_name": pipeline_name,
+            "config_override": config_override,
+            "inputs_override": inputs_override,
             "outputs": {
                 name: {
                     "type": cfg.get("type"),

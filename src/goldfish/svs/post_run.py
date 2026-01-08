@@ -54,6 +54,7 @@ def run_post_run_review(
     stats: dict | None,
     config: SVSConfig,
     agent: AgentProvider,
+    run_context: dict | None = None,
 ) -> PostRunReview:
     """Run post-run AI review on stage outputs.
 
@@ -65,6 +66,8 @@ def run_post_run_review(
         stats: Statistics about the stage outputs (can be None)
         config: SVS configuration
         agent: Agent provider to use for review
+        run_context: Optional run context with workspace, config_override, etc.
+                     If not provided, attempts to read from svs_context.json.
 
     Returns:
         PostRunReview with decision, findings, and timing information
@@ -78,6 +81,15 @@ def run_post_run_review(
     # Normalize stats to empty dict if None
     if stats is None:
         stats = {}
+
+    # Load run context from file if not provided (inside container case)
+    if run_context is None:
+        context_file = outputs_dir / ".goldfish" / "svs_context.json"
+        if context_file.exists():
+            try:
+                run_context = json.loads(context_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                run_context = {}
 
     # Check if review is disabled
     if not config.ai_post_run_enabled:
@@ -117,6 +129,7 @@ def run_post_run_review(
             "timeout_seconds": config.agent_timeout,
             "tool_policy": tool_policy,
             "test_mode": config.test_mode,
+            "run_context": run_context or {},
         },
         stats=stats,
     )

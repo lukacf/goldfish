@@ -331,15 +331,50 @@ This is a test run to verify the AI review system works. You MUST:
 4. Comment on anything noteworthy in the outputs/stats
 """
 
+    # Format run command section if run_context is available
+    run_command_section = ""
+    run_context = context.get("run_context", {})
+    if run_context:
+        parts = []
+        if run_context.get("workspace"):
+            parts.append(f"workspace={run_context['workspace']!r}")
+        if run_context.get("stage_name"):
+            parts.append(f"stage={run_context['stage_name']!r}")
+        if run_context.get("pipeline_name"):
+            parts.append(f"pipeline={run_context['pipeline_name']!r}")
+        if run_context.get("config_override"):
+            parts.append(f"config_override={json.dumps(run_context['config_override'])}")
+        if run_context.get("inputs_override"):
+            parts.append(f"inputs_override={json.dumps(run_context['inputs_override'])}")
+        if parts:
+            run_command_section = f"\n## Run Command\nrun({', '.join(parts)})\n"
+
+        # Include run reason if available
+        run_reason = run_context.get("run_reason", {})
+        if run_reason:
+            reason_lines = []
+            if run_reason.get("description"):
+                reason_lines.append(f"Description: {run_reason['description']}")
+            if run_reason.get("hypothesis"):
+                reason_lines.append(f"Hypothesis: {run_reason['hypothesis']}")
+            if run_reason.get("goal"):
+                reason_lines.append(f"Goal: {run_reason['goal']}")
+            if reason_lines:
+                run_command_section += "\n## Run Reason\n" + "\n".join(reason_lines) + "\n"
+
+    # Filter out items that are displayed separately
+    filtered_context = {k: v for k, v in context.items() if k not in ("tool_policy", "test_mode", "run_context")}
+
     payload = {
         "review_type": review_type,
-        "context": {k: v for k, v in context.items() if k not in ("tool_policy", "test_mode")},
+        "context": filtered_context,
         "stats": stats or {},
     }
     return (
         "You are an AI reviewer. Return findings as lines prefixed with "
         "ERROR:, WARNING:, or NOTE:. If nothing is wrong, say 'OK'.\n"
         f"{test_mode_section}"
+        f"{run_command_section}"
         f"{tool_instructions}\n"
         "Review payload:\n" + json.dumps(payload, indent=2)
     )
