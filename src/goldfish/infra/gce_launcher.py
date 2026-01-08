@@ -259,16 +259,22 @@ class GCELauncher:
                     pre_run_cmds.append(
                         f'echo "DEBUG: input_bucket={input_bucket}, input_path={input_path}" | tee -a {debug_log}'
                     )
-                    # If input is from same bucket, use gcsfuse; otherwise gsutil
+                    # If input is from same bucket, try gcsfuse symlink first; fall back to gsutil
                     if input_bucket == bucket_name:
-                        # Symlink from gcsfuse mount
+                        # Symlink from gcsfuse mount (preferred for same-bucket inputs)
+                        # But verify path exists first - gcsfuse may have stale cache or path may not exist
+                        gcsfuse_path = f"/mnt/gcs/{input_path.rstrip('/')}"
+                        pre_run_cmds.append(f'echo "DEBUG: Checking gcsfuse path {gcsfuse_path}" | tee -a {debug_log}')
+                        # Use if/else to try symlink first, fall back to gsutil if gcsfuse path doesn't exist
                         pre_run_cmds.append(
-                            f'echo "DEBUG: Creating symlink /mnt/gcs/{input_path.rstrip("/")} -> /mnt/inputs/{input_name}" | tee -a {debug_log}'
+                            f'if [ -e "{gcsfuse_path}" ] || [ -d "{gcsfuse_path}" ]; then '
+                            f'echo "DEBUG: gcsfuse path exists, creating symlink" | tee -a {debug_log}; '
+                            f'ln -sf "{gcsfuse_path}" "/mnt/inputs/{input_name}"; '
+                            f'else '
+                            f'echo "DEBUG: gcsfuse path not found, falling back to gsutil cp" | tee -a {debug_log}; '
+                            f'gsutil -m cp -r "{gcs_uri.rstrip("/")}" "/mnt/inputs/{input_name}"; '
+                            f'fi'
                         )
-                        pre_run_cmds.append(
-                            f'ls -la "/mnt/gcs/{input_path.rstrip("/")}" 2>&1 | tee -a {debug_log} || echo "DEBUG: Source does not exist!" | tee -a {debug_log}'
-                        )
-                        pre_run_cmds.append(f'ln -sf "/mnt/gcs/{input_path.rstrip("/")}" "/mnt/inputs/{input_name}"')
                     else:
                         # Different bucket - use gsutil to copy
                         pre_run_cmds.append(f'echo "DEBUG: Different bucket, using gsutil cp" | tee -a {debug_log}')

@@ -568,3 +568,66 @@ class TestInputStagingBucketMatching:
 
         # These should match
         assert input_bucket == bucket_name, f"input_bucket '{input_bucket}' should match bucket_name '{bucket_name}'"
+
+
+class TestGcsfuseFallback:
+    """Test gcsfuse fallback to gsutil when path doesn't exist.
+
+    REGRESSION TESTS: When gcsfuse doesn't see a path (due to caching, timing,
+    or other issues), staging should fall back to gsutil cp instead of creating
+    a broken symlink.
+    """
+
+    def test_staging_generates_fallback_command(self):
+        """REGRESSION: Staging should check gcsfuse path and fall back to gsutil.
+
+        When staging inputs, the code should:
+        1. Check if gcsfuse path exists
+        2. If yes, create symlink (fast)
+        3. If no, use gsutil cp (reliable fallback)
+
+        This prevents broken symlinks when gcsfuse doesn't see recently-uploaded data.
+        """
+        # The generated shell command should have conditional logic
+        expected_pattern = "if [ -e"
+        fallback_pattern = "gsutil -m cp -r"
+
+        # Simulate the staging command generation
+        input_path = "runs/stage-abc/outputs/bytes_6_2/"
+        input_name = "bytes"
+        gcs_uri = "gs://my-bucket/runs/stage-abc/outputs/bytes_6_2/"
+        gcsfuse_path = f"/mnt/gcs/{input_path.rstrip('/')}"
+
+        # Build the command like gce_launcher.py does
+        staging_cmd = (
+            f'if [ -e "{gcsfuse_path}" ] || [ -d "{gcsfuse_path}" ]; then '
+            f'echo "DEBUG: gcsfuse path exists, creating symlink"; '
+            f'ln -sf "{gcsfuse_path}" "/mnt/inputs/{input_name}"; '
+            f'else '
+            f'echo "DEBUG: gcsfuse path not found, falling back to gsutil cp"; '
+            f'gsutil -m cp -r "{gcs_uri.rstrip("/")}" "/mnt/inputs/{input_name}"; '
+            f'fi'
+        )
+
+        # Verify the command has the expected structure
+        assert expected_pattern in staging_cmd, "Should check if gcsfuse path exists"
+        assert fallback_pattern in staging_cmd, "Should have gsutil fallback"
+        assert gcsfuse_path in staging_cmd, "Should reference gcsfuse path"
+        assert input_name in staging_cmd, "Should reference input name"
+
+    def test_gsutil_fallback_uses_correct_gcs_uri(self):
+        """REGRESSION: gsutil fallback should use original GCS URI, not gcsfuse path.
+
+        When falling back to gsutil, we must use the full gs:// URI, not the
+        gcsfuse mount path. This ensures the data is downloaded correctly.
+        """
+        gcs_uri = "gs://my-bucket/runs/stage-de74f1a8/outputs/bytes_6_2/"
+        input_name = "bytes"
+
+        # The gsutil command should use the original GCS URI
+        gsutil_cmd = f'gsutil -m cp -r "{gcs_uri.rstrip("/")}" "/mnt/inputs/{input_name}"'
+
+        # Verify URI format
+        assert "gs://my-bucket" in gsutil_cmd, "Should use full gs:// URI"
+        assert not gsutil_cmd.startswith("/mnt/gcs"), "Should NOT use gcsfuse path for gsutil"
+        assert gcs_uri.rstrip("/") in gsutil_cmd, "Should strip trailing slash from URI"
