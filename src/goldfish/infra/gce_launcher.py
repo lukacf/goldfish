@@ -50,8 +50,6 @@ class GCELauncher:
         zones: list[str] | None = None,
         gpu_preference: list[str] | None = None,
         service_account: str | None = None,
-        ensure_metadata_permissions: bool = True,
-        metadata_ack_role: str = "roles/compute.instanceAdmin.v1",
     ):
         """Initialize GCE launcher.
 
@@ -70,8 +68,6 @@ class GCELauncher:
         self.zones = zones or [zone]  # Default to list containing just default_zone
         self.gpu_preference = gpu_preference or ["h100", "a100", "none"]
         self.service_account = service_account
-        self.ensure_metadata_permissions = ensure_metadata_permissions
-        self.metadata_ack_role = metadata_ack_role
         self._project_number: str | None = None
         self._zone_cache: dict[str, str] = {}  # Cache for instance zones
 
@@ -107,53 +103,6 @@ class GCELauncher:
         if not self._project_number:
             return None
         return f"{self._project_number}-compute@developer.gserviceaccount.com"
-
-    def _ensure_metadata_permissions(self) -> None:
-        """Ensure instance service account can set metadata ACKs."""
-        if not self.project_id:
-            logger.warning("Skipping metadata permission check (project_id not set).")
-            return
-
-        service_account = self._resolve_service_account()
-        if not service_account:
-            logger.warning("Skipping metadata permission check (service account not resolved).")
-            return
-
-        cmd = [
-            "gcloud",
-            "projects",
-            "add-iam-policy-binding",
-            self.project_id,
-            f"--member=serviceAccount:{service_account}",
-            f"--role={self.metadata_ack_role}",
-            "--quiet",
-        ]
-        try:
-            run_gcloud(cmd, project_id=self.project_id)
-            run_gcloud(
-                [
-                    "gcloud",
-                    "iam",
-                    "service-accounts",
-                    "add-iam-policy-binding",
-                    service_account,
-                    f"--member=serviceAccount:{service_account}",
-                    "--role=roles/iam.serviceAccountUser",
-                    f"--project={self.project_id}",
-                    "--quiet",
-                ],
-                project_id=self.project_id,
-            )
-        except GoldfishError:
-            # Metadata ACK is optional - used for Overdrive on-demand log sync
-            # If we can't grant permissions, just warn and continue
-            logger.warning(
-                "Could not grant metadata ACK permissions to %s. "
-                "On-demand log sync (Overdrive) will not work. "
-                "To fix: grant roles/compute.instanceAdmin.v1 and roles/iam.serviceAccountUser, "
-                "or set gce.ensure_metadata_permissions: false in goldfish.yaml to suppress this warning.",
-                service_account,
-            )
 
     def launch_instance(
         self,
@@ -350,10 +299,6 @@ class GCELauncher:
             # Real-time log visibility - sync logs to GCS every N seconds
             log_sync_interval=log_sync_interval,
         )
-
-        # Ensure instance service account can set metadata ACKs.
-        if self.ensure_metadata_permissions:
-            self._ensure_metadata_permissions()
 
         if use_capacity_search and self.resources:
             # Use ResourceLauncher for capacity-aware search

@@ -123,8 +123,6 @@ class StageExecutor:
         gce_resources: list[dict[str, Any]] = []
         gce_gpu_preference = None
         gce_service_account = None
-        gce_ensure_metadata_permissions = True
-        gce_metadata_ack_role = "roles/compute.instanceAdmin.v1"
 
         if config.gcs:
             gce_bucket = config.gcs.bucket
@@ -143,8 +141,6 @@ class StageExecutor:
                 gce_zones = config.gce.zones  # Pass all zones for multi-zone lookups
             gce_gpu_preference = config.gce.gpu_preference
             gce_service_account = config.gce.service_account
-            gce_ensure_metadata_permissions = config.gce.ensure_metadata_permissions
-            gce_metadata_ack_role = config.gce.metadata_ack_role
 
             # Resolve artifact_registry from config - required for GCE backend
             self.artifact_registry = config.gce.effective_artifact_registry
@@ -178,8 +174,6 @@ class StageExecutor:
             zones=gce_zones,
             gpu_preference=gce_gpu_preference,
             service_account=gce_service_account,
-            ensure_metadata_permissions=gce_ensure_metadata_permissions,
-            metadata_ack_role=gce_metadata_ack_role,
         )
 
         # Live metrics sync state (per run)
