@@ -212,6 +212,8 @@ Missing or invalid metadata is rejected.
 
 SVS (Semantic Validation System) provides three layers of protection:
 
+**Run Command Visibility:** All SVS phases see the full run command including `config_override` and `inputs_override`. This prevents false positives when runtime overrides address issues flagged in static config.
+
 #### Layer 1: Pre-Run AI Review (Automatic)
 Before execution, an AI reviews code/config for logic errors, undefined variables, and anti-patterns.
 - **Blocked**: High-confidence errors found. Fix code and re-run.
