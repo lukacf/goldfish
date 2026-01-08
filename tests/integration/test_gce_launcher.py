@@ -17,7 +17,6 @@ def launcher():
         zone="us-central1-a",
         bucket="gs://test-bucket",
         service_account="svc@test.iam.gserviceaccount.com",
-        ensure_metadata_permissions=False,
         resources=[
             {
                 "name": "cpu-resource",
@@ -48,7 +47,6 @@ def test_gce_launcher_init():
         zone="us-west1-a",
         bucket="gs://my-bucket",
         service_account="svc@test.iam.gserviceaccount.com",
-        ensure_metadata_permissions=False,
     )
 
     assert launcher.project_id == "test-project"
@@ -69,30 +67,6 @@ def test_resolve_service_account_default(mock_run_gcloud):
     cmd = mock_run_gcloud.call_args[0][0]
     assert cmd[:3] == ["gcloud", "projects", "describe"]
     assert "test-project" in cmd
-
-
-@patch("goldfish.infra.gce_launcher.run_gcloud")
-def test_ensure_metadata_permissions_adds_binding(mock_run_gcloud):
-    """Should add IAM binding for metadata ack role."""
-    launcher = GCELauncher(
-        project_id="test-project",
-        service_account="svc@test.iam.gserviceaccount.com",
-    )
-    mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
-
-    launcher._ensure_metadata_permissions()
-
-    assert mock_run_gcloud.call_count == 2
-    cmd = mock_run_gcloud.call_args_list[0][0][0]
-    assert cmd[:4] == ["gcloud", "projects", "add-iam-policy-binding", "test-project"]
-    assert "--member=serviceAccount:svc@test.iam.gserviceaccount.com" in cmd
-    assert "--role=roles/compute.instanceAdmin.v1" in cmd
-
-    cmd = mock_run_gcloud.call_args_list[1][0][0]
-    assert cmd[:4] == ["gcloud", "iam", "service-accounts", "add-iam-policy-binding"]
-    assert "svc@test.iam.gserviceaccount.com" in cmd
-    assert "--member=serviceAccount:svc@test.iam.gserviceaccount.com" in cmd
-    assert "--role=roles/iam.serviceAccountUser" in cmd
 
 
 def test_gce_launcher_requires_bucket_for_launch(launcher):
