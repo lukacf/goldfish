@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from goldfish.svs.agent import ReviewRequest
+from goldfish.svs.agent import ReviewRequest, ToolPolicy
 
 if TYPE_CHECKING:
     from goldfish.svs.agent import AgentProvider
@@ -102,6 +102,12 @@ def run_post_run_review(
         )
 
     # Build review request
+    # Post-run reviews must bypass permission prompts (non-interactive)
+    tool_policy = ToolPolicy(
+        permission_mode="bypassPermissions",
+        allow_tools=["Read", "Glob", "Grep"],  # Read-only tools for reviewing
+    )
+
     request = ReviewRequest(
         review_type="post_run",
         context={
@@ -109,6 +115,8 @@ def run_post_run_review(
             "model": config.agent_model,
             "max_turns": config.agent_max_turns,
             "timeout_seconds": config.agent_timeout,
+            "tool_policy": tool_policy,
+            "test_mode": config.test_mode,
         },
         stats=stats,
     )

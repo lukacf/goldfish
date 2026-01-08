@@ -65,11 +65,11 @@ class TestSVSConfigDefaults:
         assert config.agent_timeout == 120
 
     def test_default_agent_max_turns(self):
-        """Default max turns should be 3."""
+        """Default max turns should be 30."""
         from goldfish.svs.config import SVSConfig
 
         config = SVSConfig()
-        assert config.agent_max_turns == 3
+        assert config.agent_max_turns == 30
 
     def test_default_rate_limit(self):
         """Default rate limit should be 60 per hour."""
@@ -177,6 +177,28 @@ class TestSVSConfigValidation:
         for provider in ["claude_code", "null"]:
             config = SVSConfig(agent_provider=provider)
             assert config.agent_provider == provider
+
+    def test_rejects_short_interval_without_test_mode(self):
+        """Should reject interval < 60 without test_mode enabled."""
+        from goldfish.svs.config import SVSConfig
+
+        with pytest.raises(ValidationError, match="must be >= 60"):
+            SVSConfig(ai_during_run_interval_seconds=30, test_mode=False)
+
+    def test_accepts_short_interval_with_test_mode(self):
+        """Should accept interval < 60 when test_mode is enabled."""
+        from goldfish.svs.config import SVSConfig
+
+        config = SVSConfig(ai_during_run_interval_seconds=15, test_mode=True)
+        assert config.ai_during_run_interval_seconds == 15
+        assert config.test_mode is True
+
+    def test_accepts_normal_interval_without_test_mode(self):
+        """Should accept interval >= 60 without test_mode."""
+        from goldfish.svs.config import SVSConfig
+
+        config = SVSConfig(ai_during_run_interval_seconds=60, test_mode=False)
+        assert config.ai_during_run_interval_seconds == 60
 
 
 class TestSVSConfigExtraForbidden:

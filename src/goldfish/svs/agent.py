@@ -38,13 +38,21 @@ class ToolPolicy:
     """Controls agent tool permissions.
 
     Attributes:
-        permission_mode: How tools are permitted - "plan", "ask", or "auto"
+        permission_mode: Claude CLI permission mode. Valid values:
+            - "bypassPermissions": Auto-approve all tool calls (for automated reviews)
+            - "default": Normal interactive mode
+            - "acceptEdits": Auto-accept file edits
+            - "dontAsk": Don't prompt for permissions
+            - "plan": Planning mode only
+            - "delegate": Delegate to sub-agents
         allow_tools: Explicit list of allowed tool names (None = all allowed)
         deny_tools: Explicit list of denied tool names (None = none denied)
         mcp_servers: List of MCP server names to enable
     """
 
-    permission_mode: Literal["plan", "ask", "auto"] = "auto"
+    permission_mode: Literal["bypassPermissions", "default", "acceptEdits", "dontAsk", "plan", "delegate"] = (
+        "bypassPermissions"
+    )
     allow_tools: list[str] | None = None
     deny_tools: list[str] | None = None
     mcp_servers: list[str] | None = None
@@ -285,7 +293,7 @@ def _build_tool_policy(context: dict[str, Any]) -> ToolPolicy | None:
         return tool_policy
     if isinstance(tool_policy, dict):
         return ToolPolicy(
-            permission_mode=tool_policy.get("permission_mode", "auto"),
+            permission_mode=tool_policy.get("permission_mode", "bypassPermissions"),
             allow_tools=tool_policy.get("allow_tools"),
             deny_tools=tool_policy.get("deny_tools"),
             mcp_servers=tool_policy.get("mcp_servers"),
@@ -311,14 +319,27 @@ def _default_prompt(review_type: str, context: dict[str, Any], stats: dict[str, 
 
         tool_instructions = f"\n## Tool Usage Policy\n{json.dumps(policy_dict, indent=2)}\n"
 
+    # Test mode instructions
+    test_mode_section = ""
+    if context.get("test_mode"):
+        test_mode_section = """
+## TEST MODE ENABLED
+This is a test run to verify the AI review system works. You MUST:
+1. Always provide at least one finding, even if just a NOTE-level observation
+2. Look for [SVS-TEST] markers - these indicate intentional test triggers
+3. Be verbose - this is testing the review pipeline, not production monitoring
+4. Comment on anything noteworthy in the outputs/stats
+"""
+
     payload = {
         "review_type": review_type,
-        "context": {k: v for k, v in context.items() if k != "tool_policy"},
+        "context": {k: v for k, v in context.items() if k not in ("tool_policy", "test_mode")},
         "stats": stats or {},
     }
     return (
         "You are an AI reviewer. Return findings as lines prefixed with "
         "ERROR:, WARNING:, or NOTE:. If nothing is wrong, say 'OK'.\n"
+        f"{test_mode_section}"
         f"{tool_instructions}\n"
         "Review payload:\n" + json.dumps(payload, indent=2)
     )
@@ -358,8 +379,30 @@ def _coerce_agent_request(request: ReviewRequest | AgentRequest) -> AgentRequest
     )
 
 
+def _unwrap_cli_response(text: str) -> str:
+    """Unwrap Claude CLI JSON response to get actual result text.
+
+    Claude CLI with --print-only-result outputs:
+    {"type":"result","subtype":"success","result":"actual response here"}
+
+    This function extracts the "result" field if present.
+    """
+    try:
+        wrapper = json.loads(text)
+        if isinstance(wrapper, dict) and wrapper.get("type") == "result":
+            result = wrapper.get("result")
+            if isinstance(result, str):
+                return result
+    except json.JSONDecodeError:
+        pass
+    return text
+
+
 def _parse_findings(text: str) -> tuple[str, list[str]]:
     """Parse decision + findings from agent output text."""
+    # First unwrap CLI JSON response if present
+    text = _unwrap_cli_response(text)
+
     findings: list[str] = []
     decision = "approved"
 
@@ -447,10 +490,10 @@ class ClaudeCodeProvider:
             cmd += ["--permission-mode", agent_request.tool_policy.permission_mode]
             if agent_request.tool_policy.allow_tools:
                 for tool in agent_request.tool_policy.allow_tools:
-                    cmd += ["--allow-tool", tool]
+                    cmd += ["--allowed-tools", tool]
             if agent_request.tool_policy.deny_tools:
                 for tool in agent_request.tool_policy.deny_tools:
-                    cmd += ["--deny-tool", tool]
+                    cmd += ["--disallowed-tools", tool]
             if agent_request.tool_policy.mcp_servers:
                 for server in agent_request.tool_policy.mcp_servers:
                     cmd += ["--mcp-server", server]
@@ -468,6 +511,28 @@ class ClaudeCodeProvider:
         )
 
         raw_output = stdout.strip() if stdout else stderr.strip()
+
+        # Detect CLI failures and log warning (fail-open: still approve, but be loud about it)
+        cli_failed = False
+        if exit_code != 0:
+            cli_failed = True
+            logger.warning(
+                f"Claude CLI exited with code {exit_code}. "
+                f"AI review may not have run correctly. stderr: {stderr[:500] if stderr else 'none'}"
+            )
+        elif raw_output.lower().startswith("error:"):
+            cli_failed = True
+            logger.warning(f"Claude CLI returned error: {raw_output[:500]}. " "AI review may not have run correctly.")
+
+        if cli_failed:
+            # Return approved with a clear finding that the review itself failed
+            return ReviewResult(
+                decision="approved",
+                findings=[f"WARNING: AI review failed to run (exit_code={exit_code}). Failing open."],
+                response_text=raw_output,
+                duration_ms=duration_ms,
+            )
+
         decision, findings = _parse_findings(raw_output)
 
         return ReviewResult(
@@ -522,6 +587,27 @@ class CodexCLIProvider:
         )
 
         raw_output = stdout.strip() if stdout else stderr.strip()
+
+        # Detect CLI failures and log warning (fail-open: still approve, but be loud about it)
+        cli_failed = False
+        if exit_code != 0:
+            cli_failed = True
+            logger.warning(
+                f"Codex CLI exited with code {exit_code}. "
+                f"AI review may not have run correctly. stderr: {stderr[:500] if stderr else 'none'}"
+            )
+        elif raw_output.lower().startswith("error:"):
+            cli_failed = True
+            logger.warning(f"Codex CLI returned error: {raw_output[:500]}. " "AI review may not have run correctly.")
+
+        if cli_failed:
+            return ReviewResult(
+                decision="approved",
+                findings=[f"WARNING: AI review failed to run (exit_code={exit_code}). Failing open."],
+                response_text=raw_output,
+                duration_ms=duration_ms,
+            )
+
         decision, findings = _parse_findings(raw_output)
 
         return ReviewResult(
@@ -573,6 +659,27 @@ class GeminiCLIProvider:
         )
 
         raw_output = stdout.strip() if stdout else stderr.strip()
+
+        # Detect CLI failures and log warning (fail-open: still approve, but be loud about it)
+        cli_failed = False
+        if exit_code != 0:
+            cli_failed = True
+            logger.warning(
+                f"Gemini CLI exited with code {exit_code}. "
+                f"AI review may not have run correctly. stderr: {stderr[:500] if stderr else 'none'}"
+            )
+        elif raw_output.lower().startswith("error:"):
+            cli_failed = True
+            logger.warning(f"Gemini CLI returned error: {raw_output[:500]}. " "AI review may not have run correctly.")
+
+        if cli_failed:
+            return ReviewResult(
+                decision="approved",
+                findings=[f"WARNING: AI review failed to run (exit_code={exit_code}). Failing open."],
+                response_text=raw_output,
+                duration_ms=duration_ms,
+            )
+
         decision, findings = _parse_findings(raw_output)
 
         return ReviewResult(

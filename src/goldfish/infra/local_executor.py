@@ -1,6 +1,7 @@
 """Local Docker container execution for Goldfish stages."""
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -98,6 +99,14 @@ class LocalExecutor:
                 if not env_name.replace("_", "").isalnum():
                     continue
                 docker_cmd.extend(["-e", f"{env_name}={env_value}"])
+
+        # Set HOME for non-root user (Claude CLI needs writable home directory)
+        docker_cmd.extend(["-e", "HOME=/tmp"])
+
+        # Pass API key for SVS AI reviews (during-run and post-run)
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if api_key:
+            docker_cmd.extend(["-e", f"ANTHROPIC_API_KEY={api_key}"])
 
         # Set user-defined environment variables from config
         # This allows configs to specify env vars like WANDB_API_KEY
