@@ -60,7 +60,7 @@ class PreRunReviewConfig(BaseModel):
     enabled: bool = True
     model: str = "claude-opus-4-5-20251101"
     timeout_seconds: int = 60
-    max_turns: int = 5  # Max agent turns for exploring code
+    max_turns: int = 30  # Max agent turns for exploring code
 
 
 class MetricsConfig(BaseModel):

@@ -147,7 +147,13 @@ def librarian_review_patterns(
         f"Patterns:\n{json.dumps(patterns, indent=2)}\n"
     )
 
-    from goldfish.svs.agent import ReviewRequest
+    from goldfish.svs.agent import ReviewRequest, ToolPolicy
+
+    # Pattern review must bypass permission prompts (non-interactive)
+    tool_policy = ToolPolicy(
+        permission_mode="bypassPermissions",
+        allow_tools=["Read", "Glob", "Grep"],
+    )
 
     request = ReviewRequest(
         review_type="pattern_review",
@@ -157,6 +163,7 @@ def librarian_review_patterns(
             "model": config.agent_model,
             "timeout_seconds": config.agent_timeout,
             "max_turns": config.agent_max_turns,
+            "tool_policy": tool_policy,
         },
     )
 

@@ -58,6 +58,11 @@ def _svs_enabled() -> bool:
 _stats_queue = None
 _stats_queue_lock = threading.Lock()
 
+# Global during-run monitor instance (lazily initialized)
+_during_run_monitor = None
+_during_run_monitor_lock = threading.Lock()
+_during_run_monitor_started = False
+
 
 def _get_stats_queue():
     """Get the global stats queue instance (singleton).
@@ -75,6 +80,54 @@ def _get_stats_queue():
         if _stats_queue is None:
             _stats_queue = StatsQueue()
         return _stats_queue
+
+
+def _ensure_monitor_started() -> None:
+    """Ensure the during-run monitor is started (lazy initialization).
+
+    This is called automatically when the user calls goldfish.io functions
+    like load_input(), runtime_log(), etc. No need for explicit wrapper.
+
+    Thread-safe and idempotent - safe to call multiple times.
+    """
+    global _during_run_monitor, _during_run_monitor_started
+
+    # Fast path: already started
+    if _during_run_monitor_started:
+        return
+
+    # Check if during-run is enabled
+    if not _during_run_enabled():
+        return
+
+    with _during_run_monitor_lock:
+        # Double-check after acquiring lock
+        if _during_run_monitor_started:
+            return
+
+        try:
+            from goldfish.svs.during_run_monitor import DuringRunMonitor
+
+            outputs_dir = Path(os.environ.get("GOLDFISH_OUTPUTS_DIR", "/mnt/outputs"))
+            _during_run_monitor = DuringRunMonitor(_load_svs_config(), outputs_dir)
+            _during_run_monitor.start()
+            _during_run_monitor_started = True
+            logger.info("During-run AI monitor started automatically")
+        except Exception as e:
+            logger.error(f"Failed to start during-run monitor: {e}")
+            _during_run_monitor_started = True  # Don't retry on failure
+
+
+def _stop_monitor() -> None:
+    """Stop the during-run monitor if running."""
+    global _during_run_monitor
+
+    if _during_run_monitor is not None:
+        try:
+            _during_run_monitor.stop(timeout=10.0)
+            logger.debug("During-run monitor stopped")
+        except Exception as e:
+            logger.error(f"Failed to stop during-run monitor: {e}")
 
 
 def _write_stats_manifest(stats: dict[str, dict[str, Any] | None]) -> None:
@@ -150,6 +203,12 @@ def _svs_finalize() -> None:
         return
 
     _finalized = True
+
+    # Stop during-run monitor first (before any other cleanup)
+    try:
+        _stop_monitor()
+    except Exception as e:
+        logger.error(f"Error stopping during-run monitor: {e}")
 
     # Skip if SVS is disabled
     if not _svs_enabled():

@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from goldfish.errors import GoldfishError
-from goldfish.svs.agent import ReviewRequest
+from goldfish.svs.agent import ReviewRequest, ToolPolicy
 
 if TYPE_CHECKING:
     from goldfish.db.database import Database
@@ -243,6 +243,12 @@ def extract_failure_pattern(
             f"Error: {error}\n"
             f"Logs:\n{truncated_logs}\n"
         )
+        # Pattern extraction must bypass permission prompts (non-interactive)
+        tool_policy = ToolPolicy(
+            permission_mode="bypassPermissions",
+            allow_tools=["Read", "Glob", "Grep"],
+        )
+
         request = ReviewRequest(
             review_type="pattern_extraction",
             context={
@@ -255,6 +261,7 @@ def extract_failure_pattern(
                 "stage_type": stage_name,
                 "timeout_seconds": 120,  # 2-minute timeout for pattern extraction
                 "max_turns": 1,  # Single turn - just analyze and respond
+                "tool_policy": tool_policy,
             },
         )
         result = agent.run(request)

@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from goldfish.config import AuditConfig, GCSConfig, GoldfishConfig, JobsConfig, StateMdConfig
+from goldfish.config import (
+    AuditConfig,
+    GCSConfig,
+    GoldfishConfig,
+    JobsConfig,
+    PreRunReviewConfig,
+    StateMdConfig,
+)
 from goldfish.db.database import Database
 from goldfish.svs.config import SVSConfig
 
@@ -58,6 +65,7 @@ def test_config(temp_dir: Path) -> GoldfishConfig:
             sources_prefix="sources/",
             artifacts_prefix="artifacts/",
         ),
+        pre_run_review=PreRunReviewConfig(enabled=False),  # Disable pre-run review for tests
         svs=SVSConfig(enabled=False),  # Disable SVS for tests by default
         invariants=["Test invariant"],
     )
