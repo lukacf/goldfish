@@ -1261,13 +1261,13 @@ class TestSourceNameResolution:
 
 
 class TestArtifactRegistryRequirement:
-    """Test artifact_registry is required for GCE backend."""
+    """Test artifact_registry configuration for GCE backend."""
 
-    def test_gce_backend_requires_artifact_registry(self, test_db, temp_dir):
-        """GCE backend should error if artifact_registry not configured."""
+    def test_gce_backend_auto_generates_artifact_registry(self, test_db, temp_dir):
+        """GCE backend should auto-generate artifact_registry from project_id."""
         from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
 
-        # Config with GCE backend but no artifact_registry
+        # Config with GCE backend and project_id but no explicit artifact_registry
         config = GoldfishConfig(
             project_name="test",
             dev_repo_path=str(temp_dir),
@@ -1275,7 +1275,34 @@ class TestArtifactRegistryRequirement:
             gcs=GCSConfig(bucket="test-bucket"),
             gce=GCEConfig(
                 project_id="my-project",
-                artifact_registry=None,  # Not configured!
+                artifact_registry=None,  # Not configured - should auto-generate
+                zones=["us-central1-a"],  # Required for GCE backend
+            ),
+        )
+
+        # Should not raise - artifact_registry auto-generates from project_id
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+        )
+        assert executor.artifact_registry == "us-docker.pkg.dev/my-project/goldfish"
+
+    def test_gce_backend_requires_artifact_registry_or_project_id(self, test_db, temp_dir):
+        """GCE backend should error if neither artifact_registry nor project_id configured."""
+        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
+
+        # Config with GCE backend but no artifact_registry and no project_id
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path=str(temp_dir),
+            jobs=JobsConfig(backend="gce"),
+            gcs=GCSConfig(bucket="test-bucket"),
+            gce=GCEConfig(
+                # No project_id, no artifact_registry - can't auto-generate
+                zones=["us-central1-a"],
             ),
         )
 

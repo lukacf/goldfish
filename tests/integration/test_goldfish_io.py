@@ -308,6 +308,63 @@ class TestGetPaths:
         assert "results" in str(path)
 
 
+class TestGCSURIFallback:
+    """Test GCS URI handling when input staging fails."""
+
+    def test_gcs_uri_fallback_raises_clear_error(self, temp_dir):
+        """When staging fails and location is GCS URI, error should be clear."""
+        from goldfish.io import load_input
+
+        # Simulate a GCS URI that wasn't staged properly
+        config = {
+            "inputs": {
+                "tokens": {
+                    "format": "directory",
+                    "location": "gs://my-bucket/data/tokens/",  # GCS URI with trailing slash
+                }
+            }
+        }
+
+        env = {
+            "GOLDFISH_STAGE_CONFIG": json.dumps(config),
+            "GOLDFISH_INPUTS_DIR": str(temp_dir / "inputs"),  # Empty, staging failed
+        }
+        with patch.dict(os.environ, env):
+            # The bug: pathlib.Path("gs://...") corrupts to "gs:/" and strips trailing slash
+            # This should raise a clear error, not a confusing FileNotFoundError with corrupted path
+            with pytest.raises(FileNotFoundError) as exc_info:
+                load_input("tokens")
+
+            # Verify the error message contains the ORIGINAL GCS URI, not corrupted "gs:/"
+            error_msg = str(exc_info.value)
+            assert "gs://" in error_msg, f"Error should contain 'gs://' but got: {error_msg}"
+            assert "gs:/" not in error_msg.replace("gs://", ""), "Error contains corrupted 'gs:/' path"
+
+    def test_gcs_uri_preserves_double_slash(self, temp_dir):
+        """GCS URIs should preserve double slash in error messages."""
+        from goldfish.io import load_input
+
+        config = {
+            "inputs": {
+                "data": {
+                    "format": "file",
+                    "location": "gs://bucket/path/to/file.csv",
+                }
+            }
+        }
+
+        env = {
+            "GOLDFISH_STAGE_CONFIG": json.dumps(config),
+            "GOLDFISH_INPUTS_DIR": str(temp_dir / "inputs"),
+        }
+        with patch.dict(os.environ, env):
+            with pytest.raises(FileNotFoundError) as exc_info:
+                load_input("data")
+
+            # Should show the original URI, not corrupted by pathlib
+            assert "gs://bucket/path" in str(exc_info.value)
+
+
 class TestCustomLoader:
     """Test custom loader functionality."""
 
