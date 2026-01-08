@@ -327,6 +327,10 @@ class DuringRunMonitor(threading.Thread):
     def _build_prompt(self, context: dict, metrics_summary: str, logs: str) -> str:
         """Build the prompt for the AI agent."""
         stage_name = context.get("stage_name", "unknown")
+        workspace = context.get("workspace", "unknown")
+        pipeline_name = context.get("pipeline_name")
+        config_override = context.get("config_override")
+        inputs_override = context.get("inputs_override")
         run_reason = context.get("run_reason", {})
 
         # Test mode instructions
@@ -341,8 +345,21 @@ This is a test run to verify the AI review system works. You MUST:
 4. Be verbose - this is testing the review pipeline, not production monitoring
 """
 
+        # Build run command section
+        run_command_parts = [f"workspace={workspace}", f"stage={stage_name}"]
+        if pipeline_name:
+            run_command_parts.append(f"pipeline={pipeline_name}")
+        if config_override:
+            run_command_parts.append(f"config_override={json.dumps(config_override)}")
+        if inputs_override:
+            run_command_parts.append(f"inputs_override={json.dumps(inputs_override)}")
+        run_command_str = ", ".join(run_command_parts)
+
         prompt = f"""You are an expert ML monitoring agent. You are reviewing a training run for stage '{stage_name}'.
 {test_mode_section}
+## Run Command
+run({run_command_str})
+
 ## Context
 Goal: {run_reason.get('goal', 'Unknown')}
 Hypothesis: {run_reason.get('hypothesis', 'Unknown')}
