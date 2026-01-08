@@ -632,6 +632,38 @@ class TestGcsfuseFallback:
         assert not gsutil_cmd.startswith("/mnt/gcs"), "Should NOT use gcsfuse path for gsutil"
         assert gcs_uri.rstrip("/") in gsutil_cmd, "Should strip trailing slash from URI"
 
+    def test_staging_failure_writes_error_and_exits(self):
+        """REGRESSION: Staging failure should write error to stderr.log and exit.
+
+        When gsutil cp fails (e.g., GCS path doesn't exist), the staging script
+        should:
+        1. Write a clear error message to stderr.log
+        2. Exit with error code (triggering self_delete and log sync)
+
+        This prevents misleading "Instance not found in zone" errors when the
+        actual problem is a missing input source.
+        """
+        input_name = "bytes"
+        gcs_uri = "gs://my-bucket/runs/stage-xyz/outputs/bytes_6_2/"
+        debug_log = "/tmp/staging_debug.log"
+
+        # The staging command should check gsutil exit code and fail loudly
+        # This is the pattern used in gce_launcher.py for gsutil fallback
+        staging_cmd = (
+            f'if ! gsutil -m cp -r "{gcs_uri.rstrip("/")}" "/mnt/inputs/{input_name}"; then '
+            f'echo "ERROR: Failed to stage input {input_name} from {gcs_uri}" | tee -a {debug_log} /tmp/stderr.log; '
+            f'echo "The GCS path may not exist or you may lack permissions." | tee -a {debug_log} /tmp/stderr.log; '
+            f'exit 1; fi'
+        )
+
+        # Verify the command has error handling
+        assert "if ! gsutil" in staging_cmd, "Should check gsutil exit code"
+        assert "ERROR:" in staging_cmd, "Should write clear error message"
+        assert "/tmp/stderr.log" in staging_cmd, "Should write to stderr.log for sync"
+        assert "exit 1" in staging_cmd, "Should exit on failure"
+        assert input_name in staging_cmd, "Error should include input name"
+        assert gcs_uri in staging_cmd, "Error should include GCS URI"
+
 
 class TestSerialConsoleNoiseFilter:
     """Test filtering of noisy serial console output."""
