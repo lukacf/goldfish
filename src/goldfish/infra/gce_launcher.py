@@ -196,7 +196,8 @@ class GCELauncher:
         instance_name = self._sanitize_name(stage_run_id)
 
         # Build startup script using startup_builder
-        bucket_name = self.bucket.replace("gs://", "")
+        # Strip both gs:// prefix AND trailing slash for consistent bucket comparison
+        bucket_name = self.bucket.replace("gs://", "").rstrip("/")
         run_path = f"runs/{stage_run_id}"
 
         # Prepare environment variables

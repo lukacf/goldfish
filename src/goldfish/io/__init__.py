@@ -187,6 +187,15 @@ def load_input(name: str, format: str | None = None) -> Any:
                     f"Input '{name}' has unresolved override: {location}. "
                     "This usually means the specified run_id or signal could not be found."
                 )
+            # IMPORTANT: Don't use pathlib.Path() on GCS URIs - it corrupts gs:// to gs:/
+            # GCS URIs should have been staged to /mnt/inputs by the infrastructure layer
+            if isinstance(location, str) and location.startswith("gs://"):
+                raise FileNotFoundError(
+                    f"Input '{name}' not found at /mnt/inputs/{name}. "
+                    f"GCS location {location} was not staged properly. "
+                    "This usually means the GCE staging commands failed. "
+                    "Check the staging_debug.log in the job's logs directory."
+                )
             input_path = Path(location)
 
     # Auto-load based on format
