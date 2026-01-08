@@ -317,6 +317,77 @@ def main():
     save_output("model", model_dir)
 ```
 
+### 3.1 Checkpoint API (Resume on Preemption)
+
+For preemptible/spot instances that can be terminated with ~30 seconds notice, use the **Checkpoint API** for immediate GCS upload:
+
+```python
+# modules/train.py
+from goldfish.io import (
+    load_input, save_output, save_checkpoint, load_checkpoint, list_checkpoints
+)
+
+def main():
+    features = load_input("features")
+
+    # Try to resume from previous checkpoint
+    ckpt = load_checkpoint("training_state")
+    if ckpt:
+        state = torch.load(ckpt)
+        model.load_state_dict(state["model"])
+        optimizer.load_state_dict(state["optimizer"])
+        start_step = state["step"]
+        print(f"Resuming from step {start_step}")
+    else:
+        start_step = 0
+
+    for step in range(start_step, total_steps):
+        train_step(model, optimizer)
+
+        # Save checkpoint every 1000 steps (IMMEDIATE GCS upload)
+        if step % 1000 == 0:
+            save_checkpoint("training_state", {
+                "step": step,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+            }, step=step)
+
+            # Also checkpoint model directory
+            save_checkpoint("model", model_dir, step=step)
+
+    # Final output (batched at stage completion)
+    save_output("model", model_dir)
+```
+
+**Key differences:**
+
+| Function | Upload Timing | Use Case |
+|----------|---------------|----------|
+| `save_output()` | Batched at stage completion | Final artifacts |
+| `save_checkpoint()` | **Immediate** GCS upload | Preemption recovery |
+
+**Checkpoint API:**
+
+```python
+# Save checkpoint (immediate upload)
+save_checkpoint(name, data, step=None, local_ok=False)
+# - name: checkpoint name (e.g., "model", "optimizer")
+# - data: Path, numpy array, or any picklable object
+# - step: optional step for versioned checkpoints
+# - local_ok: allow local-only save when GCS not configured
+
+# Load checkpoint (for resume)
+path = load_checkpoint(name, step=None, run_id=None)
+# - Returns Path to checkpoint, or None if not found
+# - run_id: load from a different run (for cross-run resume)
+
+# List available checkpoints
+checkpoints = list_checkpoints(run_id=None)
+# Returns: {"model": {"steps": [1000, 2000, 3000]}, ...}
+```
+
+**Checkpoint storage:** `gs://{bucket}/checkpoints/{run_id}/{name}/step_{step}/`
+
 ### 4. Metrics API (Stage Code)
 
 Use the Metrics API from inside stage modules to record scalars and artifacts.

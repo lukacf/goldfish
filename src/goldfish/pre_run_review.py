@@ -252,6 +252,18 @@ class PreRunReviewer:
             stage_sections=stage_sections,  # Content within sections is already escaped by _build_stage_sections
         )
 
+        # Add test mode instructions if enabled
+        if self.svs_config.test_mode:
+            test_mode_instructions = """
+## TEST MODE ENABLED
+This is a test run to verify the AI review system works. You MUST:
+1. Always provide at least one finding for each stage, even if just a NOTE-level observation
+2. Look for [SVS-TEST] markers in code/logs - these indicate intentional test triggers that you should comment on
+3. Be verbose about what you observe - this is testing the review pipeline
+4. Comment on code quality, structure, or suggestions even if not errors
+"""
+            prompt = test_mode_instructions + prompt
+
         # Enforce total context size limit
         if len(prompt) > MAX_TOTAL_CONTEXT_SIZE:
             logger.warning(f"Review context too large ({len(prompt)} bytes), truncating to {MAX_TOTAL_CONTEXT_SIZE}")
@@ -262,9 +274,9 @@ class PreRunReviewer:
         try:
             agent = self._get_agent()
 
-            # Pre-run tools: read-only
+            # Pre-run tools: read-only, bypass permission prompts
             tool_policy = ToolPolicy(
-                permission_mode="auto",
+                permission_mode="bypassPermissions",
                 allow_tools=["Read", "Glob", "Grep"],
             )
 

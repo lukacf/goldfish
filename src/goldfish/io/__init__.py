@@ -155,6 +155,11 @@ def load_input(name: str, format: str | None = None) -> Any:
         path = load_input("model_dir")  # Returns Path
         model = torch.load(path / "model.pt")
     """
+    # Auto-start during-run monitor on first goldfish.io call
+    from goldfish.io.bootstrap import _ensure_monitor_started
+
+    _ensure_monitor_started()
+
     config = _get_stage_config()
     input_config = config.get("inputs", {}).get(name)
 
@@ -370,6 +375,11 @@ def get_config() -> dict[str, Any]:
 
     Returns the full stage config dict from GOLDFISH_STAGE_CONFIG.
     """
+    # Auto-start during-run monitor on first goldfish.io call
+    from goldfish.io.bootstrap import _ensure_monitor_started
+
+    _ensure_monitor_started()
+
     return _get_stage_config()
 
 
@@ -637,6 +647,401 @@ def should_stop() -> bool:
 
 
 # =============================================================================
+# Checkpoint API - Immediate GCS upload for resume functionality
+# =============================================================================
+
+# Lazy-loaded GCS client
+_gcs_client = None
+
+
+def _get_gcs_client():
+    """Get or create GCS client (lazy initialization)."""
+    global _gcs_client
+    if _gcs_client is None:
+        try:
+            from google.cloud import storage
+
+            _gcs_client = storage.Client()
+        except ImportError as e:
+            raise RuntimeError(
+                "google-cloud-storage not installed. " "Add it to your requirements.txt or use local_ok=True."
+            ) from e
+    return _gcs_client
+
+
+def _parse_gcs_uri(uri: str) -> tuple[str, str]:
+    """Parse gs://bucket/path into (bucket_name, blob_path)."""
+    if not uri.startswith("gs://"):
+        raise ValueError(f"Invalid GCS URI: {uri}")
+    parts = uri[5:].split("/", 1)
+    bucket_name = parts[0]
+    blob_path = parts[1] if len(parts) > 1 else ""
+    return bucket_name, blob_path
+
+
+def _get_gcs_bucket_name() -> str | None:
+    """Get GCS bucket name from environment (without gs:// prefix)."""
+    bucket = os.environ.get("GOLDFISH_GCS_BUCKET")
+    if not bucket:
+        return None
+    # Strip gs:// prefix if present
+    if bucket.startswith("gs://"):
+        bucket = bucket[5:]
+    # Strip trailing slash
+    return bucket.rstrip("/")
+
+
+def _get_run_id() -> str:
+    """Get current run ID from environment."""
+    run_id = os.environ.get("GOLDFISH_RUN_ID")
+    if not run_id:
+        raise RuntimeError("GOLDFISH_RUN_ID not set - checkpoint requires run context")
+    return run_id
+
+
+def _get_local_checkpoint_dir() -> Path:
+    """Get local checkpoint directory for fallback."""
+    return _get_outputs_dir() / ".goldfish" / "checkpoints"
+
+
+def _upload_file_to_gcs(local_path: Path, bucket_name: str, blob_path: str) -> None:
+    """Upload a single file to GCS using Python client."""
+    client = _get_gcs_client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_path)
+    blob.upload_from_filename(str(local_path))
+
+
+def _upload_dir_to_gcs(local_dir: Path, bucket_name: str, blob_prefix: str) -> None:
+    """Upload a directory to GCS using Python client."""
+    client = _get_gcs_client()
+    bucket = client.bucket(bucket_name)
+
+    for local_file in local_dir.rglob("*"):
+        if local_file.is_file():
+            relative_path = local_file.relative_to(local_dir)
+            blob_path = f"{blob_prefix}/{relative_path}".replace("\\", "/")
+            blob = bucket.blob(blob_path)
+            blob.upload_from_filename(str(local_file))
+
+
+def _download_file_from_gcs(bucket_name: str, blob_path: str, local_path: Path) -> bool:
+    """Download a single file from GCS. Returns True if successful."""
+    try:
+        client = _get_gcs_client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        if not blob.exists():
+            return False
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        blob.download_to_filename(str(local_path))
+        return True
+    except Exception:
+        return False
+
+
+def _download_dir_from_gcs(bucket_name: str, blob_prefix: str, local_dir: Path) -> bool:
+    """Download all blobs with prefix to local directory. Returns True if any downloaded."""
+    try:
+        client = _get_gcs_client()
+        bucket = client.bucket(bucket_name)
+        blobs = list(bucket.list_blobs(prefix=blob_prefix))
+        if not blobs:
+            return False
+
+        local_dir.mkdir(parents=True, exist_ok=True)
+        for blob in blobs:
+            if blob.name.endswith("/"):
+                continue  # Skip directory markers
+            relative_path = blob.name[len(blob_prefix) :].lstrip("/")
+            if not relative_path:
+                continue
+            local_path = local_dir / relative_path
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            blob.download_to_filename(str(local_path))
+        return True
+    except Exception:
+        return False
+
+
+def _blob_exists(bucket_name: str, blob_path: str) -> bool:
+    """Check if a blob exists in GCS."""
+    try:
+        client = _get_gcs_client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        return bool(blob.exists())
+    except Exception:
+        return False
+
+
+def _list_blobs_with_prefix(bucket_name: str, prefix: str) -> list[str]:
+    """List all blob names with the given prefix."""
+    try:
+        client = _get_gcs_client()
+        bucket = client.bucket(bucket_name)
+        return [blob.name for blob in bucket.list_blobs(prefix=prefix)]
+    except Exception:
+        return []
+
+
+def save_checkpoint(
+    name: str,
+    data: Any,
+    step: int | None = None,
+    local_ok: bool = False,
+) -> None:
+    """Save a checkpoint with immediate GCS upload.
+
+    Use this for resume functionality on preemptible/spot instances.
+    Unlike save_output() which batches uploads at stage completion,
+    save_checkpoint uploads immediately to GCS.
+
+    Args:
+        name: Checkpoint name (e.g., "model", "optimizer", "training_state")
+        data: Data to checkpoint. Can be:
+            - Path to file or directory
+            - numpy array (saved as .npy)
+            - Any picklable object (saved as .pkl)
+        step: Optional training step for versioned checkpoints.
+              If provided, saves to {name}/step_{step}/
+        local_ok: If True, save locally when GCS not configured (for local dev).
+                  If False (default), raises RuntimeError without GCS.
+
+    Raises:
+        RuntimeError: If GCS bucket not configured and local_ok=False
+        RuntimeError: If upload fails
+
+    Example:
+        # Save model checkpoint every 1000 steps
+        if step % 1000 == 0:
+            save_checkpoint("model", model_dir, step=step)
+
+        # Save training state for exact resume
+        save_checkpoint("training_state", {
+            "step": step,
+            "optimizer_state": optimizer.state_dict(),
+            "rng_state": torch.get_rng_state(),
+        })
+    """
+    import shutil
+    import tempfile
+
+    bucket_name = _get_gcs_bucket_name()
+    run_id = _get_run_id()
+
+    # Build GCS blob path
+    if step is not None:
+        blob_prefix = f"checkpoints/{run_id}/{name}/step_{step}"
+    else:
+        blob_prefix = f"checkpoints/{run_id}/{name}"
+
+    # Handle different data types
+    source_path: Path
+    is_temp = False
+    is_dir = False
+
+    if isinstance(data, Path):
+        source_path = data
+        is_dir = data.is_dir()
+    elif np is not None and isinstance(data, np.ndarray):
+        # Save numpy array to temp file
+        temp_dir = Path(tempfile.mkdtemp())
+        source_path = temp_dir / f"{name}.npy"
+        np.save(source_path, data)
+        is_temp = True
+        blob_prefix = f"{blob_prefix}.npy"
+    else:
+        # Pickle other objects
+        import pickle
+
+        temp_dir = Path(tempfile.mkdtemp())
+        source_path = temp_dir / f"{name}.pkl"
+        with open(source_path, "wb") as f:
+            pickle.dump(data, f)
+        is_temp = True
+        blob_prefix = f"{blob_prefix}.pkl"
+
+    try:
+        if bucket_name:
+            # Upload to GCS immediately using Python client
+            try:
+                if is_dir:
+                    _upload_dir_to_gcs(source_path, bucket_name, blob_prefix)
+                else:
+                    _upload_file_to_gcs(source_path, bucket_name, blob_prefix)
+                logger.info(f"Checkpoint '{name}' uploaded to gs://{bucket_name}/{blob_prefix}")
+            except Exception as e:
+                raise RuntimeError(f"Checkpoint upload failed: {e}") from e
+
+        elif local_ok:
+            # Local fallback
+            local_dir = _get_local_checkpoint_dir()
+            if step is not None:
+                local_path = local_dir / name / f"step_{step}"
+            else:
+                local_path = local_dir / name
+
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+
+            if is_dir:
+                if local_path.exists():
+                    shutil.rmtree(local_path)
+                shutil.copytree(source_path, local_path)
+            else:
+                shutil.copy2(source_path, local_path)
+
+            logger.info(f"Checkpoint '{name}' saved locally to {local_path}")
+
+        else:
+            raise RuntimeError(
+                "GCS bucket not configured for checkpoints. "
+                "Set GOLDFISH_GCS_BUCKET or use local_ok=True for local dev."
+            )
+
+    finally:
+        # Clean up temp files
+        if is_temp and source_path.parent.exists():
+            shutil.rmtree(source_path.parent, ignore_errors=True)
+
+
+def load_checkpoint(
+    name: str,
+    step: int | None = None,
+    run_id: str | None = None,
+) -> Path | None:
+    """Load a checkpoint from GCS or local storage.
+
+    Use this at stage start to resume from a previous checkpoint.
+
+    Args:
+        name: Checkpoint name to load
+        step: Specific step to load. If None, loads the base checkpoint.
+        run_id: Run ID to load from. If None, uses current run.
+                Use this to resume from a previous run's checkpoint.
+
+    Returns:
+        Path to downloaded checkpoint (file or directory), or None if not found.
+
+    Example:
+        # Try to resume from previous checkpoint
+        ckpt_path = load_checkpoint("model", run_id="stage-previous123")
+        if ckpt_path:
+            model.load_state_dict(torch.load(ckpt_path / "model.pt"))
+            start_step = load_checkpoint("training_state")["step"]
+        else:
+            start_step = 0
+    """
+    bucket_name = _get_gcs_bucket_name()
+    target_run_id = run_id or _get_run_id()
+
+    # Check local first (for local dev or already-downloaded checkpoints)
+    local_dir = _get_local_checkpoint_dir()
+    if step is not None:
+        local_path = local_dir / name / f"step_{step}"
+    else:
+        local_path = local_dir / name
+
+    if local_path.exists():
+        return local_path
+
+    # Try GCS if bucket configured
+    if not bucket_name:
+        return None
+
+    if step is not None:
+        blob_prefix = f"checkpoints/{target_run_id}/{name}/step_{step}"
+    else:
+        blob_prefix = f"checkpoints/{target_run_id}/{name}"
+
+    # Try exact path first, then with common extensions
+    for suffix in ["", ".npy", ".pkl"]:
+        test_path = f"{blob_prefix}{suffix}"
+
+        # Check if it's a single file
+        if _blob_exists(bucket_name, test_path):
+            local_file = local_path.with_suffix(suffix) if suffix else local_path
+            if _download_file_from_gcs(bucket_name, test_path, local_file):
+                logger.info(f"Checkpoint '{name}' downloaded to {local_file}")
+                return local_file
+
+        # Check if it's a directory (has blobs with this prefix)
+        blobs = _list_blobs_with_prefix(bucket_name, test_path + "/")
+        if blobs:
+            if _download_dir_from_gcs(bucket_name, test_path, local_path):
+                logger.info(f"Checkpoint '{name}' downloaded to {local_path}")
+                return local_path
+
+    return None
+
+
+def list_checkpoints(run_id: str | None = None) -> dict[str, dict]:
+    """List available checkpoints for a run.
+
+    Args:
+        run_id: Run ID to list checkpoints for. If None, uses current run.
+
+    Returns:
+        Dict mapping checkpoint names to info including available steps.
+        Example: {"model": {"steps": [1000, 2000, 3000]}, "optimizer": {"steps": []}}
+    """
+    import re
+
+    bucket_name = _get_gcs_bucket_name()
+    target_run_id = run_id or _get_run_id()
+
+    result: dict[str, dict] = {}
+
+    # Check local checkpoints
+    local_dir = _get_local_checkpoint_dir()
+    if local_dir.exists():
+        for item in local_dir.iterdir():
+            if item.is_dir():
+                steps = []
+                for sub in item.iterdir():
+                    if sub.is_dir() and sub.name.startswith("step_"):
+                        try:
+                            step_num = int(sub.name.replace("step_", ""))
+                            steps.append(step_num)
+                        except ValueError:
+                            pass
+                result[item.name] = {"steps": sorted(steps), "location": "local"}
+
+    # Check GCS if configured
+    if bucket_name:
+        prefix = f"checkpoints/{target_run_id}/"
+        blobs = _list_blobs_with_prefix(bucket_name, prefix)
+
+        for blob_name in blobs:
+            if not blob_name:
+                continue
+            # Parse checkpoint name from path
+            # checkpoints/run-id/model/file.pt or checkpoints/run-id/model/step_1000/file.pt
+            relative = blob_name[len(prefix) :]
+            parts = relative.split("/")
+            if not parts or not parts[0]:
+                continue
+
+            ckpt_name = parts[0]
+            # Strip extensions for single-file checkpoints
+            if "." in ckpt_name and "/" not in relative[len(ckpt_name) :]:
+                ckpt_name = ckpt_name.rsplit(".", 1)[0]
+
+            if ckpt_name not in result:
+                result[ckpt_name] = {"steps": [], "location": "gcs"}
+
+            # Check for step directories
+            step_match = re.search(r"step_(\d+)", relative)
+            if step_match:
+                step_num = int(step_match.group(1))
+                if step_num not in result[ckpt_name]["steps"]:
+                    result[ckpt_name]["steps"].append(step_num)
+                    result[ckpt_name]["steps"].sort()
+
+    return result
+
+
+# =============================================================================
 # Metrics API - Re-export for convenience
 # =============================================================================
 
@@ -647,6 +1052,10 @@ __all__ = [
     "get_config",
     "get_input_path",
     "get_output_path",
+    # Checkpoint functions (immediate GCS upload for resume)
+    "save_checkpoint",
+    "load_checkpoint",
+    "list_checkpoints",
     # Heartbeat functions
     "heartbeat",
     "get_heartbeat_age",

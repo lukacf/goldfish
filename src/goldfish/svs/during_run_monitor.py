@@ -117,28 +117,41 @@ class DuringRunMonitor(threading.Thread):
 
         # Specific during-run limit
         if self.reviews_this_hour >= self.config.ai_during_run_max_runs_per_hour:
+            logger.debug(f"During-run review skipped: hourly limit reached ({self.reviews_this_hour})")
             return
 
         # Shared SVS budget (overall per-hour cap)
         if self.reviews_this_hour >= self.config.rate_limit_per_hour:
+            logger.debug(f"During-run review skipped: rate limit reached ({self.reviews_this_hour})")
             return
 
         # 2. Minimum interval check
-        if now - self.last_review_time < self.config.ai_during_run_interval_seconds:
+        time_since_last = now - self.last_review_time
+        if time_since_last < self.config.ai_during_run_interval_seconds:
+            logger.debug(
+                f"During-run review skipped: interval not reached "
+                f"({time_since_last:.0f}s < {self.config.ai_during_run_interval_seconds}s)"
+            )
             return
 
         # 3. Data sufficiency check
         metrics, new_metrics_offset = self._read_new_metrics()
         logs, new_logs_offset = self._read_new_logs()
+        num_log_lines = len(logs.splitlines())
 
         if (
             len(metrics) < self.config.ai_during_run_min_metrics
-            and len(logs.splitlines()) < self.config.ai_during_run_min_log_lines
+            and num_log_lines < self.config.ai_during_run_min_log_lines
         ):
+            logger.info(
+                f"During-run review skipped: insufficient data "
+                f"(metrics={len(metrics)}/{self.config.ai_during_run_min_metrics}, "
+                f"logs={num_log_lines}/{self.config.ai_during_run_min_log_lines})"
+            )
             return
 
         # 4. Perform review
-        logger.info(f"Performing during-run AI review ({len(metrics)} metrics, {len(logs.splitlines())} log lines)")
+        logger.info(f"Performing during-run AI review ({len(metrics)} metrics, {num_log_lines} log lines)")
         success = self._do_review(metrics, logs)
 
         if success:
@@ -216,7 +229,7 @@ class DuringRunMonitor(threading.Thread):
 
     def _do_review(self, metrics: list[dict], logs: str) -> bool:
         """Call AI agent for review and save findings."""
-        from goldfish.svs.agent import ReviewRequest, get_agent_provider
+        from goldfish.svs.agent import ReviewRequest, ToolPolicy, get_agent_provider
 
         agent = get_agent_provider(self.config.agent_provider)
 
@@ -226,6 +239,12 @@ class DuringRunMonitor(threading.Thread):
 
         prompt = self._build_prompt(context, metrics_summary, logs)
 
+        # During-run reviews must bypass permission prompts (non-interactive)
+        tool_policy = ToolPolicy(
+            permission_mode="bypassPermissions",
+            allow_tools=["Read", "Glob", "Grep"],  # Read-only tools for reviewing
+        )
+
         request = ReviewRequest(
             review_type="during_run",
             context={
@@ -234,6 +253,7 @@ class DuringRunMonitor(threading.Thread):
                 "model": self.config.agent_model,
                 "max_turns": self.config.agent_max_turns,
                 "timeout_seconds": self.config.agent_timeout,
+                "tool_policy": tool_policy,
             },
             stats=None,  # We pass stats in the prompt
         )
@@ -259,6 +279,9 @@ class DuringRunMonitor(threading.Thread):
             return True
         except (OSError, TimeoutError, RuntimeError) as e:
             logger.error(f"Error calling AI agent: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error in during-run review: {e}")
             return False
 
     def _get_context(self) -> dict[str, Any]:
@@ -306,8 +329,20 @@ class DuringRunMonitor(threading.Thread):
         stage_name = context.get("stage_name", "unknown")
         run_reason = context.get("run_reason", {})
 
-        prompt = f"""You are an expert ML monitoring agent. You are reviewing a training run for stage '{stage_name}'.
+        # Test mode instructions
+        test_mode_section = ""
+        if self.config.test_mode:
+            test_mode_section = """
+## TEST MODE ENABLED
+This is a test run to verify the AI review system works. You MUST:
+1. Always provide at least one finding, even if just a NOTE-level observation
+2. Look for [SVS-TEST] markers in logs - these indicate intentional test triggers
+3. Comment on metrics trends (improving/degrading) even if not anomalous
+4. Be verbose - this is testing the review pipeline, not production monitoring
+"""
 
+        prompt = f"""You are an expert ML monitoring agent. You are reviewing a training run for stage '{stage_name}'.
+{test_mode_section}
 ## Context
 Goal: {run_reason.get('goal', 'Unknown')}
 Hypothesis: {run_reason.get('hypothesis', 'Unknown')}
@@ -342,24 +377,38 @@ Respond ONLY with a JSON block fenced with ```json:
         return prompt
 
     def _parse_json_response(self, text: str) -> dict[str, Any] | None:
-        """Extract and parse JSON from fenced blocks."""
-        match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
-        if not match:
-            # Try raw JSON if no fence
-            try:
-                data = json.loads(text)
-                if not isinstance(data, dict):
-                    return None
-                return data
-            except json.JSONDecodeError:
-                return None
+        """Extract and parse JSON from fenced blocks or Claude CLI wrapper."""
+        # First, check if this is a Claude CLI wrapper response
+        # Format: {"type":"result","subtype":"success","result":"```json\n{...}\n```"}
         try:
-            data = json.loads(match.group(1))
-            if not isinstance(data, dict):
-                return None
-            return data
+            wrapper = json.loads(text)
+            if isinstance(wrapper, dict) and wrapper.get("type") == "result":
+                # Extract the result field which contains the actual response
+                result_text = wrapper.get("result", "")
+                if result_text:
+                    text = result_text
         except json.JSONDecodeError:
-            return None
+            pass  # Not a wrapper, continue with original text
+
+        # Look for JSON in markdown fences
+        match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(1))
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError:
+                pass
+
+        # Try raw JSON if no fence
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+        return None
 
     def _save_findings(self, parsed: dict[str, Any]) -> None:
         """Save AI findings to svs_findings_during.json."""

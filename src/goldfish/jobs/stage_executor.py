@@ -1907,6 +1907,13 @@ echo "Stage completed successfully"
             "XDG_CACHE_HOME": "/app/.cache",
         }
 
+        # Pass GCS bucket for checkpoint API (immediate upload for preemption recovery)
+        if self.config.gcs and self.config.gcs.bucket:
+            bucket = self.config.gcs.bucket
+            if not bucket.startswith("gs://"):
+                bucket = f"gs://{bucket}"
+            goldfish_env["GOLDFISH_GCS_BUCKET"] = bucket
+
         # Overdrive defaults: unbuffered stdout + faster metrics flush
         goldfish_env.setdefault("PYTHONUNBUFFERED", os.environ.get("PYTHONUNBUFFERED", "1"))
         goldfish_env.setdefault(
