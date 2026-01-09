@@ -49,6 +49,11 @@ class DuringRunMonitor(threading.Thread):
         self.reviews_this_hour = 0
         self.hour_start = time.time()
 
+        # Failure tracking - back off after consecutive failures
+        self.consecutive_failures = 0
+        self.max_consecutive_failures = 3  # After this, disable for the run
+        self.ai_review_disabled = False
+
         # Load existing state if available
         self._load_state()
 
@@ -109,6 +114,10 @@ class DuringRunMonitor(threading.Thread):
         if not self.config.ai_during_run_enabled:
             return
 
+        # Check if AI review was disabled due to repeated failures
+        if self.ai_review_disabled:
+            return
+
         # 1. Rate limiting check (Shared budget + Specific budget)
         now = time.time()
         if now - self.hour_start >= 3600:
@@ -159,6 +168,15 @@ class DuringRunMonitor(threading.Thread):
             self.reviews_this_hour += 1
             self.metrics_offset = new_metrics_offset
             self.logs_offset = new_logs_offset
+            self.consecutive_failures = 0  # Reset on success
+        else:
+            self.consecutive_failures += 1
+            if self.consecutive_failures >= self.max_consecutive_failures:
+                logger.warning(
+                    f"During-run AI review disabled after {self.consecutive_failures} consecutive failures. "
+                    "Check Claude CLI configuration or API availability."
+                )
+                self.ai_review_disabled = True
             self._save_state()
 
     def _read_new_metrics(self) -> tuple[list[dict], int]:
@@ -262,13 +280,17 @@ class DuringRunMonitor(threading.Thread):
             result = agent.run(request)
             # ReviewResult has response_text, not review/success
             if not result.response_text:
-                logger.warning("During-run AI review returned empty response")
+                # Only warn on first failure, then debug to reduce spam
+                log_fn = logger.warning if self.consecutive_failures == 0 else logger.debug
+                log_fn("During-run AI review returned empty response")
                 return False
 
             # Parse findings
             parsed = self._parse_json_response(result.response_text)
             if not parsed:
-                logger.warning("Failed to parse JSON from AI review")
+                # Only warn on first failure, then debug to reduce spam
+                log_fn = logger.warning if self.consecutive_failures == 0 else logger.debug
+                log_fn("Failed to parse JSON from AI review")
                 return False
 
             self._save_findings(parsed)
@@ -278,7 +300,8 @@ class DuringRunMonitor(threading.Thread):
 
             return True
         except (OSError, TimeoutError, RuntimeError) as e:
-            logger.error(f"Error calling AI agent: {e}")
+            log_fn = logger.warning if self.consecutive_failures == 0 else logger.debug
+            log_fn(f"Error calling AI agent: {e}")
             return False
         except Exception as e:
             logger.error(f"Unexpected error in during-run review: {e}")

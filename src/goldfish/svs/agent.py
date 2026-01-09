@@ -547,17 +547,17 @@ class ClaudeCodeProvider:
 
         raw_output = stdout.strip() if stdout else stderr.strip()
 
-        # Detect CLI failures and log warning (fail-open: still approve, but be loud about it)
+        # Detect CLI failures (fail-open: still approve, caller handles error tracking)
         cli_failed = False
         if exit_code != 0:
             cli_failed = True
-            logger.warning(
+            logger.debug(
                 f"Claude CLI exited with code {exit_code}. "
                 f"AI review may not have run correctly. stderr: {stderr[:500] if stderr else 'none'}"
             )
         elif raw_output.lower().startswith("error:"):
             cli_failed = True
-            logger.warning(f"Claude CLI returned error: {raw_output[:500]}. " "AI review may not have run correctly.")
+            logger.debug(f"Claude CLI returned error: {raw_output[:500]}. " "AI review may not have run correctly.")
 
         if cli_failed:
             # Return approved with a clear finding that the review itself failed
