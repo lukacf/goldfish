@@ -1955,6 +1955,10 @@ echo "Stage completed successfully"
         if "WANDB_API_KEY" in os.environ:
             goldfish_env["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
 
+        # Passthrough ANTHROPIC_API_KEY for SVS AI reviews (during-run and post-run)
+        if "ANTHROPIC_API_KEY" in os.environ:
+            goldfish_env["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+
         if backend == "local":
             # Create work directory for this run
             run_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id

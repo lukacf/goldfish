@@ -326,6 +326,7 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
                 bus.set_signal("goldfish", sig, target=target)
 
                 # Wait for ACK (dynamic timeout)
+                # ACK means "signal received, uploads starting" (not "uploads complete")
                 ack_timeout = _overdrive_ack_timeout(row)
                 start_time = time.time()
                 sync_status = "timeout"
@@ -333,6 +334,9 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
                     ack = bus.get_ack("goldfish", target=target)
                     if ack == req_id:
                         sync_status = "synced"
+                        # Wait a bit for uploads to complete after ACK
+                        # VM sets ACK first, then uploads metrics (~2s)
+                        time.sleep(2.0)
                         break
                     time.sleep(0.1)
 
@@ -342,10 +346,12 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
                 logger.debug(f"Failed to trigger sync signal: {e}")
                 sync_status = f"error: {e}"
 
-        # If we got an ACK, ingest metrics/SVS now (best-effort).
+        # Ingest metrics/SVS if sync was triggered (even without ACK confirmation).
+        # The ACK may fail if the instance lacks IAM permissions to set metadata,
+        # but the instance still uploads files to GCS. Pull them anyway.
         # NOTE: For local backend, the LocalMetadataSyncer also ingests metrics,
         # but doing it here makes `inspect_run` self-contained and reliable.
-        if sync_status == "synced":
+        if sync_status in ("synced", "pending"):
             try:
                 stage_exec = _get_stage_executor()
                 stage_exec.sync_metrics_if_running(run_id)
@@ -433,14 +439,83 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
             if any(k in name.lower() for k in ["gpu", "vram", "memory"]):
                 health[name] = s["last_value"]
 
-        last_sync = row.get("last_metrics_sync_at") or row.get("started_at")
+        # Calculate actual latest metric timestamp from the data itself
+        # This shows when the most recent metric was RECORDED (on the VM)
+        latest_metric_at: str | None = None
+        for s in summary_rows:
+            ts = s.get("last_timestamp")
+            if ts and isinstance(ts, str):
+                if latest_metric_at is None or ts > latest_metric_at:
+                    latest_metric_at = ts
+
+        # Calculate data staleness
+        data_age_seconds: float | None = None
+        if latest_metric_at:
+            try:
+                from goldfish.utils import parse_datetime
+
+                latest_dt = parse_datetime(latest_metric_at.replace("Z", "+00:00"))
+                if latest_dt.tzinfo is None:
+                    latest_dt = latest_dt.replace(tzinfo=UTC)
+                data_age_seconds = (datetime.now(UTC) - latest_dt).total_seconds()
+            except Exception:
+                pass
+
+        # Determine sync method based on current overdrive result
+        # "overdrive" = ACK received, data pulled via on-demand sync
+        # "polling" = ACK timeout, data came from periodic 30s sync
+        # "none" = no metrics data yet
+        sync_method = "none"
+        if latest_metric_at:
+            if sync_status == "synced":
+                sync_method = "overdrive"
+            else:
+                sync_method = "polling"
+
+        # Get new (unnotified) SVS reviews for this run
+        svs_rows = db.get_unnotified_svs_reviews(limit=50)
+        new_svs_reviews = []
+        review_ids_to_mark: list[int] = []
+        for svs_row in svs_rows:
+            # Only include reviews for this specific run
+            if svs_row["stage_run_id"] != run_id:
+                continue
+
+            # Parse findings to include actual content
+            findings = []
+            findings_json = svs_row.get("parsed_findings")
+            if findings_json:
+                try:
+                    parsed = json.loads(findings_json)
+                    if isinstance(parsed, list):
+                        findings = parsed
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            new_svs_reviews.append(
+                {
+                    "review_type": svs_row["review_type"],
+                    "decision": svs_row["decision"],
+                    "findings": findings,
+                    "full_text": svs_row.get("response_text"),
+                    "reviewed_at": svs_row["reviewed_at"],
+                }
+            )
+            review_ids_to_mark.append(svs_row["id"])
+
+        # Mark these reviews as notified
+        if review_ids_to_mark:
+            db.mark_svs_reviews_notified(review_ids_to_mark)
 
         result["dashboard"] = {
             "progress": progress,
             "metrics": synthesized_metrics,
             "health": health,
-            "last_sync": last_sync,
             "sync_status": sync_status,
+            "sync_method": sync_method,  # "overdrive" | "polling" | "none"
+            "latest_metric_at": latest_metric_at,  # When newest metric was recorded on VM
+            "data_age_seconds": round(data_age_seconds, 1) if data_age_seconds is not None else None,
+            "new_svs_reviews": new_svs_reviews,
         }
 
     if "manifest" in include:
@@ -492,8 +567,9 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
             if row.get("svs_findings_json"):
                 try:
                     findings = json.loads(row["svs_findings_json"])
-                    svs_data["during_run"] = findings.get("during_run")
-                    svs_data["post_run"] = findings.get("ai_review")
+                    if isinstance(findings, dict):
+                        svs_data["during_run"] = findings.get("during_run")
+                        svs_data["post_run"] = findings.get("ai_review")
                 except Exception:
                     pass
 

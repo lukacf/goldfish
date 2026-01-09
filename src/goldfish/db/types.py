@@ -122,6 +122,7 @@ class MetricsSummaryRow(TypedDict):
     min_value: float | None
     max_value: float | None
     last_value: float | None
+    last_timestamp: str | None
     count: int
 
 
@@ -155,6 +156,7 @@ class SVSReviewRow(TypedDict):
     policy_overrides: str | None  # JSON string
     reviewed_at: str
     duration_ms: int | None
+    notified: int  # 0 = not yet shown in dashboard, 1 = already shown
 
 
 class FailurePatternRow(TypedDict):

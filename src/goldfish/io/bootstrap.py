@@ -300,8 +300,10 @@ def run_stage_with_svs(module_main: Callable[[], int | None]) -> int:
 
                 # Small delay to let ML frameworks initialize (avoids issues with fork/multiprocessing)
                 time.sleep(1.0)
-                monitor = DuringRunMonitor(_load_svs_config(), _get_outputs_dir())
+                config = _load_svs_config()
+                monitor = DuringRunMonitor(config, _get_outputs_dir())
                 monitor.start()
+                logger.info("During-run SVS monitor started")
             except Exception as e:
                 logger.error(f"Failed to start during-run monitor: {e}")
 
