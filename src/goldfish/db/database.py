@@ -123,6 +123,9 @@ class Database:
                 ("pruned_at", "TEXT"),  # When version was pruned
                 ("prune_reason", "TEXT"),  # Why version was pruned
             ],
+            "svs_reviews": [
+                ("notified", "INTEGER DEFAULT 0"),  # 0 = not shown in dashboard, 1 = shown
+            ],
         }
 
         with self._conn() as conn:
@@ -3598,7 +3601,7 @@ class Database:
 
         with self._conn() as conn:
             query = """
-                SELECT stage_run_id, name, min_value, max_value, last_value, count
+                SELECT stage_run_id, name, min_value, max_value, last_value, last_timestamp, count
                 FROM run_metrics_summary
                 WHERE stage_run_id = ?
             """
@@ -3933,6 +3936,48 @@ class Database:
                 (limit,),
             ).fetchall()
             return [cast(SVSReviewRow, dict(row)) for row in rows]
+
+    def get_unnotified_svs_reviews(self, limit: int = 50) -> list[SVSReviewRow]:
+        """Get SVS reviews that haven't been shown in dashboard yet.
+
+        Args:
+            limit: Maximum number of reviews to return
+
+        Returns:
+            List of unnotified SVSReviewRow dicts with workspace/stage info, newest first
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.*, s.workspace_name, s.stage_name
+                FROM svs_reviews r
+                JOIN stage_runs s ON r.stage_run_id = s.id
+                WHERE r.notified = 0
+                ORDER BY r.reviewed_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [cast(SVSReviewRow, dict(row)) for row in rows]
+
+    def mark_svs_reviews_notified(self, review_ids: list[int]) -> int:
+        """Mark SVS reviews as notified (shown in dashboard).
+
+        Args:
+            review_ids: List of review IDs to mark as notified
+
+        Returns:
+            Number of rows updated
+        """
+        if not review_ids:
+            return 0
+        with self._conn() as conn:
+            placeholders = ",".join("?" * len(review_ids))
+            cursor = conn.execute(
+                f"UPDATE svs_reviews SET notified = 1 WHERE id IN ({placeholders})",
+                review_ids,
+            )
+            return cursor.rowcount
 
     def create_failure_pattern(
         self,

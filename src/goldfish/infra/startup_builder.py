@@ -96,20 +96,28 @@ PROJECT_ID=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.intern
 
 # Final log sync function - called by EXIT trap to ensure errors are captured
 # GCS paths are set by log_syncer_section or build_startup_script
+# IMPORTANT: Metrics and SVS are uploaded FIRST because they're needed by inspect_run
+# for real-time dashboard updates. Logs (stdout/stderr) are larger and can wait.
 sync_final_logs() {
-    echo "=== SYNCING FINAL LOGS BEFORE DELETION ==="
-    # Only sync if GCS paths are configured (set by log_syncer_section)
+    echo "=== SYNCING FINAL LOGS ==="
+    # Upload metrics FIRST - needed for dashboard/inspect_run
+    if [[ -n "${GCS_METRICS_PATH:-}" && -f "${LOCAL_METRICS:-/dev/null}" ]]; then
+        echo "Uploading metrics.jsonl..."
+        timeout 30 gcloud storage cp "$LOCAL_METRICS" "$GCS_METRICS_PATH" --quiet 2>/dev/null || echo "metrics upload failed"
+    fi
+    # Upload during-run SVS findings SECOND - needed for dashboard/inspect_run
+    if [[ -n "${GCS_SVS_DURING_PATH:-}" && -f "${LOCAL_SVS_DURING:-/dev/null}" ]]; then
+        echo "Uploading svs_findings_during.json..."
+        timeout 30 gcloud storage cp "$LOCAL_SVS_DURING" "$GCS_SVS_DURING_PATH" --quiet 2>/dev/null || echo "svs_during upload failed"
+    fi
+    # Upload stdout/stderr LAST - these can be large and are less time-critical
     if [[ -n "${GCS_STDOUT_PATH:-}" && -s "${LOCAL_STDOUT:-/tmp/stdout.log}" ]]; then
-        echo "Uploading final stdout.log..."
+        echo "Uploading stdout.log..."
         timeout 30 gcloud storage cp "${LOCAL_STDOUT:-/tmp/stdout.log}" "$GCS_STDOUT_PATH" --quiet 2>/dev/null || echo "stdout upload failed"
     fi
     if [[ -n "${GCS_STDERR_PATH:-}" && -s "${LOCAL_STDERR:-/tmp/stderr.log}" ]]; then
-        echo "Uploading final stderr.log..."
+        echo "Uploading stderr.log..."
         timeout 30 gcloud storage cp "${LOCAL_STDERR:-/tmp/stderr.log}" "$GCS_STDERR_PATH" --quiet 2>/dev/null || echo "stderr upload failed"
-    fi
-    if [[ -n "${GCS_METRICS_PATH:-}" && -f "${LOCAL_METRICS:-/dev/null}" ]]; then
-        echo "Uploading final metrics.jsonl..."
-        timeout 30 gcloud storage cp "$LOCAL_METRICS" "$GCS_METRICS_PATH" --quiet 2>/dev/null || echo "metrics upload failed"
     fi
     echo "=== FINAL LOG SYNC COMPLETE ==="
 }
@@ -525,6 +533,7 @@ def log_syncer_section(bucket: str, bucket_path: str, sync_interval: int = 30) -
     - stdout.log: Container stdout
     - stderr.log: Container stderr
     - metrics.jsonl: Goldfish metrics + artifacts (from /mnt/outputs/.goldfish/)
+    - svs_findings_during.json: During-run AI review findings (real-time)
 
     Args:
         bucket: GCS bucket name (without gs:// prefix)
@@ -537,20 +546,23 @@ def log_syncer_section(bucket: str, bucket_path: str, sync_interval: int = 30) -
     gcs_stdout = f"gs://{bucket}/{bucket_path}/logs/stdout.log"
     gcs_stderr = f"gs://{bucket}/{bucket_path}/logs/stderr.log"
     gcs_metrics = f"gs://{bucket}/{bucket_path}/logs/metrics.jsonl"
+    gcs_svs_during = f"gs://{bucket}/{bucket_path}/outputs/.goldfish/svs_findings_during.json"
 
     return f"""
 # === LOG SYNCER (Real-time log visibility) ===
-# Background process that periodically uploads logs and metrics from /tmp/ to GCS
+# Background process that periodically uploads logs, metrics, and SVS findings to GCS
 # This works around gcsfuse streaming writes not finalizing until close()
 LOCAL_STDOUT=/tmp/stdout.log
 LOCAL_STDERR=/tmp/stderr.log
 LOCAL_METRICS=/mnt/outputs/.goldfish/metrics.jsonl
+LOCAL_SVS_DURING=/mnt/outputs/.goldfish/svs_findings_during.json
 LOG_SYNC_INTERVAL={sync_interval}
 
 # Export GCS paths for sync_final_logs() to use in EXIT trap
 GCS_STDOUT_PATH="{gcs_stdout}"
 GCS_STDERR_PATH="{gcs_stderr}"
 GCS_METRICS_PATH="{gcs_metrics}"
+GCS_SVS_DURING_PATH="{gcs_svs_during}"
 
 start_log_syncer() {{
     (
@@ -558,28 +570,37 @@ start_log_syncer() {{
         sleep 5
 
         # Sync logs periodically while Docker is running
+        # IMPORTANT: Metrics and SVS are synced FIRST for faster dashboard updates
         while kill -0 $DOCKER_PID 2>/dev/null; do
             sleep $LOG_SYNC_INTERVAL
 
-            # Sync stdout/stderr
-            gcloud storage cp "$LOCAL_STDOUT" {gcs_stdout} --quiet 2>/dev/null || true
-            gcloud storage cp "$LOCAL_STDERR" {gcs_stderr} --quiet 2>/dev/null || true
-
-            # Sync metrics.jsonl if it exists (not all stages use metrics)
+            # Sync metrics.jsonl FIRST if it exists (needed for dashboard)
             if [[ -f "$LOCAL_METRICS" ]]; then
                 gcloud storage cp "$LOCAL_METRICS" {gcs_metrics} --quiet 2>/dev/null || true
             fi
+
+            # Sync during-run SVS findings SECOND (needed for dashboard)
+            if [[ -f "$LOCAL_SVS_DURING" ]]; then
+                gcloud storage cp "$LOCAL_SVS_DURING" {gcs_svs_during} --quiet 2>/dev/null || true
+            fi
+
+            # Sync stdout/stderr LAST (can be large, less time-critical)
+            gcloud storage cp "$LOCAL_STDOUT" {gcs_stdout} --quiet 2>/dev/null || true
+            gcloud storage cp "$LOCAL_STDERR" {gcs_stderr} --quiet 2>/dev/null || true
         done
 
         # Final sync after Docker exits to capture last logs
         sleep 2
-        gcloud storage cp "$LOCAL_STDOUT" {gcs_stdout} --quiet 2>/dev/null || true
-        gcloud storage cp "$LOCAL_STDERR" {gcs_stderr} --quiet 2>/dev/null || true
-
-        # Final sync of metrics
+        # Final sync of metrics and SVS findings FIRST
         if [[ -f "$LOCAL_METRICS" ]]; then
             gcloud storage cp "$LOCAL_METRICS" {gcs_metrics} --quiet 2>/dev/null || true
         fi
+        if [[ -f "$LOCAL_SVS_DURING" ]]; then
+            gcloud storage cp "$LOCAL_SVS_DURING" {gcs_svs_during} --quiet 2>/dev/null || true
+        fi
+        # Then logs
+        gcloud storage cp "$LOCAL_STDOUT" {gcs_stdout} --quiet 2>/dev/null || true
+        gcloud storage cp "$LOCAL_STDERR" {gcs_stderr} --quiet 2>/dev/null || true
     ) &
     LOG_SYNCER_PID=$!
     echo "Log syncer started (PID=$LOG_SYNCER_PID, interval={sync_interval}s)"
@@ -612,26 +633,18 @@ start_metadata_syncer() {{
                 CMD=$(printf "%s" "$SIG_JSON" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
                 REQ_ID=$(printf "%s" "$SIG_JSON" | sed -n 's/.*"request_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
                 if [[ "$CMD" == "sync" && -n "$REQ_ID" && "$REQ_ID" != "$LAST_SEEN" ]]; then
-                    sync_final_logs || true
                     LAST_SEEN="$REQ_ID"
-                    ACK_OK=0
+                    # Set ACK FIRST to tell dev side we received the signal
+                    # This allows dev side to start polling GCS while we upload
                     if command -v gcloud >/dev/null 2>&1; then
-                        ACK_ERR=""
-                        if ACK_ERR=$(gcloud compute instances add-metadata "$INSTANCE_NAME" \
+                        gcloud compute instances add-metadata "$INSTANCE_NAME" \
                             --zone="$INSTANCE_ZONE" \
                             --project="$PROJECT_ID" \
                             --metadata "goldfish_ack=$REQ_ID" \
-                            --quiet 2>&1); then
-                            ACK_OK=1
-                        else
-                            echo "Failed to set goldfish_ack for $REQ_ID: $ACK_ERR"
-                        fi
-                    else
-                        echo "gcloud not available for metadata ack"
+                            --quiet 2>&1 || echo "Failed to set goldfish_ack for $REQ_ID"
                     fi
-                    if [[ "$ACK_OK" == "1" ]]; then
-                        LAST_ACK="$REQ_ID"
-                    fi
+                    # THEN upload files - dev side can poll for these
+                    sync_final_logs || true
                 fi
             fi
             sleep "$METADATA_SYNC_INTERVAL"
@@ -747,6 +760,21 @@ def build_startup_script(
     # Add metadata syncer for on-demand Overdrive sync
     parts.append(metadata_syncer_section())
 
+    # Always set log/metrics paths for sync_final_logs() (used by metadata syncer and EXIT trap)
+    # log_syncer_section may override these, but they're needed even if periodic sync is disabled
+    gcs_svs_during_path = f"gs://{bucket}/{bucket_path}/outputs/.goldfish/svs_findings_during.json"
+    path_exports = f"""
+# Paths for sync_final_logs() - always needed for on-demand Overdrive sync
+LOCAL_STDOUT=/tmp/stdout.log
+LOCAL_STDERR=/tmp/stderr.log
+LOCAL_METRICS=/mnt/outputs/.goldfish/metrics.jsonl
+LOCAL_SVS_DURING=/mnt/outputs/.goldfish/svs_findings_during.json
+GCS_STDOUT_PATH="gs://{bucket}/{bucket_path}/logs/stdout.log"
+GCS_STDERR_PATH="gs://{bucket}/{bucket_path}/logs/stderr.log"
+GCS_METRICS_PATH="gs://{bucket}/{bucket_path}/logs/metrics.jsonl"
+GCS_SVS_DURING_PATH="{gcs_svs_during_path}"
+"""
+
     parts.extend(
         [
             "apt-get update -y",
@@ -754,6 +782,7 @@ def build_startup_script(
             "systemctl enable --now docker || true",
             'log_stage "docker_ready"',
             env_exports_block,
+            path_exports,
             "start_metadata_syncer",
         ]
     )
