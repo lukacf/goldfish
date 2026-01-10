@@ -349,6 +349,7 @@ CREATE TABLE IF NOT EXISTS svs_reviews (
     policy_overrides TEXT,                -- JSON: any policy overrides applied
     reviewed_at TEXT NOT NULL,
     duration_ms INTEGER,
+    notified INTEGER DEFAULT 0,           -- 0 = not yet shown in dashboard, 1 = already shown
     FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
 );
 
@@ -356,6 +357,7 @@ CREATE INDEX IF NOT EXISTS idx_svs_reviews_stage_run ON svs_reviews(stage_run_id
 CREATE INDEX IF NOT EXISTS idx_svs_reviews_type ON svs_reviews(review_type);
 CREATE INDEX IF NOT EXISTS idx_svs_reviews_decision ON svs_reviews(decision);
 CREATE INDEX IF NOT EXISTS idx_svs_reviews_reviewed_at ON svs_reviews(reviewed_at);
+CREATE INDEX IF NOT EXISTS idx_svs_reviews_notified ON svs_reviews(notified);
 
 
 -- Failure Patterns (self-learning failure detection heuristics)
@@ -403,3 +405,30 @@ CREATE TABLE IF NOT EXISTS workspace_version_tags (
 );
 
 CREATE INDEX IF NOT EXISTS idx_version_tags_version ON workspace_version_tags(workspace_name, version);
+
+
+-- =============================================================================
+-- Docker Image Builds
+-- =============================================================================
+
+-- Docker builds (persistent tracking for local and cloud builds)
+-- Allows tracking build status across process restarts, especially for Cloud Build
+CREATE TABLE IF NOT EXISTS docker_builds (
+    id TEXT PRIMARY KEY,              -- "build-{uuid8}"
+    image_type TEXT NOT NULL,         -- "cpu" or "gpu"
+    target TEXT NOT NULL,             -- "base" (goldfish-base-*) or "project" ({project}-*)
+    backend TEXT NOT NULL,            -- "local" or "cloud"
+    cloud_build_id TEXT,              -- GCP Cloud Build operation ID (if backend=cloud)
+    status TEXT NOT NULL,             -- "pending", "building", "completed", "failed", "cancelled"
+    image_tag TEXT,                   -- Local tag (e.g., "goldfish-base-gpu:v4")
+    registry_tag TEXT,                -- Full registry tag
+    started_at TEXT NOT NULL,         -- ISO timestamp
+    completed_at TEXT,                -- ISO timestamp
+    error TEXT,                       -- Error message if failed
+    logs_uri TEXT,                    -- GCS path to logs (Cloud Build only)
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_docker_builds_status ON docker_builds(status);
+CREATE INDEX IF NOT EXISTS idx_docker_builds_backend ON docker_builds(backend);
+CREATE INDEX IF NOT EXISTS idx_docker_builds_started ON docker_builds(started_at);

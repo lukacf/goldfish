@@ -26,10 +26,12 @@ Goldfish automatically uses pre-built Docker images with common ML libraries:
 
 | Profile Type | Base Image | Included Libraries |
 |--------------|------------|-------------------|
-| CPU (`cpu-small`, `cpu-large`) | Jupyter pytorch-notebook | numpy, pandas, scikit-learn, torch, matplotlib, seaborn |
-| GPU (`h100-*`, `a100-*`) | Jupyter pytorch-notebook + CUDA | Same as CPU + CUDA 12 support |
+| CPU (`cpu-small`, `cpu-large`) | `goldfish-base-cpu:v5` | numpy, pandas, scikit-learn, torch, matplotlib, seaborn |
+| GPU (`h100-*`, `a100-*`) | `goldfish-base-gpu:v5` | Same as CPU + CUDA 12.8 + PyTorch 2.9.1 + FlashAttention-3 |
 
 **No setup required** - the appropriate base image is automatically selected based on your stage's compute profile.
+
+For custom packages, see [Custom Docker Images (Advanced)](#custom-docker-images-advanced).
 
 ## Requirements.txt (Optional)
 
@@ -642,22 +644,148 @@ def main():
 
 ## Custom Docker Images (Advanced)
 
-For custom environments beyond `requirements.txt` (e.g., system dependencies, custom base images):
+Goldfish manages **two layers** of Docker images via `manage_base_images()`:
+
+1. **Base images** (`goldfish-base-gpu`, `goldfish-base-cpu`) - foundation with CUDA, PyTorch, FlashAttention-3
+2. **Project images** (`{project}-gpu`, `{project}-cpu`) - extend base with project-specific packages
+
+### Prerequisites: Base Images
+
+Base images must exist in Artifact Registry before project images can be built. Check status:
+
+```python
+manage_base_images(action="list")
+# → base_images: shows goldfish-base-* status
+# → project_images: shows {project}-* status
+```
+
+If base images don't exist (first-time setup), build and push them:
+
+Two build backends are available:
+- `backend="local"` (default): Uses local Docker daemon
+- `backend="cloud"`: Uses Google Cloud Build (recommended for GPU images - faster, doesn't tie up local machine)
+
+```python
+# Build goldfish base GPU image on Cloud Build (recommended, ~15-20 min)
+result = manage_base_images(action="build", image_type="gpu", target="base", backend="cloud")
+# Returns immediately with build_id - poll with get_build_status(result["build_id"])
+
+# Or build locally (ties up machine but works without GCP)
+manage_base_images(action="build", image_type="gpu", target="base", wait=True)
+
+# Push to Artifact Registry (required for GCE runs)
+manage_base_images(action="push", image_type="gpu", target="base")
+
+# CPU image (~5 min)
+manage_base_images(action="build", image_type="cpu", target="base", backend="cloud")
+manage_base_images(action="push", image_type="cpu", target="base")
+```
+
+**Cloud Build Requirements:**
+- `gce.project_id` must be set in goldfish.yaml
+- The service account used by Cloud Build needs Artifact Registry write permission on the repository:
+  ```bash
+  # Check which service account Cloud Build uses
+  # (usually: {PROJECT_NUMBER}-compute@developer.gserviceaccount.com)
+  gcloud builds list --project=YOUR_PROJECT_ID --limit=1 --format="value(serviceAccount)"
+
+  # Grant repository-level permission (one-time setup)
+  gcloud artifacts repositories add-iam-policy-binding goldfish \
+    --location=us \
+    --project=YOUR_PROJECT_ID \
+    --member="serviceAccount:YOUR_SERVICE_ACCOUNT" \
+    --role="roles/artifactregistry.writer"
+  ```
+
+### Option 1: Config-Based Packages (Recommended)
+
+Add extra pip packages via `goldfish.yaml` without writing a Dockerfile:
+
+```yaml
+# goldfish.yaml
+docker:
+  extra_packages:
+    gpu:
+      - triton
+    cpu:
+      - lightgbm
+```
+
+Then build and push the project image:
+
+```python
+# Check current images and customizations
+manage_base_images(action="list")
+
+# View effective Dockerfile (base + your packages)
+manage_base_images(action="inspect", image_type="gpu")
+
+# Build project image (target="project" is default)
+manage_base_images(action="build", image_type="gpu", wait=True)
+
+# Push to Artifact Registry
+manage_base_images(action="push", image_type="gpu")
+```
+
+### Option 2: Custom Dockerfile (Full Control)
+
+For system-level dependencies or major customizations, place a `Dockerfile.gpu` or `Dockerfile.cpu` in your project root:
 
 ```dockerfile
-FROM python:3.11-slim
+# Dockerfile.gpu (in project root)
+FROM goldfish-base-gpu:v5
 
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-# Additional system dependencies
+# System dependencies
 RUN apt-get update && apt-get install -y \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
+
+# Additional Python packages
+RUN pip install --no-cache-dir my-custom-package
+
+WORKDIR /app
 ```
 
-Note: Most workloads only need `requirements.txt`. Custom Dockerfiles are for advanced cases requiring system-level packages.
+Then build and push:
+
+```python
+manage_base_images(action="build", image_type="gpu", wait=True)
+manage_base_images(action="push", image_type="gpu")
+```
+
+### Image Management Workflow
+
+```python
+# Check if rebuild is needed
+manage_base_images(action="check")
+# → Shows: needs_rebuild, needs_push, has_customization
+
+# Start a Cloud Build (recommended for GPU)
+result = manage_base_images(action="build", image_type="gpu", backend="cloud")
+# Returns immediately with build_id
+
+# Monitor build progress
+status = get_build_status(result["build_id"])
+# → Shows: status, logs_uri (Cloud Build logs URL), error
+
+# Or run locally and wait
+manage_base_images(action="build", image_type="gpu", wait=True)
+# → Shows: status, logs_tail, image_tag
+```
+
+### Base Images
+
+| Type | Base Image | Included |
+|------|------------|----------|
+| GPU | `goldfish-base-gpu:v5` | CUDA 12.8 + PyTorch 2.9.1 + PyTorch + FlashAttention-3 + numpy/pandas/scikit-learn |
+| CPU | `goldfish-base-cpu:v5` | PyTorch (CPU) + numpy/pandas/scikit-learn |
+
+### Target Parameter
+
+- `target="base"` - Build/push goldfish-base-{cpu,gpu} foundation images
+- `target="project"` (default) - Build/push {project}-{cpu,gpu} images
+
+**Note:** Most workloads only need `requirements.txt` for simple pip packages. Use custom images for system dependencies or when you need specific base image customizations.
 
 ## Testing Stages Locally
 

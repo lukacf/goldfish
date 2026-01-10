@@ -136,6 +136,12 @@ Check each stage for:
     - If code uses a config value in a mathematical operation or API that expects a number (e.g., `optimizer(lr=lr)`), verify it is cast to float/int.
     - Config values from `get_config()` or environment variables may be strings (e.g., "3e-4").
     - Usage like `lr = config['lr']` followed by `Adam(lr=lr)` without `float()` cast is a BLOCKING ERROR if the config source is not typed.
+12. **Metrics instrumentation** - Training stages MUST call `log_metric()` or `log_metrics()` from `goldfish.io`.
+    - Without metrics logging, Goldfish cannot monitor training progress or trigger during-run AI reviews.
+    - If a training stage (stages with training loops, loss computation, epochs) does NOT import and call
+      `log_metric()` or `log_metrics()`, this is a BLOCKING ERROR.
+    - At minimum, training stages should log: loss values per step/epoch, learning rate, and validation metrics.
+    - Non-training stages (preprocessing, data loading) are exempt from this requirement.
 
 ## Output Format
 

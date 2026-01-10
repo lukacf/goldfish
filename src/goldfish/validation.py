@@ -1680,3 +1680,75 @@ def validate_batch_size(count: int, max_size: int = 10000) -> None:
 
     if count > max_size:
         raise InvalidBatchSizeError(count, f"batch size cannot exceed {max_size}")
+
+
+# ============== DOCKER IMAGE VALIDATION ==============
+
+
+class InvalidImageTypeError(ValidationError):
+    """Docker image type is invalid."""
+
+    def __init__(self, image_type: str, reason: str):
+        super().__init__(
+            f"Invalid image type '{image_type}': {reason}",
+            value=image_type,
+            field="image_type",
+        )
+
+
+class InvalidBuildIdError(ValidationError):
+    """Build ID is invalid."""
+
+    def __init__(self, build_id: str, reason: str):
+        super().__init__(
+            f"Invalid build ID '{build_id}': {reason}",
+            value=build_id,
+            field="build_id",
+        )
+
+
+# Build ID pattern: build-{8 hex chars}
+_BUILD_ID_PATTERN = re.compile(r"^build-[a-f0-9]{8}$")
+
+# Valid image types
+_VALID_IMAGE_TYPES = {"cpu", "gpu"}
+
+
+def validate_image_type(image_type: str) -> None:
+    """Validate a Docker base image type.
+
+    Args:
+        image_type: The image type to validate ("cpu" or "gpu")
+
+    Raises:
+        InvalidImageTypeError: If validation fails
+    """
+    if not image_type:
+        raise InvalidImageTypeError(image_type, "image type cannot be empty")
+
+    if image_type not in _VALID_IMAGE_TYPES:
+        raise InvalidImageTypeError(image_type, f"must be one of: {', '.join(sorted(_VALID_IMAGE_TYPES))}")
+
+
+def validate_build_id(build_id: str) -> None:
+    """Validate a Docker image build operation ID.
+
+    Build IDs must match format: build-{8 hex chars}
+
+    Args:
+        build_id: The build ID to validate
+
+    Raises:
+        InvalidBuildIdError: If validation fails
+    """
+    if not build_id:
+        raise InvalidBuildIdError(build_id, "build ID cannot be empty")
+
+    # Check for dangerous characters first
+    dangerous = _contains_dangerous_chars(build_id)
+    if dangerous:
+        raise InvalidBuildIdError(build_id, f"contains invalid character: '{dangerous}'")
+
+    # Must match exact format
+    if not _BUILD_ID_PATTERN.match(build_id):
+        raise InvalidBuildIdError(build_id, "must match format build-{8 hex chars}")
