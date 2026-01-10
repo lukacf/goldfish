@@ -268,6 +268,10 @@ from goldfish.server_tools.execution_tools import (  # noqa: F401, E402
     mark_outcome,
     run,
 )
+from goldfish.server_tools.infra_tools import (  # noqa: F401, E402
+    get_build_status,
+    manage_base_images,
+)
 from goldfish.server_tools.logging_tools import (  # noqa: F401, E402
     search_goldfish_logs,
 )

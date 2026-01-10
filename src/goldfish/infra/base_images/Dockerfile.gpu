@@ -1,32 +1,31 @@
-# Goldfish Base Image - GPU (CUDA)
-# Pre-built with PyTorch + CUDA for GPU workloads
+# Goldfish Base Image - GPU (CUDA 12.8 + PyTorch 2.9.1 + FlashAttention-3)
+# Uses pre-built flash-attn wheels for fast builds (seconds, not 60+ min)
 #
-# Build: docker build -f Dockerfile.gpu -t goldfish-base-gpu:v1 .
-# Push:  docker tag goldfish-base-gpu:v1 us-docker.pkg.dev/PROJECT/goldfish/goldfish-base-gpu:v1
-#        docker push us-docker.pkg.dev/PROJECT/goldfish/goldfish-base-gpu:v1
+# Build: docker build -f Dockerfile.gpu -t goldfish-base-gpu:v5 .
+# Push:  docker tag goldfish-base-gpu:v5 us-docker.pkg.dev/PROJECT/goldfish/goldfish-base-gpu:v5
+#        docker push us-docker.pkg.dev/PROJECT/goldfish/goldfish-base-gpu:v5
 
-# NVIDIA CUDA base image with Python support
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+# NVIDIA CUDA 12.8 runtime image - no need for devel since we use pre-built flash-attn wheels
+FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
 
 LABEL org.opencontainers.image.title="Goldfish Base GPU"
-LABEL org.opencontainers.image.description="Pre-built base image with PyTorch + CUDA for GPU workloads"
+LABEL org.opencontainers.image.description="CUDA 12.8 + PyTorch 2.9.1 + FlashAttention-3 (pre-built wheels)"
 LABEL org.opencontainers.image.vendor="Goldfish ML"
-LABEL org.opencontainers.image.version="v1"
+LABEL org.opencontainers.image.version="v5"
 
 # Avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System dependencies
-# cuda-nvrtc-12-1 provides libnvrtc.so.12 needed for Flash Attention JIT compilation
+# System dependencies for ML development
+# Note: No build-essential/ninja-build needed since we use pre-built flash-attn wheels
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3.11-venv \
+    python3.11-dev \
     python3-pip \
-    build-essential \
     curl \
     git \
     libgomp1 \
-    cuda-nvrtc-12-1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust toolchain (needed for many modern ML tools like tiktoken)
@@ -43,9 +42,16 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 &
 # Upgrade pip
 RUN python -m pip install --upgrade pip
 
-# Core ML libraries pre-installed
+# Core ML libraries pre-installed (includes PyTorch - required before flash-attn)
 COPY requirements-gpu.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
+
+# FlashAttention-3 - using pre-built wheels (installs in seconds, not 60+ min)
+# Wheels from: https://github.com/windreamer/flash-attention3-wheels
+RUN pip install --no-cache-dir flash_attn_3 --find-links https://windreamer.github.io/flash-attention3-wheels/cu128_torch291
+
+# Verify FlashAttention-3 installed correctly
+RUN python -c "import flash_attn_interface; print(dir(flash_attn_interface)); print('FlashAttention-3: OK')"
 
 # Create non-root user for security
 RUN useradd -m -u 1000 goldfish

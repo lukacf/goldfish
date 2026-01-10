@@ -246,10 +246,13 @@ def dashboard() -> dict:
     - What's running (active runs)
     - Workspace status (mounted, dirty state)
     - Recent outcomes (success/bad_results trends)
-    - Recent AI reviews (SVS findings)
+    - New AI reviews (SVS findings not yet shown)
 
     Unlike status(), this tool focuses on actionable information
     rather than audit trails.
+
+    SVS reviews are shown ONCE when new, then cleared from subsequent dashboard
+    calls. Use inspect_run(include=["svs"]) to see all reviews for a run.
 
     Returns:
         dict with:
@@ -258,7 +261,7 @@ def dashboard() -> dict:
         - workspaces: Workspace summary with dirty status
         - source_count: Total registered data sources
         - recent_outcomes: Recent run outcomes for trend visibility
-        - recent_svs_reviews: Recent AI reviews with findings
+        - new_svs_reviews: New AI reviews (marked as notified after return)
 
     Related tools:
     - status(): Global state including STATE.md and audit trail
@@ -331,9 +334,10 @@ def dashboard() -> dict:
         for row in outcome_rows
     ]
 
-    # Get recent SVS reviews
-    svs_rows = db.get_recent_svs_reviews(limit=10)
-    recent_svs_reviews = []
+    # Get unnotified SVS reviews (new since last dashboard view)
+    svs_rows = db.get_unnotified_svs_reviews(limit=50)
+    new_svs_reviews = []
+    review_ids_to_mark: list[int] = []
     for row in svs_rows:
         # Parse findings count from JSON string
         findings_count = 0
@@ -346,7 +350,7 @@ def dashboard() -> dict:
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        recent_svs_reviews.append(
+        new_svs_reviews.append(
             {
                 "run_id": row["stage_run_id"],
                 "workspace": row.get("workspace_name"),
@@ -357,6 +361,11 @@ def dashboard() -> dict:
                 "reviewed_at": row["reviewed_at"],
             }
         )
+        review_ids_to_mark.append(row["id"])
+
+    # Mark these reviews as notified so they don't appear again
+    if review_ids_to_mark:
+        db.mark_svs_reviews_notified(review_ids_to_mark)
 
     return {
         "failed_runs": failed_runs,
@@ -364,7 +373,7 @@ def dashboard() -> dict:
         "workspaces": workspaces,
         "source_count": source_count,
         "recent_outcomes": recent_outcomes,
-        "recent_svs_reviews": recent_svs_reviews,
+        "new_svs_reviews": new_svs_reviews,
     }
 
 

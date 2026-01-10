@@ -684,9 +684,9 @@ manage_versions(workspace="exp_v1", action="tag", version="v24", tag="baseline-v
 
 # Clean up failed experiments
 
-manage_versions(workspace="exp_v1", action="prune", 
+manage_versions(workspace="exp_v1", action="prune",
 
-                from_version="v1", to_version="v23", 
+                from_version="v1", to_version="v23",
 
                 reason="Cleanup noise")
 
@@ -710,9 +710,76 @@ manage_versions(workspace="exp_v1", action="list")
 
 - Pruning is **reversible** via unprune
 
+### 8. Managing Docker Images
 
+Goldfish manages **two layers** of Docker images:
+1. **Base images** (`goldfish-base-gpu`, `goldfish-base-cpu`) - foundation with ML libraries + FlashAttention-3
+2. **Project images** (`{project}-gpu`, `{project}-cpu`) - extend base with project-specific packages
 
-## Master Tool Reference (31)
+**Check image status (both layers)**
+```python
+manage_base_images(action="list")
+# Returns: base_images (goldfish-base-*) and project_images ({project}-*)
+```
+
+**Build/push base images (one-time setup or updates)**
+
+Two build backends are available:
+- `backend="local"` (default): Uses local Docker daemon
+- `backend="cloud"`: Uses Google Cloud Build (recommended for GPU images - faster, doesn't tie up local machine)
+
+```python
+# Build goldfish base GPU image on Cloud Build (recommended, ~15-20 min)
+result = manage_base_images(action="build", image_type="gpu", target="base", backend="cloud")
+# Returns immediately with build_id, poll with get_build_status(result["build_id"])
+
+# Or build locally (ties up machine, but works without GCP)
+manage_base_images(action="build", image_type="gpu", target="base", wait=True)
+
+# Push to Artifact Registry
+manage_base_images(action="push", image_type="gpu", target="base")
+
+# Build goldfish base CPU image (~5 min)
+manage_base_images(action="build", image_type="cpu", target="base", backend="cloud")
+# or wait=True for local
+```
+
+**Customize project images (optional)**
+
+Add packages via config:
+```yaml
+# goldfish.yaml
+docker:
+  extra_packages:
+    gpu:
+      - triton
+    cpu:
+      - lightgbm
+```
+
+Or create custom Dockerfile in project root:
+```dockerfile
+# Dockerfile.gpu
+FROM goldfish-base-gpu:v5
+RUN pip install my-custom-package
+```
+
+**Build/push project images**
+```python
+# Build project image (uses base + extra_packages/Dockerfile)
+manage_base_images(action="build", image_type="gpu", target="project", wait=True)
+manage_base_images(action="push", image_type="gpu", target="project")
+```
+
+**Key points:**
+- Base GPU image: CUDA 12.8 + PyTorch 2.9.1 + FlashAttention-3 + numpy/pandas/scikit-learn
+- Base CPU image: PyTorch (CPU) + numpy/pandas/scikit-learn
+- `target="base"` builds goldfish-base-*, `target="project"` (default) builds {project}-*
+- `backend="cloud"` recommended for GPU builds (Cloud Build, doesn't tie up local machine)
+- Base images must exist in registry before project images can be built
+- Cloud Build requires `gce.project_id` in goldfish.yaml + Artifact Registry write permission for Cloud Build service account
+
+## Master Tool Reference (33)
 
 
 
@@ -882,11 +949,18 @@ manage_versions(workspace="exp_v1", action="list")
 
 | `promote_artifact()` | Stage output → reusable source | job_id, output_name, metadata |
 
+### Infrastructure
 
+| Tool | Purpose | Key Parameters |
+|------|---------|----------------|
+| `manage_base_images()` | Docker base image management | action, image_type, target, backend |
+| `get_build_status()` | Poll image build progress | build_id |
 
-
-
-
+**`manage_base_images` parameters:**
+- `target="base"` - goldfish-base-{cpu,gpu} images (foundation)
+- `target="project"` (default) - {project}-{cpu,gpu} images (customized)
+- `backend="local"` (default) - build using local Docker daemon
+- `backend="cloud"` - build using Google Cloud Build (recommended for GPU images)
 
 ### Utility
 
