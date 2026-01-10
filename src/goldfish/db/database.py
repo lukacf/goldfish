@@ -11,6 +11,7 @@ from typing import Any, TypedDict, cast
 from goldfish.db.types import (
     ArtifactRow,
     AuditRow,
+    DockerBuildRow,
     FailurePatternRow,
     JobInputWithSource,
     JobRow,
@@ -4272,5 +4273,229 @@ class Database:
                 WHERE id = ?
                 """,
                 (svs_findings_json, stage_run_id),
+            )
+            return cursor.rowcount > 0
+
+    # =========================================================================
+    # Docker Builds CRUD
+    # =========================================================================
+
+    def insert_docker_build(
+        self,
+        build_id: str,
+        image_type: str,
+        target: str,
+        backend: str,
+        started_at: str,
+        image_tag: str | None = None,
+        registry_tag: str | None = None,
+        cloud_build_id: str | None = None,
+    ) -> None:
+        """Insert a new Docker build record.
+
+        Args:
+            build_id: Unique build ID (e.g., "build-abc12345")
+            image_type: "cpu" or "gpu"
+            target: "base" or "project"
+            backend: "local" or "cloud"
+            started_at: ISO timestamp
+            image_tag: Local Docker tag
+            registry_tag: Full registry tag
+            cloud_build_id: GCP Cloud Build operation ID (if backend=cloud)
+        """
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO docker_builds (
+                    id, image_type, target, backend, cloud_build_id,
+                    status, image_tag, registry_tag, started_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                """,
+                (
+                    build_id,
+                    image_type,
+                    target,
+                    backend,
+                    cloud_build_id,
+                    image_tag,
+                    registry_tag,
+                    started_at,
+                ),
+            )
+
+    def get_docker_build(self, build_id: str) -> "DockerBuildRow | None":
+        """Get a Docker build by ID.
+
+        Args:
+            build_id: Build ID to fetch
+
+        Returns:
+            DockerBuildRow if found, None otherwise
+        """
+        from goldfish.db.types import DockerBuildRow
+
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT id, image_type, target, backend, cloud_build_id,
+                       status, image_tag, registry_tag, started_at,
+                       completed_at, error, logs_uri, created_at
+                FROM docker_builds
+                WHERE id = ?
+                """,
+                (build_id,),
+            ).fetchone()
+            return cast(DockerBuildRow, dict(row)) if row else None
+
+    def update_docker_build_status(
+        self,
+        build_id: str,
+        status: str,
+        error: str | None = None,
+        completed_at: str | None = None,
+        cloud_build_id: str | None = None,
+        logs_uri: str | None = None,
+        image_tag: str | None = None,
+        registry_tag: str | None = None,
+    ) -> bool:
+        """Update status and related fields for a Docker build.
+
+        Args:
+            build_id: Build ID to update
+            status: New status (pending, building, completed, failed, cancelled)
+            error: Error message (for failed status)
+            completed_at: Completion timestamp (for completed/failed status)
+            cloud_build_id: GCP Cloud Build ID (for cloud builds)
+            logs_uri: GCS path to logs (for cloud builds)
+            image_tag: Local Docker tag (on success)
+            registry_tag: Full registry tag (on success)
+
+        Returns:
+            True if updated, False if build not found
+        """
+        with self._conn() as conn:
+            # Build dynamic update
+            fields = ["status = ?"]
+            params: list[str | None] = [status]
+
+            if error is not None:
+                fields.append("error = ?")
+                params.append(error)
+            if completed_at is not None:
+                fields.append("completed_at = ?")
+                params.append(completed_at)
+            if cloud_build_id is not None:
+                fields.append("cloud_build_id = ?")
+                params.append(cloud_build_id)
+            if logs_uri is not None:
+                fields.append("logs_uri = ?")
+                params.append(logs_uri)
+            if image_tag is not None:
+                fields.append("image_tag = ?")
+                params.append(image_tag)
+            if registry_tag is not None:
+                fields.append("registry_tag = ?")
+                params.append(registry_tag)
+
+            params.append(build_id)
+
+            cursor = conn.execute(
+                f"""
+                UPDATE docker_builds
+                SET {", ".join(fields)}
+                WHERE id = ?
+                """,
+                params,
+            )
+            return cursor.rowcount > 0
+
+    def list_docker_builds(
+        self,
+        status: str | None = None,
+        backend: str | None = None,
+        image_type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list["DockerBuildRow"]:
+        """List Docker builds with optional filters.
+
+        Args:
+            status: Filter by status (pending, building, completed, failed, cancelled)
+            backend: Filter by backend (local, cloud)
+            image_type: Filter by image type (cpu, gpu)
+            limit: Maximum results to return
+            offset: Pagination offset
+
+        Returns:
+            List of DockerBuildRow
+        """
+        from goldfish.db.types import DockerBuildRow
+
+        conditions = []
+        params: list = []
+
+        if status is not None:
+            conditions.append("status = ?")
+            params.append(status)
+        if backend is not None:
+            conditions.append("backend = ?")
+            params.append(backend)
+        if image_type is not None:
+            conditions.append("image_type = ?")
+            params.append(image_type)
+
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+        params.extend([limit, offset])
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, image_type, target, backend, cloud_build_id,
+                       status, image_tag, registry_tag, started_at,
+                       completed_at, error, logs_uri, created_at
+                FROM docker_builds
+                WHERE {where_clause}
+                ORDER BY started_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            ).fetchall()
+            return [cast(DockerBuildRow, dict(row)) for row in rows]
+
+    def get_active_docker_builds(self) -> list["DockerBuildRow"]:
+        """Get all in-progress Docker builds (pending or building).
+
+        Returns:
+            List of active DockerBuildRow
+        """
+        from goldfish.db.types import DockerBuildRow
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, image_type, target, backend, cloud_build_id,
+                       status, image_tag, registry_tag, started_at,
+                       completed_at, error, logs_uri, created_at
+                FROM docker_builds
+                WHERE status IN ('pending', 'building')
+                ORDER BY started_at DESC
+                """,
+            ).fetchall()
+            return [cast(DockerBuildRow, dict(row)) for row in rows]
+
+    def delete_docker_build(self, build_id: str) -> bool:
+        """Delete a Docker build record.
+
+        Args:
+            build_id: Build ID to delete
+
+        Returns:
+            True if deleted, False if not found
+        """
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM docker_builds WHERE id = ?",
+                (build_id,),
             )
             return cursor.rowcount > 0

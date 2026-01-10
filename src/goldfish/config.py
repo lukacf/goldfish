@@ -72,6 +72,55 @@ class MetricsConfig(BaseModel):
     wandb: dict[str, str] | None = None  # W&B-specific config (project, entity)
 
 
+class CloudBuildConfig(BaseModel):
+    """Cloud Build settings for remote Docker image builds.
+
+    Cloud Build allows building images on GCP instead of locally,
+    which is faster and doesn't tie up the local machine.
+
+    Machine type notes:
+    - Default pools max out at E2_HIGHCPU_32 (32 vCPUs)
+    - N1_HIGHCPU_32 also available at same price
+    - Private pools support up to N2_HIGHCPU_96 but require additional setup
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    machine_type: str = "E2_HIGHCPU_32"  # Max for default pools (32 vCPUs)
+    timeout_minutes: int = 60  # Build timeout
+    disk_size_gb: int = 200  # GPU images are large
+
+
+class DockerConfig(BaseModel):
+    """Docker image customization configuration.
+
+    Allows projects to customize Docker base images without editing Goldfish source.
+    Two approaches:
+    1. extra_packages: Add pip packages on top of goldfish-base-{cpu,gpu} images
+    2. Custom Dockerfiles: Place Dockerfile.cpu/Dockerfile.gpu in project root
+
+    Example goldfish.yaml:
+        docker:
+          extra_packages:
+            gpu:
+              - flash-attn --no-build-isolation
+              - triton
+            cpu:
+              - lightgbm
+          cloud_build:
+            machine_type: E2_HIGHCPU_32
+            timeout_minutes: 60
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    extra_packages: dict[str, list[str]] = Field(default_factory=dict)
+    # Keys: "gpu", "cpu"
+    # Values: list of pip install args (supports flags like --no-build-isolation)
+
+    cloud_build: CloudBuildConfig = Field(default_factory=CloudBuildConfig)
+
+
 class GCEConfig(BaseModel):
     """GCE (Google Compute Engine) configuration."""
 
@@ -162,6 +211,7 @@ def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
         "gce": list(GCEConfig.model_fields.keys()),
         "pre_run_review": list(PreRunReviewConfig.model_fields.keys()),
         "metrics": list(MetricsConfig.model_fields.keys()),
+        "docker": list(DockerConfig.model_fields.keys()),
         "svs": list(SVSConfig.model_fields.keys()),
     }
 
@@ -177,6 +227,7 @@ def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
         "gce",
         "pre_run_review",
         "metrics",
+        "docker",
         "svs",
         "invariants",
     ]
@@ -213,6 +264,7 @@ class GoldfishConfig(BaseModel):
     gce: GCEConfig | None = None
     pre_run_review: PreRunReviewConfig = Field(default_factory=PreRunReviewConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    docker: DockerConfig = Field(default_factory=DockerConfig)
     svs: SVSConfig = Field(default_factory=SVSConfig)
     invariants: list[str] = Field(default_factory=list)
 

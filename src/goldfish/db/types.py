@@ -202,3 +202,24 @@ class PrunedVersionRow(TypedDict):
     version: str
     pruned_at: str
     prune_reason: str
+
+
+class DockerBuildRow(TypedDict):
+    """Row from the docker_builds table.
+
+    Tracks Docker image builds (local and Cloud Build).
+    """
+
+    id: str  # "build-{uuid8}"
+    image_type: str  # "cpu" or "gpu"
+    target: str  # "base" or "project"
+    backend: str  # "local" or "cloud"
+    cloud_build_id: str | None  # GCP Cloud Build operation ID (if backend=cloud)
+    status: str  # "pending", "building", "completed", "failed", "cancelled"
+    image_tag: str | None  # Local tag (e.g., "goldfish-base-gpu:v4")
+    registry_tag: str | None  # Full registry tag
+    started_at: str  # ISO timestamp
+    completed_at: str | None  # ISO timestamp
+    error: str | None  # Error message if failed
+    logs_uri: str | None  # GCS path to logs (Cloud Build only)
+    created_at: str

@@ -118,6 +118,83 @@ class ConfigParamNotFoundError(GoldfishError):
         super().__init__(message, details)
 
 
+# Docker image management errors
+
+
+class DockerNotAvailableError(GoldfishError):
+    """Docker is not installed or daemon is not running."""
+
+    def __init__(self, reason: str = "Docker daemon not responding"):
+        message = f"Docker not available: {reason}"
+        details = {
+            "hint": "Install Docker Desktop or ensure Docker daemon is running",
+            "check_command": "docker info",
+        }
+        super().__init__(message, details)
+
+
+class RegistryNotConfiguredError(GoldfishError):
+    """Artifact Registry not configured in goldfish.yaml."""
+
+    def __init__(self):
+        message = "Artifact Registry not configured"
+        details = {
+            "hint": "Configure gce.project_id in goldfish.yaml (registry auto-generates from project_id)",
+            "example": "gce:\n  project_id: my-project",
+        }
+        super().__init__(message, details)
+
+
+class BaseImageBuildError(GoldfishError):
+    """Docker base image build failed."""
+
+    def __init__(self, image_type: str, reason: str, logs_tail: str | None = None):
+        message = f"Failed to build {image_type} image: {reason}"
+        details = {"image_type": image_type, "reason": reason}
+        if logs_tail:
+            details["logs_tail"] = logs_tail
+        super().__init__(message, details)
+
+
+class BaseImageNotFoundError(GoldfishError):
+    """Local base image does not exist."""
+
+    def __init__(self, image_tag: str):
+        message = f"Local image not found: {image_tag}"
+        details = {
+            "image_tag": image_tag,
+            "hint": "Build the image first with manage_base_images(action='build', image_type='...')",
+        }
+        super().__init__(message, details)
+
+
+# Cloud Build errors
+
+
+class CloudBuildError(GoldfishError):
+    """Cloud Build operation failed."""
+
+    def __init__(self, message: str, cloud_build_id: str | None = None, logs_uri: str | None = None):
+        details: dict[str, str] = {}
+        if cloud_build_id:
+            details["cloud_build_id"] = cloud_build_id
+        if logs_uri:
+            details["logs_uri"] = logs_uri
+        super().__init__(f"Cloud Build failed: {message}", details)
+
+
+class CloudBuildNotConfiguredError(GoldfishError):
+    """Cloud Build requires GCE configuration."""
+
+    def __init__(self):
+        message = "Cloud Build requires GCE project configuration"
+        details = {
+            "hint": "Configure gce.project_id in goldfish.yaml to use Cloud Build",
+            "example": "gce:\n  project_id: my-gcp-project",
+        }
+        super().__init__(message, details)
+
+
 # Git error translation - never let Claude see git terminology
 GIT_ERROR_TRANSLATIONS = {
     "already exists": "already exists",

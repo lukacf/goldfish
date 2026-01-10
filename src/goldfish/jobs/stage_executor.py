@@ -1262,6 +1262,54 @@ class StageExecutor:
                 svs_findings_json=json.dumps(findings),
             )
 
+        # 3. Insert post-run review into svs_reviews table for dashboard visibility
+        ai_review = manifest_data.get("ai_review")
+        if ai_review and isinstance(ai_review, dict):
+            import hashlib
+            from datetime import datetime
+
+            review_findings = ai_review.get("findings", [])
+            decision = ai_review.get("decision", "approved")
+            duration_ms = ai_review.get("duration_ms", 0)
+            model = ai_review.get("model", self.config.svs.agent_model)
+
+            try:
+                self.db.create_svs_review(
+                    stage_run_id=stage_run_id,
+                    review_type="post_run",
+                    model_used=model,
+                    prompt_hash=hashlib.sha256(f"post_run_{stage_run_id}".encode()).hexdigest()[:16],
+                    decision=decision,
+                    parsed_findings=json.dumps(review_findings) if review_findings else None,
+                    reviewed_at=datetime.now().isoformat(),
+                    duration_ms=duration_ms,
+                )
+            except Exception as e:
+                logger.debug(f"Failed to create post-run svs_review record: {e}")
+
+        # 4. Insert during-run review into svs_reviews table for dashboard visibility
+        during_run = manifest_data.get("during_run")
+        if during_run and isinstance(during_run, dict):
+            import hashlib
+            from datetime import datetime
+
+            during_history = during_run.get("history", [])
+            during_decision = during_run.get("decision", "approved")
+
+            try:
+                self.db.create_svs_review(
+                    stage_run_id=stage_run_id,
+                    review_type="during_run",
+                    model_used=self.config.svs.agent_model or "unknown",
+                    prompt_hash=hashlib.sha256(f"during_run_{stage_run_id}".encode()).hexdigest()[:16],
+                    decision=during_decision,
+                    parsed_findings=json.dumps(during_history) if during_history else None,
+                    reviewed_at=datetime.now().isoformat(),
+                    duration_ms=0,
+                )
+            except Exception as e:
+                logger.debug(f"Failed to create during-run svs_review record: {e}")
+
     def _collect_metrics(self, stage_run_id: str, backend: str) -> None:
         """Collect metrics from JSONL and store in database."""
         from goldfish.metrics.collector import MetricsCollector
@@ -1654,6 +1702,62 @@ class StageExecutor:
 
         if merged:
             self.db.update_stage_run_svs_findings(stage_run_id, json.dumps(merged))
+
+        # Also insert during-run findings into svs_reviews table for live dashboard visibility
+        during_run = manifest.get("during_run")
+        if during_run and isinstance(during_run, dict):
+            self._sync_during_run_to_svs_reviews(stage_run_id, during_run)
+
+    def _sync_during_run_to_svs_reviews(self, stage_run_id: str, during_run: dict) -> None:
+        """Sync during-run findings to svs_reviews table for dashboard visibility.
+
+        Only inserts new findings (based on timestamp) to avoid duplicates.
+        """
+        import hashlib
+
+        history = during_run.get("history", [])
+        if not history:
+            return
+
+        # Get existing during-run review timestamps for this run
+        existing_reviews = self.db.get_svs_reviews(stage_run_id=stage_run_id, review_type="during_run")
+        existing_hashes = set()
+        for r in existing_reviews:
+            # Use prompt_hash as the unique identifier
+            if r.get("prompt_hash"):
+                existing_hashes.add(r["prompt_hash"])
+
+        # Insert new findings
+        decision = during_run.get("decision", "approved")
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+
+            # Create a unique hash for this entry based on timestamp + content
+            timestamp = entry.get("timestamp", "")
+            check_name = entry.get("check", "")
+            summary = entry.get("summary", "")[:100]  # First 100 chars
+            unique_key = f"during_run_{stage_run_id}_{timestamp}_{check_name}_{summary}"
+            entry_hash = hashlib.sha256(unique_key.encode()).hexdigest()[:16]
+
+            if entry_hash in existing_hashes:
+                continue
+
+            try:
+                # Store the single finding as parsed_findings
+                self.db.create_svs_review(
+                    stage_run_id=stage_run_id,
+                    review_type="during_run",
+                    model_used=self.config.svs.agent_model or "unknown",
+                    prompt_hash=entry_hash,
+                    decision=decision,
+                    parsed_findings=json.dumps([entry]),
+                    response_text=entry.get("summary"),
+                    reviewed_at=timestamp or datetime.now().isoformat(),
+                    duration_ms=0,
+                )
+            except Exception as e:
+                logger.debug(f"Failed to sync during-run finding to svs_reviews: {e}")
 
     def _build_docker_image(self, workspace: str, version: str, profile_name: str | None = None) -> str:
         """Build Docker image for this run.

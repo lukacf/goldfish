@@ -41,10 +41,11 @@ PUBLIC_BASE_IMAGE_GPU = "nvcr.io/nvidia/pytorch:24.01-py3"
 FALLBACK_BASE_IMAGE = "python:3.11-slim"
 
 # Custom registry images (requires artifact_registry in goldfish.yaml)
-# These include the full CUDA toolkit with nvrtc for Flash Attention support
+# GPU: CUDA 12.8 + PyTorch 2.9.1 + FlashAttention-3 (pre-built wheels)
+# CPU: PyTorch 2.9.1 + standard ML stack
 BASE_IMAGE_CPU = "goldfish-base-cpu"
 BASE_IMAGE_GPU = "goldfish-base-gpu"
-BASE_IMAGE_VERSION = "v3"
+BASE_IMAGE_VERSION = "v5"
 
 
 # Built-in resource profiles optimized for ML workloads
