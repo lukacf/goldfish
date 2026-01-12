@@ -749,6 +749,25 @@ class GitLayer:
         stdout, _ = self._run_git("rev-parse", branch)
         return stdout.strip()
 
+    def is_ancestor(self, potential_ancestor: str, descendant: str) -> bool:
+        """Check if one commit is an ancestor of another.
+
+        Uses `git merge-base --is-ancestor` which returns exit code 0 if true.
+
+        Args:
+            potential_ancestor: SHA that might be an ancestor
+            descendant: SHA that might be a descendant
+
+        Returns:
+            True if potential_ancestor is an ancestor of (or equal to) descendant
+        """
+        try:
+            self._run_git("merge-base", "--is-ancestor", potential_ancestor, descendant)
+            return True
+        except GoldfishError:
+            # Exit code 1 means not an ancestor, which is a normal case
+            return False
+
     def copy_mount_workspace(self, workspace_name: str, slot_path: Path) -> dict:
         """Copy workspace branch content to slot directory.
 
@@ -975,14 +994,29 @@ class GitLayer:
 
         metadata = json.loads(metadata_file.read_text())
 
-        # 1. Check branch hasn't moved (reject divergence)
+        # 1. Check if branch moved - allow forward moves, reject true divergence
         current_branch_sha = self.get_head_sha_from_branch(branch)
-        if current_branch_sha != metadata["mounted_sha"]:
-            raise GoldfishError(
-                f"Workspace '{workspace_name}' diverged on remote.\n"
-                f"Branch moved from {metadata['mounted_sha'][:8]} to {current_branch_sha[:8]}.\n"
-                f"Options: rollback() or branch_workspace()"
-            )
+        mounted_sha = metadata["mounted_sha"]
+
+        if current_branch_sha != mounted_sha:
+            # Branch moved - check if it's a forward move (safe) or true divergence
+            if self.is_ancestor(mounted_sha, current_branch_sha):
+                # Forward move: mounted_sha is ancestor of current_branch_sha
+                # This is safe - the branch just advanced (e.g., from another session)
+                logger.info(
+                    f"Workspace '{workspace_name}' branch moved forward from "
+                    f"{mounted_sha[:8]} to {current_branch_sha[:8]}. Updating metadata."
+                )
+                # Update metadata to new branch position
+                metadata["mounted_sha"] = current_branch_sha
+                metadata_file.write_text(json.dumps(metadata, indent=2))
+            else:
+                # True divergence: branch was rewritten/rebased
+                raise GoldfishError(
+                    f"Workspace '{workspace_name}' diverged - not a forward move.\n"
+                    f"Branch moved from {mounted_sha[:8]} to {current_branch_sha[:8]}.\n"
+                    f"Options: rollback() or branch_workspace()"
+                )
 
         # 2. Sync files from slot to branch using a temporary worktree
         temp_worktree = self.dev_repo / ".goldfish" / "tmp-sync" / workspace_name
