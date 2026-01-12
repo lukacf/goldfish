@@ -1096,6 +1096,47 @@ class TestOrphanCleanupWithPreemption:
 
         assert row["status"] == StageRunStatus.RUNNING  # Still running, not touched
 
+    def test_orphan_cleanup_skips_on_gcloud_error(self, test_db):
+        """Orphan cleanup should not mark runs failed when gcloud list errors."""
+        from goldfish.models import StageRunStatus
+
+        daemon = GoldfishDaemon(Path("/tmp/fake"))
+        daemon._db = test_db
+
+        # Create a mock config with GCE settings
+        mock_config = MagicMock()
+        mock_config.gce = MagicMock()
+        mock_config.gce.effective_project_id = "test-project"
+        daemon.config = mock_config
+
+        # Create workspace and version for foreign key constraints
+        self._create_workspace_and_version(test_db, "ws1", "v1")
+
+        # Insert a running GCE stage run (started > 20 minutes ago)
+        with test_db._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, backend_type, backend_handle, started_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '-30 minutes'))
+                """,
+                ("stage-gcloud-error", "ws1", "v1", "train", StageRunStatus.RUNNING, "gce", "stage-gcloud-error"),
+            )
+
+        # Mock gcloud list to return error (non-zero return code)
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="", stderr="PERMISSION_DENIED", returncode=1)
+
+            daemon._check_orphaned_instances()
+
+        # Verify the run was NOT marked as failed
+        with test_db._conn() as conn:
+            row = conn.execute(
+                "SELECT status FROM stage_runs WHERE id = ?",
+                ("stage-gcloud-error",),
+            ).fetchone()
+
+        assert row["status"] == StageRunStatus.RUNNING
+
     def test_orphan_cleanup_skips_without_gce_config(self):
         """Orphan cleanup does nothing when GCE not configured."""
         daemon = GoldfishDaemon(Path("/tmp/fake"))
