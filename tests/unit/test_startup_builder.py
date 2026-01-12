@@ -235,6 +235,27 @@ def test_build_startup_script_basic_structure():
     assert "docker pull test-image:latest" in script
 
 
+def test_build_startup_script_docker_pull_failure_diagnostics():
+    """Docker pull failure diagnostics should be non-fatal and explicit."""
+    script = build_startup_script(
+        bucket="test-bucket",
+        bucket_prefix="",
+        run_path="runs/test-run",
+        image="test-image:latest",
+        entrypoint="/bin/bash",
+        env_map={},
+    )
+
+    # Must log a distinct failure stage for debugging
+    assert 'log_stage "docker_pull_failed"' in script
+    # Diagnostics must not exit the script prematurely under set -euo pipefail
+    assert "set +e" in script
+    assert "set -e" in script
+    assert "docker info 2>&1 | head -20" in script
+    # Fail fast after diagnostics so the run is marked failed
+    assert "exit 1" in script
+
+
 def test_build_startup_script_environment_escaping():
     """Test that environment variables are properly escaped with shlex.quote."""
     dangerous_value = "'; whoami; echo '"
