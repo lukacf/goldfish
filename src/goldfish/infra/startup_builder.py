@@ -621,18 +621,28 @@ def metadata_syncer_section(sync_interval: int = 1) -> str:
 # === METADATA SYNCER (Overdrive on-demand sync) ===
 METADATA_SYNC_INTERVAL={sync_interval}
 METADATA_SIGNAL_URL="http://metadata.google.internal/computeMetadata/v1/instance/attributes/goldfish"
+METADATA_SYNCER_STARTED=0
 
 start_metadata_syncer() {{
+    # Guard against multiple syncers (e.g., if startup script runs twice)
+    if [[ "$METADATA_SYNCER_STARTED" == "1" ]]; then
+        echo "Metadata syncer already started, skipping"
+        return
+    fi
+    METADATA_SYNCER_STARTED=1
+
     (
         set +e
         LAST_ACK=""
         LAST_SEEN=""
         while true; do
-            SIG_JSON=$(curl -sf -H "Metadata-Flavor: Google" "$METADATA_SIGNAL_URL" || true)
+            SIG_JSON=$(curl -sf -H "Metadata-Flavor: Google" "$METADATA_SIGNAL_URL" 2>/dev/null || true)
             if [[ -n "$SIG_JSON" ]]; then
-                CMD=$(printf "%s" "$SIG_JSON" | sed -n 's/.*"command"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
-                REQ_ID=$(printf "%s" "$SIG_JSON" | sed -n 's/.*"request_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+                # Extract command and request_id, trimming whitespace
+                CMD=$(echo "$SIG_JSON" | grep -o '"command"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"command"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/' | tr -d '[:space:]')
+                REQ_ID=$(echo "$SIG_JSON" | grep -o '"request_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"request_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/' | tr -d '[:space:]')
                 if [[ "$CMD" == "sync" && -n "$REQ_ID" && "$REQ_ID" != "$LAST_SEEN" ]]; then
+                    echo "SYNCER: Processing sync request $REQ_ID (last_seen=$LAST_SEEN)"
                     LAST_SEEN="$REQ_ID"
                     # Set ACK FIRST to tell dev side we received the signal
                     # This allows dev side to start polling GCS while we upload
@@ -645,6 +655,7 @@ start_metadata_syncer() {{
                     fi
                     # THEN upload files - dev side can poll for these
                     sync_final_logs || true
+                    echo "SYNCER: Completed sync request $REQ_ID"
                 fi
             fi
             sleep "$METADATA_SYNC_INTERVAL"
