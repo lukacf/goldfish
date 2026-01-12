@@ -2436,6 +2436,12 @@ echo "Stage completed successfully"
                 if not row:
                     return status
 
+                # Don't apply not_found timeout during build/launch phases
+                # Instance doesn't exist yet - Cloud Build may still be running
+                progress = row.get("progress")
+                if progress in (StageRunProgress.BUILD, StageRunProgress.LAUNCH):
+                    return status
+
                 not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
                 started_at = row.get("started_at")
                 elapsed = float(not_found_timeout)
