@@ -416,7 +416,7 @@ CREATE INDEX IF NOT EXISTS idx_version_tags_version ON workspace_version_tags(wo
 CREATE TABLE IF NOT EXISTS docker_builds (
     id TEXT PRIMARY KEY,              -- "build-{uuid8}"
     image_type TEXT NOT NULL,         -- "cpu" or "gpu"
-    target TEXT NOT NULL,             -- "base" (goldfish-base-*) or "project" ({project}-*)
+    target TEXT NOT NULL,             -- "base" (goldfish-base-*), "project" ({project}-*), or "workspace"
     backend TEXT NOT NULL,            -- "local" or "cloud"
     cloud_build_id TEXT,              -- GCP Cloud Build operation ID (if backend=cloud)
     status TEXT NOT NULL,             -- "pending", "building", "completed", "failed", "cancelled"
@@ -426,9 +426,38 @@ CREATE TABLE IF NOT EXISTS docker_builds (
     completed_at TEXT,                -- ISO timestamp
     error TEXT,                       -- Error message if failed
     logs_uri TEXT,                    -- GCS path to logs (Cloud Build only)
+    workspace_name TEXT,              -- For workspace builds (NULL for base/project images)
+    version TEXT,                     -- Workspace version (NULL for base/project images)
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_docker_builds_status ON docker_builds(status);
 CREATE INDEX IF NOT EXISTS idx_docker_builds_backend ON docker_builds(backend);
 CREATE INDEX IF NOT EXISTS idx_docker_builds_started ON docker_builds(started_at);
+CREATE INDEX IF NOT EXISTS idx_docker_builds_workspace ON docker_builds(workspace_name, version);
+
+
+-- =============================================================================
+-- Database Backups
+-- =============================================================================
+
+-- Backup history (tracks database backups with tiered retention)
+-- Tiers: event (24h), daily (7d), weekly (30d), monthly (365d)
+CREATE TABLE IF NOT EXISTS backup_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    backup_id TEXT NOT NULL UNIQUE,       -- UUID "backup-{uuid8}"
+    tier TEXT NOT NULL,                   -- 'event', 'daily', 'weekly', 'monthly'
+    trigger TEXT NOT NULL,                -- 'run', 'save_version', 'create_workspace', 'manual', etc.
+    trigger_details_json TEXT,            -- JSON: workspace, version, run_id, etc.
+    gcs_path TEXT NOT NULL,               -- GCS path to backup file
+    size_bytes INTEGER,                   -- Compressed size
+    created_at TEXT NOT NULL,             -- When backup was created
+    expires_at TEXT NOT NULL,             -- When backup should be cleaned up
+    deleted_at TEXT,                      -- When backup was deleted (NULL = still exists)
+    CHECK(tier IN ('event', 'daily', 'weekly', 'monthly'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_backup_history_tier ON backup_history(tier);
+CREATE INDEX IF NOT EXISTS idx_backup_history_created ON backup_history(created_at);
+CREATE INDEX IF NOT EXISTS idx_backup_history_expires ON backup_history(expires_at);
+CREATE INDEX IF NOT EXISTS idx_backup_history_deleted ON backup_history(deleted_at);

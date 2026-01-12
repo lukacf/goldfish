@@ -318,3 +318,140 @@ class TestDeleteDockerBuild:
         """delete_docker_build should return False for unknown build."""
         result = test_db.delete_docker_build("build-00000000")
         assert result is False
+
+
+class TestWorkspaceBuilds:
+    """Tests for workspace-related Docker build features."""
+
+    def test_insert_workspace_build(self, test_db):
+        """insert_docker_build should store workspace_name and version."""
+        build_id = "build-ws123456"
+        test_db.insert_docker_build(
+            build_id=build_id,
+            image_type="gpu",
+            target="workspace",
+            backend="cloud",
+            started_at=datetime.now(UTC).isoformat(),
+            workspace_name="baseline_lstm",
+            version="v5",
+        )
+
+        result = test_db.get_docker_build(build_id)
+        assert result is not None
+        assert result["target"] == "workspace"
+        assert result["workspace_name"] == "baseline_lstm"
+        assert result["version"] == "v5"
+
+    def test_insert_base_build_has_null_workspace(self, test_db):
+        """Base builds should have NULL workspace_name and version."""
+        build_id = "build-base1234"
+        test_db.insert_docker_build(
+            build_id=build_id,
+            image_type="gpu",
+            target="base",
+            backend="local",
+            started_at=datetime.now(UTC).isoformat(),
+        )
+
+        result = test_db.get_docker_build(build_id)
+        assert result is not None
+        assert result["workspace_name"] is None
+        assert result["version"] is None
+
+    def test_get_docker_build_returns_workspace_fields(self, test_db):
+        """get_docker_build should include workspace_name and version fields."""
+        build_id = "build-wsfield1"
+        test_db.insert_docker_build(
+            build_id=build_id,
+            image_type="gpu",
+            target="workspace",
+            backend="cloud",
+            started_at=datetime.now(UTC).isoformat(),
+            workspace_name="test_ws",
+            version="v10",
+        )
+
+        result = test_db.get_docker_build(build_id)
+        assert result is not None
+        # Check new fields exist
+        assert "workspace_name" in result
+        assert "version" in result
+        assert result["workspace_name"] == "test_ws"
+        assert result["version"] == "v10"
+
+    def test_get_docker_build_by_workspace(self, test_db):
+        """get_docker_build_by_workspace should find build by workspace+version."""
+        build_id = "build-bylookup"
+        test_db.insert_docker_build(
+            build_id=build_id,
+            image_type="gpu",
+            target="workspace",
+            backend="cloud",
+            started_at=datetime.now(UTC).isoformat(),
+            workspace_name="my_workspace",
+            version="v3",
+        )
+
+        result = test_db.get_docker_build_by_workspace("my_workspace", "v3")
+        assert result is not None
+        assert result["id"] == build_id
+        assert result["workspace_name"] == "my_workspace"
+        assert result["version"] == "v3"
+
+    def test_get_docker_build_by_workspace_returns_none_if_not_found(self, test_db):
+        """get_docker_build_by_workspace should return None if not found."""
+        result = test_db.get_docker_build_by_workspace("nonexistent", "v1")
+        assert result is None
+
+    def test_get_docker_build_by_workspace_returns_latest(self, test_db):
+        """get_docker_build_by_workspace should return most recent build."""
+        now = datetime.now(UTC)
+        # Insert older build
+        test_db.insert_docker_build(
+            build_id="build-older001",
+            image_type="gpu",
+            target="workspace",
+            backend="cloud",
+            started_at=now.isoformat(),
+            workspace_name="multi_build",
+            version="v1",
+        )
+        test_db.update_docker_build_status("build-older001", "completed")
+
+        # Insert newer build for same workspace+version
+        from datetime import timedelta
+
+        later = (now + timedelta(hours=1)).isoformat()
+        test_db.insert_docker_build(
+            build_id="build-newer001",
+            image_type="gpu",
+            target="workspace",
+            backend="cloud",
+            started_at=later,
+            workspace_name="multi_build",
+            version="v1",
+        )
+
+        result = test_db.get_docker_build_by_workspace("multi_build", "v1")
+        assert result is not None
+        # Should return the newer build
+        assert result["id"] == "build-newer001"
+
+    def test_list_docker_builds_includes_workspace_fields(self, test_db):
+        """list_docker_builds should include workspace fields."""
+        test_db.insert_docker_build(
+            build_id="build-list-ws1",
+            image_type="gpu",
+            target="workspace",
+            backend="cloud",
+            started_at=datetime.now(UTC).isoformat(),
+            workspace_name="list_test_ws",
+            version="v2",
+        )
+
+        result = test_db.list_docker_builds()
+        assert len(result) == 1
+        assert "workspace_name" in result[0]
+        assert "version" in result[0]
+        assert result[0]["workspace_name"] == "list_test_ws"
+        assert result[0]["version"] == "v2"

@@ -90,6 +90,11 @@ class CloudBuildConfig(BaseModel):
     timeout_minutes: int = 60  # Build timeout
     disk_size_gb: int = 200  # GPU images are large
 
+    # FlashAttention-3 wheel from GCS (for GPU base image builds)
+    # Pre-built wheel avoids 2+ hour compile time during Docker build
+    # Example: "gs://bucket/wheels/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl"
+    fa3_wheel_gcs: str | None = None
+
 
 class DockerConfig(BaseModel):
     """Docker image customization configuration.

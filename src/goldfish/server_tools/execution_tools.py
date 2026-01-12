@@ -35,6 +35,7 @@ from goldfish.server_core import (
     _get_workspace_manager,
     mcp,
 )
+from goldfish.server_tools.backup_tools import trigger_backup
 from goldfish.utils import parse_datetime
 from goldfish.validation import (
     validate_stage_run_id,
@@ -251,6 +252,12 @@ def run(
         reason_structured=run_reason,
         async_mode=not wait,
         skip_review=skip_review,
+    )
+
+    # Trigger automatic backup after starting run
+    trigger_backup(
+        "run",
+        {"workspace": workspace_name, "stages": stages or ["all"]},
     )
 
     return result

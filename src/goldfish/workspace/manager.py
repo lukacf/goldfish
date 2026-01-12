@@ -817,12 +817,37 @@ class WorkspaceManager:
         commit_msg = reason or f"Auto-version for {stage_name}"
         git_sha = self.git.sync_slot_to_branch(slot_path, workspace, commit_msg)
 
-        # 2. Get next version number and create tag
+        # 2. Check if a version with this SHA already exists (idempotent retry)
+        # This handles retries after failed stage launches - same code = same version
+        existing_version = self.db.get_version_by_sha(workspace, git_sha)
+        if existing_version:
+            # Reuse existing version - code hasn't changed since last version
+            return existing_version["version"], git_sha
+
+        # 3. Get next version number and create tag
         next_version = self.db.get_next_version_number(workspace)
         git_tag = f"{workspace}-{next_version}"
-        self.git.create_tag(workspace, git_tag, git_sha)
 
-        # 3. Record version in database
+        try:
+            self.git.create_tag(workspace, git_tag, git_sha)
+        except GoldfishError as e:
+            if "already exists" in str(e).lower():
+                # Tag exists but DB record doesn't (orphaned tag from failed run)
+                # Check if tag points to the same SHA - if so, just record in DB
+                tag_sha = self.git.get_tag_sha(git_tag)
+                if tag_sha == git_sha:
+                    # Tag matches our SHA, just record in database
+                    pass  # Continue to database insert below
+                else:
+                    # Tag points to different SHA - this shouldn't happen normally
+                    # Increment version and retry
+                    next_version = f"v{int(next_version[1:]) + 1}"
+                    git_tag = f"{workspace}-{next_version}"
+                    self.git.create_tag(workspace, git_tag, git_sha)
+            else:
+                raise
+
+        # 4. Record version in database
         description = reason or f"Auto-version for {stage_name} run"
         self.db.create_version(
             workspace_name=workspace,
@@ -833,14 +858,14 @@ class WorkspaceManager:
             description=description,
         )
 
-        # 4. Update slot metadata to reflect synced state
+        # 5. Update slot metadata to reflect synced state
         metadata_file = slot_path / ".goldfish-mount"
         if metadata_file.exists():
             metadata = json.loads(metadata_file.read_text())
             metadata["mounted_sha"] = git_sha
             metadata_file.write_text(json.dumps(metadata, indent=2))
 
-        # 5. Record in audit log
+        # 6. Record in audit log
         self.db.log_audit(
             operation="sync_and_version",
             slot=slot,
@@ -849,7 +874,7 @@ class WorkspaceManager:
             details={"version": next_version, "git_sha": git_sha, "stage": stage_name},
         )
 
-        # 6. Update per-workspace STATE.md
+        # 7. Update per-workspace STATE.md
         self.refresh_workspace_state_md(slot_path, workspace, slot, event=f"Version {next_version} for {stage_name}")
 
         return next_version, git_sha

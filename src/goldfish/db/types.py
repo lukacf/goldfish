@@ -212,7 +212,7 @@ class DockerBuildRow(TypedDict):
 
     id: str  # "build-{uuid8}"
     image_type: str  # "cpu" or "gpu"
-    target: str  # "base" or "project"
+    target: str  # "base", "project", or "workspace"
     backend: str  # "local" or "cloud"
     cloud_build_id: str | None  # GCP Cloud Build operation ID (if backend=cloud)
     status: str  # "pending", "building", "completed", "failed", "cancelled"
@@ -222,4 +222,23 @@ class DockerBuildRow(TypedDict):
     completed_at: str | None  # ISO timestamp
     error: str | None  # Error message if failed
     logs_uri: str | None  # GCS path to logs (Cloud Build only)
+    workspace_name: str | None  # Workspace name (for workspace builds only)
+    version: str | None  # Workspace version (for workspace builds only)
     created_at: str
+
+
+class BackupRow(TypedDict):
+    """Row from the backup_history table.
+
+    Tracks database backups with tiered retention (GFS).
+    """
+
+    backup_id: str  # "backup-{uuid8}"
+    tier: str  # "event", "daily", "weekly", "monthly"
+    trigger: str  # "run", "save_version", "create_workspace", "manual", etc.
+    trigger_details_json: str | None  # JSON: workspace, version, run_id, etc.
+    gcs_path: str  # GCS path to backup file
+    size_bytes: int | None  # Compressed size
+    created_at: str  # When backup was created
+    expires_at: str  # When backup should be cleaned up
+    deleted_at: str | None  # When backup was deleted (NULL = still exists)

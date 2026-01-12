@@ -808,9 +808,27 @@ GCS_SVS_DURING_PATH="{gcs_svs_during_path}"
     # e.g., us-docker.pkg.dev/my-project/goldfish/image:v1
     registry_domain = image.split("/")[0] if "/" in image else ""
     if registry_domain and "." in registry_domain:
-        parts.append(f"gcloud auth configure-docker {registry_domain} --quiet || true")
+        # Use robust Docker auth that works on GCE instances with service accounts
+        # gcloud auth configure-docker may fail silently on some VM images
+        # Fallback to access token auth which is more reliable
+        parts.append(f"""
+# Configure Docker to pull from Artifact Registry
+if ! gcloud auth configure-docker {registry_domain} --quiet 2>/dev/null; then
+    echo "gcloud auth configure-docker failed, trying access token auth..."
+    gcloud auth print-access-token 2>/dev/null | docker login -u oauth2accesstoken --password-stdin https://{registry_domain} || echo "Docker login failed"
+fi
+""")
     parts.append('log_stage "docker_login"')
-    parts.append(f"docker pull {image} || true")
+    # Don't silently ignore pull failures - log them for debugging
+    parts.append(f"""
+if ! docker pull {image}; then
+    echo "ERROR: Failed to pull Docker image: {image}"
+    echo "Attempting to diagnose..."
+    docker info 2>&1 | head -20
+    echo "Docker config:"
+    cat ~/.docker/config.json 2>/dev/null || echo "No Docker config found"
+fi
+""")
     parts.append('log_stage "docker_pull"')
 
     # Pre-run commands
