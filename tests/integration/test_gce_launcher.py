@@ -188,10 +188,11 @@ def test_launch_with_goldfish_env_vars(mock_build_startup, mock_resource_launche
     mock_launcher.launch.assert_called_once()
 
 
+@patch("goldfish.infra.resource_launcher.wait_for_instance_ready")
 @patch("tempfile.NamedTemporaryFile")
 @patch("goldfish.infra.gce_launcher.run_gcloud")
 @patch("goldfish.infra.gce_launcher.build_startup_script")
-def test_launch_simple_no_gpu(mock_build_startup, mock_run_gcloud, mock_tempfile, launcher):
+def test_launch_simple_no_gpu(mock_build_startup, mock_run_gcloud, mock_tempfile, mock_wait, launcher):
     """Test simple launch without GPU."""
     # Mock temp file
     mock_temp = MagicMock()
@@ -203,6 +204,9 @@ def test_launch_simple_no_gpu(mock_build_startup, mock_run_gcloud, mock_tempfile
 
     # Mock gcloud success
     mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
+
+    # Mock wait_for_instance_ready (called after instance create)
+    mock_wait.return_value = None
 
     # Launch without capacity search (simple mode)
     result = launcher.launch_instance(
@@ -233,10 +237,11 @@ def test_launch_simple_no_gpu(mock_build_startup, mock_run_gcloud, mock_tempfile
     assert not any("--accelerator" in str(arg) for arg in gcloud_cmd)
 
 
+@patch("goldfish.infra.resource_launcher.wait_for_instance_ready")
 @patch("tempfile.NamedTemporaryFile")
 @patch("goldfish.infra.gce_launcher.run_gcloud")
 @patch("goldfish.infra.gce_launcher.build_startup_script")
-def test_launch_simple_with_gpu(mock_build_startup, mock_run_gcloud, mock_tempfile, launcher):
+def test_launch_simple_with_gpu(mock_build_startup, mock_run_gcloud, mock_tempfile, mock_wait, launcher):
     """Test simple launch with GPU."""
     # Mock temp file
     mock_temp = MagicMock()
@@ -248,6 +253,9 @@ def test_launch_simple_with_gpu(mock_build_startup, mock_run_gcloud, mock_tempfi
 
     # Mock gcloud success
     mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
+
+    # Mock wait_for_instance_ready (called after instance create)
+    mock_wait.return_value = None
 
     # Launch with GPU
     result = launcher.launch_instance(
