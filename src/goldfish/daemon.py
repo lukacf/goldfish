@@ -692,6 +692,13 @@ class GoldfishDaemon:
                 text=True,
                 timeout=30,
             )
+            if result.returncode != 0:
+                logger.warning(
+                    "Failed to list GCE instances (rc=%s): %s",
+                    result.returncode,
+                    (result.stderr or "").strip(),
+                )
+                return
             # Track all instances with their status
             # alive_instances: instances that exist and are not terminated/stopped
             # Key is instance name, value is (zone, status)
