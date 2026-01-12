@@ -1,11 +1,14 @@
 """Configuration loading for Goldfish."""
 
+import logging
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from goldfish.svs.config import SVSConfig
+
+logger = logging.getLogger(__name__)
 
 
 class StateMdConfig(BaseModel):
@@ -272,6 +275,33 @@ class GoldfishConfig(BaseModel):
     docker: DockerConfig = Field(default_factory=DockerConfig)
     svs: SVSConfig = Field(default_factory=SVSConfig)
     invariants: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_gce_config(self) -> "GoldfishConfig":
+        """Validate GCE configuration completeness.
+
+        Warns if GCE backend is enabled but zones aren't configured,
+        which will cause runtime errors when launching instances.
+        """
+        if self.jobs.backend == "gce":
+            if self.gce is None:
+                logger.warning(
+                    "jobs.backend is 'gce' but no gce config provided. "
+                    "GCE launches will fail. Add gce section to goldfish.yaml."
+                )
+            elif not self.gce.zones and not self.gce.region:
+                logger.warning(
+                    "GCE backend enabled but no zones configured. "
+                    "Add 'zones' to gce config in goldfish.yaml to specify "
+                    "which GCP zones to use for instance launches."
+                )
+            if self.gce and not self.gce.effective_artifact_registry:
+                logger.warning(
+                    "GCE backend enabled but no artifact_registry configured. "
+                    "GPU profiles require artifact_registry for Docker images. "
+                    "Add 'artifact_registry' to gce config in goldfish.yaml."
+                )
+        return self
 
     @classmethod
     def load(cls, project_root: Path) -> "GoldfishConfig":
