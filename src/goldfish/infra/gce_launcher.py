@@ -284,13 +284,24 @@ class GCELauncher:
         log_sync_interval = compute_config.get("log_sync_interval", 5)
 
         # Build startup script with proper orchestration and cost protection
+        # For GPU workloads, wrap the command to create libcuda.so symlink at runtime
+        # FA3 pre-built wheels expect libcuda.so but nvidia-container-toolkit only mounts libcuda.so.1
+        if gpu_count and gpu_count > 0:
+            docker_cmd = (
+                "-c '"
+                "ln -sf /usr/lib/x86_64-linux-gnu/libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so 2>/dev/null || true; "
+                "exec /entrypoint.sh'"
+            )
+        else:
+            docker_cmd = "/entrypoint.sh"
+
         startup_script = build_startup_script(
             bucket=bucket_name,
             bucket_prefix="",
             run_path=run_path,
             image=image_tag,
             entrypoint="/bin/bash",
-            cmd="/entrypoint.sh",
+            cmd=docker_cmd,
             env_map=env_map,
             mounts=[
                 ("/mnt/entrypoint.sh", "/entrypoint.sh"),
@@ -445,7 +456,23 @@ class GCELauncher:
             if self.project_id:
                 cmd.append(f"--project={self.project_id}")
 
-            run_gcloud(cmd)
+            # GPU instances (especially H100) can take 2-3 minutes to create
+            has_gpu = gpu_type and gpu_count > 0
+            instance_timeout = 180 if has_gpu else 60
+            run_gcloud(cmd, timeout=instance_timeout)
+
+            # Wait for instance to be fully ready (RUNNING state)
+            # This is required before metadata operations (set_signal) can succeed.
+            from goldfish.infra.resource_launcher import wait_for_instance_ready
+
+            wait_for_instance_ready(
+                instance_name=instance_name,
+                zone=zone,
+                project_id=self.project_id,
+                timeout_sec=120,  # 2 minutes for GPU instances
+                poll_interval=2.0,
+            )
+
             return instance_name
 
         finally:

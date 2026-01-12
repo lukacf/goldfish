@@ -30,6 +30,7 @@ from goldfish.server_core import (
     _get_workspace_manager,
     mcp,
 )
+from goldfish.server_tools.backup_tools import trigger_backup
 from goldfish.validation import (
     validate_slot_name,
     validate_version,
@@ -296,6 +297,9 @@ def create_workspace(name: str, goal: str, reason: str) -> CreateWorkspaceRespon
         # Persist the goal in the database
         db.set_workspace_goal(name, goal)
 
+        # Trigger automatic backup (high-value operation, bypasses rate limit)
+        trigger_backup("create_workspace", {"workspace": name})
+
         logger.info("create_workspace() succeeded", extra={"workspace": name})
         return result
     except Exception as e:
@@ -399,6 +403,15 @@ def save_version(slot: str, message: str) -> SaveVersionResponse:
 
     try:
         result = workspace_manager.save_version(slot, message)
+
+        # Trigger automatic backup (high-value operation, bypasses rate limit)
+        # Get workspace name from slot for backup details
+        workspace_name = workspace_manager.get_workspace_for_slot(slot)
+        trigger_backup(
+            "save_version",
+            {"slot": slot, "workspace": workspace_name, "version": result.version},
+        )
+
         logger.info("save_version() succeeded", extra={"slot": slot, "version": result.version})
         return result
     except Exception as e:

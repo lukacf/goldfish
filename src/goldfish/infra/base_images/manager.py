@@ -994,10 +994,16 @@ class BaseImageManager:
             registry_tag,
             "-f",
             dockerfile_path.name,
-            ".",
         ]
+
+        # Add FA3 wheel GCS path for GPU builds (downloads via Python SDK during build)
+        if image_type == "gpu" and cloud_config.fa3_wheel_gcs:
+            build_args.extend(["--build-arg", f"FA3_WHEEL_GCS={cloud_config.fa3_wheel_gcs}"])
+
         if no_cache:
             build_args.append("--no-cache")
+
+        build_args.append(".")
 
         cloudbuild_config = {
             "steps": [

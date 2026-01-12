@@ -385,6 +385,21 @@ class GitLayer:
         # Create tag in the dev repo (not in worktree)
         self._run_git("tag", tag_name, commit_sha, cwd=self.dev_repo)
 
+    def get_tag_sha(self, tag_name: str) -> str | None:
+        """Get the SHA that a tag points to.
+
+        Args:
+            tag_name: Name of the tag
+
+        Returns:
+            The SHA the tag points to, or None if tag doesn't exist
+        """
+        try:
+            stdout, _ = self._run_git("rev-parse", tag_name, cwd=self.dev_repo)
+            return stdout.strip()
+        except GoldfishError:
+            return None
+
     def get_latest_snapshot(self, slot_path: Path) -> str | None:
         """Get the most recent snapshot tag."""
         try:
@@ -1005,7 +1020,7 @@ class GitLayer:
             self._sync_directory(
                 src=slot_path,
                 dst=temp_worktree,
-                exclude=[".goldfish-mount", ".git", "__pycache__", "*.pyc", ".pytest_cache"],
+                exclude=[".goldfish-mount", "STATE.md", ".git", "__pycache__", "*.pyc", ".pytest_cache"],
             )
 
             # Commit in the worktree (this advances the branch)

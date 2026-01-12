@@ -11,6 +11,7 @@ from typing import Any, TypedDict, cast
 from goldfish.db.types import (
     ArtifactRow,
     AuditRow,
+    BackupRow,
     DockerBuildRow,
     FailurePatternRow,
     JobInputWithSource,
@@ -126,6 +127,10 @@ class Database:
             ],
             "svs_reviews": [
                 ("notified", "INTEGER DEFAULT 0"),  # 0 = not shown in dashboard, 1 = shown
+            ],
+            "docker_builds": [
+                ("workspace_name", "TEXT"),  # Workspace name (for workspace builds)
+                ("version", "TEXT"),  # Workspace version (for workspace builds)
             ],
         }
 
@@ -1241,6 +1246,30 @@ class Database:
                 WHERE workspace_name = ? AND version = ?
                 """,
                 (workspace_name, version),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_version_by_sha(self, workspace_name: str, git_sha: str) -> dict | None:
+        """Get a version by its git SHA.
+
+        Used to check if a version with this SHA already exists (idempotent retry).
+
+        Args:
+            workspace_name: Workspace name
+            git_sha: Git commit SHA
+
+        Returns:
+            Version dict with version, git_tag, git_sha, etc. if found
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM workspace_versions
+                WHERE workspace_name = ? AND git_sha = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (workspace_name, git_sha),
             ).fetchone()
             return dict(row) if row else None
 
@@ -4290,27 +4319,32 @@ class Database:
         image_tag: str | None = None,
         registry_tag: str | None = None,
         cloud_build_id: str | None = None,
+        workspace_name: str | None = None,
+        version: str | None = None,
     ) -> None:
         """Insert a new Docker build record.
 
         Args:
             build_id: Unique build ID (e.g., "build-abc12345")
             image_type: "cpu" or "gpu"
-            target: "base" or "project"
+            target: "base", "project", or "workspace"
             backend: "local" or "cloud"
             started_at: ISO timestamp
             image_tag: Local Docker tag
             registry_tag: Full registry tag
             cloud_build_id: GCP Cloud Build operation ID (if backend=cloud)
+            workspace_name: Workspace name (for workspace builds only)
+            version: Workspace version (for workspace builds only)
         """
         with self._conn() as conn:
             conn.execute(
                 """
                 INSERT INTO docker_builds (
                     id, image_type, target, backend, cloud_build_id,
-                    status, image_tag, registry_tag, started_at
+                    status, image_tag, registry_tag, started_at,
+                    workspace_name, version
                 )
-                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
                 """,
                 (
                     build_id,
@@ -4321,6 +4355,8 @@ class Database:
                     image_tag,
                     registry_tag,
                     started_at,
+                    workspace_name,
+                    version,
                 ),
             )
 
@@ -4340,11 +4376,40 @@ class Database:
                 """
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
-                       completed_at, error, logs_uri, created_at
+                       completed_at, error, logs_uri, workspace_name,
+                       version, created_at
                 FROM docker_builds
                 WHERE id = ?
                 """,
                 (build_id,),
+            ).fetchone()
+            return cast(DockerBuildRow, dict(row)) if row else None
+
+    def get_docker_build_by_workspace(self, workspace_name: str, version: str) -> "DockerBuildRow | None":
+        """Get the most recent Docker build for a workspace+version.
+
+        Args:
+            workspace_name: Workspace name
+            version: Workspace version
+
+        Returns:
+            DockerBuildRow if found, None otherwise
+        """
+        from goldfish.db.types import DockerBuildRow
+
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT id, image_type, target, backend, cloud_build_id,
+                       status, image_tag, registry_tag, started_at,
+                       completed_at, error, logs_uri, workspace_name,
+                       version, created_at
+                FROM docker_builds
+                WHERE workspace_name = ? AND version = ?
+                ORDER BY started_at DESC
+                LIMIT 1
+                """,
+                (workspace_name, version),
             ).fetchone()
             return cast(DockerBuildRow, dict(row)) if row else None
 
@@ -4453,7 +4518,8 @@ class Database:
                 f"""
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
-                       completed_at, error, logs_uri, created_at
+                       completed_at, error, logs_uri, workspace_name,
+                       version, created_at
                 FROM docker_builds
                 WHERE {where_clause}
                 ORDER BY started_at DESC
@@ -4476,7 +4542,8 @@ class Database:
                 """
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
-                       completed_at, error, logs_uri, created_at
+                       completed_at, error, logs_uri, workspace_name,
+                       version, created_at
                 FROM docker_builds
                 WHERE status IN ('pending', 'building')
                 ORDER BY started_at DESC
@@ -4499,3 +4566,221 @@ class Database:
                 (build_id,),
             )
             return cursor.rowcount > 0
+
+    # =========================================================================
+    # Backup History CRUD
+    # =========================================================================
+
+    def insert_backup(
+        self,
+        backup_id: str,
+        tier: str,
+        trigger: str,
+        gcs_path: str,
+        created_at: str,
+        expires_at: str,
+        trigger_details: dict | None = None,
+        size_bytes: int | None = None,
+    ) -> None:
+        """Insert a new backup record.
+
+        Args:
+            backup_id: Unique backup ID (e.g., "backup-abc12345")
+            tier: Backup tier ("event", "daily", "weekly", "monthly")
+            trigger: What triggered the backup ("run", "save_version", etc.)
+            gcs_path: GCS path to the backup file
+            created_at: ISO timestamp when backup was created
+            expires_at: ISO timestamp when backup expires
+            trigger_details: Optional dict with workspace, version, run_id, etc.
+            size_bytes: Compressed backup size in bytes
+        """
+        import json
+
+        trigger_details_json = json.dumps(trigger_details) if trigger_details else None
+
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO backup_history (
+                    backup_id, tier, trigger, trigger_details_json,
+                    gcs_path, size_bytes, created_at, expires_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    backup_id,
+                    tier,
+                    trigger,
+                    trigger_details_json,
+                    gcs_path,
+                    size_bytes,
+                    created_at,
+                    expires_at,
+                ),
+            )
+
+    def get_backup(self, backup_id: str) -> "BackupRow | None":
+        """Get a backup by ID.
+
+        Args:
+            backup_id: Backup ID to fetch
+
+        Returns:
+            BackupRow if found, None otherwise
+        """
+        from goldfish.db.types import BackupRow
+
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT backup_id, tier, trigger, trigger_details_json,
+                       gcs_path, size_bytes, created_at, expires_at, deleted_at
+                FROM backup_history
+                WHERE backup_id = ?
+                """,
+                (backup_id,),
+            ).fetchone()
+            return cast(BackupRow, dict(row)) if row else None
+
+    def list_backups(
+        self,
+        tier: str | None = None,
+        include_deleted: bool = False,
+        limit: int = 50,
+    ) -> list["BackupRow"]:
+        """List backups with optional filters.
+
+        Args:
+            tier: Filter by tier ("event", "daily", "weekly", "monthly")
+            include_deleted: Include soft-deleted backups
+            limit: Maximum results to return
+
+        Returns:
+            List of BackupRow, ordered by created_at descending
+        """
+        from goldfish.db.types import BackupRow
+
+        conditions = []
+        params: list = []
+
+        if tier is not None:
+            conditions.append("tier = ?")
+            params.append(tier)
+
+        if not include_deleted:
+            conditions.append("deleted_at IS NULL")
+
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+        params.append(limit)
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT backup_id, tier, trigger, trigger_details_json,
+                       gcs_path, size_bytes, created_at, expires_at, deleted_at
+                FROM backup_history
+                WHERE {where_clause}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+            return [cast(BackupRow, dict(row)) for row in rows]
+
+    def mark_backup_deleted(self, backup_id: str) -> bool:
+        """Mark a backup as deleted (soft delete).
+
+        Args:
+            backup_id: Backup ID to mark as deleted
+
+        Returns:
+            True if updated, False if backup not found
+        """
+        from datetime import UTC, datetime
+
+        with self._conn() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE backup_history
+                SET deleted_at = ?
+                WHERE backup_id = ? AND deleted_at IS NULL
+                """,
+                (datetime.now(UTC).isoformat(), backup_id),
+            )
+            return cursor.rowcount > 0
+
+    def get_last_backup(self, tier: str | None = None) -> "BackupRow | None":
+        """Get the most recent backup.
+
+        Args:
+            tier: Optional filter by tier
+
+        Returns:
+            Most recent BackupRow if found, None otherwise
+        """
+        from goldfish.db.types import BackupRow
+
+        conditions = ["deleted_at IS NULL"]
+        params: list = []
+
+        if tier is not None:
+            conditions.append("tier = ?")
+            params.append(tier)
+
+        where_clause = " AND ".join(conditions)
+
+        with self._conn() as conn:
+            row = conn.execute(
+                f"""
+                SELECT backup_id, tier, trigger, trigger_details_json,
+                       gcs_path, size_bytes, created_at, expires_at, deleted_at
+                FROM backup_history
+                WHERE {where_clause}
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+            return cast(BackupRow, dict(row)) if row else None
+
+    def get_expired_backups(self) -> list["BackupRow"]:
+        """Get all expired but not-yet-deleted backups.
+
+        Returns:
+            List of expired BackupRow
+        """
+        from datetime import UTC, datetime
+
+        from goldfish.db.types import BackupRow
+
+        now = datetime.now(UTC).isoformat()
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT backup_id, tier, trigger, trigger_details_json,
+                       gcs_path, size_bytes, created_at, expires_at, deleted_at
+                FROM backup_history
+                WHERE expires_at < ? AND deleted_at IS NULL
+                ORDER BY created_at ASC
+                """,
+                (now,),
+            ).fetchall()
+            return [cast(BackupRow, dict(row)) for row in rows]
+
+    def count_backups_by_tier(self) -> dict[str, int]:
+        """Count active backups grouped by tier.
+
+        Returns:
+            Dict mapping tier name to count
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT tier, COUNT(*) as count
+                FROM backup_history
+                WHERE deleted_at IS NULL
+                GROUP BY tier
+                """,
+            ).fetchall()
+            return {row["tier"]: row["count"] for row in rows}
