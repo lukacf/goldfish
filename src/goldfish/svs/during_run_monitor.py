@@ -290,7 +290,9 @@ class DuringRunMonitor(threading.Thread):
             if not parsed:
                 # Only warn on first failure, then debug to reduce spam
                 log_fn = logger.warning if self.consecutive_failures == 0 else logger.debug
-                log_fn("Failed to parse JSON from AI review")
+                # Include response preview in warning for debugging
+                preview = result.response_text[:200] if result.response_text else "(empty)"
+                log_fn(f"Failed to parse JSON from AI review. Response preview: {preview!r}")
                 return False
 
             self._save_findings(parsed)
@@ -417,7 +419,22 @@ Respond ONLY with a JSON block fenced with ```json:
         return prompt
 
     def _parse_json_response(self, text: str) -> dict[str, Any] | None:
-        """Extract and parse JSON from fenced blocks or Claude CLI wrapper."""
+        """Extract and parse JSON from fenced blocks or Claude CLI wrapper.
+
+        Handles multiple formats:
+        1. Claude CLI JSON wrapper: {"type":"result","result":"..."}
+        2. Markdown fenced JSON: ```json {...} ```
+        3. Raw JSON object: {...}
+        4. JSON embedded in text: Look for {...} patterns
+
+        Args:
+            text: Raw response text from the AI agent
+
+        Returns:
+            Parsed dict if successful, None otherwise
+        """
+        original_text = text  # Keep for debug logging
+
         # First, check if this is a Claude CLI wrapper response
         # Format: {"type":"result","subtype":"success","result":"```json\n{...}\n```"}
         try:
@@ -427,18 +444,30 @@ Respond ONLY with a JSON block fenced with ```json:
                 result_text = wrapper.get("result", "")
                 if result_text:
                     text = result_text
+                    logger.debug("Extracted text from Claude CLI wrapper")
         except json.JSONDecodeError:
             pass  # Not a wrapper, continue with original text
 
-        # Look for JSON in markdown fences
-        match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
-        if match:
-            try:
-                data = json.loads(match.group(1))
-                if isinstance(data, dict):
-                    return data
-            except json.JSONDecodeError:
-                pass
+        # Look for JSON in markdown fences (flexible patterns)
+        # Match ```json, ``` json, ```JSON, etc.
+        fence_patterns = [
+            r"```json\s*(.*?)\s*```",  # Standard ```json
+            r"```\s*json\s*(.*?)\s*```",  # ``` json with space
+            r"```JSON\s*(.*?)\s*```",  # ```JSON uppercase
+            r"```\s*({\s*\".*?)\s*```",  # ``` followed by JSON object
+        ]
+
+        for pattern in fence_patterns:
+            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+            if match:
+                try:
+                    json_str = match.group(1).strip()
+                    data = json.loads(json_str)
+                    if isinstance(data, dict):
+                        return data
+                except json.JSONDecodeError as e:
+                    logger.debug(f"Fenced JSON parse failed: {e}")
+                    continue
 
         # Try raw JSON if no fence
         try:
@@ -447,6 +476,22 @@ Respond ONLY with a JSON block fenced with ```json:
                 return data
         except json.JSONDecodeError:
             pass
+
+        # Last resort: find JSON object embedded in text
+        # Look for { ... } that could be valid JSON
+        json_match = re.search(r"(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})", text, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group(1))
+                if isinstance(data, dict):
+                    logger.debug("Found embedded JSON object in text")
+                    return data
+            except json.JSONDecodeError:
+                pass
+
+        # Log the first 500 chars of the failed response for debugging
+        preview = original_text[:500] if len(original_text) > 500 else original_text
+        logger.debug(f"Failed to parse JSON from response: {preview!r}")
 
         return None
 
