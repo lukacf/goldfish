@@ -87,3 +87,78 @@ def test_refresh_status_once_not_found_failed(test_db, test_config, tmp_path, mo
 
     assert status == StageRunStatus.FAILED
     executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageRunStatus.FAILED)
+
+
+def test_refresh_status_once_not_found_during_build_phase(test_db, test_config, tmp_path, monkeypatch):
+    """Instance not_found during BUILD phase should NOT trigger timeout.
+
+    When Cloud Build is running, the instance doesn't exist yet. The refresh
+    should return not_found without marking the run as failed, regardless of
+    elapsed time.
+    """
+    run_id = _create_running_stage_run(test_db)
+    # Set started_at to 1 hour ago - would normally trigger timeout
+    started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    with test_db._conn() as conn:
+        conn.execute(
+            "UPDATE stage_runs SET started_at=?, progress=? WHERE id=?",
+            (started_at, StageRunProgress.BUILD, run_id),
+        )
+
+    config = test_config.model_copy(deep=True)
+    config.jobs.backend = "gce"
+    executor = StageExecutor(
+        db=test_db,
+        config=config,
+        workspace_manager=MagicMock(),
+        pipeline_manager=MagicMock(),
+        project_root=tmp_path,
+        dataset_registry=None,
+    )
+
+    executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
+    executor._finalize_stage_run = MagicMock()
+    monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
+
+    status = executor.refresh_status_once(run_id)
+
+    # Should return not_found without triggering timeout/finalization
+    assert status == "not_found"
+    executor._finalize_stage_run.assert_not_called()
+
+
+def test_refresh_status_once_not_found_during_launch_phase(test_db, test_config, tmp_path, monkeypatch):
+    """Instance not_found during LAUNCH phase should NOT trigger timeout.
+
+    When instance is being created, it may not be visible in GCE API yet.
+    The refresh should return not_found without marking the run as failed.
+    """
+    run_id = _create_running_stage_run(test_db)
+    # Set started_at to 1 hour ago - would normally trigger timeout
+    started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    with test_db._conn() as conn:
+        conn.execute(
+            "UPDATE stage_runs SET started_at=?, progress=? WHERE id=?",
+            (started_at, StageRunProgress.LAUNCH, run_id),
+        )
+
+    config = test_config.model_copy(deep=True)
+    config.jobs.backend = "gce"
+    executor = StageExecutor(
+        db=test_db,
+        config=config,
+        workspace_manager=MagicMock(),
+        pipeline_manager=MagicMock(),
+        project_root=tmp_path,
+        dataset_registry=None,
+    )
+
+    executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
+    executor._finalize_stage_run = MagicMock()
+    monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
+
+    status = executor.refresh_status_once(run_id)
+
+    # Should return not_found without triggering timeout/finalization
+    assert status == "not_found"
+    executor._finalize_stage_run.assert_not_called()
