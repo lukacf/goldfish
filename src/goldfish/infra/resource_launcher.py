@@ -203,6 +203,73 @@ def cleanup_disk(disk_name: str, zone: str) -> None:
     )
 
 
+def wait_for_instance_ready(
+    instance_name: str,
+    zone: str,
+    project_id: str | None = None,
+    timeout_sec: int = 120,
+    poll_interval: float = 2.0,
+) -> None:
+    """Wait for GCE instance to reach RUNNING state.
+
+    After `gcloud compute instances create` returns, the instance may still be in
+    PROVISIONING or STAGING state. This function polls until the instance is
+    fully in RUNNING state, which is required before metadata operations can succeed.
+
+    Args:
+        instance_name: Instance name
+        zone: GCE zone
+        project_id: Optional GCP project ID
+        timeout_sec: Maximum time to wait (default 120s for GPU instances)
+        poll_interval: Time between polls (default 2s)
+
+    Raises:
+        GoldfishError: If instance doesn't reach RUNNING within timeout
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    deadline = time.time() + timeout_sec
+    last_status = None
+
+    while time.time() < deadline:
+        cmd = [
+            "gcloud",
+            "compute",
+            "instances",
+            "describe",
+            instance_name,
+            f"--zone={zone}",
+            "--format=value(status)",
+        ]
+        if project_id:
+            cmd.append(f"--project={project_id}")
+
+        result = run_gcloud(cmd, check=False, project_id=project_id, timeout=30)
+
+        if result.returncode == 0:
+            status = result.stdout.strip()
+            if status != last_status:
+                logger.info("Instance %s status: %s", instance_name, status)
+                last_status = status
+
+            if status == "RUNNING":
+                logger.info("Instance %s is ready", instance_name)
+                return
+            elif status in ("TERMINATED", "STOPPED", "SUSPENDED"):
+                raise GoldfishError(f"Instance {instance_name} reached unexpected state: {status}")
+            # PROVISIONING, STAGING - keep waiting
+        else:
+            # Instance might not exist yet in API - keep waiting
+            logger.debug("Instance %s not yet queryable: %s", instance_name, result.stderr)
+
+        time.sleep(poll_interval)
+
+    raise GoldfishError(
+        f"Instance {instance_name} did not reach RUNNING state within {timeout_sec}s " f"(last status: {last_status})"
+    )
+
+
 class ResourceLauncher:
     """Capacity-aware launcher driven by resource catalog.
 
@@ -511,9 +578,11 @@ class ResourceLauncher:
             cmd.append(f"--project={self.project_id}")
 
         # Launch instance
+        # GPU instances (especially H100) can take 2-3 minutes to create
+        instance_timeout = 180 if has_gpu else 60
         start = time.time()
         try:
-            run_gcloud(cmd, allow_capacity=True, project_id=self.project_id)
+            run_gcloud(cmd, allow_capacity=True, project_id=self.project_id, timeout=instance_timeout)
         except CapacityError:
             if scratch_attached and disk_name:
                 cleanup_disk(disk_name, zone)
@@ -524,6 +593,26 @@ class ResourceLauncher:
             raise
 
         timings["instance_create_sec"] = round(time.time() - start, 2)
+
+        # Wait for instance to be fully ready (RUNNING state)
+        # This is required before metadata operations (set_signal) can succeed.
+        # GPU instances can take 30-60+ seconds to provision after the API returns.
+        ready_start = time.time()
+        try:
+            wait_for_instance_ready(
+                instance_name=instance_name,
+                zone=zone,
+                project_id=self.project_id,
+                timeout_sec=120,  # 2 minutes for GPU instances
+                poll_interval=2.0,
+            )
+        except GoldfishError:
+            # If we can't verify readiness, clean up and re-raise
+            if scratch_attached and disk_name:
+                cleanup_disk(disk_name, zone)
+            raise
+
+        timings["instance_ready_sec"] = round(time.time() - ready_start, 2)
 
         return (
             LaunchSelection(resource=resource["name"], zone=zone, preemptible=preemptible),

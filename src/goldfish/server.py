@@ -254,6 +254,12 @@ def _init_server(project_root: Path) -> None:
 # Tools are organized in separate modules for maintainability
 # These imports register tools with the FastMCP instance AND export them for tests
 
+from goldfish.server_tools.backup_tools import (  # noqa: F401, E402
+    cleanup_backups,
+    create_backup,
+    get_backup_status,
+    list_backups,
+)
 from goldfish.server_tools.data_tools import (  # noqa: F401, E402
     manage_sources,
     promote_artifact,

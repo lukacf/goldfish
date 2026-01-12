@@ -94,7 +94,7 @@ class StageExecutor:
         self.dev_repo = config.get_dev_repo_path(project_root)
 
         # Initialize execution infrastructure
-        self.docker_builder = DockerBuilder(config)
+        self.docker_builder = DockerBuilder(config, db=db)
 
         # Initialize local executor with configurable resource limits
         # Config values override defaults; None means use LocalExecutor default
@@ -1780,17 +1780,11 @@ class StageExecutor:
             profile = self.profile_resolver.resolve(profile_name)
             base_image = resolve_base_image(profile, self.artifact_registry)
 
-        # Build image using DockerBuilder
-        local_image_tag = self.docker_builder.build_image(
-            workspace_dir=workspace_dir,
-            workspace_name=workspace,
-            version=version,
-            use_cache=True,
-            base_image=base_image,
-        )
-
-        # If using GCE backend, push to Artifact Registry
+        # Determine build backend
         backend = self.config.jobs.backend
+
+        # GCE backend: Use Cloud Build (builds AND pushes in one step)
+        # This ensures linux-native wheels (flash-attn, etc.) install correctly
         if backend == "gce":
             if not self.artifact_registry:
                 raise GoldfishError(
@@ -1798,24 +1792,27 @@ class StageExecutor:
                     "Set gce.artifact_registry in goldfish.yaml or gce.project_id for auto-generation."
                 )
 
-            # Use pre-computed artifact_registry
-            registry_url = self.artifact_registry
-
-            # Push image to Artifact Registry
-            registry_image_tag = self.docker_builder.push_image(
-                local_tag=local_image_tag,
-                registry_url=registry_url,
+            # Cloud Build builds directly on linux/amd64 and pushes to Artifact Registry
+            registry_image_tag = self.docker_builder.build_image(
+                workspace_dir=workspace_dir,
                 workspace_name=workspace,
                 version=version,
+                use_cache=True,
+                base_image=base_image,
+                backend="cloud",
+                wait=True,  # Stage execution needs image before launching
             )
-
-            # Cleanup local image after successful push to prevent bloat
-            try:
-                self.docker_builder.remove_image(local_image_tag)
-            except Exception:
-                pass
-
             return registry_image_tag
+
+        # Local backend: Build locally
+        local_image_tag = self.docker_builder.build_image(
+            workspace_dir=workspace_dir,
+            workspace_name=workspace,
+            version=version,
+            use_cache=True,
+            base_image=base_image,
+            backend="local",
+        )
 
         return local_image_tag
 
@@ -2104,7 +2101,9 @@ echo "Stage completed successfully"
                 machine_type = profile["machine_type"]
                 gpu_info = profile.get("gpu", {})
                 if gpu_info.get("type") != "none":
-                    gpu_type = gpu_info.get("accelerator")
+                    # Use type (e.g., "h100") not accelerator for filtering
+                    # gce_launcher filters by gpu.type, not accelerator
+                    gpu_type = gpu_info.get("type")
                     gpu_count = gpu_info.get("count", 0)
                 zones = profile.get("zones")
                 use_capacity_search = True

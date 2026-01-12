@@ -284,3 +284,58 @@ class TestProvenanceGuard:
         )
         assert version_audit is not None
         assert version_audit["workspace"] == "audit-ws"
+
+    def test_sync_and_version_idempotent_retry(self, provenance_setup):
+        """sync_and_version should reuse existing version if code hasn't changed.
+
+        This handles retries after failed stage launches - if the code is the same,
+        return the same version instead of creating a new one.
+        """
+        manager = provenance_setup["manager"]
+        db = provenance_setup["db"]
+
+        # Create and mount workspace
+        manager.create_workspace("retry-ws", "Retry test workspace", "Creating for retry test")
+        manager.mount("retry-ws", "w1", "Mount for retry test")
+
+        # First sync_and_version creates a version
+        version1, sha1 = manager.sync_and_version("w1", "train", "First run")
+        assert version1 == "v1"
+
+        # Second sync_and_version with no changes should return the same version
+        version2, sha2 = manager.sync_and_version("w1", "train", "Retry after failure")
+        assert version2 == "v1"  # Same version, not v2
+        assert sha2 == sha1  # Same SHA
+
+        # Verify only one version was created
+        versions = db.list_versions("retry-ws")
+        assert len(versions) == 1
+        assert versions[0]["version"] == "v1"
+
+    def test_sync_and_version_new_version_after_changes(self, provenance_setup):
+        """sync_and_version should create new version after code changes."""
+        manager = provenance_setup["manager"]
+        db = provenance_setup["db"]
+        workspaces_dir = provenance_setup["workspaces_dir"]
+
+        # Create and mount workspace
+        manager.create_workspace("changes-ws", "Changes test workspace", "Creating for changes test")
+        manager.mount("changes-ws", "w1", "Mount for changes test")
+
+        slot_path = workspaces_dir / "w1"
+
+        # First sync_and_version
+        version1, sha1 = manager.sync_and_version("w1", "train", "First run")
+        assert version1 == "v1"
+
+        # Make a change
+        (slot_path / "new_file.txt").write_text("New content")
+
+        # Second sync_and_version should create a new version
+        version2, sha2 = manager.sync_and_version("w1", "train", "After changes")
+        assert version2 == "v2"
+        assert sha2 != sha1
+
+        # Verify two versions were created
+        versions = db.list_versions("changes-ws")
+        assert len(versions) == 2
