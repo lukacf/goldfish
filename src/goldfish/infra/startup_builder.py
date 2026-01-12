@@ -833,11 +833,15 @@ fi
     # Don't silently ignore pull failures - log them for debugging
     parts.append(f"""
 if ! docker pull {image}; then
-    echo "ERROR: Failed to pull Docker image: {image}"
-    echo "Attempting to diagnose..."
-    docker info 2>&1 | head -20
-    echo "Docker config:"
-    cat ~/.docker/config.json 2>/dev/null || echo "No Docker config found"
+    echo "ERROR: Failed to pull Docker image: {image}" | tee -a /tmp/stderr.log
+    echo "Attempting to diagnose..." | tee -a /tmp/stderr.log
+    set +e
+    docker info 2>&1 | head -20 | tee -a /tmp/stderr.log
+    echo "Docker config:" | tee -a /tmp/stderr.log
+    cat ~/.docker/config.json 2>/dev/null | tee -a /tmp/stderr.log || echo "No Docker config found" | tee -a /tmp/stderr.log
+    set -e
+    log_stage "docker_pull_failed" || true
+    exit 1
 fi
 """)
     parts.append('log_stage "docker_pull"')
