@@ -137,6 +137,147 @@ def test_parse_json_response(mock_outputs_dir, config):
     assert monitor._parse_json_response("not json") is None
 
 
+class TestParseJsonResponseEdgeCases:
+    """Regression tests for JSON parsing edge cases."""
+
+    def test_claude_cli_wrapper_format(self, mock_outputs_dir, config):
+        """Should extract JSON from Claude CLI wrapper format."""
+        monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+        # Claude CLI JSON output format
+        wrapper = {
+            "type": "result",
+            "subtype": "success",
+            "result": '```json\n{"findings": [], "request_stop": false}\n```',
+        }
+        text = json.dumps(wrapper)
+        parsed = monitor._parse_json_response(text)
+        assert parsed == {"findings": [], "request_stop": False}
+
+    def test_claude_cli_wrapper_without_fence(self, mock_outputs_dir, config):
+        """Should handle wrapper with plain text result (no JSON fence)."""
+        monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+        wrapper = {
+            "type": "result",
+            "subtype": "success",
+            "result": '{"findings": [{"check": "test", "severity": "WARN", "summary": "issue"}]}',
+        }
+        text = json.dumps(wrapper)
+        parsed = monitor._parse_json_response(text)
+        assert parsed is not None
+        assert parsed["findings"][0]["check"] == "test"
+
+    def test_uppercase_json_fence(self, mock_outputs_dir, config):
+        """Should handle uppercase JSON fence."""
+        monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+        text = '```JSON\n{"key": "uppercase"}\n```'
+        parsed = monitor._parse_json_response(text)
+        assert parsed == {"key": "uppercase"}
+
+    def test_json_fence_with_space(self, mock_outputs_dir, config):
+        """Should handle ``` json with space."""
+        monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+        text = '``` json\n{"key": "space"}\n```'
+        parsed = monitor._parse_json_response(text)
+        assert parsed == {"key": "space"}
+
+    def test_plain_fence_with_json_object(self, mock_outputs_dir, config):
+        """Should handle plain fence containing JSON object."""
+        monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+        text = '```\n{"key": "plain"}\n```'
+        parsed = monitor._parse_json_response(text)
+        assert parsed == {"key": "plain"}
+
+    def test_json_embedded_in_prose(self, mock_outputs_dir, config):
+        """Should extract JSON embedded in natural language response."""
+        monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+        text = """Based on my analysis, here is the result:
+
+{"findings": [{"check": "loss_spike", "severity": "WARN", "summary": "Loss increased"}], "request_stop": false}
+
+The training appears to be proceeding normally."""
+
+        parsed = monitor._parse_json_response(text)
+        assert parsed is not None
+        assert len(parsed["findings"]) == 1
+        assert parsed["findings"][0]["check"] == "loss_spike"
+
+    def test_multiline_json_in_fence(self, mock_outputs_dir, config):
+        """Should handle pretty-printed multiline JSON in fence."""
+        monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+        text = """```json
+{
+    "findings": [
+        {
+            "check": "gradient_norm",
+            "severity": "ERROR",
+            "summary": "Gradient explosion detected"
+        }
+    ],
+    "request_stop": true,
+    "stop_reason": "Critical training failure"
+}
+```"""
+        parsed = monitor._parse_json_response(text)
+        assert parsed is not None
+        assert parsed["request_stop"] is True
+        assert parsed["stop_reason"] == "Critical training failure"
+
+    def test_json_with_nested_objects(self, mock_outputs_dir, config):
+        """Should handle JSON with nested objects."""
+        monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+        text = '```json\n{"outer": {"inner": {"deep": "value"}}}\n```'
+        parsed = monitor._parse_json_response(text)
+        assert parsed == {"outer": {"inner": {"deep": "value"}}}
+
+    def test_empty_findings_array(self, mock_outputs_dir, config):
+        """Should handle empty findings array (no issues found)."""
+        monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+        text = '```json\n{"findings": [], "request_stop": false}\n```'
+        parsed = monitor._parse_json_response(text)
+        assert parsed == {"findings": [], "request_stop": False}
+
+    def test_returns_none_for_no_json(self, mock_outputs_dir, config):
+        """Should return None when no JSON found."""
+        monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+        text = "This is just plain text with no JSON at all."
+        parsed = monitor._parse_json_response(text)
+        assert parsed is None
+
+    def test_returns_none_for_invalid_json(self, mock_outputs_dir, config):
+        """Should return None for malformed JSON."""
+        monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+        text = '```json\n{"key": "missing quote}\n```'
+        parsed = monitor._parse_json_response(text)
+        assert parsed is None
+
+    def test_returns_none_for_array(self, mock_outputs_dir, config):
+        """Should return None for JSON arrays (expect object)."""
+        monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+        text = "```json\n[1, 2, 3]\n```"
+        parsed = monitor._parse_json_response(text)
+        assert parsed is None
+
+    def test_whitespace_around_fence(self, mock_outputs_dir, config):
+        """Should handle extra whitespace around fences."""
+        monitor = DuringRunMonitor(config, mock_outputs_dir)
+
+        text = '  ```json  \n  {"key": "whitespace"}  \n  ```  '
+        parsed = monitor._parse_json_response(text)
+        assert parsed == {"key": "whitespace"}
+
+
 def test_build_prompt_includes_config_override(mock_outputs_dir, config):
     """Prompt should include config_override when present in context."""
     monitor = DuringRunMonitor(config, mock_outputs_dir)
