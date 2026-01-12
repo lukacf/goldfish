@@ -153,9 +153,10 @@ def test_resource_launcher_init_filters_resources():
     assert launcher.ordered_resources[1]["name"] == "cpu-resource"
 
 
+@patch("goldfish.infra.resource_launcher.wait_for_instance_ready")
 @patch("goldfish.infra.resource_launcher.run_gcloud")
 @patch("goldfish.infra.resource_launcher.tempfile.NamedTemporaryFile")
-def test_resource_launcher_launch_success(mock_tempfile, mock_run_gcloud):
+def test_resource_launcher_launch_success(mock_tempfile, mock_run_gcloud, mock_wait):
     """Test successful launch with capacity search."""
     # Mock temp file for startup script
     mock_temp = MagicMock()
@@ -164,6 +165,9 @@ def test_resource_launcher_launch_success(mock_tempfile, mock_run_gcloud):
 
     # Mock successful gcloud commands
     mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
+
+    # Mock wait_for_instance_ready (called after instance create)
+    mock_wait.return_value = None
 
     resources = [
         {
@@ -193,14 +197,18 @@ def test_resource_launcher_launch_success(mock_tempfile, mock_run_gcloud):
     assert "instance_create_sec" in result.timings
 
 
+@patch("goldfish.infra.resource_launcher.wait_for_instance_ready")
 @patch("goldfish.infra.resource_launcher.run_gcloud")
 @patch("goldfish.infra.resource_launcher.tempfile.NamedTemporaryFile")
-def test_resource_launcher_launch_sets_service_account(mock_tempfile, mock_run_gcloud):
+def test_resource_launcher_launch_sets_service_account(mock_tempfile, mock_run_gcloud, mock_wait):
     """Should set service account on instance creation when configured."""
     mock_temp = MagicMock()
     mock_temp.name = "/tmp/startup.sh"
     mock_tempfile.return_value.__enter__.return_value = mock_temp
     mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
+
+    # Mock wait_for_instance_ready (called after instance create)
+    mock_wait.return_value = None
 
     resources = [
         {
@@ -229,24 +237,29 @@ def test_resource_launcher_launch_sets_service_account(mock_tempfile, mock_run_g
     assert "--service-account=svc@test.iam.gserviceaccount.com" in cmd
 
 
+@patch("goldfish.infra.resource_launcher.wait_for_instance_ready")
 @patch("goldfish.infra.resource_launcher.run_gcloud")
 @patch("goldfish.infra.resource_launcher.tempfile.NamedTemporaryFile")
 @patch("goldfish.infra.resource_launcher.time.time")
-def test_resource_launcher_retry_on_capacity_error(mock_time, mock_tempfile, mock_run_gcloud):
+def test_resource_launcher_retry_on_capacity_error(mock_time, mock_tempfile, mock_run_gcloud, mock_wait):
     """Test that launcher retries on capacity errors."""
     # Mock temp file
     mock_temp = MagicMock()
     mock_temp.name = "/tmp/startup.sh"
     mock_tempfile.return_value.__enter__.return_value = mock_temp
 
-    # Mock time for backoff testing
-    mock_time.side_effect = [0, 1, 2, 3, 4, 5, 6]  # Incremental time
+    # Mock time for backoff testing - need enough values for all time.time() calls
+    # including the ones in _attempt_launch after successful create
+    mock_time.side_effect = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
     # First call raises CapacityError, second succeeds
     mock_run_gcloud.side_effect = [
         CapacityError("zone_resource_pool_exhausted"),
         Mock(returncode=0, stdout="", stderr=""),
     ]
+
+    # Mock wait_for_instance_ready (called after successful instance create)
+    mock_wait.return_value = None
 
     resources = [
         {
