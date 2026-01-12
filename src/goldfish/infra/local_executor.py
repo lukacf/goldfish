@@ -1,12 +1,15 @@
 """Local Docker container execution for Goldfish stages."""
 
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
 
 from goldfish.errors import GoldfishError
 from goldfish.models import StageRunStatus
+
+logger = logging.getLogger(__name__)
 
 
 class LocalExecutor:
@@ -97,6 +100,10 @@ class LocalExecutor:
             for env_name, env_value in goldfish_env.items():
                 # SECURITY: Validate env var name (alphanumeric + underscore only)
                 if not env_name.replace("_", "").isalnum():
+                    logger.warning(
+                        f"Skipping invalid env var name '{env_name}' - "
+                        "must contain only alphanumeric characters and underscores"
+                    )
                     continue
                 docker_cmd.extend(["-e", f"{env_name}={env_value}"])
 
@@ -114,6 +121,10 @@ class LocalExecutor:
             for env_name, env_value in stage_config["environment"].items():
                 # SECURITY: Validate env var name (alphanumeric + underscore only)
                 if not env_name.replace("_", "").isalnum():
+                    logger.warning(
+                        f"Skipping invalid env var name '{env_name}' in stage config - "
+                        "must contain only alphanumeric characters and underscores"
+                    )
                     continue
                 docker_cmd.extend(["-e", f"{env_name}={env_value}"])
 
