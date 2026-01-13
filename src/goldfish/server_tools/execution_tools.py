@@ -298,6 +298,8 @@ def run(
         reason_structured=run_reason,
         async_mode=not wait,
         skip_review=skip_review,
+        results_spec=results_spec,
+        experiment_group=experiment_group,
     )
 
     # Store results_spec for each run if provided

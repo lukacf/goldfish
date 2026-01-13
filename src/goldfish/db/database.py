@@ -120,6 +120,8 @@ class Database:
             ],
             "pipeline_runs": [
                 ("reason_json", "TEXT"),  # Structured RunReason for async pipelines
+                ("results_spec_json", "TEXT"),  # Results spec for async runs
+                ("experiment_group", "TEXT"),  # Experiment group for async runs
             ],
             "workspace_versions": [
                 ("pruned_at", "TEXT"),  # When version was pruned
@@ -435,6 +437,64 @@ class Database:
                     """
                 )
                 new_version = 4
+
+            # Version 5: Backfill experiment_records and run_results for existing stage_runs
+            # Required for DBs created before the experiment model was added
+            if current_version < 5:
+                from goldfish.experiment_model.records import generate_record_id
+
+                # Find stage_runs without experiment_records
+                orphaned = conn.execute(
+                    """
+                    SELECT sr.id, sr.workspace_name, sr.version, sr.status
+                    FROM stage_runs sr
+                    LEFT JOIN experiment_records er ON er.stage_run_id = sr.id
+                    WHERE er.record_id IS NULL
+                    """
+                ).fetchall()
+
+                for row in orphaned:
+                    stage_run_id = row["id"]
+                    workspace_name = row["workspace_name"]
+                    version = row["version"]
+                    status = row["status"]
+
+                    # Generate ULID for record_id
+                    record_id = generate_record_id()
+
+                    # Determine infra_outcome from status
+                    # completed, failed, canceled -> terminal states
+                    # running, pending -> non-terminal
+                    infra_outcome_map = {
+                        "completed": "completed",
+                        "failed": "crashed",
+                        "canceled": "canceled",
+                        "running": "running",
+                        "pending": "pending",
+                    }
+                    infra_outcome = infra_outcome_map.get(status, "unknown")
+
+                    # Create experiment_record
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO experiment_records
+                        (record_id, workspace_name, type, stage_run_id, version, created_at)
+                        VALUES (?, ?, 'run', ?, ?, datetime('now'))
+                        """,
+                        (record_id, workspace_name, stage_run_id, version),
+                    )
+
+                    # Create run_results with status=missing (needs finalization)
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO run_results
+                        (stage_run_id, record_id, results_status, infra_outcome, ml_outcome)
+                        VALUES (?, ?, 'missing', ?, 'unknown')
+                        """,
+                        (stage_run_id, record_id, infra_outcome),
+                    )
+
+                new_version = 5
 
             # Bump schema version if needed
             if new_version != current_version:

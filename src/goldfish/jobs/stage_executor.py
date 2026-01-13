@@ -200,6 +200,7 @@ class StageExecutor:
         wait: bool = False,
         stage_run_id: str | None = None,
         skip_review: bool = False,
+        experiment_group: str | None = None,
     ) -> StageRunInfo:
         """Run a single pipeline stage.
 
@@ -216,6 +217,7 @@ class StageExecutor:
             stage_run_id: Pre-created stage_run_id (from pipeline queue). If provided,
                          updates existing record; if None, creates new one.
             skip_review: Skip pre-run review (default False)
+            experiment_group: Optional experiment group for filtering
 
         Flow:
             1. Auto-version workspace (git tag)
@@ -311,6 +313,7 @@ class StageExecutor:
                 config=stage_config,
                 preflight_errors=preflight_errors,
                 preflight_warnings=preflight_warnings,
+                experiment_group=experiment_group,
             )
 
         # 3. Resolve inputs
@@ -377,6 +380,7 @@ class StageExecutor:
             preflight_warnings=preflight_warnings,
             preflight_errors=preflight_errors,
             create_experiment_record=stage_run_precreated,  # Only for pre-queued runs
+            experiment_group=experiment_group,
         )
         # Use queued record_id if we didn't create one earlier (pre-queued case)
         if record_id is None:
@@ -862,6 +866,7 @@ class StageExecutor:
         config: dict | None,
         preflight_errors: list[str] | None = None,
         preflight_warnings: list[str] | None = None,
+        experiment_group: str | None = None,
     ) -> str:
         """Create stage run record in database with input lineage tracking.
 
@@ -911,6 +916,7 @@ class StageExecutor:
             workspace_name=workspace,
             version=version,
             stage_run_id=stage_run_id,
+            experiment_group=experiment_group,
         )
 
         return record_id
@@ -929,6 +935,7 @@ class StageExecutor:
         preflight_warnings: list[str] | None = None,
         preflight_errors: list[str] | None = None,
         create_experiment_record: bool = True,
+        experiment_group: str | None = None,
     ) -> str | None:
         """Update a queued stage run record with resolved values.
 
@@ -949,6 +956,7 @@ class StageExecutor:
             preflight_errors: Validation errors
             create_experiment_record: Whether to create an experiment record (True for
                 pipeline-queued runs that don't already have one)
+            experiment_group: Optional experiment group for filtering
 
         Returns:
             The generated experiment record_id (ULID) if created, None otherwise
@@ -1012,6 +1020,7 @@ class StageExecutor:
                 workspace_name=workspace,
                 version=version,
                 stage_run_id=stage_run_id,
+                experiment_group=experiment_group,
             )
             return record_id
 
