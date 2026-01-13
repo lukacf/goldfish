@@ -385,3 +385,100 @@ class ExperimentRecordManager:
 
         result: dict[str, Any] = json.loads(row["spec_json"])
         return result
+
+    def extract_auto_results(self, stage_run_id: str) -> dict[str, Any] | None:
+        """Extract auto results from metrics summary.
+
+        Reads the results_spec and looks up corresponding metrics
+        to build the auto-extracted results.
+
+        Args:
+            stage_run_id: The stage run ID
+
+        Returns:
+            Auto results dict or None if no spec exists
+        """
+        # Get the spec to know which metrics to extract
+        spec = self.get_results_spec_parsed(stage_run_id)
+        if spec is None:
+            return None
+
+        # Get all metrics for this run
+        with self.db._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT name, last_value, min_value, max_value
+                FROM run_metrics_summary
+                WHERE stage_run_id = ?
+                """,
+                (stage_run_id,),
+            ).fetchall()
+
+        metrics = {row["name"]: row for row in rows}
+
+        # Build auto results
+        primary_metric = spec["primary_metric"]
+        primary_data = metrics.get(primary_metric)
+
+        auto_results: dict[str, Any] = {
+            "primary_metric": primary_metric,
+            "value": primary_data["last_value"] if primary_data else None,
+            "direction": spec["direction"],
+            "dataset_split": spec["dataset_split"],
+        }
+
+        # Add secondary metrics if specified
+        secondary_metrics = spec.get("secondary_metrics", [])
+        if secondary_metrics:
+            secondary: dict[str, float | None] = {}
+            for metric_name in secondary_metrics:
+                metric_data = metrics.get(metric_name)
+                secondary[metric_name] = metric_data["last_value"] if metric_data else None
+            auto_results["secondary"] = secondary
+
+        return auto_results
+
+    def update_auto_results(
+        self,
+        stage_run_id: str,
+        auto_results: dict[str, Any],
+        run_status: str,
+    ) -> None:
+        """Update run_results with auto-extracted data.
+
+        Args:
+            stage_run_id: The stage run ID
+            auto_results: The auto-extracted results
+            run_status: The run status for deriving infra_outcome
+        """
+        results_auto_json = json.dumps(auto_results)
+        infra_outcome = self.derive_infra_outcome(run_status)
+
+        with self.db._conn() as conn:
+            conn.execute(
+                """
+                UPDATE run_results
+                SET results_auto = ?,
+                    results_status = ?,
+                    infra_outcome = ?
+                WHERE stage_run_id = ?
+                """,
+                (results_auto_json, "auto", infra_outcome, stage_run_id),
+            )
+
+    def derive_infra_outcome(self, run_status: str) -> str:
+        """Derive infra_outcome from run status.
+
+        Args:
+            run_status: The run status string
+
+        Returns:
+            The infra_outcome value
+        """
+        status_mapping = {
+            "completed": "completed",
+            "failed": "crashed",
+            "preempted": "preempted",
+            "canceled": "canceled",
+        }
+        return status_mapping.get(run_status, "unknown")
