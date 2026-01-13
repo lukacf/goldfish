@@ -81,7 +81,7 @@ class TestFinalizeRunIntegration:
             "tolerance": 0.01,
             "context": "Testing preservation of auto results.",
         }
-        manager.store_results_spec("stage-preserve", record_id, spec)
+        manager.save_results_spec("stage-preserve", record_id, spec)
         _add_metric(test_db, "stage-preserve", "accuracy", 0.70)
 
         # Extract and update auto results

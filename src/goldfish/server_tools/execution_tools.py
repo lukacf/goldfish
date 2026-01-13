@@ -129,6 +129,8 @@ def run(
     config_override: dict | None = None,
     inputs_override: dict | None = None,
     reason: str | dict | None = None,
+    results_spec: dict | None = None,
+    experiment_group: str | None = None,
     wait: bool = False,
     dry_run: bool = False,
     skip_review: bool = False,
@@ -155,6 +157,11 @@ def run(
                     "min_result": "Minimum bar for success",
                     "goal": "Best case outcome"
                 }
+        results_spec: Expected results specification (recommended). Dict with:
+            Required: primary_metric, direction, min_value, goal_value,
+                     dataset_split, tolerance, context (verbose description)
+            Optional: secondary_metrics, baseline_run, failure_threshold, known_caveats
+        experiment_group: Optional grouping for filtering and summary
         wait: False (default) returns immediately; True blocks until completion
         dry_run: If True, validate everything without launching. Returns what would
                  run and any validation errors found.
@@ -171,12 +178,19 @@ def run(
         - validation_errors: List of any issues found
         - warnings: Non-fatal issues
 
+    Note:
+        This tool enforces a strict finalization gate: if there are terminal runs
+        (completed, preempted, crashed, canceled) with unfinalized results in the
+        workspace, the run will be blocked. Use finalize_run() to finalize pending
+        results before starting new runs.
+
     Examples:
         run("w1")                           # Run all stages
         run("w1", stages=["train"])         # Run single stage
         run("w1", stages=["preprocess", "train", "evaluate"])  # Run specific stages
         run("w1", reason={"description": "Test new architecture", "hypothesis": "Will improve accuracy"})
         run("w1", dry_run=True)             # Validate without launching
+        run("w1", results_spec={"primary_metric": "accuracy", "direction": "maximize", ...})
     """
     config = _get_config()
     workspace_manager = _get_workspace_manager()
@@ -224,6 +238,33 @@ def run(
     if not workspace_name:
         workspace_name = workspace
 
+    # Check finalization gate - block if there are unfinalized terminal runs
+    from goldfish.experiment_model.records import ExperimentRecordManager
+    from goldfish.experiment_model.schemas import (
+        InvalidResultsSpecError,
+        validate_results_spec,
+    )
+
+    db = _get_db()
+    exp_manager = ExperimentRecordManager(db)
+    gate_result = exp_manager.check_finalization_gate(workspace_name)
+
+    if gate_result["blocked"]:
+        unfinalized = gate_result.get("unfinalized_runs", [])
+        run_ids = [r.get("stage_run_id", r.get("record_id")) for r in unfinalized[:3]]
+        raise GoldfishError(
+            f"Finalization gate blocked: {len(unfinalized)} unfinalized terminal run(s) "
+            f"in workspace '{workspace_name}'. Use finalize_run() to finalize results "
+            f"before starting new runs. Pending runs: {', '.join(run_ids)}" + ("..." if len(unfinalized) > 3 else "")
+        )
+
+    # Validate results_spec if provided
+    if results_spec is not None:
+        try:
+            validate_results_spec(results_spec)
+        except InvalidResultsSpecError as e:
+            raise GoldfishError(f"Invalid results_spec: {e.message}") from e
+
     # Dry run mode: validate without launching
     if dry_run:
         from goldfish.pipeline.validator import validate_pipeline_run
@@ -253,6 +294,17 @@ def run(
         async_mode=not wait,
         skip_review=skip_review,
     )
+
+    # Store results_spec for each run if provided
+    if results_spec is not None and "runs" in result:
+        for run_info in result["runs"]:
+            stage_run_id = run_info.get("run_id")
+            record_id = run_info.get("record_id")
+            if stage_run_id and record_id:
+                try:
+                    exp_manager.save_results_spec(stage_run_id, record_id, results_spec)
+                except Exception as e:
+                    logger.warning("Failed to save results_spec for %s: %s", stage_run_id, e)
 
     # Trigger automatic backup after starting run
     trigger_backup(

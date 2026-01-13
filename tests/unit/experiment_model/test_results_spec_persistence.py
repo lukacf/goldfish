@@ -18,7 +18,7 @@ from goldfish.experiment_model.schemas import InvalidResultsSpecError
 class TestStoreResultsSpec:
     """Tests for storing run_results_spec."""
 
-    def test_store_results_spec(self) -> None:
+    def test_save_results_spec(self) -> None:
         """Can store a valid results_spec for a stage run."""
         mock_db = MagicMock()
         mock_conn = MagicMock()
@@ -37,7 +37,7 @@ class TestStoreResultsSpec:
             "context": "Testing model accuracy on validation set.",
         }
 
-        manager.store_results_spec(
+        manager.save_results_spec(
             stage_run_id="stage-abc123",
             record_id="01HXYZ1234567890ABCDEFGH",
             spec=spec,
@@ -48,7 +48,7 @@ class TestStoreResultsSpec:
         call_args = mock_conn.execute.call_args
         assert "INSERT INTO run_results_spec" in call_args[0][0]
 
-    def test_store_results_spec_validates_spec(self) -> None:
+    def test_save_results_spec_validates_spec(self) -> None:
         """Storing an invalid spec raises InvalidResultsSpecError."""
         mock_db = MagicMock()
         mock_db._conn.return_value.__enter__ = MagicMock(return_value=MagicMock())
@@ -62,13 +62,13 @@ class TestStoreResultsSpec:
         }
 
         with pytest.raises(InvalidResultsSpecError):
-            manager.store_results_spec(
+            manager.save_results_spec(
                 stage_run_id="stage-abc123",
                 record_id="01HXYZ1234567890ABCDEFGH",
                 spec=invalid_spec,
             )
 
-    def test_store_results_spec_serializes_to_json(self) -> None:
+    def test_save_results_spec_serializes_to_json(self) -> None:
         """The spec is serialized to JSON before storage."""
         mock_db = MagicMock()
         mock_conn = MagicMock()
@@ -87,7 +87,7 @@ class TestStoreResultsSpec:
             "context": "Testing model accuracy on validation set.",
         }
 
-        manager.store_results_spec(
+        manager.save_results_spec(
             stage_run_id="stage-abc123",
             record_id="01HXYZ1234567890ABCDEFGH",
             spec=spec,

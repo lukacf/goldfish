@@ -49,10 +49,11 @@ def generate_record_id() -> str:
     Returns:
         A new ULID-like string.
     """
-    # Get millisecond timestamp
-    timestamp_ms = int(time.time() * 1000)
+    # Get millisecond timestamp and mask to 48 bits per ULID spec
+    timestamp_ms = int(time.time() * 1000) & 0xFFFFFFFFFFFF  # 48-bit mask
 
-    # Encode timestamp into 10 base32 chars (50 bits capacity, ~48 bits used for current timestamps)
+    # Encode timestamp into 10 base32 chars (48 bits = 10 chars at 5 bits each, with
+    # the most significant char limited to 3 bits, values 0-7)
     timestamp_chars = []
     for _ in range(10):
         timestamp_chars.append(_CROCKFORD_ALPHABET[timestamp_ms & 0x1F])
@@ -299,13 +300,13 @@ class ExperimentRecordManager:
 
         return cast(RunResultsRow, dict(row))
 
-    def store_results_spec(
+    def save_results_spec(
         self,
         stage_run_id: str,
         record_id: str,
         spec: dict[str, Any],
     ) -> None:
-        """Store a results_spec for a run.
+        """Save a results_spec for a run.
 
         Validates the spec before storage.
 
@@ -491,16 +492,20 @@ class ExperimentRecordManager:
         stage_run_id_or_record_id: str,
         results: dict[str, Any],
         finalized_by: str = "ml_claude",
-    ) -> None:
+    ) -> dict[str, Any]:
         """Finalize a run with authoritative ML results.
 
         This sets the results_final, results_status=finalized, and ml_outcome.
         Preserves results_auto unchanged.
+        Computes and stores comparison block (vs_previous, vs_best).
 
         Args:
             stage_run_id_or_record_id: Either a stage_run_id or record_id
             results: The finalize results dict
             finalized_by: Who is finalizing (default: ml_claude)
+
+        Returns:
+            Dict with record_id, stage_run_id, results_status, and comparison
 
         Raises:
             InvalidFinalizeResultsError: If results validation fails
@@ -516,6 +521,32 @@ class ExperimentRecordManager:
         ml_outcome = results["ml_outcome"]
         finalized_at = datetime.now(UTC).isoformat()
 
+        # Get the record for workspace_name
+        record = self.get_record_by_stage_run(stage_run_id)
+        if record is None:
+            raise ValueError(f"Record not found for stage_run_id: {stage_run_id}")
+
+        workspace_name = record["workspace_name"]
+        record_id = record["record_id"]
+
+        # Get stage_name from stage_runs table
+        with self.db._conn() as conn:
+            stage_row = conn.execute(
+                "SELECT stage_name FROM stage_runs WHERE id = ?",
+                (stage_run_id,),
+            ).fetchone()
+        stage_name = stage_row["stage_name"] if stage_row else "unknown"
+
+        # Compute comparison block
+        comparison = self.compute_comparison(
+            stage_run_id=stage_run_id,
+            workspace_name=workspace_name,
+            stage_name=stage_name,
+            results=results,
+        )
+
+        comparison_json = json.dumps(comparison)
+
         with self.db._conn() as conn:
             conn.execute(
                 """
@@ -524,11 +555,19 @@ class ExperimentRecordManager:
                     results_status = ?,
                     ml_outcome = ?,
                     finalized_by = ?,
-                    finalized_at = ?
+                    finalized_at = ?,
+                    comparison = ?
                 WHERE stage_run_id = ?
                 """,
-                (results_json, "finalized", ml_outcome, finalized_by, finalized_at, stage_run_id),
+                (results_json, "finalized", ml_outcome, finalized_by, finalized_at, comparison_json, stage_run_id),
             )
+
+        return {
+            "record_id": record_id,
+            "stage_run_id": stage_run_id,
+            "results_status": "finalized",
+            "comparison": comparison,
+        }
 
     def _resolve_stage_run_id(self, stage_run_id_or_record_id: str) -> str:
         """Resolve a stage_run_id or record_id to a stage_run_id.
@@ -612,9 +651,18 @@ class ExperimentRecordManager:
             current_value=current_value,
         )
 
+        # Compute config_diff (comparing vs_previous if available)
+        config_diff: dict[str, list[Any]] | None = None
+        if vs_previous is not None:
+            config_diff = self._compute_config_diff(
+                current_stage_run_id=stage_run_id,
+                baseline_record_id=vs_previous["record"],
+            )
+
         return {
             "vs_previous": vs_previous,
             "vs_best": vs_best,
+            "config_diff": config_diff,
         }
 
     def _compute_vs_previous(
@@ -681,7 +729,14 @@ class ExperimentRecordManager:
         stage_run_id: str,
         current_value: float | None,
     ) -> dict[str, Any] | None:
-        """Compute vs_best comparison using baseline_run from spec.
+        """Compute vs_best comparison using baseline_run from spec, or best tagged record.
+
+        Resolution order:
+        1. If baseline_run specified in spec, resolve it:
+           - Tag reference (starting with @, e.g., "@best-25m")
+           - record_id (ULID)
+           - stage_run_id
+        2. Else, fall back to best tagged record (tag starting with "best-")
 
         Args:
             stage_run_id: Current stage run ID
@@ -690,18 +745,160 @@ class ExperimentRecordManager:
         Returns:
             Dict with record, tag, and delta, or None if no baseline
         """
+        if current_value is None:
+            return None
+
+        # Get the current record to know the workspace
+        current_record = self.get_record_by_stage_run(stage_run_id)
+        if current_record is None:
+            return None
+
+        workspace_name = current_record["workspace_name"]
+
         # Get the spec to check for baseline_run
         spec = self.get_results_spec_parsed(stage_run_id)
-        if spec is None:
+        baseline_run = spec.get("baseline_run") if spec else None
+
+        # Resolve baseline_run to a record
+        baseline_record: ExperimentRecordRow | None = None
+        tag_name: str | None = None
+
+        if baseline_run is not None:
+            # Explicit baseline_run in spec
+            if baseline_run.startswith("@"):
+                # Tag reference - look up by tag
+                resolved_tag = baseline_run[1:]  # Remove @ prefix
+                tag_name = resolved_tag
+                baseline_record = self.get_record_by_tag(workspace_name, resolved_tag)
+            else:
+                # Try as record_id first, then as stage_run_id
+                baseline_record = self.get_record(baseline_run)
+                if baseline_record is None:
+                    baseline_record = self.get_record_by_stage_run(baseline_run)
+        else:
+            # No explicit baseline_run - fall back to best tagged record
+            best_record_info = self.get_current_best(workspace_name, tag_prefix="best-")
+            if best_record_info is not None:
+                baseline_record = self.get_record(best_record_info["record_id"])
+                tag_name = best_record_info.get("tag")  # Key is "tag" not "tag_name"
+
+        if baseline_record is None:
             return None
 
-        baseline_run = spec.get("baseline_run")
-        if baseline_run is None:
+        # Get baseline results
+        baseline_stage_run_id = baseline_record.get("stage_run_id")
+        if baseline_stage_run_id is None:
             return None
 
-        # TODO: Implement baseline resolution (tag reference, run_id, record_id)
-        # For now, return None - this will be enhanced in a later phase
-        return None
+        baseline_results = self.get_finalized_results(baseline_stage_run_id)
+        if baseline_results is None:
+            return None
+
+        baseline_value = baseline_results.get("value")
+        if baseline_value is None or not isinstance(baseline_value, int | float):
+            return None
+
+        delta = current_value - baseline_value
+
+        result: dict[str, Any] = {
+            "record": baseline_record["record_id"],
+            "delta": round(delta, 6),  # Avoid floating point noise
+        }
+
+        # Include tag if resolved via tag reference
+        if tag_name:
+            result["tag"] = tag_name
+
+        return result
+
+    def _compute_config_diff(
+        self,
+        current_stage_run_id: str,
+        baseline_record_id: str,
+    ) -> dict[str, list[Any]] | None:
+        """Compute config diff between current run and baseline.
+
+        Only includes changed keys; truncates large values.
+
+        Args:
+            current_stage_run_id: Current stage run ID
+            baseline_record_id: Baseline record ID to compare against
+
+        Returns:
+            Dict mapping changed keys to [old_value, new_value], or None if unable to compute
+        """
+        # Get baseline record and its stage_run_id
+        baseline_record = self.get_record(baseline_record_id)
+        if baseline_record is None:
+            return None
+
+        baseline_stage_run_id = baseline_record.get("stage_run_id")
+        if baseline_stage_run_id is None:
+            return None
+
+        # Get configs from stage_runs
+        with self.db._conn() as conn:
+            current_row = conn.execute(
+                "SELECT config_json FROM stage_runs WHERE id = ?",
+                (current_stage_run_id,),
+            ).fetchone()
+
+            baseline_row = conn.execute(
+                "SELECT config_json FROM stage_runs WHERE id = ?",
+                (baseline_stage_run_id,),
+            ).fetchone()
+
+        if current_row is None or baseline_row is None:
+            return None
+
+        current_config_json = current_row["config_json"]
+        baseline_config_json = baseline_row["config_json"]
+
+        if current_config_json is None or baseline_config_json is None:
+            return None
+
+        current_config: dict[str, Any] = json.loads(current_config_json)
+        baseline_config: dict[str, Any] = json.loads(baseline_config_json)
+
+        # Find changed keys
+        diff: dict[str, list[Any]] = {}
+        all_keys = set(current_config.keys()) | set(baseline_config.keys())
+
+        for key in all_keys:
+            current_val = current_config.get(key)
+            baseline_val = baseline_config.get(key)
+
+            if current_val != baseline_val:
+                # Truncate large values
+                diff[key] = [
+                    self._truncate_value(baseline_val),
+                    self._truncate_value(current_val),
+                ]
+
+        return diff if diff else None
+
+    def _truncate_value(self, value: Any, max_len: int = 50) -> Any:
+        """Truncate a value for config_diff display.
+
+        Args:
+            value: Value to potentially truncate
+            max_len: Maximum string length
+
+        Returns:
+            Truncated value
+        """
+        if value is None:
+            return None
+
+        if isinstance(value, str) and len(value) > max_len:
+            return value[:max_len] + "..."
+
+        if isinstance(value, list | dict):
+            as_str = json.dumps(value)
+            if len(as_str) > max_len:
+                return as_str[:max_len] + "..."
+
+        return value
 
     def store_comparison(self, stage_run_id: str, comparison: dict[str, Any]) -> None:
         """Store comparison in run_results.
@@ -742,16 +939,19 @@ class ExperimentRecordManager:
         result: dict[str, Any] = json.loads(comparison_json)
         return result
 
-    def tag_record(self, record_id: str, tag: str) -> None:
+    def tag_record(self, record_id: str, tag: str) -> dict[str, Any]:
         """Tag an experiment record.
 
-        For run records, creates a run tag.
-        For checkpoint records, creates a run tag (same table).
-        Tag uniqueness is enforced per workspace.
+        For run records, creates BOTH a run tag AND a version tag.
+        For checkpoint records, creates only a version tag.
+        Tag uniqueness is enforced per workspace across both tables.
 
         Args:
             record_id: The record ID to tag
             tag: The tag name
+
+        Returns:
+            Dict with tag confirmation: record_id, tag, workspace_name, record_type
 
         Raises:
             ValueError: If tag is empty, record not found, or tag already exists
@@ -766,11 +966,14 @@ class ExperimentRecordManager:
             raise ValueError(f"Record not found: {record_id}")
 
         workspace_name = record["workspace_name"]
+        version = record["version"]
+        record_type = record["type"]
         created_at = datetime.now(UTC).isoformat()
 
-        # Check for tag uniqueness in workspace
+        # Check for tag uniqueness across BOTH run_tags and workspace_version_tags
         with self.db._conn() as conn:
-            existing = conn.execute(
+            # Check run_tags
+            existing_run_tag = conn.execute(
                 """
                 SELECT 1 FROM run_tags
                 WHERE workspace_name = ? AND tag_name = ?
@@ -778,37 +981,93 @@ class ExperimentRecordManager:
                 (workspace_name, tag),
             ).fetchone()
 
-            if existing:
+            if existing_run_tag:
                 raise ValueError(f"Tag '{tag}' already exists in workspace '{workspace_name}'")
 
-            # Insert the tag
+            # Check workspace_version_tags
+            existing_version_tag = conn.execute(
+                """
+                SELECT 1 FROM workspace_version_tags
+                WHERE workspace_name = ? AND tag_name = ?
+                """,
+                (workspace_name, tag),
+            ).fetchone()
+
+            if existing_version_tag:
+                raise ValueError(f"Tag '{tag}' already exists in workspace '{workspace_name}'")
+
+            # For run records: create BOTH run tag AND version tag
+            # For checkpoint records: create ONLY version tag
+            if record_type == "run":
+                # Create run tag
+                conn.execute(
+                    """
+                    INSERT INTO run_tags (workspace_name, record_id, tag_name, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (workspace_name, record_id, tag, created_at),
+                )
+
+            # Always create version tag (for both run and checkpoint)
             conn.execute(
                 """
-                INSERT INTO run_tags (workspace_name, record_id, tag_name, created_at)
+                INSERT INTO workspace_version_tags (workspace_name, version, tag_name, created_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                (workspace_name, record_id, tag, created_at),
+                (workspace_name, version, tag, created_at),
             )
 
+        return {
+            "record_id": record_id,
+            "tag": tag,
+            "workspace_name": workspace_name,
+            "record_type": record_type,
+        }
+
     def get_record_tags(self, record_id: str) -> list[str]:
-        """Get all tags for a record.
+        """Get all tags for a record (merged from run_tags and workspace_version_tags).
+
+        For run records, tags exist in both tables.
+        For checkpoint records, tags only exist in workspace_version_tags.
 
         Args:
             record_id: The record ID
 
         Returns:
-            List of tag names
+            List of tag names (merged, deduplicated)
         """
+        # Get the record to know workspace and version
+        record = self.get_record(record_id)
+        if record is None:
+            return []
+
+        workspace_name = record["workspace_name"]
+        version = record["version"]
+
         with self.db._conn() as conn:
-            rows = conn.execute(
+            # Get tags from run_tags (for run records)
+            run_tag_rows = conn.execute(
                 "SELECT tag_name FROM run_tags WHERE record_id = ?",
                 (record_id,),
             ).fetchall()
 
-        return [row["tag_name"] for row in rows]
+            # Get tags from workspace_version_tags (for the record's version)
+            version_tag_rows = conn.execute(
+                "SELECT tag_name FROM workspace_version_tags WHERE workspace_name = ? AND version = ?",
+                (workspace_name, version),
+            ).fetchall()
+
+        # Merge and deduplicate
+        run_tags = {row["tag_name"] for row in run_tag_rows}
+        version_tags = {row["tag_name"] for row in version_tag_rows}
+        all_tags = run_tags | version_tags
+
+        return sorted(all_tags)
 
     def get_record_by_tag(self, workspace_name: str, tag: str) -> ExperimentRecordRow | None:
         """Look up a record by its tag.
+
+        Searches both run_tags (for run records) and workspace_version_tags (for checkpoints).
 
         Args:
             workspace_name: Workspace name
@@ -816,8 +1075,18 @@ class ExperimentRecordManager:
 
         Returns:
             The record row or None if tag not found
+
+        Raises:
+            ValidationError: If workspace_name is invalid
+            ValueError: If tag name is invalid
         """
+        validate_workspace_name(workspace_name)
+
+        if not tag or not tag.strip():
+            raise ValueError("Tag name is invalid: cannot be empty")
+
         with self.db._conn() as conn:
+            # First try run_tags (for run records)
             tag_row = conn.execute(
                 """
                 SELECT record_id FROM run_tags
@@ -826,22 +1095,55 @@ class ExperimentRecordManager:
                 (workspace_name, tag),
             ).fetchone()
 
-        if tag_row is None:
-            return None
+            if tag_row is not None:
+                return self.get_record(tag_row["record_id"])
 
-        return self.get_record(tag_row["record_id"])
+            # Fall back to workspace_version_tags (for checkpoint records)
+            version_tag_row = conn.execute(
+                """
+                SELECT er.record_id FROM workspace_version_tags vt
+                JOIN experiment_records er ON er.workspace_name = vt.workspace_name AND er.version = vt.version
+                WHERE vt.workspace_name = ? AND vt.tag_name = ?
+                """,
+                (workspace_name, tag),
+            ).fetchone()
+
+            if version_tag_row is not None:
+                return self.get_record(version_tag_row["record_id"])
+
+        return None
 
     def remove_tag(self, workspace_name: str, tag: str) -> None:
         """Remove a tag from a workspace.
 
+        Removes both run_tags and workspace_version_tags entries.
+
         Args:
             workspace_name: Workspace name
             tag: Tag name to remove
+
+        Raises:
+            ValidationError: If workspace_name is invalid
+            ValueError: If tag name is invalid
         """
+        validate_workspace_name(workspace_name)
+
+        if not tag or not tag.strip():
+            raise ValueError("Tag name is invalid: cannot be empty")
+
         with self.db._conn() as conn:
+            # Remove from run_tags
             conn.execute(
                 """
                 DELETE FROM run_tags
+                WHERE workspace_name = ? AND tag_name = ?
+                """,
+                (workspace_name, tag),
+            )
+            # Remove from workspace_version_tags
+            conn.execute(
+                """
+                DELETE FROM workspace_version_tags
                 WHERE workspace_name = ? AND tag_name = ?
                 """,
                 (workspace_name, tag),
@@ -853,8 +1155,12 @@ class ExperimentRecordManager:
         record_type: RecordType | None = None,
         stage: str | None = None,
         tagged: bool | str | None = None,
+        metric: str | None = None,
+        min_value: float | None = None,
         sort_by: Literal["created", "metric"] = "created",
         desc: bool = True,
+        include_pruned: bool = False,
+        include_internal_ids: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -865,14 +1171,24 @@ class ExperimentRecordManager:
             record_type: Filter by "run" or "checkpoint"
             stage: Filter by stage name
             tagged: True for any tagged, or specific tag name
+            metric: Filter by specific metric name (not yet implemented)
+            min_value: Filter by minimum metric value (not yet implemented)
             sort_by: Sort by "created" or "metric"
             desc: Sort descending if True
+            include_pruned: Include pruned records (default False)
+            include_internal_ids: Include internal IDs in response (default False)
             limit: Max records to return
             offset: Records to skip
 
         Returns:
             Dict with 'records' list
         """
+        # Note: metric, min_value, include_pruned, include_internal_ids are accepted
+        # but implementation is deferred for now (basic filtering exists)
+        _ = metric  # Reserved for future use
+        _ = min_value  # Reserved for future use
+        _ = include_pruned  # Reserved for future use
+        _ = include_internal_ids  # Reserved for future use
         validate_workspace_name(workspace_name)
 
         # Build query dynamically based on filters
@@ -884,18 +1200,40 @@ class ExperimentRecordManager:
                 WHERE er.workspace_name = ?
             """
         elif tagged is True:
-            # Need JOIN to run_tags
+            # Need to search BOTH run_tags AND workspace_version_tags (merged tags per spec)
+            # Run records are found via run_tags
+            # Checkpoint records are found via workspace_version_tags (since they have no run_tag)
             query = """
                 SELECT DISTINCT er.* FROM experiment_records er
-                JOIN run_tags rt ON er.record_id = rt.record_id
                 WHERE er.workspace_name = ?
+                AND (
+                    er.record_id IN (SELECT record_id FROM run_tags WHERE workspace_name = er.workspace_name)
+                    OR (
+                        er.type = 'checkpoint' AND er.record_id IN (
+                            SELECT e2.record_id FROM workspace_version_tags vt
+                            JOIN experiment_records e2 ON e2.workspace_name = vt.workspace_name AND e2.version = vt.version
+                            WHERE vt.workspace_name = er.workspace_name AND e2.type = 'checkpoint'
+                        )
+                    )
+                )
             """
         elif isinstance(tagged, str):
-            # Specific tag filter
+            # Specific tag filter - search BOTH tables (merged tags per spec)
+            # Run records are found via run_tags
+            # Checkpoint records are found via workspace_version_tags
             query = """
-                SELECT er.* FROM experiment_records er
-                JOIN run_tags rt ON er.record_id = rt.record_id
-                WHERE er.workspace_name = ? AND rt.tag_name = ?
+                SELECT DISTINCT er.* FROM experiment_records er
+                WHERE er.workspace_name = ?
+                AND (
+                    er.record_id IN (SELECT record_id FROM run_tags WHERE workspace_name = er.workspace_name AND tag_name = ?)
+                    OR (
+                        er.type = 'checkpoint' AND er.record_id IN (
+                            SELECT e2.record_id FROM workspace_version_tags vt
+                            JOIN experiment_records e2 ON e2.workspace_name = vt.workspace_name AND e2.version = vt.version
+                            WHERE vt.workspace_name = er.workspace_name AND vt.tag_name = ? AND e2.type = 'checkpoint'
+                        )
+                    )
+                )
             """
         else:
             query = """
@@ -906,6 +1244,8 @@ class ExperimentRecordManager:
         params: list[Any] = [workspace_name]
 
         if isinstance(tagged, str):
+            # Tag appears twice in the query (once for each subquery)
+            params.append(tagged)
             params.append(tagged)
 
         if record_type is not None:
@@ -1038,18 +1378,22 @@ class ExperimentRecordManager:
         """
         validate_workspace_name(workspace_name)
 
-        terminal_outcomes = tuple(self._TERMINAL_INFRA_OUTCOMES)
+        terminal_outcomes = list(self._TERMINAL_INFRA_OUTCOMES)
+        # Build parameterized placeholders for IN clause
+        placeholders = ", ".join("?" for _ in terminal_outcomes)
+
+        query = f"""
+            SELECT rr.* FROM run_results rr
+            JOIN experiment_records er ON rr.record_id = er.record_id
+            WHERE er.workspace_name = ?
+              AND rr.infra_outcome IN ({placeholders})
+              AND rr.results_status != 'finalized'
+        """
 
         with self.db._conn() as conn:
             rows = conn.execute(
-                f"""
-                SELECT rr.* FROM run_results rr
-                JOIN experiment_records er ON rr.record_id = er.record_id
-                WHERE er.workspace_name = ?
-                  AND rr.infra_outcome IN ({','.join('?' * len(terminal_outcomes))})
-                  AND rr.results_status != 'finalized'
-                """,
-                (workspace_name, *terminal_outcomes),
+                query,
+                [workspace_name, *terminal_outcomes],
             ).fetchall()
 
         return [dict(row) for row in rows]
@@ -1095,11 +1439,59 @@ class ExperimentRecordManager:
         # Get recent trend
         recent_trend = self.get_recent_trend(workspace_name, limit=10)
 
+        # Compute regression alerts (comparing recent trend to best)
+        regression_alerts = self._compute_regression_alerts(
+            current_best=current_best,
+            recent_trend=recent_trend,
+        )
+
         return {
             "current_best": current_best,
             "awaiting_finalization": awaiting_finalization,
             "recent_trend": recent_trend,
+            "regression_alerts": regression_alerts,
         }
+
+    def _compute_regression_alerts(
+        self,
+        current_best: dict[str, Any] | None,
+        recent_trend: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Compute regression alerts by comparing recent runs to best.
+
+        Args:
+            current_best: Current best record info
+            recent_trend: Recent finalized runs
+
+        Returns:
+            List of regression alert dicts
+        """
+        if current_best is None or not recent_trend:
+            return []
+
+        best_value = current_best.get("value")
+        if best_value is None:
+            return []
+
+        alerts: list[dict[str, Any]] = []
+        for entry in recent_trend:
+            value = entry.get("value")
+            if value is not None and isinstance(value, int | float):
+                # A regression is when current value is significantly worse than best
+                # For "maximize" direction, worse = lower; for "minimize", worse = higher
+                # We'll flag any decrease from best for now (assumes maximize)
+                delta = value - best_value
+                if delta < -0.01:  # Threshold for significance
+                    alerts.append(
+                        {
+                            "record_id": entry.get("record_id"),
+                            "value": value,
+                            "best_value": best_value,
+                            "delta": round(delta, 6),
+                        }
+                    )
+
+        return alerts
 
     def get_recent_trend(
         self,

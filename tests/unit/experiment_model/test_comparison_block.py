@@ -157,6 +157,29 @@ class TestComputeComparisonVsBest:
 
     def test_compute_comparison_vs_best_with_baseline(self) -> None:
         """vs_best uses baseline_run when specified in spec."""
+        mock_spec = {
+            "stage_run_id": "stage-current",
+            "record_id": "rec-current",
+            "spec_json": json.dumps({"baseline_run": "stage-baseline", "primary_metric": "accuracy"}),
+            "created_at": "2025-01-13T14:00:00Z",
+        }
+
+        mock_current_record = {
+            "record_id": "rec-current",
+            "workspace_name": "test_ws",
+            "version": "v1",
+            "type": "run",
+            "stage_run_id": "stage-current",
+        }
+
+        mock_baseline_record = {
+            "record_id": "rec-baseline",
+            "workspace_name": "test_ws",
+            "version": "v1",
+            "type": "run",
+            "stage_run_id": "stage-baseline",
+        }
+
         mock_baseline_results = {
             "stage_run_id": "stage-baseline",
             "record_id": "rec-baseline",
@@ -165,19 +188,17 @@ class TestComputeComparisonVsBest:
             "ml_outcome": "success",
         }
 
-        mock_spec = {
-            "stage_run_id": "stage-current",
-            "record_id": "rec-current",
-            "spec_json": json.dumps({"baseline_run": "stage-baseline", "primary_metric": "accuracy"}),
-            "created_at": "2025-01-13T14:00:00Z",
-        }
-
         mock_conn = MagicMock()
         # Setup different returns for different queries
         mock_conn.execute.return_value.fetchall.return_value = []  # No previous runs
         mock_conn.execute.return_value.fetchone.side_effect = [
-            mock_spec,  # Get spec for baseline_run
-            mock_baseline_results,  # Get baseline results
+            # vs_previous: get_record_by_stage_run first, but no previous runs
+            # vs_best: get_record_by_stage_run (for workspace), then spec, then baseline resolution
+            mock_current_record,  # _compute_vs_best: get_record_by_stage_run for workspace
+            mock_spec,  # _compute_vs_best: get_results_spec_parsed
+            None,  # _compute_vs_best: get_record (baseline as record_id) - not found
+            mock_baseline_record,  # _compute_vs_best: get_record_by_stage_run for baseline
+            mock_baseline_results,  # _compute_vs_best: get_finalized_results
         ]
 
         mock_db = MagicMock()
@@ -200,7 +221,9 @@ class TestComputeComparisonVsBest:
         )
 
         assert "vs_best" in comparison
-        # Note: actual implementation may vary based on how we wire up baseline lookup
+        assert comparison["vs_best"] is not None
+        assert comparison["vs_best"]["record"] == "rec-baseline"
+        assert comparison["vs_best"]["delta"] == -0.05  # 0.75 - 0.80
 
 
 class TestStoreComparison:

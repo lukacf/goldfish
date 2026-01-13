@@ -274,6 +274,16 @@ from goldfish.server_tools.execution_tools import (  # noqa: F401, E402
     mark_outcome,
     run,
 )
+from goldfish.server_tools.experiment_tools import (  # noqa: F401, E402
+    finalize_run,
+    get_debug_info,
+    get_experiment_context,
+    inspect_record,
+    list_history,
+    list_unfinalized_runs,
+    save_results_spec,
+    tag_record,
+)
 from goldfish.server_tools.infra_tools import (  # noqa: F401, E402
     get_build_status,
     manage_base_images,
