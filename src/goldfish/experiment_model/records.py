@@ -846,3 +846,167 @@ class ExperimentRecordManager:
                 """,
                 (workspace_name, tag),
             )
+
+    def list_history(
+        self,
+        workspace_name: str,
+        record_type: RecordType | None = None,
+        stage: str | None = None,
+        tagged: bool | str | None = None,
+        sort_by: Literal["created", "metric"] = "created",
+        desc: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """List experiment history (runs + checkpoints).
+
+        Args:
+            workspace_name: Workspace name
+            record_type: Filter by "run" or "checkpoint"
+            stage: Filter by stage name
+            tagged: True for any tagged, or specific tag name
+            sort_by: Sort by "created" or "metric"
+            desc: Sort descending if True
+            limit: Max records to return
+            offset: Records to skip
+
+        Returns:
+            Dict with 'records' list
+        """
+        validate_workspace_name(workspace_name)
+
+        # Build query dynamically based on filters
+        if stage is not None:
+            # Need JOIN to stage_runs
+            query = """
+                SELECT er.* FROM experiment_records er
+                JOIN stage_runs sr ON er.stage_run_id = sr.id
+                WHERE er.workspace_name = ?
+            """
+        elif tagged is True:
+            # Need JOIN to run_tags
+            query = """
+                SELECT DISTINCT er.* FROM experiment_records er
+                JOIN run_tags rt ON er.record_id = rt.record_id
+                WHERE er.workspace_name = ?
+            """
+        elif isinstance(tagged, str):
+            # Specific tag filter
+            query = """
+                SELECT er.* FROM experiment_records er
+                JOIN run_tags rt ON er.record_id = rt.record_id
+                WHERE er.workspace_name = ? AND rt.tag_name = ?
+            """
+        else:
+            query = """
+                SELECT * FROM experiment_records
+                WHERE workspace_name = ?
+            """
+
+        params: list[Any] = [workspace_name]
+
+        if isinstance(tagged, str):
+            params.append(tagged)
+
+        if record_type is not None:
+            query += " AND type = ?"
+            params.append(record_type)
+
+        if stage is not None:
+            query += " AND sr.stage_name = ?"
+            params.append(stage)
+
+        # Sorting
+        order_dir = "DESC" if desc else "ASC"
+        if sort_by == "created":
+            # ULID is lexicographically sortable by time
+            query += f" ORDER BY record_id {order_dir}"
+        else:
+            # Metric sorting would require JOIN to run_results
+            # For now, default to created
+            query += f" ORDER BY record_id {order_dir}"
+
+        query += " LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        with self.db._conn() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        records = [cast(ExperimentRecordRow, dict(row)) for row in rows]
+
+        return {"records": records}
+
+    def inspect_record(
+        self,
+        ref: str,
+        include: list[str] | None = None,
+        workspace_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Inspect an experiment record.
+
+        Args:
+            ref: Record ID, @tag reference, or stage_run_id
+            include: List of sections to include (results, tags, comparison)
+            workspace_name: Required when ref is a @tag
+
+        Returns:
+            Dict with record details and requested sections, or None if not found
+        """
+        if include is None:
+            include = []
+
+        # Resolve the record
+        record = self._resolve_record_ref(ref, workspace_name)
+        if record is None:
+            return None
+
+        # Build result from record
+        result: dict[str, Any] = dict(record)
+
+        # Include requested sections
+        if "results" in include and record["stage_run_id"]:
+            run_results = self.get_run_results(record["stage_run_id"])
+            if run_results:
+                result["results"] = dict(run_results)
+
+        if "tags" in include:
+            result["tags"] = self.get_record_tags(record["record_id"])
+
+        if "comparison" in include and record["stage_run_id"]:
+            result["comparison"] = self.get_comparison(record["stage_run_id"])
+
+        return result
+
+    def _resolve_record_ref(
+        self,
+        ref: str,
+        workspace_name: str | None = None,
+    ) -> ExperimentRecordRow | None:
+        """Resolve a reference to a record.
+
+        Supports:
+        - record_id: Direct lookup
+        - @tag: Tag reference (requires workspace_name)
+        - stage_run_id: Lookup by stage run
+
+        Args:
+            ref: The reference to resolve
+            workspace_name: Required for @tag resolution
+
+        Returns:
+            The record row or None
+        """
+        # Check for @tag reference
+        if ref.startswith("@"):
+            if workspace_name is None:
+                return None
+            tag_name = ref[1:]
+            return self.get_record_by_tag(workspace_name, tag_name)
+
+        # Try direct record_id lookup
+        record = self.get_record(ref)
+        if record is not None:
+            return record
+
+        # Try stage_run_id lookup
+        return self.get_record_by_stage_run(ref)
