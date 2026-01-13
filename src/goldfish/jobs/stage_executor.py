@@ -361,7 +361,9 @@ class StageExecutor:
                     error=error_msg,
                 )
 
-        # 5. Update record with resolved values (creates experiment record if pre-queued)
+        # 5. Update record with resolved values
+        # Only create experiment record if this was a pre-queued run (from pipeline)
+        # For normal runs, we already created the experiment record in step 2e
         queued_record_id = self._update_queued_stage_run(
             stage_run_id=stage_run_id,
             workspace=workspace,
@@ -374,6 +376,7 @@ class StageExecutor:
             hints=stage_config.get("hints"),
             preflight_warnings=preflight_warnings,
             preflight_errors=preflight_errors,
+            create_experiment_record=stage_run_precreated,  # Only for pre-queued runs
         )
         # Use queued record_id if we didn't create one earlier (pre-queued case)
         if record_id is None:
@@ -925,14 +928,30 @@ class StageExecutor:
         hints: dict | None,
         preflight_warnings: list[str] | None = None,
         preflight_errors: list[str] | None = None,
-    ) -> str:
+        create_experiment_record: bool = True,
+    ) -> str | None:
         """Update a queued stage run record with resolved values.
 
         Called when processing a pre-created stage_run from the pipeline queue.
-        Updates version, config, inputs, records input lineage, and creates experiment record.
+        Updates version, config, inputs, records input lineage.
+
+        Args:
+            stage_run_id: The stage run ID to update
+            workspace: Workspace name
+            version: Workspace version
+            stage_version_id: Stage version ID
+            inputs: Resolved input paths
+            input_sources: Input source metadata
+            config: Stage config
+            profile: Compute profile
+            hints: Stage hints
+            preflight_warnings: Validation warnings
+            preflight_errors: Validation errors
+            create_experiment_record: Whether to create an experiment record (True for
+                pipeline-queued runs that don't already have one)
 
         Returns:
-            The generated experiment record_id (ULID)
+            The generated experiment record_id (ULID) if created, None otherwise
         """
         # Update the stage run with resolved values
         with self.db._conn() as conn:
@@ -986,15 +1005,17 @@ class StageExecutor:
                 source_stage_version_id=source_stage_version_id,
             )
 
-        # Create experiment record for this run (for pipeline-queued runs)
-        exp_manager = ExperimentRecordManager(self.db)
-        record_id = exp_manager.create_run_record(
-            workspace_name=workspace,
-            version=version,
-            stage_run_id=stage_run_id,
-        )
+        # Create experiment record only for pipeline-queued runs that don't already have one
+        if create_experiment_record:
+            exp_manager = ExperimentRecordManager(self.db)
+            record_id = exp_manager.create_run_record(
+                workspace_name=workspace,
+                version=version,
+                stage_run_id=stage_run_id,
+            )
+            return record_id
 
-        return record_id
+        return None
 
     def _record_output_signals(
         self,

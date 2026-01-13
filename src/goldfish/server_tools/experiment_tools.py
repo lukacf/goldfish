@@ -95,6 +95,7 @@ def list_history(
     tagged: bool | str | None = None,
     metric: str | None = None,
     min_value: float | None = None,
+    experiment_group: str | None = None,
     sort_by: Literal["created", "metric"] = "created",
     desc: bool = True,
     include_pruned: bool = False,
@@ -112,8 +113,9 @@ def list_history(
             - None: No tag filtering
             - True: Only tagged records
             - "tag-name": Records with specific tag
-        metric: Filter by metric name (reserved for future use)
-        min_value: Minimum metric value filter (reserved for future use)
+        metric: Filter by metric name
+        min_value: Minimum metric value filter
+        experiment_group: Filter by experiment group
         sort_by: Sort order - "created" (default) or "metric"
         desc: Sort descending (newest/highest first) if True
         include_pruned: Include records from pruned versions (default False)
@@ -152,6 +154,7 @@ def list_history(
         tagged=tagged,
         metric=metric,
         min_value=min_value,
+        experiment_group=experiment_group,
         sort_by=sort_by,
         desc=desc,
         include_pruned=include_pruned,

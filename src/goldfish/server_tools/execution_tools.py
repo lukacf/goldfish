@@ -258,7 +258,12 @@ def run(
             f"before starting new runs. Pending runs: {', '.join(run_ids)}" + ("..." if len(unfinalized) > 3 else "")
         )
 
-    # Validate results_spec if provided
+    # Validate results_spec - required for actual runs, optional for dry_run
+    if results_spec is None and not dry_run:
+        raise GoldfishError(
+            "results_spec is required for runs. Provide a dict with: "
+            "primary_metric, direction, min_value, goal_value, dataset_split, tolerance, context"
+        )
     if results_spec is not None:
         try:
             validate_results_spec(results_spec)
@@ -296,9 +301,12 @@ def run(
     )
 
     # Store results_spec for each run if provided
-    if results_spec is not None and "runs" in result:
-        for run_info in result["runs"]:
-            stage_run_id = run_info.get("run_id")
+    # For sync runs, result contains "stage_runs" list from StageRunInfo.model_dump()
+    # For async runs, the spec will be stored when the worker creates the stage run
+    runs_list = result.get("stage_runs") or result.get("runs") or []
+    if results_spec is not None and runs_list:
+        for run_info in runs_list:
+            stage_run_id = run_info.get("stage_run_id")
             record_id = run_info.get("record_id")
             if stage_run_id and record_id:
                 try:
