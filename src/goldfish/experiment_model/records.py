@@ -16,7 +16,10 @@ from goldfish.validation import validate_workspace_name
 if TYPE_CHECKING:
     from goldfish.db.database import Database
 
-from goldfish.db.types import ExperimentRecordRow, RunResultsRow
+import json
+
+from goldfish.db.types import ExperimentRecordRow, RunResultsRow, RunResultsSpecRow
+from goldfish.experiment_model.schemas import validate_results_spec
 
 # Crockford's Base32 alphabet (excludes I, L, O, U to avoid confusion)
 _CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -292,3 +295,93 @@ class ExperimentRecordManager:
             return None
 
         return cast(RunResultsRow, dict(row))
+
+    def store_results_spec(
+        self,
+        stage_run_id: str,
+        record_id: str,
+        spec: dict[str, Any],
+    ) -> None:
+        """Store a results_spec for a run.
+
+        Validates the spec before storage.
+
+        Args:
+            stage_run_id: Stage run ID
+            record_id: Experiment record ID
+            spec: The results_spec dict
+
+        Raises:
+            InvalidResultsSpecError: If spec validation fails
+        """
+        # Validate before storing
+        validate_results_spec(spec)
+
+        spec_json = json.dumps(spec)
+        created_at = datetime.now(UTC).isoformat()
+
+        with self.db._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO run_results_spec
+                (stage_run_id, record_id, spec_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (stage_run_id, record_id, spec_json, created_at),
+            )
+
+    def get_results_spec(self, stage_run_id: str) -> RunResultsSpecRow | None:
+        """Get results spec by stage_run_id.
+
+        Args:
+            stage_run_id: The stage run ID to look up
+
+        Returns:
+            The results spec row or None if not found
+        """
+        with self.db._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM run_results_spec WHERE stage_run_id = ?",
+                (stage_run_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return cast(RunResultsSpecRow, dict(row))
+
+    def get_results_spec_by_record(self, record_id: str) -> RunResultsSpecRow | None:
+        """Get results spec by record_id.
+
+        Args:
+            record_id: The experiment record ID to look up
+
+        Returns:
+            The results spec row or None if not found
+        """
+        with self.db._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM run_results_spec WHERE record_id = ?",
+                (record_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return cast(RunResultsSpecRow, dict(row))
+
+    def get_results_spec_parsed(self, stage_run_id: str) -> dict[str, Any] | None:
+        """Get results spec as parsed dict.
+
+        Args:
+            stage_run_id: The stage run ID to look up
+
+        Returns:
+            The parsed spec dict or None if not found
+        """
+        row = self.get_results_spec(stage_run_id)
+        if row is None:
+            return None
+
+        result: dict[str, Any] = json.loads(row["spec_json"])
+        return result
