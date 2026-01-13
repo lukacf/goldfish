@@ -9,20 +9,20 @@ This skill enables effective use of Goldfish ML, an MCP server that transforms C
 
 ## Core Mental Model
 
-Goldfish manages ML experiments through **six key abstractions**:
+Goldfish manages ML experiments through **seven key abstractions** (with a new Experiment Record layer):
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        GOLDFISH ARCHITECTURE                     │
 ├─────────────────────────────────────────────────────────────────┤
-│  WORKSPACE          VERSION           PIPELINE                   │
+│  WORKSPACE          RECORD            PIPELINE                   │
 │  ┌─────────┐       ┌─────────┐       ┌─────────────────────┐    │
-│  │ w1/     │──────▶│ v1, v2  │       │ stages:             │    │
-│  │ (slot)  │       │ (tags)  │       │   - preprocess      │    │
+│  │ w1/     │──────▶│ r123    │       │ stages:             │    │
+│  │ (slot)  │       │ (run)   │       │   - preprocess      │    │
 │  └─────────┘       └─────────┘       │   - train           │    │
 │       │                              │   - evaluate        │    │
 │       ▼                              └─────────────────────┘    │
-│  STAGE (Docker)    SIGNAL            PROFILE                    │
+│  VERSION (v1)      SIGNAL            PROFILE                    │
 │  ┌─────────┐       ┌─────────┐       ┌─────────────────────┐    │
 │  │ train.py│──────▶│ features│       │ h100-spot           │    │
 │  │ (module)│       │ (npy)   │       │ a100-on-demand      │    │
@@ -33,9 +33,12 @@ Goldfish manages ML experiments through **six key abstractions**:
 **Key invariants:**
 - All infrastructure (Docker, GCS, GCE) is hidden from Claude
 - User workspace is plain files (no `.git`) - all versioning handled internally
-- Every `run()` creates a version BEFORE execution (100% provenance)
+- Every `run()` creates a **record** and a version BEFORE execution (100% provenance)
+- `run()` requires `results_spec` (structured + verbose context)
+- Terminal runs must be finalized with `finalize_run()` before new runs start
 - Signals connect stages with typed data flow
 - **Pre-run review**: The configured SVS agent reviews your code before execution to catch bugs early
+- **Experiment Records** hide the run/version split in normal UX (use record_id or tags)
 
 ## Workflow Decision Tree
 
@@ -46,25 +49,38 @@ START: What task?
   │     └─▶ status() or dashboard() → See slots, active jobs, recent outcomes
   │
   ├─▶ "Start new experiment"
-  │     └─▶ create_workspace() → mount() → Edit files → run()
+  │     └─▶ create_workspace() → mount() → Edit files → run(results_spec=...) → finalize_run()
   │
   ├─▶ "Continue existing work"
-  │     └─▶ status() → mount(workspace, slot, reason) → Edit → run()
+  │     └─▶ status() → mount(workspace, slot, reason) → Edit → run(results_spec=...) → finalize_run()
   │
   ├─▶ "Run ML training"
-  │     └─▶ run(workspace, stages=["train"]) or run(workspace) for all
+  │     └─▶ run(workspace, stages=["train"], results_spec=...) → finalize_run()
   │
   ├─▶ "Check run status"
-  │     └─▶ list_runs() → inspect_run(run_id) → logs(run_id)
+  │     └─▶ list_history() → inspect_record(record_id) → inspect_run/run logs (infra)
   │
   ├─▶ "Manage data"
   │     └─▶ register_source() or manage_sources(action="list")
   │
   ├─▶ "Track lineage"
-  │     └─▶ inspect_workspace() → inspect_run(include=["provenance"])
+  │     └─▶ inspect_record(include=["comparison"]) → inspect_run(include=["provenance"])
   │
   └─▶ "Save progress / Switch context"
         └─▶ save_version() → hibernate() (auto-saves)
+
+## Experiment Memory (New)
+
+Goldfish now treats **experiment records** as the primary UX layer.
+
+- **records** = runs or checkpoints
+- **results_spec** is required at `run()` time (structured + verbose)
+- **results_auto** is extracted after completion
+- **results_final** is set by `finalize_run()` and is authoritative
+- **ML outcome** (success/partial/miss/unknown) is only set on finalization
+- **Infra outcome** (completed/preempted/crashed/canceled) is tracked separately
+
+Use `list_history()` and `inspect_record()` for experiment memory. Use `inspect_run()` for low-level infra details (logs, SVS, provenance).
 ```
 
 ## Data Source Metadata (Required, Strict)
@@ -201,10 +217,28 @@ Missing or invalid metadata is rejected.
 **Note:** Stages automatically use pre-built images with common ML libraries
    (numpy, pandas, torch, scikit-learn, etc.). No setup required.
 
-4. Run the pipeline (with structured reason for experiment tracking)
+4. Run the pipeline (with results_spec for experiment tracking)
    run("w1", reason={
        "description": "Baseline LSTM training",
        "hypothesis": "LSTM should achieve 85%+ accuracy"
+   }, results_spec={
+       "primary_metric": "dir_acc_binary",
+       "direction": "maximize",
+       "min_value": 0.60,
+       "goal_value": 0.63,
+       "dataset_split": "val",
+       "tolerance": 0.003,
+       "context": "Baseline LSTM, 25M params. Focus on directional accuracy."
+   })
+
+5. Finalize results (required once run is terminal)
+   finalize_run("stage-abc123", {
+       "primary_metric": "dir_acc_binary",
+       "direction": "maximize",
+       "value": 0.631,
+       "dataset_split": "val",
+       "ml_outcome": "success",
+       "notes": "Achieved target; preempted but results are valid."
    })
 ```
 
@@ -224,7 +258,7 @@ Before execution, an AI reviews code/config for logic errors, undefined variable
 A background monitor reviews metrics (`.goldfish/metrics.jsonl`) and runtime logs (`.goldfish/logs.txt`) every 5 minutes.
 - **Anomalies**: Detects diverging loss, exploding gradients, or stalled progress.
 - **Early Stop**: Can terminate runs early if `ai_during_run_auto_stop: true` in config.
-- **Usage**: Check progress with `inspect_run(run_id)`.
+- **Usage**: Check progress with `inspect_run(run_id)` (infra), and `inspect_record(record_id)` for results.
 
 #### Layer 3: Output Contract Enforcement
 Enforces schema contracts (shape, dtype) and computes output stats (entropy, null ratio).
@@ -624,7 +658,8 @@ svs:
 
 2. Detailed status (PRIMARY TOOL)
 
-   inspect_run(run_id) → trends, progress, SVS findings. This is the master tool for result analysis.
+   inspect_record(record_id, include=["results", "comparison"]) → experiment results + diffs.
+   inspect_run(run_id) → infra status, logs, SVS findings (lower-level).
 
 
 
@@ -656,13 +691,13 @@ inspect_workspace("baseline")
 
 
 
-# Side-by-side comparison
+# Side-by-side comparison (legacy, infra-level)
 
 compare_runs(run_id_a="stage-1", run_id_b="stage-2")
 
 
 
-# Full run provenance
+# Full run provenance (infra-level)
 
 inspect_run(run_id, include=["provenance"])
 
@@ -1099,8 +1134,6 @@ Goldfish auto-extracts failure patterns to prevent regression. Be aware of these
 
 
 11. **MANDATORY: Always use `goldfish.io` and `goldfish.metrics`** for I/O and telemetry. AI monitoring will fail without them.
-
-
 
 
 

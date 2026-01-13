@@ -114,8 +114,18 @@ class StateManager:
         jobs: list[dict[str, Any]],
         source_count: int = 0,
         recent_runs: list[dict[str, Any]] | None = None,
+        experiment_contexts: dict[str, dict[str, Any]] | None = None,
     ) -> str:
-        """Generate complete STATE.md content and write to file."""
+        """Generate complete STATE.md content and write to file.
+
+        Args:
+            slots: List of workspace slot info
+            jobs: List of background jobs
+            source_count: Number of registered data sources
+            recent_runs: Recent run history
+            experiment_contexts: Dict mapping workspace names to experiment context
+                (from ExperimentRecordManager.get_experiment_context)
+        """
         lines = [f"# {self.config.project_name}", ""]
 
         # Active Goal
@@ -181,6 +191,47 @@ class StateManager:
         if source_count > 0:
             lines.append("## Data Sources")
             lines.append(f"- {source_count} sources registered (use list_sources() to see)")
+            lines.append("")
+
+        # Experiment Summary (per workspace)
+        if experiment_contexts:
+            lines.append("## Experiment Summary")
+            for ws_name, exp_ctx in experiment_contexts.items():
+                lines.append(f"### {ws_name}")
+
+                # Current best
+                current_best = exp_ctx.get("current_best")
+                if current_best:
+                    tag = current_best.get("tag", "untagged")
+                    metric = current_best.get("metric", "")
+                    value = current_best.get("value")
+                    if value is not None:
+                        lines.append(f"- **Best**: @{tag} ({metric}: {value})")
+                    else:
+                        lines.append(f"- **Best**: @{tag}")
+                else:
+                    lines.append("- **Best**: None tagged")
+
+                # Pending finalizations
+                awaiting = exp_ctx.get("awaiting_finalization", [])
+                if awaiting:
+                    count = len(awaiting)
+                    lines.append(f"- **Pending finalization**: {count} run(s)")
+                else:
+                    lines.append("- **Pending finalization**: None")
+
+                # Recent trend (last 3)
+                trend = exp_ctx.get("recent_trend", [])
+                if trend:
+                    values = [str(t.get("value", "?")) for t in trend[:3]]
+                    lines.append(f"- **Recent trend**: [{', '.join(values)}]")
+
+                # Regression alerts
+                alerts = exp_ctx.get("regression_alerts", [])
+                if alerts:
+                    lines.append(f"- **Regression alerts**: {len(alerts)} detected")
+
+                lines.append("")
             lines.append("")
 
         # Recent Runs with structured reasons

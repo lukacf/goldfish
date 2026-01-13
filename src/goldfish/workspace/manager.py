@@ -276,15 +276,33 @@ class WorkspaceManager:
     def _regenerate_state_md(self) -> str:
         """Regenerate STATE.md and return content."""
         if self.state_manager:
+            from goldfish.experiment_model.records import ExperimentRecordManager
+            from goldfish.models import SlotState
+
             jobs = self.db.get_active_jobs()
             # Get recent runs (last 5) for display in STATE.md
             recent_runs_rows = self.db.list_stage_runs_with_total(limit=5, offset=0)
             recent_runs = [dict(r) for r in recent_runs_rows] if recent_runs_rows else []
+
+            # Get experiment contexts for all mounted workspaces
+            slots = self.get_all_slots()
+            experiment_contexts: dict[str, dict] = {}
+            exp_manager = ExperimentRecordManager(self.db)
+            for slot in slots:
+                if slot.state != SlotState.EMPTY and slot.workspace:
+                    try:
+                        context = exp_manager.get_experiment_context(slot.workspace)
+                        experiment_contexts[slot.workspace] = context
+                    except Exception:
+                        # Skip if context retrieval fails
+                        pass
+
             result: str = self.state_manager.regenerate(
-                slots=self.get_all_slots(),
+                slots=slots,
                 jobs=[dict(j) for j in jobs],  # Convert JobRow to dict
                 source_count=len(self.db.list_sources()),
                 recent_runs=recent_runs,
+                experiment_contexts=experiment_contexts if experiment_contexts else None,
             )
             return result
         return "# Project\n\nSTATE.md not yet initialized"

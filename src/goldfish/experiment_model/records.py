@@ -92,6 +92,7 @@ class ExperimentRecordManager:
         workspace_name: str,
         version: str,
         stage_run_id: str,
+        experiment_group: str | None = None,
     ) -> str:
         """Create a run record linked to a stage run.
 
@@ -101,6 +102,7 @@ class ExperimentRecordManager:
             workspace_name: Workspace name
             version: Workspace version
             stage_run_id: Stage run ID to link to
+            experiment_group: Optional grouping for filtering
 
         Returns:
             The generated record_id (ULID)
@@ -119,10 +121,10 @@ class ExperimentRecordManager:
             conn.execute(
                 """
                 INSERT INTO experiment_records
-                (record_id, workspace_name, type, stage_run_id, version, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (record_id, workspace_name, type, stage_run_id, version, experiment_group, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (record_id, workspace_name, "run", stage_run_id, version, created_at),
+                (record_id, workspace_name, "run", stage_run_id, version, experiment_group, created_at),
             )
 
             # Initialize run_results with missing status
@@ -1186,6 +1188,7 @@ class ExperimentRecordManager:
         tagged: bool | str | None = None,
         metric: str | None = None,
         min_value: float | None = None,
+        experiment_group: str | None = None,
         sort_by: Literal["created", "metric"] = "created",
         desc: bool = True,
         include_pruned: bool = False,
@@ -1200,8 +1203,9 @@ class ExperimentRecordManager:
             record_type: Filter by "run" or "checkpoint"
             stage: Filter by stage name
             tagged: True for any tagged, or specific tag name
-            metric: Filter by specific metric name (not yet implemented)
-            min_value: Filter by minimum metric value (not yet implemented)
+            metric: Filter by specific metric name
+            min_value: Filter by minimum metric value
+            experiment_group: Filter by experiment group
             sort_by: Sort by "created" or "metric"
             desc: Sort descending if True
             include_pruned: Include pruned records (default False)
@@ -1212,13 +1216,10 @@ class ExperimentRecordManager:
         Returns:
             Dict with 'records' list
         """
-        # Note: metric, min_value, include_pruned, include_internal_ids are accepted
-        # but implementation is deferred for now (basic filtering exists)
-        _ = metric  # Reserved for future use
-        _ = min_value  # Reserved for future use
-        _ = include_pruned  # Reserved for future use
-        _ = include_internal_ids  # Reserved for future use
         validate_workspace_name(workspace_name)
+
+        # Determine if we need metric filtering (requires JOIN to run_results)
+        needs_metric_join = metric is not None or min_value is not None
 
         # Build query dynamically based on filters
         if stage is not None:
@@ -1266,8 +1267,8 @@ class ExperimentRecordManager:
             """
         else:
             query = """
-                SELECT * FROM experiment_records
-                WHERE workspace_name = ?
+                SELECT er.* FROM experiment_records er
+                WHERE er.workspace_name = ?
             """
 
         params: list[Any] = [workspace_name]
@@ -1278,22 +1279,63 @@ class ExperimentRecordManager:
             params.append(tagged)
 
         if record_type is not None:
-            query += " AND type = ?"
+            query += " AND er.type = ?"
             params.append(record_type)
 
         if stage is not None:
             query += " AND sr.stage_name = ?"
             params.append(stage)
 
+        # Experiment group filtering
+        if experiment_group is not None:
+            query += " AND er.experiment_group = ?"
+            params.append(experiment_group)
+
+        # Include pruned filtering (via workspace_versions)
+        if not include_pruned:
+            query += " AND NOT EXISTS (SELECT 1 FROM workspace_versions wv WHERE wv.workspace_name = er.workspace_name AND wv.version = er.version AND wv.pruned_at IS NOT NULL)"
+
+        # Metric filtering (requires JOIN to run_results)
+        if needs_metric_join:
+            # Add JOIN to run_results for metric filtering
+            # This only applies to run records (checkpoint records don't have results)
+            query += """
+                AND er.type = 'run'
+                AND EXISTS (
+                    SELECT 1 FROM run_results rr
+                    WHERE rr.stage_run_id = er.stage_run_id
+            """
+            if metric is not None:
+                # Filter by metric name in either results_final or results_auto
+                query += """
+                    AND (
+                        json_extract(rr.results_final, '$.primary_metric') = ?
+                        OR json_extract(rr.results_auto, '$.primary_metric') = ?
+                    )
+                """
+                params.append(metric)
+                params.append(metric)
+            if min_value is not None:
+                # Filter by min value in either results_final or results_auto
+                query += """
+                    AND (
+                        CAST(json_extract(rr.results_final, '$.value') AS REAL) >= ?
+                        OR CAST(json_extract(rr.results_auto, '$.value') AS REAL) >= ?
+                    )
+                """
+                params.append(min_value)
+                params.append(min_value)
+            query += ")"
+
         # Sorting
         order_dir = "DESC" if desc else "ASC"
         if sort_by == "created":
             # ULID is lexicographically sortable by time
-            query += f" ORDER BY record_id {order_dir}"
+            query += f" ORDER BY er.record_id {order_dir}"
         else:
             # Metric sorting would require JOIN to run_results
             # For now, default to created
-            query += f" ORDER BY record_id {order_dir}"
+            query += f" ORDER BY er.record_id {order_dir}"
 
         query += " LIMIT ? OFFSET ?"
         params.extend([limit, offset])

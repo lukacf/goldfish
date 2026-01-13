@@ -132,6 +132,9 @@ class Database:
                 ("workspace_name", "TEXT"),  # Workspace name (for workspace builds)
                 ("version", "TEXT"),  # Workspace version (for workspace builds)
             ],
+            "experiment_records": [
+                ("experiment_group", "TEXT"),  # Optional grouping for filtering
+            ],
         }
 
         with self._conn() as conn:
@@ -242,6 +245,7 @@ class Database:
                     type TEXT NOT NULL,
                     stage_run_id TEXT,
                     version TEXT NOT NULL,
+                    experiment_group TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id),
                     FOREIGN KEY (workspace_name, version) REFERENCES workspace_versions(workspace_name, version)
@@ -252,6 +256,8 @@ class Database:
                     ON experiment_records(workspace_name, version);
                 CREATE INDEX IF NOT EXISTS idx_experiment_records_run
                     ON experiment_records(stage_run_id);
+                CREATE INDEX IF NOT EXISTS idx_experiment_records_group
+                    ON experiment_records(workspace_name, experiment_group);
 
                 -- Run Results (auto + final results with ML/infra outcome separation)
                 CREATE TABLE IF NOT EXISTS run_results (
