@@ -472,7 +472,7 @@ CREATE INDEX IF NOT EXISTS idx_backup_history_deleted ON backup_history(deleted_
 CREATE TABLE IF NOT EXISTS experiment_records (
     record_id TEXT PRIMARY KEY,           -- ULID for lexicographic ordering
     workspace_name TEXT NOT NULL,
-    type TEXT NOT NULL,                   -- 'run' | 'checkpoint'
+    type TEXT NOT NULL CHECK(type IN ('run', 'checkpoint')),
     stage_run_id TEXT,                    -- FK stage_runs (NULL for checkpoints)
     version TEXT NOT NULL,                -- FK workspace_versions
     created_at TEXT NOT NULL,
@@ -493,9 +493,9 @@ CREATE INDEX IF NOT EXISTS idx_experiment_records_run
 CREATE TABLE IF NOT EXISTS run_results (
     stage_run_id TEXT PRIMARY KEY,        -- FK stage_runs
     record_id TEXT NOT NULL,              -- FK experiment_records
-    results_status TEXT NOT NULL,         -- 'missing' | 'auto' | 'finalized'
-    infra_outcome TEXT NOT NULL,          -- 'completed' | 'preempted' | 'crashed' | 'canceled' | 'unknown'
-    ml_outcome TEXT NOT NULL,             -- 'success' | 'partial' | 'miss' | 'unknown'
+    results_status TEXT NOT NULL CHECK(results_status IN ('missing', 'auto', 'finalized')),
+    infra_outcome TEXT NOT NULL CHECK(infra_outcome IN ('completed', 'preempted', 'crashed', 'canceled', 'unknown')),
+    ml_outcome TEXT NOT NULL CHECK(ml_outcome IN ('success', 'partial', 'miss', 'unknown')),
     results_auto TEXT,                    -- JSON (immutable, auto-extracted)
     results_final TEXT,                   -- JSON (authoritative, set by finalize_run)
     comparison TEXT,                      -- JSON (computed at finalize time)
