@@ -447,8 +447,8 @@ Add Experiment Summary block:
 - No backfill needed for run_tags.
 
 5) **Tool compatibility**
-- `list_runs()` should delegate to `list_history()` to preserve older clients.
-- `inspect_run()` should map to `inspect_record()` and expose results/tags.
+- Legacy tools (`list_runs`, `list_all_runs`, `mark_outcome`, `compare_runs`, `get_run_provenance`) have been removed to enforce the new record-first workflow.
+- `inspect_run()` remains for infra-level details (SVS, logs, provenance); use `inspect_record()` for experiment results/tags.
 
 ---
 
