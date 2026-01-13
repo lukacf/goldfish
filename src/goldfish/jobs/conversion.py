@@ -52,7 +52,7 @@ def stage_run_dict_to_info(row: dict, truncate_error: bool = True) -> StageRunIn
     Args:
         row: Database row dict
         truncate_error: If True, truncate error to first line (for list views).
-                       Use truncate_error=False in get_run() for full error.
+                       Use truncate_error=False in inspect_run() for full error.
     """
 
     def _safe_json(val):
