@@ -26,8 +26,24 @@ class TestListHistory:
                 "created_at": "2025-01-13T14:00:00Z",
             },
         ]
+
+        # Set up mock to return different results for different queries
+        # First call = main query, subsequent calls = enrichment queries (return empty)
         mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchall.return_value = mock_rows
+        call_count = [0]
+
+        def mock_execute(*args: object, **kwargs: object) -> MagicMock:
+            result = MagicMock()
+            if call_count[0] == 0:
+                result.fetchall.return_value = mock_rows
+            else:
+                # Enrichment queries return empty lists
+                result.fetchall.return_value = []
+                result.fetchone.return_value = {"stage_name": "train"}
+            call_count[0] += 1
+            return result
+
+        mock_conn.execute.side_effect = mock_execute
 
         mock_db = MagicMock()
         mock_db._conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -39,6 +55,8 @@ class TestListHistory:
         assert result is not None
         assert "records" in result
         assert len(result["records"]) == 1
+        # Enrichment adds these fields
+        assert "tags" in result["records"][0]
 
     def test_list_history_filter_by_type(self) -> None:
         """Can filter history by type."""
