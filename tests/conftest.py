@@ -1,5 +1,6 @@
 """Shared test fixtures for Goldfish tests."""
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +19,28 @@ from goldfish.config import (
 )
 from goldfish.db.database import Database
 from goldfish.svs.config import SVSConfig
+
+# Git environment variables that can leak from git hooks (e.g., pre-push)
+_GIT_ENV_VARS = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_REFLOG_ACTION",
+    "GIT_QUARANTINE_PATH",
+]
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Clear git environment variables to prevent hook interference.
+
+    When tests run as part of git pre-push hook, git environment variables
+    like GIT_DIR leak into test subprocesses, causing git operations in
+    temporary test directories to fail.
+    """
+    for var in _GIT_ENV_VARS:
+        os.environ.pop(var, None)
 
 
 @pytest.fixture
