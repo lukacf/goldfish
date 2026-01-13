@@ -741,3 +741,108 @@ class ExperimentRecordManager:
 
         result: dict[str, Any] = json.loads(comparison_json)
         return result
+
+    def tag_record(self, record_id: str, tag: str) -> None:
+        """Tag an experiment record.
+
+        For run records, creates a run tag.
+        For checkpoint records, creates a run tag (same table).
+        Tag uniqueness is enforced per workspace.
+
+        Args:
+            record_id: The record ID to tag
+            tag: The tag name
+
+        Raises:
+            ValueError: If tag is empty, record not found, or tag already exists
+        """
+        # Validate tag name
+        if not tag or not tag.strip():
+            raise ValueError("Tag name is invalid: cannot be empty")
+
+        # Get the record
+        record = self.get_record(record_id)
+        if record is None:
+            raise ValueError(f"Record not found: {record_id}")
+
+        workspace_name = record["workspace_name"]
+        created_at = datetime.now(UTC).isoformat()
+
+        # Check for tag uniqueness in workspace
+        with self.db._conn() as conn:
+            existing = conn.execute(
+                """
+                SELECT 1 FROM run_tags
+                WHERE workspace_name = ? AND tag_name = ?
+                """,
+                (workspace_name, tag),
+            ).fetchone()
+
+            if existing:
+                raise ValueError(f"Tag '{tag}' already exists in workspace '{workspace_name}'")
+
+            # Insert the tag
+            conn.execute(
+                """
+                INSERT INTO run_tags (workspace_name, record_id, tag_name, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (workspace_name, record_id, tag, created_at),
+            )
+
+    def get_record_tags(self, record_id: str) -> list[str]:
+        """Get all tags for a record.
+
+        Args:
+            record_id: The record ID
+
+        Returns:
+            List of tag names
+        """
+        with self.db._conn() as conn:
+            rows = conn.execute(
+                "SELECT tag_name FROM run_tags WHERE record_id = ?",
+                (record_id,),
+            ).fetchall()
+
+        return [row["tag_name"] for row in rows]
+
+    def get_record_by_tag(self, workspace_name: str, tag: str) -> ExperimentRecordRow | None:
+        """Look up a record by its tag.
+
+        Args:
+            workspace_name: Workspace name
+            tag: Tag name
+
+        Returns:
+            The record row or None if tag not found
+        """
+        with self.db._conn() as conn:
+            tag_row = conn.execute(
+                """
+                SELECT record_id FROM run_tags
+                WHERE workspace_name = ? AND tag_name = ?
+                """,
+                (workspace_name, tag),
+            ).fetchone()
+
+        if tag_row is None:
+            return None
+
+        return self.get_record(tag_row["record_id"])
+
+    def remove_tag(self, workspace_name: str, tag: str) -> None:
+        """Remove a tag from a workspace.
+
+        Args:
+            workspace_name: Workspace name
+            tag: Tag name to remove
+        """
+        with self.db._conn() as conn:
+            conn.execute(
+                """
+                DELETE FROM run_tags
+                WHERE workspace_name = ? AND tag_name = ?
+                """,
+                (workspace_name, tag),
+            )
