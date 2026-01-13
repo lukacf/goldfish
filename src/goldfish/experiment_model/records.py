@@ -19,7 +19,10 @@ if TYPE_CHECKING:
 import json
 
 from goldfish.db.types import ExperimentRecordRow, RunResultsRow, RunResultsSpecRow
-from goldfish.experiment_model.schemas import validate_results_spec
+from goldfish.experiment_model.schemas import (
+    validate_finalize_results,
+    validate_results_spec,
+)
 
 # Crockford's Base32 alphabet (excludes I, L, O, U to avoid confusion)
 _CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -482,3 +485,91 @@ class ExperimentRecordManager:
             "canceled": "canceled",
         }
         return status_mapping.get(run_status, "unknown")
+
+    def finalize_run(
+        self,
+        stage_run_id_or_record_id: str,
+        results: dict[str, Any],
+        finalized_by: str = "ml_claude",
+    ) -> None:
+        """Finalize a run with authoritative ML results.
+
+        This sets the results_final, results_status=finalized, and ml_outcome.
+        Preserves results_auto unchanged.
+
+        Args:
+            stage_run_id_or_record_id: Either a stage_run_id or record_id
+            results: The finalize results dict
+            finalized_by: Who is finalizing (default: ml_claude)
+
+        Raises:
+            InvalidFinalizeResultsError: If results validation fails
+            ValueError: If the run/record is not found
+        """
+        # Validate results before anything else
+        validate_finalize_results(results)
+
+        # Resolve stage_run_id
+        stage_run_id = self._resolve_stage_run_id(stage_run_id_or_record_id)
+
+        results_json = json.dumps(results)
+        ml_outcome = results["ml_outcome"]
+        finalized_at = datetime.now(UTC).isoformat()
+
+        with self.db._conn() as conn:
+            conn.execute(
+                """
+                UPDATE run_results
+                SET results_final = ?,
+                    results_status = ?,
+                    ml_outcome = ?,
+                    finalized_by = ?,
+                    finalized_at = ?
+                WHERE stage_run_id = ?
+                """,
+                (results_json, "finalized", ml_outcome, finalized_by, finalized_at, stage_run_id),
+            )
+
+    def _resolve_stage_run_id(self, stage_run_id_or_record_id: str) -> str:
+        """Resolve a stage_run_id or record_id to a stage_run_id.
+
+        Args:
+            stage_run_id_or_record_id: Either a stage_run_id or record_id
+
+        Returns:
+            The stage_run_id
+
+        Raises:
+            ValueError: If not found
+        """
+        # First try as stage_run_id
+        run_results = self.get_run_results(stage_run_id_or_record_id)
+        if run_results is not None:
+            return stage_run_id_or_record_id
+
+        # Try as record_id
+        record = self.get_record(stage_run_id_or_record_id)
+        if record is not None and record["stage_run_id"] is not None:
+            return record["stage_run_id"]
+
+        raise ValueError(f"Run or record not found: {stage_run_id_or_record_id}")
+
+    def get_finalized_results(self, stage_run_id: str) -> dict[str, Any] | None:
+        """Get finalized results as parsed dict.
+
+        Args:
+            stage_run_id: The stage run ID to look up
+
+        Returns:
+            The parsed finalized results dict or None if not finalized
+        """
+        run_results = self.get_run_results(stage_run_id)
+        if run_results is None:
+            return None
+
+        results_final = run_results.get("results_final")
+        if results_final is None:
+            return None
+
+        result: dict[str, Any] = json.loads(results_final)
+        return result

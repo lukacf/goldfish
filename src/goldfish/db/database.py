@@ -234,6 +234,70 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_version_tags_version
                     ON workspace_version_tags(workspace_name, version);
+
+                -- Experiment Records (user-facing entity representing runs or checkpoints)
+                CREATE TABLE IF NOT EXISTS experiment_records (
+                    record_id TEXT PRIMARY KEY,
+                    workspace_name TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    stage_run_id TEXT,
+                    version TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id),
+                    FOREIGN KEY (workspace_name, version) REFERENCES workspace_versions(workspace_name, version)
+                );
+                CREATE INDEX IF NOT EXISTS idx_experiment_records_workspace
+                    ON experiment_records(workspace_name);
+                CREATE INDEX IF NOT EXISTS idx_experiment_records_version
+                    ON experiment_records(workspace_name, version);
+                CREATE INDEX IF NOT EXISTS idx_experiment_records_run
+                    ON experiment_records(stage_run_id);
+
+                -- Run Results (auto + final results with ML/infra outcome separation)
+                CREATE TABLE IF NOT EXISTS run_results (
+                    stage_run_id TEXT PRIMARY KEY,
+                    record_id TEXT NOT NULL,
+                    results_status TEXT NOT NULL,
+                    infra_outcome TEXT NOT NULL,
+                    ml_outcome TEXT NOT NULL,
+                    results_auto TEXT,
+                    results_final TEXT,
+                    comparison TEXT,
+                    finalized_by TEXT,
+                    finalized_at TEXT,
+                    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id),
+                    FOREIGN KEY (record_id) REFERENCES experiment_records(record_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_run_results_record
+                    ON run_results(record_id);
+                CREATE INDEX IF NOT EXISTS idx_run_results_status
+                    ON run_results(results_status);
+                CREATE INDEX IF NOT EXISTS idx_run_results_ml_outcome
+                    ON run_results(ml_outcome);
+
+                -- Run Results Spec (required at run time to specify expected results)
+                CREATE TABLE IF NOT EXISTS run_results_spec (
+                    stage_run_id TEXT PRIMARY KEY,
+                    record_id TEXT NOT NULL,
+                    spec_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id),
+                    FOREIGN KEY (record_id) REFERENCES experiment_records(record_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_run_results_spec_record
+                    ON run_results_spec(record_id);
+
+                -- Run Tags (user-defined names for significant runs)
+                CREATE TABLE IF NOT EXISTS run_tags (
+                    workspace_name TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    tag_name TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (workspace_name, tag_name),
+                    FOREIGN KEY (record_id) REFERENCES experiment_records(record_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_run_tags_record
+                    ON run_tags(record_id);
                 """
             )
 

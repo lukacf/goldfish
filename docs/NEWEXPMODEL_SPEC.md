@@ -455,6 +455,7 @@ Add Experiment Summary block:
 ## Implementation Checklist (TDD First)
 
 - [ ] Define JSON schema for `results_spec` and `finalize_run` payloads (tests first).
+- [ ] Add migration tests and implement DB migrations for new tables/indexes.
 - [ ] Add schema migrations for new tables (tests validate schema).
 - [ ] Implement `experiment_records` creation on run + save_version (tests).
 - [ ] Implement `run_results_spec` persistence on run() (tests).
