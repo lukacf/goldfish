@@ -6,6 +6,11 @@ first-class (results, comparisons, summaries) rather than relying on manual thou
 
 from __future__ import annotations
 
+from goldfish.experiment_model.records import (
+    ExperimentRecordManager,
+    RecordType,
+    generate_record_id,
+)
 from goldfish.experiment_model.schemas import (
     InvalidFinalizeResultsError,
     InvalidResultsSpecError,
@@ -14,8 +19,11 @@ from goldfish.experiment_model.schemas import (
 )
 
 __all__ = [
+    "ExperimentRecordManager",
     "InvalidFinalizeResultsError",
     "InvalidResultsSpecError",
+    "RecordType",
+    "generate_record_id",
     "validate_finalize_results",
     "validate_results_spec",
 ]
