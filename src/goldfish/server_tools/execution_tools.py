@@ -250,7 +250,7 @@ def run(
     gate_result = exp_manager.check_finalization_gate(workspace_name)
 
     if gate_result["blocked"]:
-        unfinalized = gate_result.get("unfinalized_runs", [])
+        unfinalized = gate_result.get("unfinalized", [])
         run_ids = [r.get("stage_run_id", r.get("record_id")) for r in unfinalized[:3]]
         raise GoldfishError(
             f"Finalization gate blocked: {len(unfinalized)} unfinalized terminal run(s) "

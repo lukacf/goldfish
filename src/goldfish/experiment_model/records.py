@@ -456,7 +456,18 @@ class ExperimentRecordManager:
             run_status: The run status for deriving infra_outcome
         """
         results_auto_json = json.dumps(auto_results)
-        infra_outcome = self.derive_infra_outcome(run_status)
+
+        # Fetch error text from stage_runs for preemption detection
+        error_text: str | None = None
+        with self.db._conn() as conn:
+            row = conn.execute(
+                "SELECT error FROM stage_runs WHERE id = ?",
+                (stage_run_id,),
+            ).fetchone()
+            if row:
+                error_text = row["error"]
+
+        infra_outcome = self.derive_infra_outcome(run_status, error_text)
 
         with self.db._conn() as conn:
             conn.execute(
@@ -470,15 +481,33 @@ class ExperimentRecordManager:
                 (results_auto_json, "auto", infra_outcome, stage_run_id),
             )
 
-    def derive_infra_outcome(self, run_status: str) -> str:
-        """Derive infra_outcome from run status.
+    def derive_infra_outcome(self, run_status: str, error_text: str | None = None) -> str:
+        """Derive infra_outcome from run status and error text.
+
+        Preemptions are stored as "failed" with error text containing
+        preemption-related keywords, so we check the error text to detect them.
 
         Args:
             run_status: The run status string
+            error_text: Optional error message to check for preemption keywords
 
         Returns:
             The infra_outcome value
         """
+        # Check for preemption keywords in error text (GCE spot preemption messages)
+        if run_status == "failed" and error_text:
+            error_lower = error_text.lower()
+            preemption_keywords = [
+                "preempted",
+                "preemption",
+                "spot instance terminated",
+                "instance was preempted",
+                "compute.instances.preempted",
+                "scheduling.preemptible",
+            ]
+            if any(keyword in error_lower for keyword in preemption_keywords):
+                return "preempted"
+
         status_mapping = {
             "completed": "completed",
             "failed": "crashed",
@@ -1272,7 +1301,66 @@ class ExperimentRecordManager:
         with self.db._conn() as conn:
             rows = conn.execute(query, params).fetchall()
 
-        records = [cast(ExperimentRecordRow, dict(row)) for row in rows]
+        # Enrich records with tags, results_status, ml_outcome, stage
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+
+            # Enrich with tags (merged from run_tags and workspace_version_tags)
+            # Note: We inline this instead of calling get_record_tags to avoid
+            # redundant lookups since we already have workspace_name and version
+            record_id = record["record_id"]
+            ws_name = record["workspace_name"]
+            ver = record.get("version")
+            with self.db._conn() as conn_tags:
+                run_tag_rows = conn_tags.execute(
+                    "SELECT tag_name FROM run_tags WHERE record_id = ?",
+                    (record_id,),
+                ).fetchall()
+                if ver:
+                    version_tag_rows = conn_tags.execute(
+                        "SELECT tag_name FROM workspace_version_tags WHERE workspace_name = ? AND version = ?",
+                        (ws_name, ver),
+                    ).fetchall()
+                else:
+                    version_tag_rows = []
+            run_tags = {r["tag_name"] for r in run_tag_rows}
+            version_tags = {r["tag_name"] for r in version_tag_rows}
+            record["tags"] = sorted(run_tags | version_tags)
+
+            # For run records, enrich with results_status, ml_outcome, stage
+            stage_run_id = record.get("stage_run_id")
+            if stage_run_id is not None and record["type"] == "run":
+                # Get run results
+                run_results = self.get_run_results(stage_run_id)
+                if run_results:
+                    record["results_status"] = run_results.get("results_status")
+                    record["ml_outcome"] = run_results.get("ml_outcome")
+                else:
+                    record["results_status"] = "missing"
+                    record["ml_outcome"] = "unknown"
+
+                # Get stage name
+                with self.db._conn() as conn2:
+                    stage_row = conn2.execute(
+                        "SELECT stage_name FROM stage_runs WHERE id = ?",
+                        (stage_run_id,),
+                    ).fetchone()
+                    if stage_row:
+                        record["stage"] = stage_row["stage_name"]
+
+                # Include internal_ids if requested
+                if include_internal_ids:
+                    record["stage_run_id"] = stage_run_id
+                else:
+                    # Remove internal ID from output
+                    record.pop("stage_run_id", None)
+            else:
+                # Checkpoint records don't have results/stage
+                if not include_internal_ids:
+                    record.pop("stage_run_id", None)
+
+            records.append(record)
 
         return {"records": records}
 

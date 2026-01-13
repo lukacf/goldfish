@@ -168,13 +168,19 @@ class TestUpdateAutoResults:
 
         manager.update_auto_results("stage-abc123", auto_results, "completed")
 
-        # Verify UPDATE was called
-        mock_conn.execute.assert_called_once()
-        call_args = mock_conn.execute.call_args
-        assert "UPDATE run_results" in call_args[0][0]
-        assert "results_auto" in call_args[0][0]
-        assert "results_status" in call_args[0][0]
-        assert "infra_outcome" in call_args[0][0]
+        # Verify UPDATE was called (there's also a SELECT for error text)
+        assert mock_conn.execute.call_count >= 1
+        # Find the UPDATE call
+        update_called = False
+        for call in mock_conn.execute.call_args_list:
+            if call[0] and "UPDATE run_results" in call[0][0]:
+                update_called = True
+                sql = call[0][0]
+                assert "results_auto" in sql
+                assert "results_status" in sql
+                assert "infra_outcome" in sql
+                break
+        assert update_called, "UPDATE run_results was not called"
 
     def test_update_auto_results_sets_status_to_auto(self) -> None:
         """Updating auto results sets results_status to 'auto'."""

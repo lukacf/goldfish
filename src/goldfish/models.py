@@ -525,6 +525,7 @@ class StageRunInfo(BaseModel):
 
     stage_run_id: str
     pipeline_run_id: str | None = None
+    record_id: str | None = None  # Experiment record ID (ULID)
     workspace: str
     pipeline: str | None = None
     version: str

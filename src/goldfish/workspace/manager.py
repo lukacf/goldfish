@@ -31,6 +31,7 @@ from goldfish.errors import (
     WorkspaceNotFoundError,
     validate_reason,
 )
+from goldfish.experiment_model.records import ExperimentRecordManager
 from goldfish.models import (
     CheckpointResponse,
     CreateWorkspaceResponse,
@@ -736,6 +737,13 @@ class WorkspaceManager:
             git_sha=git_sha,
             created_by="save_version",
             description=message,
+        )
+
+        # Create checkpoint experiment record for this version
+        exp_manager = ExperimentRecordManager(self.db)
+        exp_manager.create_checkpoint_record(
+            workspace_name=workspace,
+            version=version,
         )
 
         # Log to audit
