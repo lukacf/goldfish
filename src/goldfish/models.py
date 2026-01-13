@@ -132,6 +132,8 @@ class MountResponse(BaseModel):
     dirty: DirtyState
     last_checkpoint: str | None = None
     warning: str | None = None  # For soft limit warnings
+    # Experiment context for experiment-aware workflows
+    experiment_context: dict | None = None  # current_best, awaiting_finalization, etc.
 
 
 class HibernateResponse(BaseModel):

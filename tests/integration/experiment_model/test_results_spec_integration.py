@@ -45,7 +45,7 @@ class TestResultsSpecIntegration:
         }
 
         # Store the spec
-        manager.store_results_spec(
+        manager.save_results_spec(
             stage_run_id="stage-spec-test",
             record_id=record_id,
             spec=spec,
@@ -63,7 +63,7 @@ class TestResultsSpecIntegration:
         assert parsed["primary_metric"] == "accuracy"
         assert parsed["direction"] == "maximize"
 
-    def test_store_results_spec_validates_before_insert(self, test_db: Database) -> None:
+    def test_save_results_spec_validates_before_insert(self, test_db: Database) -> None:
         """Invalid specs are rejected before database insert."""
         _setup_workspace_and_version(test_db, "test_ws", "v1")
         _setup_stage_run(test_db, "stage-invalid", "test_ws", "v1")
@@ -82,7 +82,7 @@ class TestResultsSpecIntegration:
         }
 
         with pytest.raises(InvalidResultsSpecError):
-            manager.store_results_spec(
+            manager.save_results_spec(
                 stage_run_id="stage-invalid",
                 record_id=record_id,
                 spec=invalid_spec,
@@ -115,7 +115,7 @@ class TestResultsSpecIntegration:
             "context": "Testing loss minimization on test set.",
         }
 
-        manager.store_results_spec(
+        manager.save_results_spec(
             stage_run_id="stage-by-record",
             record_id=record_id,
             spec=spec,
@@ -165,7 +165,7 @@ class TestResultsSpecIntegration:
             "context": "Testing F1 score on validation set with secondary metrics.",
         }
 
-        manager.store_results_spec(
+        manager.save_results_spec(
             stage_run_id="stage-parsed",
             record_id=record_id,
             spec=spec,
@@ -205,7 +205,7 @@ class TestResultsSpecIntegration:
             "context": "Full spec test with all optional fields populated.",
         }
 
-        manager.store_results_spec(
+        manager.save_results_spec(
             stage_run_id="stage-full-spec",
             record_id=record_id,
             spec=spec,

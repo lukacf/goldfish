@@ -14,15 +14,38 @@ from goldfish.experiment_model.records import ExperimentRecordManager
 from goldfish.experiment_model.schemas import InvalidFinalizeResultsError
 
 
+def _setup_finalize_mocks(mock_conn: MagicMock) -> None:
+    """Setup standard mocks for finalize_run tests.
+
+    Returns data for: run_results, record, stage_runs, spec, previous runs, current_best.
+    """
+    mock_run_results = {"stage_run_id": "stage-abc123", "record_id": "rec123"}
+    mock_record = {
+        "record_id": "rec123",
+        "workspace_name": "test_ws",
+        "version": "v1",
+        "type": "run",
+        "stage_run_id": "stage-abc123",
+    }
+    mock_stage_row = {"stage_name": "train"}
+
+    mock_conn.execute.return_value.fetchone.side_effect = [
+        mock_run_results,  # get_run_results
+        mock_record,  # get_record_by_stage_run
+        mock_stage_row,  # get stage_name
+        None,  # get_results_spec_parsed (no spec)
+        None,  # get_current_best (no best)
+    ]
+    mock_conn.execute.return_value.fetchall.return_value = []  # no previous runs
+
+
 class TestFinalizeRun:
     """Tests for finalizing run results."""
 
     def test_finalize_run_basic(self) -> None:
         """Can finalize a run with valid results."""
-        # Setup mock to return a row from get_run_results
-        mock_run_results = {"stage_run_id": "stage-abc123", "record_id": "rec123"}
         mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchone.return_value = mock_run_results
+        _setup_finalize_mocks(mock_conn)
         mock_db = MagicMock()
         mock_db._conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_db._conn.return_value.__exit__ = MagicMock(return_value=False)
@@ -38,7 +61,12 @@ class TestFinalizeRun:
             "notes": "Good results with stable training.",
         }
 
-        manager.finalize_run("stage-abc123", results)
+        result = manager.finalize_run("stage-abc123", results)
+
+        # Should return result dict
+        assert result["record_id"] == "rec123"
+        assert result["results_status"] == "finalized"
+        assert "comparison" in result
 
         # Verify UPDATE was called (among other calls for resolution)
         assert mock_conn.execute.call_count >= 2  # SELECT + UPDATE
@@ -72,6 +100,7 @@ class TestFinalizeRun:
     def test_finalize_run_sets_status_to_finalized(self) -> None:
         """Finalize sets results_status to 'finalized'."""
         mock_conn = MagicMock()
+        _setup_finalize_mocks(mock_conn)
         mock_db = MagicMock()
         mock_db._conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_db._conn.return_value.__exit__ = MagicMock(return_value=False)
@@ -87,15 +116,15 @@ class TestFinalizeRun:
             "notes": "Good results with stable training.",
         }
 
-        manager.finalize_run("stage-abc123", results)
+        result = manager.finalize_run("stage-abc123", results)
 
-        call_args = mock_conn.execute.call_args
-        params = call_args[0][1]
-        assert "finalized" in params
+        # Should return finalized status
+        assert result["results_status"] == "finalized"
 
     def test_finalize_run_serializes_results(self) -> None:
         """Results are serialized to JSON."""
         mock_conn = MagicMock()
+        _setup_finalize_mocks(mock_conn)
         mock_db = MagicMock()
         mock_db._conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_db._conn.return_value.__exit__ = MagicMock(return_value=False)
@@ -113,8 +142,14 @@ class TestFinalizeRun:
 
         manager.finalize_run("stage-abc123", results)
 
-        call_args = mock_conn.execute.call_args
-        params = call_args[0][1]
+        # Find the UPDATE call
+        update_call = None
+        for call in mock_conn.execute.call_args_list:
+            if "UPDATE run_results" in call[0][0]:
+                update_call = call
+                break
+        assert update_call is not None
+        params = update_call[0][1]
         # First param should be JSON string
         results_json = params[0]
         parsed = json.loads(results_json)
@@ -123,6 +158,7 @@ class TestFinalizeRun:
     def test_finalize_run_with_optional_fields(self) -> None:
         """Finalize works with all optional fields."""
         mock_conn = MagicMock()
+        _setup_finalize_mocks(mock_conn)
         mock_db = MagicMock()
         mock_db._conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
         mock_db._conn.return_value.__exit__ = MagicMock(return_value=False)
@@ -145,8 +181,14 @@ class TestFinalizeRun:
 
         manager.finalize_run("stage-abc123", results)
 
-        call_args = mock_conn.execute.call_args
-        params = call_args[0][1]
+        # Find the UPDATE call
+        update_call = None
+        for call in mock_conn.execute.call_args_list:
+            if "UPDATE run_results" in call[0][0]:
+                update_call = call
+                break
+        assert update_call is not None
+        params = update_call[0][1]
         results_json = params[0]
         parsed = json.loads(results_json)
         assert parsed["unit"] == "fraction"
@@ -168,8 +210,28 @@ class TestFinalizeRunByRecordId:
             "version": "v1",
             "created_at": "2025-01-13T14:00:00Z",
         }
+        mock_run_results = {"stage_run_id": "stage-abc123", "record_id": "01HXYZ1234567890ABCDEFGH"}
+        mock_stage_row = {"stage_name": "train"}
+
         mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchone.return_value = mock_record_row
+        # Sequence through finalize_run when called with record_id:
+        # 1. _resolve_stage_run_id: get_run_results(record_id) -> None
+        # 2. _resolve_stage_run_id: get_record(record_id) -> record_row
+        # 3. finalize_run: get_record_by_stage_run(stage_run_id) -> record_row
+        # 4. finalize_run: get stage_name from stage_runs -> stage_row
+        # 5. compute_comparison -> _compute_vs_best: get_record_by_stage_run -> record_row
+        # 6. _compute_vs_best: get_results_spec_parsed -> None
+        # 7. _compute_vs_best: get_current_best -> None
+        mock_conn.execute.return_value.fetchone.side_effect = [
+            None,  # _resolve_stage_run_id: get_run_results(record_id) - not found
+            mock_record_row,  # _resolve_stage_run_id: get_record(record_id) - found
+            mock_record_row,  # finalize_run: get_record_by_stage_run
+            mock_stage_row,  # finalize_run: stage_name lookup
+            mock_record_row,  # _compute_vs_best: get_record_by_stage_run
+            None,  # _compute_vs_best: get_results_spec_parsed - None
+            None,  # _compute_vs_best: get_current_best - None
+        ]
+        mock_conn.execute.return_value.fetchall.return_value = []  # no previous runs
 
         mock_db = MagicMock()
         mock_db._conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -187,9 +249,10 @@ class TestFinalizeRunByRecordId:
         }
 
         # Should resolve record_id to stage_run_id
-        manager.finalize_run("01HXYZ1234567890ABCDEFGH", results)
+        result = manager.finalize_run("01HXYZ1234567890ABCDEFGH", results)
 
-        # Verify calls were made
+        # Verify finalization succeeded
+        assert result["results_status"] == "finalized"
         assert mock_conn.execute.called
 
     def test_finalize_run_record_not_found(self) -> None:
