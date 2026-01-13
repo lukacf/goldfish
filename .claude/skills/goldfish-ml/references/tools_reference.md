@@ -337,22 +337,3 @@ Reload configuration from `goldfish.yaml` without restarting the server.
 
 Get recent audit trail entries for compliance and history.
 
----
-
-## Removed Tools
-
-These legacy tools have been removed - use the replacements below:
-
-| Removed | Use Instead |
-|---------|-------------|
-| `list_runs()` | `list_history()` |
-| `list_all_runs()` | `list_history()` |
-| `mark_outcome()` | `finalize_run()` |
-| `compare_runs()` | `inspect_record(include=["comparison"])` |
-| `get_run_provenance()` | `inspect_run(include=["provenance"])` |
-| `checkpoint()` | `save_version()` |
-| `tag_version()` | `manage_versions(action="tag")` |
-| `prune_version()` | `manage_versions(action="prune")` |
-| `register_dataset()` | `register_source()` |
-| `get_workspace_lineage()` | `inspect_workspace()` |
-| `get_audit_log()` | `status()` |
