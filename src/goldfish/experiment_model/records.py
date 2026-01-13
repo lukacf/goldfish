@@ -573,3 +573,171 @@ class ExperimentRecordManager:
 
         result: dict[str, Any] = json.loads(results_final)
         return result
+
+    def compute_comparison(
+        self,
+        stage_run_id: str,
+        workspace_name: str,
+        stage_name: str,
+        results: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compute comparison block for a run.
+
+        Computes:
+        - vs_previous: comparison to last finalized run for same stage
+        - vs_best: comparison to baseline_run if specified in spec
+
+        Args:
+            stage_run_id: Current stage run ID
+            workspace_name: Workspace name
+            stage_name: Stage name
+            results: Current results dict with 'value', 'primary_metric', 'direction'
+
+        Returns:
+            Comparison dict with vs_previous and vs_best fields
+        """
+        current_value = results.get("value")
+
+        # Compute vs_previous
+        vs_previous = self._compute_vs_previous(
+            stage_run_id=stage_run_id,
+            workspace_name=workspace_name,
+            stage_name=stage_name,
+            current_value=current_value,
+        )
+
+        # Compute vs_best (from baseline_run in spec if present)
+        vs_best = self._compute_vs_best(
+            stage_run_id=stage_run_id,
+            current_value=current_value,
+        )
+
+        return {
+            "vs_previous": vs_previous,
+            "vs_best": vs_best,
+        }
+
+    def _compute_vs_previous(
+        self,
+        stage_run_id: str,
+        workspace_name: str,
+        stage_name: str,
+        current_value: float | None,
+    ) -> dict[str, Any] | None:
+        """Compute vs_previous comparison.
+
+        Finds the last finalized run for the same workspace and stage,
+        excluding the current run.
+
+        Args:
+            stage_run_id: Current stage run ID to exclude
+            workspace_name: Workspace name
+            stage_name: Stage name
+            current_value: Current result value
+
+        Returns:
+            Dict with record and delta, or None if no previous run
+        """
+        with self.db._conn() as conn:
+            # Find finalized runs for same workspace/stage, excluding current
+            rows = conn.execute(
+                """
+                SELECT rr.stage_run_id, rr.record_id, rr.results_final
+                FROM run_results rr
+                JOIN stage_runs sr ON rr.stage_run_id = sr.id
+                WHERE sr.workspace_name = ?
+                  AND sr.stage_name = ?
+                  AND rr.results_status = 'finalized'
+                  AND rr.stage_run_id != ?
+                ORDER BY rr.finalized_at DESC
+                LIMIT 1
+                """,
+                (workspace_name, stage_name, stage_run_id),
+            ).fetchall()
+
+        if not rows:
+            return None
+
+        prev_row = rows[0]
+        prev_results_json = prev_row["results_final"]
+        if prev_results_json is None:
+            return None
+
+        prev_results: dict[str, Any] = json.loads(prev_results_json)
+        prev_value = prev_results.get("value")
+
+        if prev_value is None or current_value is None:
+            return None
+
+        delta = current_value - prev_value
+
+        return {
+            "record": prev_row["record_id"],
+            "delta": round(delta, 6),  # Avoid floating point noise
+        }
+
+    def _compute_vs_best(
+        self,
+        stage_run_id: str,
+        current_value: float | None,
+    ) -> dict[str, Any] | None:
+        """Compute vs_best comparison using baseline_run from spec.
+
+        Args:
+            stage_run_id: Current stage run ID
+            current_value: Current result value
+
+        Returns:
+            Dict with record, tag, and delta, or None if no baseline
+        """
+        # Get the spec to check for baseline_run
+        spec = self.get_results_spec_parsed(stage_run_id)
+        if spec is None:
+            return None
+
+        baseline_run = spec.get("baseline_run")
+        if baseline_run is None:
+            return None
+
+        # TODO: Implement baseline resolution (tag reference, run_id, record_id)
+        # For now, return None - this will be enhanced in a later phase
+        return None
+
+    def store_comparison(self, stage_run_id: str, comparison: dict[str, Any]) -> None:
+        """Store comparison in run_results.
+
+        Args:
+            stage_run_id: Stage run ID
+            comparison: Comparison dict to store
+        """
+        comparison_json = json.dumps(comparison)
+
+        with self.db._conn() as conn:
+            conn.execute(
+                """
+                UPDATE run_results
+                SET comparison = ?
+                WHERE stage_run_id = ?
+                """,
+                (comparison_json, stage_run_id),
+            )
+
+    def get_comparison(self, stage_run_id: str) -> dict[str, Any] | None:
+        """Get comparison from run_results.
+
+        Args:
+            stage_run_id: Stage run ID
+
+        Returns:
+            Parsed comparison dict or None
+        """
+        run_results = self.get_run_results(stage_run_id)
+        if run_results is None:
+            return None
+
+        comparison_json = run_results.get("comparison")
+        if comparison_json is None:
+            return None
+
+        result: dict[str, Any] = json.loads(comparison_json)
+        return result
