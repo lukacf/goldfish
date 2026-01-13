@@ -98,17 +98,13 @@ def test_full_lineage_flow(test_db, test_config, temp_dir, mocker):
     assert len(provenance["downstream"]) == 1
     assert provenance["downstream"][0]["stage_run_id"] == run_id_train
 
-    # Verify execution_tools.list_runs
+    # Verify execution_tools.inspect_run (contains provenance with both inputs and downstream)
     from goldfish.server_tools import execution_tools
 
     mocker.patch("goldfish.server_tools.execution_tools._get_db", return_value=test_db)
     # Configure mock to return None so workspace string is used directly
     mock_wm.get_workspace_for_slot.return_value = None
     mocker.patch("goldfish.server_tools.execution_tools._get_workspace_manager", return_value=mock_wm)
-
-    runs_result = execution_tools.list_runs.fn(workspace=workspace)
-    train_run_compact = next(r for r in runs_result["runs"] if r["run_id"] == run_id_train)
-    # Verify execution_tools.inspect_run (contains provenance with both inputs and downstream)
     # Using 'include=["provenance"]' to verify consolidation
     inspect_result = execution_tools.inspect_run.fn(run_id=run_id_prep, include=["provenance"])
     provenance = inspect_result["provenance"]
