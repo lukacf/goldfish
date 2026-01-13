@@ -267,11 +267,8 @@ from goldfish.server_tools.data_tools import (  # noqa: F401, E402
 )
 from goldfish.server_tools.execution_tools import (  # noqa: F401, E402
     cancel,
-    get_run_provenance,
     inspect_run,
-    list_runs,
     logs,
-    mark_outcome,
     run,
 )
 from goldfish.server_tools.experiment_tools import (  # noqa: F401, E402

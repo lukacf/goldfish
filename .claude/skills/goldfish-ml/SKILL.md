@@ -676,9 +676,6 @@ inspect_run(run_id, include=["provenance"])
 
 # Debugging: map record/tag to GCS/logs
 get_debug_info("@best-v1", workspace="baseline")
-
-# Legacy infra comparison (use record comparison when possible)
-compare_runs(run_id_a="stage-1", run_id_b="stage-2")
 ```
 
 ### 7. Version Management (Tags & Pruning)
@@ -864,9 +861,6 @@ manage_base_images(action="push", image_type="gpu", target="project")
 | `inspect_run()` | Infra status, SVS, provenance | run_id, include |
 | `logs()` | Container logs (supports follow mode) | run_id, tail, follow |
 | `cancel()` | Stop a running stage | run_id, reason |
-| `list_runs()` | Legacy run timeline (infra) | workspace, stage |
-| `list_all_runs()` | Legacy global timeline (infra) | status, limit |
-| `compare_runs()` | Legacy infra comparison | run_id_a, run_id_b |
 
 ### Version Management
 

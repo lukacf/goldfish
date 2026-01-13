@@ -265,7 +265,7 @@ def dashboard() -> dict:
 
     Related tools:
     - status(): Global state including STATE.md and audit trail
-    - list_all_runs(): Complete run history across workspaces
+    - list_history(): Experiment history for a workspace
     - inspect_run(): Full details for a specific run
     """
     from goldfish.workspace.manager import DirtyState
