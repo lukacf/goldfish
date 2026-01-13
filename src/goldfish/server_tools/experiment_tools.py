@@ -178,18 +178,20 @@ def list_history(
 def inspect_record(
     ref: str,
     include: list[str] | None = None,
+    workspace: str | None = None,
 ) -> dict:
     """Inspect an experiment record in detail.
 
     Args:
         ref: Record reference - can be:
             - record_id (ULID): "01HXYZ..."
-            - tag: "@best-v1" (with @ prefix)
+            - tag: "@best-v1" (with @ prefix, requires workspace parameter)
             - stage_run_id: "stage-abc123"
         include: Optional list of additional data to include:
             - "results": Auto + final results
             - "comparison": vs_previous, vs_best, config_diff
             - "tags": All tags on the record
+        workspace: Workspace name or slot - REQUIRED when ref is a @tag
 
     Returns:
         Dict with record details:
@@ -200,16 +202,26 @@ def inspect_record(
 
     Example:
         inspect_record("01HXYZ...")  # By record ID
-        inspect_record("@best-v1")  # By tag
+        inspect_record("@best-v1", workspace="w1")  # By tag (requires workspace)
         inspect_record("stage-abc123", include=["results", "comparison"])
     """
     manager = _get_experiment_manager()
+    workspace_manager = _get_workspace_manager()
+
+    # Resolve workspace if provided (could be slot like "w1")
+    workspace_name: str | None = None
+    if workspace:
+        workspace_name = workspace_manager.get_workspace_for_slot(workspace) or workspace
+
+    # Validate that @tag references have workspace
+    if ref.startswith("@") and workspace_name is None:
+        raise GoldfishError("Tag reference requires workspace parameter (e.g., workspace='w1')")
 
     # Default includes
     if include is None:
         include = ["results", "tags"]
 
-    result = manager.inspect_record(ref, include=include)
+    result = manager.inspect_record(ref, include=include, workspace_name=workspace_name)
 
     if result is None:
         raise GoldfishError(f"Record not found: {ref}")
@@ -290,11 +302,13 @@ def list_unfinalized_runs(
 @mcp.tool()
 def get_debug_info(
     ref: str,
+    workspace: str | None = None,
 ) -> dict:
     """Get debug info for a run (internal IDs, GCS paths, logs).
 
     Args:
         ref: Record reference (record_id, stage_run_id, or @tag)
+        workspace: Workspace name or slot - REQUIRED when ref is a @tag
 
     Returns:
         Dict with debug information:
@@ -307,16 +321,24 @@ def get_debug_info(
 
     Example:
         get_debug_info("01HXYZ...")
-        get_debug_info("@best-v1")
+        get_debug_info("@best-v1", workspace="w1")
     """
     manager = _get_experiment_manager()
+    workspace_manager = _get_workspace_manager()
     db = _get_db()
+
+    # Resolve workspace if provided (could be slot like "w1")
+    workspace_name: str | None = None
+    if workspace:
+        workspace_name = workspace_manager.get_workspace_for_slot(workspace) or workspace
 
     # Resolve ref to record
     record = None
     if ref.startswith("@"):
         # Tag reference - need workspace context
-        raise GoldfishError("Tag reference requires workspace context. Use record_id or stage_run_id.")
+        if workspace_name is None:
+            raise GoldfishError("Tag reference requires workspace parameter (e.g., workspace='w1')")
+        record = manager.get_record_by_tag(workspace_name, ref[1:])
     elif ref.startswith("stage-"):
         record = manager.get_record_by_stage_run(ref)
     else:

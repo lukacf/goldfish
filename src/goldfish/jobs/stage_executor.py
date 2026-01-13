@@ -24,6 +24,7 @@ from goldfish.config import GoldfishConfig
 from goldfish.datasets.registry import DatasetRegistry
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError
+from goldfish.experiment_model.records import ExperimentRecordManager
 from goldfish.infra.docker_builder import DockerBuilder
 from goldfish.infra.gce_launcher import GCELauncher
 from goldfish.infra.local_executor import LocalExecutor
@@ -290,8 +291,9 @@ class StageExecutor:
         )
 
         # 2e. Create placeholder record IMMEDIATELY (to satisfy FKs for review/audit)
+        record_id: str | None = None
         if not stage_run_precreated:
-            self._create_stage_run_record(
+            record_id = self._create_stage_run_record(
                 stage_run_id=stage_run_id,
                 workspace=workspace,
                 version=version,
@@ -348,6 +350,7 @@ class StageExecutor:
                 return StageRunInfo(
                     stage_run_id=stage_run_id,
                     pipeline_run_id=pipeline_run_id,
+                    record_id=record_id,
                     workspace=workspace,
                     pipeline=pipeline_name,
                     version=version,
@@ -358,9 +361,10 @@ class StageExecutor:
                     error=error_msg,
                 )
 
-        # 5. Update record with resolved values
-        self._update_queued_stage_run(
+        # 5. Update record with resolved values (creates experiment record if pre-queued)
+        queued_record_id = self._update_queued_stage_run(
             stage_run_id=stage_run_id,
+            workspace=workspace,
             version=version,
             stage_version_id=stage_version_id,
             inputs=inputs,
@@ -371,6 +375,9 @@ class StageExecutor:
             preflight_warnings=preflight_warnings,
             preflight_errors=preflight_errors,
         )
+        # Use queued record_id if we didn't create one earlier (pre-queued case)
+        if record_id is None:
+            record_id = queued_record_id
 
         try:
             # Emit phase progress: building image
@@ -443,6 +450,7 @@ class StageExecutor:
         info = StageRunInfo(
             stage_run_id=stage_run_id,
             pipeline_run_id=pipeline_run_id,
+            record_id=record_id,
             workspace=workspace,
             pipeline=pipeline_name,
             version=version,
@@ -851,8 +859,12 @@ class StageExecutor:
         config: dict | None,
         preflight_errors: list[str] | None = None,
         preflight_warnings: list[str] | None = None,
-    ):
-        """Create stage run record in database with input lineage tracking."""
+    ) -> str:
+        """Create stage run record in database with input lineage tracking.
+
+        Returns:
+            The generated experiment record_id (ULID)
+        """
         self.db.create_stage_run(
             stage_run_id=stage_run_id,
             workspace_name=workspace,
@@ -890,9 +902,20 @@ class StageExecutor:
                 source_stage_version_id=source_stage_version_id,
             )
 
+        # Create experiment record for this run
+        exp_manager = ExperimentRecordManager(self.db)
+        record_id = exp_manager.create_run_record(
+            workspace_name=workspace,
+            version=version,
+            stage_run_id=stage_run_id,
+        )
+
+        return record_id
+
     def _update_queued_stage_run(
         self,
         stage_run_id: str,
+        workspace: str,
         version: str,
         stage_version_id: int,
         inputs: dict,
@@ -902,11 +925,14 @@ class StageExecutor:
         hints: dict | None,
         preflight_warnings: list[str] | None = None,
         preflight_errors: list[str] | None = None,
-    ):
+    ) -> str:
         """Update a queued stage run record with resolved values.
 
         Called when processing a pre-created stage_run from the pipeline queue.
-        Updates version, config, inputs, and records input lineage.
+        Updates version, config, inputs, records input lineage, and creates experiment record.
+
+        Returns:
+            The generated experiment record_id (ULID)
         """
         # Update the stage run with resolved values
         with self.db._conn() as conn:
@@ -959,6 +985,16 @@ class StageExecutor:
                 source_stage_run_id=source_stage_run_id,
                 source_stage_version_id=source_stage_version_id,
             )
+
+        # Create experiment record for this run (for pipeline-queued runs)
+        exp_manager = ExperimentRecordManager(self.db)
+        record_id = exp_manager.create_run_record(
+            workspace_name=workspace,
+            version=version,
+            stage_run_id=stage_run_id,
+        )
+
+        return record_id
 
     def _record_output_signals(
         self,
@@ -2200,6 +2236,15 @@ echo "Stage completed successfully"
             # Log warning but don't fail the run if metrics collection fails
             logger.warning(f"Failed to collect metrics for {stage_run_id}: {e}")
 
+        # Extract auto-results from metrics and update run_results
+        try:
+            exp_manager = ExperimentRecordManager(self.db)
+            auto_results = exp_manager.extract_auto_results(stage_run_id)
+            if auto_results is not None:
+                exp_manager.update_auto_results(stage_run_id, auto_results, status)
+        except Exception as e:
+            logger.warning(f"Failed to extract auto-results for {stage_run_id}: {e}")
+
         # Run AI semantic review of outputs
         try:
             self._run_post_run_svs_review(stage_run_id, backend)
@@ -2716,6 +2761,14 @@ echo "Stage completed successfully"
             backend_type=None,  # Not executed - blocked by review
         )
 
+        # Create experiment record for this run (even if blocked by review)
+        exp_manager = ExperimentRecordManager(self.db)
+        record_id = exp_manager.create_run_record(
+            workspace_name=workspace,
+            version=version,
+            stage_run_id=stage_run_id,
+        )
+
         # Update status to FAILED with error message
         self.db.update_stage_run_status(
             stage_run_id=stage_run_id,
@@ -2728,6 +2781,7 @@ echo "Stage completed successfully"
         return StageRunInfo(
             stage_run_id=stage_run_id,
             pipeline_run_id=pipeline_run_id,
+            record_id=record_id,
             workspace=workspace,
             pipeline=pipeline_name,
             version=version,
@@ -2840,6 +2894,14 @@ echo "Stage completed successfully"
             backend_type=None,  # Not executed - blocked by preflight
         )
 
+        # Create experiment record for this run (even if blocked by preflight)
+        exp_manager = ExperimentRecordManager(self.db)
+        record_id = exp_manager.create_run_record(
+            workspace_name=workspace,
+            version=version,
+            stage_run_id=stage_run_id,
+        )
+
         self.db.update_stage_run_status(
             stage_run_id=stage_run_id,
             status=StageRunStatus.FAILED,
@@ -2852,6 +2914,7 @@ echo "Stage completed successfully"
         return StageRunInfo(
             stage_run_id=stage_run_id,
             pipeline_run_id=pipeline_run_id,
+            record_id=record_id,
             workspace=workspace,
             pipeline=pipeline_name,
             version=version,
