@@ -52,7 +52,7 @@ class PipelineExecutor:
         """On startup, reschedule any pipelines that were mid-flight."""
         with self.db._conn() as conn:
             rows = conn.execute(
-                "SELECT id, workspace_name, pipeline_name, config_override, inputs_override, reason_json FROM pipeline_runs WHERE status IN (?, ?)",
+                "SELECT id, workspace_name, pipeline_name, config_override, inputs_override, reason_json, results_spec_json, experiment_group FROM pipeline_runs WHERE status IN (?, ?)",
                 (PipelineStatus.PENDING, PipelineStatus.RUNNING),
             ).fetchall()
             for row in rows:
@@ -65,10 +65,12 @@ class PipelineExecutor:
                 if (counts["pending"] or 0) > 0 or (counts["running"] or 0) > 0:
                     workspace = row["workspace_name"]
                     pipeline_name = row["pipeline_name"]
-                    # Load persisted overrides and reason
+                    # Load persisted overrides, reason, and results_spec
                     config_override = json.loads(row["config_override"]) if row["config_override"] else None
                     inputs_override = json.loads(row["inputs_override"]) if row["inputs_override"] else None
                     reason_structured = json.loads(row["reason_json"]) if row["reason_json"] else None
+                    results_spec = json.loads(row["results_spec_json"]) if row["results_spec_json"] else None
+                    experiment_group = row["experiment_group"]
                     # Extract string reason from structured reason (for backwards compatibility)
                     reason = reason_structured.get("description") if reason_structured else None
                     # submit worker to continue processing
@@ -81,6 +83,8 @@ class PipelineExecutor:
                         inputs_override,
                         reason,
                         reason_structured,
+                        results_spec,
+                        experiment_group,
                     )
 
     def run_stages(
@@ -94,6 +98,8 @@ class PipelineExecutor:
         reason_structured: RunReason | None = None,
         async_mode: bool = True,
         skip_review: bool = False,
+        results_spec: dict | None = None,
+        experiment_group: str | None = None,
     ) -> dict:
         """
         Run pipeline stages - unified entry point for all stage execution.
@@ -108,6 +114,8 @@ class PipelineExecutor:
             reason_structured: Structured RunReason object with hypothesis/approach/etc
             async_mode: True = queue-based async, False = sequential blocking
             skip_review: If True, skip pre-run review
+            results_spec: Results spec dict for experiment tracking (stored for async runs)
+            experiment_group: Optional experiment group name for filtering
 
         Returns:
             Dict with pipeline_run_id and stage_runs list
@@ -193,8 +201,8 @@ class PipelineExecutor:
         with self.db._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO pipeline_runs (id, workspace_name, pipeline_name, status, started_at, config_override, inputs_override, reason_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO pipeline_runs (id, workspace_name, pipeline_name, status, started_at, config_override, inputs_override, reason_json, results_spec_json, experiment_group)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pipeline_run_id,
@@ -205,6 +213,8 @@ class PipelineExecutor:
                     json.dumps(safe_config_override) if safe_config_override else None,
                     json.dumps(safe_inputs_override) if safe_inputs_override else None,
                     json.dumps(reason_dict) if reason_dict else None,
+                    json.dumps(results_spec) if results_spec else None,
+                    experiment_group,
                 ),
             )
 
@@ -237,6 +247,8 @@ class PipelineExecutor:
             safe_inputs_override,
             reason,
             reason_dict,
+            results_spec,
+            experiment_group,
         )
 
         # Build queued stage info for immediate feedback
@@ -309,6 +321,8 @@ class PipelineExecutor:
         inputs_override: dict | None,
         reason: str | None,
         reason_structured: dict | None = None,
+        results_spec: dict | None = None,
+        experiment_group: str | None = None,
     ) -> None:
         self._logger.info("Worker started for pipeline %s workspace=%s", pipeline_run_id, workspace)
         start_time = time.time()
@@ -329,6 +343,8 @@ class PipelineExecutor:
                     inputs_override,
                     reason,
                     reason_structured,
+                    results_spec,
+                    experiment_group,
                 )
                 error_count = 0
             except Exception as e:
@@ -448,6 +464,8 @@ class PipelineExecutor:
         inputs_override: dict | None,
         reason: str | None,
         reason_structured: dict | None = None,
+        results_spec: dict | None = None,
+        experiment_group: str | None = None,
     ) -> list[StageRunInfo]:
         launched: list[StageRunInfo] = []
         now = datetime.now(UTC)
@@ -610,6 +628,7 @@ class PipelineExecutor:
                     inputs_override=stage_inputs,
                     reason=reason,
                     reason_structured=reason_structured,
+                    experiment_group=experiment_group,
                 )
                 launched.append(stage_run)
                 # Update queue with the stage_run_id for status tracking
@@ -618,6 +637,24 @@ class PipelineExecutor:
                         "UPDATE pipeline_stage_queue SET stage_run_id = ? WHERE id = ?",
                         (stage_run.stage_run_id, queue_id),
                     )
+
+                # Save results_spec for experiment tracking (async runs)
+                if results_spec and stage_run.record_id:
+                    try:
+                        from goldfish.experiment_model.records import ExperimentRecordManager
+
+                        exp_manager = ExperimentRecordManager(self.db)
+                        exp_manager.save_results_spec(
+                            stage_run.stage_run_id,
+                            stage_run.record_id,
+                            results_spec,
+                        )
+                    except Exception as e:
+                        self._logger.warning(
+                            "Failed to save results_spec for %s: %s",
+                            stage_run.stage_run_id,
+                            e,
+                        )
             except Exception as e:
                 # Mark queue entry as failed with error message so it's visible to the user
                 error_msg = str(e)

@@ -271,13 +271,26 @@ if __name__ == "__main__":
 
 ## Step 7: Run Training
 
+Define a results_spec (required for all runs):
+```
+RESULTS_SPEC = {
+  "primary_metric": "perplexity",
+  "direction": "minimize",
+  "min_value": 4.0,
+  "goal_value": 3.0,
+  "dataset_split": "val",
+  "tolerance": 0.05,
+  "context": "1B LM baseline on V37 tokens; minimize val perplexity"
+}
+```
+
 ```
 run("w1", stages=["train"], reason={
     "description": "Training 1B LM on V37 tokens",
     "hypothesis": "1B params should achieve < 3.0 perplexity",
     "approach": "Standard transformer training with AdamW",
     "min_result": "Perplexity under 4.0"
-})
+}, results_spec=RESULTS_SPEC)
 ```
 
 Returns:
@@ -285,6 +298,7 @@ Returns:
 {
   "runs": [{
     "stage_run_id": "stage-abc123",
+    "record_id": "01HXYZ...",
     "workspace": "1b-8k-lm",
     "version": "v1",
     "stage": "train",
@@ -299,9 +313,9 @@ Returns:
 
 ## Step 8: Monitor Progress
 
-Check status:
+Check infra status:
 ```
-get_run("stage-abc123")
+inspect_run("stage-abc123", include=["dashboard", "metadata"])
 ```
 
 View logs:
@@ -309,42 +323,43 @@ View logs:
 logs("stage-abc123", tail=100)
 ```
 
-List all running jobs:
+Track experiment status:
 ```
-list_runs(status="running")
+list_history("1b-8k-lm", record_type="run", sort_by="created")
+inspect_record("01HXYZ...", include=["results", "comparison"])
+list_unfinalized_runs("1b-8k-lm")
 ```
 
 ## Step 9: After Completion
 
-Get outputs:
+Finalize results (required):
 ```
-get_outputs("stage-abc123")
-```
-
-Returns:
-```json
-{
-  "outputs": [
-    {"name": "model", "type": "directory", "location": "gs://my-goldfish-bucket/artifacts/..."},
-    {"name": "training_log", "type": "csv", "location": "gs://my-goldfish-bucket/artifacts/..."}
-  ]
-}
+finalize_run("stage-abc123", {
+  "primary_metric": "perplexity",
+  "direction": "minimize",
+  "value": 2.98,
+  "dataset_split": "val",
+  "ml_outcome": "success",
+  "notes": "Met target; stable convergence across last 3 epochs."
+})
 ```
 
-Check lineage:
+Inspect outputs + lineage:
 ```
-get_run_provenance("stage-abc123")
+inspect_run("stage-abc123", include=["manifest", "provenance"])
+get_debug_info("stage-abc123")
 ```
 
 ## Step 10: Save and Tag Milestone
 
-Create version and tag it as a milestone:
+Tag the run as a milestone:
+```
+tag_record("stage-abc123", "initial-training-complete")
+```
+
+Optional checkpoint (save without running):
 ```
 save_version("w1", "Training complete - 1B model trained on V37")
-# Returns version="v1"
-
-# Tag this as a significant milestone for easy reference
-manage_versions(workspace="1b-8k-lm", action="tag", version="v1", tag="initial-training-complete")
 ```
 
 Hibernate workspace:
@@ -355,18 +370,17 @@ hibernate("w1", "Completed 1B-8k LM training experiment")
 ## Full Tool Sequence Summary
 
 ```
-1. reload_config()                                    # Verify config
-2. register_source("v37-tokens", ...)                # Register data
+1. reload_config()                                     # Verify config
+2. register_source("v37-tokens", ...)                 # Register data
 3. create_workspace("1b-8k-lm", goal="...", reason="...") # Create workspace
-4. mount("1b-8k-lm", "w1", reason="...")             # Mount to slot
+4. mount("1b-8k-lm", "w1", reason="...")              # Mount to slot
 5. [Create files: pipeline.yaml, configs/train.yaml, modules/train.py]
-6. run("w1", stages=["train"], reason={...})         # Launch training (structured reason)
-7. logs("stage-abc123", tail=100)                    # Monitor
-8. inspect_run("stage-abc123")                       # Check status
-9. get_outputs("stage-abc123")                       # Get results
-10. save_version("w1", "Training complete")          # Save progress
-11. manage_versions(..., action="tag", ...)          # Tag milestone
-12. hibernate("w1", "Done with experiment")          # Clean up
+6. run("w1", stages=["train"], reason={...}, results_spec=RESULTS_SPEC)
+7. inspect_run("stage-abc123")                         # Infra status
+8. inspect_record("01HXYZ...", include=["results", "comparison"])
+9. finalize_run("stage-abc123", {...})                 # Required finalization
+10. tag_record("stage-abc123", "initial-training-complete")
+11. hibernate("w1", "Done with experiment")            # Clean up
 ```
 
 ## Common Variations
@@ -374,21 +388,24 @@ hibernate("w1", "Completed 1B-8k LM training experiment")
 ### Run All Pipeline Stages
 
 ```
-run("w1")  # Runs all stages in pipeline order
+run("w1", results_spec=RESULTS_SPEC)  # Runs all stages in pipeline order
 ```
 
 ### Resume Failed Run
 
 ```
 # Check what failed
-get_run("stage-abc123")
+inspect_run("stage-abc123", include=["svs", "metadata"])
 logs("stage-abc123", tail=500)
+
+# If the run is terminal and unfinalized, finalize it before new runs
+list_unfinalized_runs("1b-8k-lm")
 
 # Fix code, then re-run
 run("w1", stages=["train"], reason={
     "description": "Fixed OOM error, reduced batch size",
     "approach": "Reduced batch size from 4 to 2"
-})
+}, results_spec=RESULTS_SPEC)
 ```
 
 ### Promote Output to Dataset
@@ -421,6 +438,8 @@ mount("w2", "1b-8k-lm-larger", reason="Experimenting with larger model")
 This shows a realistic ML workflow over multiple iterations, demonstrating how to use tags and pruning to manage experiment history.
 
 ### Phase 1: Initial Development (Many Failures)
+
+Note: All run(...) calls below assume `results_spec=RESULTS_SPEC` (required).
 
 ```
 # Day 1-3: Getting the basics working
@@ -461,10 +480,10 @@ run("w1", reason={
 # SUCCESS: Loss decreasing properly!
 
 # Mark this milestone
-save_version("w1", "First working training configuration")
-# Returns v16
+save_version("w1", "First working training configuration")  # optional checkpoint
 
-manage_versions(workspace="1b-8k-lm", action="tag", version="v16", tag="first-working")
+# Tag the successful run
+tag_record("stage-abc123", "first-working")
 ```
 
 ### Phase 3: Optimization Iterations
@@ -497,8 +516,10 @@ run("w1", reason={
 })
 # SUCCESS: Perplexity 2.87!
 
-save_version("w1", "Best model configuration found")
-manage_versions(workspace="1b-8k-lm", action="tag", version="v31", tag="best-model")
+save_version("w1", "Best model configuration found")  # optional checkpoint
+
+# Tag the best run
+tag_record("stage-abc123", "best-model")
 ```
 
 ### Phase 4: Clean Up History

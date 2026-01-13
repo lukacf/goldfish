@@ -1,6 +1,6 @@
 # Goldfish MCP Tools Reference
 
-Complete API documentation for the 31 master Goldfish MCP tools organized by category.
+Complete API documentation for the Goldfish MCP tools organized by category.
 
 ## Workspace Management Tools
 
@@ -54,6 +54,7 @@ Create a new experiment workspace from main.
 ### mount(workspace, slot, reason)
 
 Mount a workspace to an editing slot. Required before editing files.
+Returns experiment context for quick orientation (current best, pending finalizations, recent trend).
 
 **Parameters:**
 | Parameter | Type | Required | Description |
@@ -121,46 +122,123 @@ Permanently delete a workspace and all snapshots.
 
 ## Execution Tools
 
-### run(workspace, stages, pipeline, config_override, inputs_override, reason, wait, dry_run, skip_review)
+### run(workspace, stages, pipeline, config_override, inputs_override, reason, results_spec, experiment_group, wait, dry_run, skip_review)
 
-Execute pipeline stages. **The primary execution tool.**
+Execute pipeline stages. **Primary execution tool.**
 
 **Parameters:**
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `workspace` | str | Yes | - | Workspace name or slot (e.g., "w1") |
 | `stages` | list[str] | No | None | Stages to run (None = all) |
-| `reason` | str \| dict | No | None | Why running (min 15 chars description or dict) |
+| `pipeline` | str | No | None | Named pipeline file (pipelines/<name>.yaml) |
+| `config_override` | dict | No | None | Override config vars per stage |
+| `inputs_override` | dict | No | None | Override input sources |
+| `reason` | str \| dict | No | None | Why running (min 15 chars; dict supports hypothesis/approach) |
+| `results_spec` | dict | **Yes** | - | Expected results spec (required for non-dry runs) |
+| `experiment_group` | str | No | None | Optional grouping label for filtering/summaries |
+| `wait` | bool | No | False | If True, block until completion |
+| `dry_run` | bool | No | False | Validate without launching |
+| `skip_review` | bool | No | False | Skip SVS pre-run review (last resort) |
+
+**results_spec (required):**
+```json
+{
+  "primary_metric": "dir_acc_binary",
+  "direction": "maximize",
+  "min_value": 0.60,
+  "goal_value": 0.63,
+  "dataset_split": "val",
+  "tolerance": 0.003,
+  "context": "Verbose experiment intent and constraints",
+  "secondary_metrics": ["val_loss"],
+  "baseline_run": "@best-25m",
+  "failure_threshold": 0.55,
+  "known_caveats": ["High variance early epochs"]
+}
+```
+
+**Note:** `run()` enforces a **finalization gate**: terminal runs without `finalize_run()` will block new runs.
+
+---
+
+### finalize_run(record_or_run_id, results)
+
+Finalize ML results for a run. Authoritative outcome recording.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `record_or_run_id` | str | Yes | Record ID or stage_run_id |
+| `results` | dict | Yes | Final results payload |
+
+**results (required fields):**
+```json
+{
+  "primary_metric": "dir_acc_binary",
+  "direction": "maximize",
+  "value": 0.631,
+  "dataset_split": "val",
+  "ml_outcome": "success|partial|miss|unknown",
+  "notes": "Verbose interpretation (min 15 chars)"
+}
+```
+
+Optional fields: `unit`, `step`, `epoch`, `secondary`, `termination`.
+
+---
+
+### list_history(workspace, record_type, stage, tagged, metric, min_value, experiment_group, sort_by, desc, include_pruned, include_internal_ids, limit, offset)
+
+List experiment records (runs + checkpoints). Primary history/query tool.
+
+---
+
+### inspect_record(ref, include, workspace)
+
+Inspect a record by record_id, stage_run_id, or @tag (workspace required for tags).
+
+---
+
+### tag_record(ref, tag)
+
+Tag a record. For runs, creates both run_tag and version_tag.
+
+---
+
+### list_unfinalized_runs(workspace)
+
+List terminal runs that still need finalization.
+
+---
+
+### get_experiment_context(workspace)
+
+Returns baseline, pending finalizations, recent trend, regression alerts.
+
+---
+
+### get_debug_info(ref, workspace)
+
+Resolve a record/tag to infra IDs and GCS/log URIs for debugging.
 
 ---
 
 ### inspect_run(run_id, include)
 
-Get a comprehensive, synthesized view of a run results and health.
-
-**Parameters:**
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `run_id` | str | Yes | - | Run ID (e.g., "stage-abc123") |
-| `include` | list[str] | No | - | Data to include (dashboard, manifest, provenance, svs, thoughts) |
+Infra-level run view (SVS, logs, provenance). Use `inspect_record()` for experiment results.
 
 ---
 
 ### compare_runs(run_id_a, run_id_b)
 
-Compare two runs side-by-side. **Essential for troubleshooting regressions.**
+Legacy infra comparison (use record comparison where possible).
 
 ---
 
 ### logs(run_id, tail, since, follow)
 
 Get container logs from a run. Supports follow mode for cursor-based streaming.
-
----
-
-### mark_outcome(run_id, outcome)
-
-Indicate if a completed run produced good results or garbage.
 
 ---
 
@@ -172,13 +250,19 @@ Cancel a running stage.
 
 ### list_runs(workspace, stage, status, pipeline_run_id, limit, offset)
 
-List recent runs for a workspace (compact view).
+Legacy run timeline (infra). Prefer `list_history()`.
 
 ---
 
 ### list_all_runs(status, limit, offset)
 
-Get a global experiment timeline across ALL workspaces.
+Legacy global run timeline. Prefer `list_history()`.
+
+---
+
+### save_results_spec(stage_run_id, record_id, spec)
+
+Advanced: persist a results_spec after the run was created.
 
 ---
 
