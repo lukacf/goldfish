@@ -452,6 +452,8 @@ class ExperimentRecordManager:
     ) -> None:
         """Update run_results with auto-extracted data.
 
+        Does NOT overwrite results_status if the run is already finalized.
+
         Args:
             stage_run_id: The stage run ID
             auto_results: The auto-extracted results
@@ -472,11 +474,13 @@ class ExperimentRecordManager:
         infra_outcome = self.derive_infra_outcome(run_status, error_text)
 
         with self.db._conn() as conn:
+            # Only update results_status if not already finalized
+            # This preserves the authoritative finalization status
             conn.execute(
                 """
                 UPDATE run_results
                 SET results_auto = ?,
-                    results_status = ?,
+                    results_status = CASE WHEN results_status = 'finalized' THEN results_status ELSE ? END,
                     infra_outcome = ?
                 WHERE stage_run_id = ?
                 """,
@@ -970,7 +974,7 @@ class ExperimentRecordManager:
         result: dict[str, Any] = json.loads(comparison_json)
         return result
 
-    def tag_record(self, record_id: str, tag: str) -> dict[str, Any]:
+    def tag_record(self, ref: str, tag: str) -> dict[str, Any]:
         """Tag an experiment record.
 
         For run records, creates BOTH a run tag AND a version tag.
@@ -978,7 +982,7 @@ class ExperimentRecordManager:
         Tag uniqueness is enforced per workspace across both tables.
 
         Args:
-            record_id: The record ID to tag
+            ref: Record reference - can be record_id or stage_run_id (stage-*)
             tag: The tag name
 
         Returns:
@@ -991,10 +995,15 @@ class ExperimentRecordManager:
         if not tag or not tag.strip():
             raise ValueError("Tag name is invalid: cannot be empty")
 
-        # Get the record
-        record = self.get_record(record_id)
+        # Get the record - handle both record_id and stage_run_id
+        record = None
+        if ref.startswith("stage-"):
+            record = self.get_record_by_stage_run(ref)
+        else:
+            record = self.get_record(ref)
+
         if record is None:
-            raise ValueError(f"Record not found: {record_id}")
+            raise ValueError(f"Record not found: {ref}")
 
         workspace_name = record["workspace_name"]
         version = record["version"]
@@ -1036,7 +1045,7 @@ class ExperimentRecordManager:
                     INSERT INTO run_tags (workspace_name, record_id, tag_name, created_at)
                     VALUES (?, ?, ?, ?)
                     """,
-                    (workspace_name, record_id, tag, created_at),
+                    (workspace_name, record["record_id"], tag, created_at),
                 )
 
             # Always create version tag (for both run and checkpoint)
@@ -1049,7 +1058,7 @@ class ExperimentRecordManager:
             )
 
         return {
-            "record_id": record_id,
+            "record_id": record["record_id"],
             "tag": tag,
             "workspace_name": workspace_name,
             "record_type": record_type,
@@ -1231,8 +1240,8 @@ class ExperimentRecordManager:
             """
         elif tagged is True:
             # Need to search BOTH run_tags AND workspace_version_tags (merged tags per spec)
-            # Run records are found via run_tags
-            # Checkpoint records are found via workspace_version_tags (since they have no run_tag)
+            # Run records: found via run_tags (run_tag is per-record, version_tag is per-version)
+            # Checkpoint records: found via workspace_version_tags (since they have no run_tag)
             query = """
                 SELECT DISTINCT er.* FROM experiment_records er
                 WHERE er.workspace_name = ?
@@ -1249,8 +1258,8 @@ class ExperimentRecordManager:
             """
         elif isinstance(tagged, str):
             # Specific tag filter - search BOTH tables (merged tags per spec)
-            # Run records are found via run_tags
-            # Checkpoint records are found via workspace_version_tags
+            # Run records: found via run_tags (run_tag is per-record, version_tag is per-version)
+            # Checkpoint records: found via workspace_version_tags
             query = """
                 SELECT DISTINCT er.* FROM experiment_records er
                 WHERE er.workspace_name = ?
@@ -1329,18 +1338,45 @@ class ExperimentRecordManager:
 
         # Sorting
         order_dir = "DESC" if desc else "ASC"
-        if sort_by == "created":
-            # ULID is lexicographically sortable by time
-            query += f" ORDER BY er.record_id {order_dir}"
+        if sort_by == "metric":
+            # Sort by metric value from run_results
+            # Use COALESCE to handle both results_final and results_auto
+            # Note: This sorts only run records; checkpoints have no metric
+            query += f"""
+                ORDER BY (
+                    SELECT COALESCE(
+                        CAST(json_extract(rr.results_final, '$.value') AS REAL),
+                        CAST(json_extract(rr.results_auto, '$.value') AS REAL)
+                    )
+                    FROM run_results rr
+                    WHERE rr.stage_run_id = er.stage_run_id
+                ) {order_dir} NULLS LAST, er.record_id {order_dir}
+            """
         else:
-            # Metric sorting would require JOIN to run_results
-            # For now, default to created
+            # Default to created (ULID is lexicographically sortable by time)
             query += f" ORDER BY er.record_id {order_dir}"
+
+        # First get total count (without LIMIT/OFFSET)
+        count_query = query.replace("SELECT DISTINCT er.*", "SELECT COUNT(DISTINCT er.record_id) as cnt")
+        count_query = count_query.replace("SELECT er.*", "SELECT COUNT(er.record_id) as cnt")
+        # Remove ORDER BY clause for count query
+        if " ORDER BY " in count_query:
+            count_query = count_query[: count_query.index(" ORDER BY ")]
 
         query += " LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         with self.db._conn() as conn:
+            # Get total count first (params without limit/offset)
+            count_params = params[:-2]  # Remove limit/offset
+            count_row = conn.execute(count_query, count_params).fetchone()
+            # Ensure total_count is an int (handles mock scenarios in tests)
+            total_count = 0
+            if count_row:
+                cnt_val = count_row["cnt"]
+                if isinstance(cnt_val, int):
+                    total_count = cnt_val
+
             rows = conn.execute(query, params).fetchall()
 
         # Enrich records with tags, results_status, ml_outcome, stage
@@ -1404,7 +1440,11 @@ class ExperimentRecordManager:
 
             records.append(record)
 
-        return {"records": records}
+        return {
+            "records": records,
+            "total": total_count,
+            "has_more": offset + len(records) < total_count,
+        }
 
     def inspect_record(
         self,
@@ -1437,7 +1477,27 @@ class ExperimentRecordManager:
         if "results" in include and record["stage_run_id"]:
             run_results = self.get_run_results(record["stage_run_id"])
             if run_results:
-                result["results"] = dict(run_results)
+                # Parse JSON fields
+                parsed_results: dict[str, Any] = dict(run_results)
+                results_auto = parsed_results.get("results_auto")
+                if results_auto and isinstance(results_auto, str):
+                    try:
+                        parsed_results["results_auto"] = json.loads(results_auto)
+                    except (json.JSONDecodeError, TypeError):
+                        pass  # Keep as string if parsing fails
+                results_final = parsed_results.get("results_final")
+                if results_final and isinstance(results_final, str):
+                    try:
+                        parsed_results["results_final"] = json.loads(results_final)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                comparison_val = parsed_results.get("comparison")
+                if comparison_val and isinstance(comparison_val, str):
+                    try:
+                        parsed_results["comparison"] = json.loads(comparison_val)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                result["results"] = parsed_results
 
         if "tags" in include:
             result["tags"] = self.get_record_tags(record["record_id"])
@@ -1504,7 +1564,9 @@ class ExperimentRecordManager:
             workspace_name: Workspace name
 
         Returns:
-            List of unfinalized run result dicts
+            List of unfinalized run result dicts with:
+            - record_id, stage_run_id, infra_outcome, results_status
+            - stage_name (from stage_runs)
         """
         validate_workspace_name(workspace_name)
 
@@ -1513,8 +1575,9 @@ class ExperimentRecordManager:
         placeholders = ", ".join("?" for _ in terminal_outcomes)
 
         query = f"""
-            SELECT rr.* FROM run_results rr
+            SELECT rr.*, sr.stage_name FROM run_results rr
             JOIN experiment_records er ON rr.record_id = er.record_id
+            JOIN stage_runs sr ON rr.stage_run_id = sr.id
             WHERE er.workspace_name = ?
               AND rr.infra_outcome IN ({placeholders})
               AND rr.results_status != 'finalized'

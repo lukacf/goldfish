@@ -208,7 +208,9 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     error TEXT,
     config_override TEXT,             -- JSON: per-stage config overrides
     inputs_override TEXT,             -- JSON: per-stage input overrides
-    reason_json TEXT                  -- JSON: structured RunReason (description, hypothesis, etc.)
+    reason_json TEXT,                 -- JSON: structured RunReason (description, hypothesis, etc.)
+    results_spec_json TEXT,           -- JSON: results_spec for async runs
+    experiment_group TEXT             -- Optional experiment group for async runs
 );
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_workspace ON pipeline_runs(workspace_name);

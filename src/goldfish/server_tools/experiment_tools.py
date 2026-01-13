@@ -163,17 +163,11 @@ def list_history(
         offset=offset,
     )
 
-    # The manager returns a dict with 'records' key
-    records_list = records.get("records", [])
-
-    # Determine if there are more records
-    total_count = len(records_list)
-    has_more = total_count == limit  # Approximate - if we got limit, there might be more
-
+    # The manager returns a dict with 'records', 'total', and 'has_more'
     return {
-        "records": records_list,
-        "total": total_count,
-        "has_more": has_more,
+        "records": records.get("records", []),
+        "total": records.get("total", 0),
+        "has_more": records.get("has_more", False),
     }
 
 

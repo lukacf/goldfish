@@ -72,6 +72,7 @@ class DummyStageExecutor:
         reason_structured: dict | None = None,
         wait: bool = False,
         skip_review: bool = False,
+        experiment_group: str | None = None,
     ) -> StageRunInfo:
         self._ensure_workspace_version(workspace)
         stage_run_id = f"stage-{len(self.calls) + 1}"
@@ -678,8 +679,8 @@ class TestOverridePersistence:
 
         # Verify overrides were passed to worker
         assert len(submitted_args) == 1
-        # Args: pipeline_run_id, workspace, pipeline_name, config_override, inputs_override, reason, reason_structured
-        _, _, _, config_override, inputs_override, _, _ = submitted_args[0]
+        # Args: pipeline_run_id, workspace, pipeline_name, config_override, inputs_override, reason, reason_structured, results_spec, experiment_group
+        _, _, _, config_override, inputs_override, _, _, _, _ = submitted_args[0]
         assert config_override == {"prep": {"LR": "0.01"}}
         assert inputs_override == {"prep": {"data": "gs://test"}}
 
@@ -965,8 +966,8 @@ class TestReasonPropagation:
 
         # Verify reason_structured was passed to worker
         assert len(submitted_args) == 1
-        # Args: prun_id, workspace, pipeline_name, config, inputs, reason, reason_structured
-        _, _, _, _, _, reason, reason_structured = submitted_args[0]
+        # Args: prun_id, workspace, pipeline_name, config, inputs, reason, reason_structured, results_spec, experiment_group
+        _, _, _, _, _, reason, reason_structured, _, _ = submitted_args[0]
         assert reason == "Recovery test reason"  # Extracted from description
         assert reason_structured["description"] == "Recovery test reason"
         assert reason_structured["hypothesis"] == "Should recover correctly"

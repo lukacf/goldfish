@@ -1,6 +1,6 @@
 ---
 name: goldfish-ml
-description: This skill should be used when working with Goldfish ML, an MCP server for AI-driven machine learning experimentation. Use this skill for workspace management, pipeline execution, data registry operations, and provenance tracking. Goldfish provides 31 master tools for efficient ML workflows.
+description: This skill should be used when working with Goldfish ML, an MCP server for AI-driven machine learning experimentation. Use this skill for workspace management, pipeline execution, data registry operations, and provenance tracking. Goldfish provides a suite of master tools for efficient ML workflows.
 ---
 
 # Goldfish ML
@@ -646,103 +646,70 @@ svs:
 
 ### 5. Monitoring Runs
 
-
-
 ```
-
 1. Get overview
-
    dashboard() → orientation on active/failed runs
+   get_experiment_context("w1") → baseline + trends + pending finalizations
+   list_unfinalized_runs("w1") → runs blocked on finalization
 
+2. Experiment status (PRIMARY)
+   list_history("w1", sort_by="created") → recent records
+   inspect_record(record_id, include=["results", "comparison"]) → results + diffs
 
-
-2. Detailed status (PRIMARY TOOL)
-
-   inspect_record(record_id, include=["results", "comparison"]) → experiment results + diffs.
-   inspect_run(run_id) → infra status, logs, SVS findings (lower-level).
-
-
-
-3. Debugging / Low-level logs (SECONDARY TOOL)
-
-   logs(run_id, follow=True) → return only NEW logs since last call. Use if dashboard/trends are insufficient.
-
-
+3. Infra details (SECONDARY)
+   inspect_run(run_id) → infra status, logs, SVS findings
+   logs(run_id, follow=True) → stream new logs
 
 4. Cancel if needed
-
    cancel(run_id, reason="Wrong hyperparameters")
-
 ```
-
-
-
-
 
 ### 6. Lineage & Provenance
 
-
-
 ```
+# Experiment-level context
+list_history("baseline")
+inspect_record(record_id, include=["results", "comparison"])
 
-# Full workspace context
-
-inspect_workspace("baseline")
-
-
-
-# Side-by-side comparison (legacy, infra-level)
-
-compare_runs(run_id_a="stage-1", run_id_b="stage-2")
-
-
-
-# Full run provenance (infra-level)
-
+# Infra-level provenance
 inspect_run(run_id, include=["provenance"])
 
+# Debugging: map record/tag to GCS/logs
+get_debug_info("@best-v1", workspace="baseline")
+
+# Legacy infra comparison (use record comparison when possible)
+compare_runs(run_id_a="stage-1", run_id_b="stage-2")
 ```
-
-
 
 ### 7. Version Management (Tags & Pruning)
 
-
-
 ```
+# Tag a run (also tags its version)
+tag_record("stage-abc123", "best-v1")
 
-# Mark a milestone
-
-manage_versions(workspace="exp_v1", action="tag", version="v24", tag="baseline-v1")
-
-
+# Tag a checkpoint (get record_id via list_history)
+list_history("exp_v1", record_type="checkpoint")
+tag_record("01HXYZ...", "checkpoint-1")
 
 # Clean up failed experiments
+manage_versions(
+    workspace="exp_v1",
+    action="prune",
+    from_version="v1",
+    to_version="v23",
+    reason="Cleanup noise",
+)
 
-manage_versions(workspace="exp_v1", action="prune",
-
-                from_version="v1", to_version="v23",
-
-                reason="Cleanup noise")
-
-
-
-# List history including milestones
-
+# List version history (includes tags + pruned info)
 manage_versions(workspace="exp_v1", action="list")
-
 ```
-
-
 
 **Key behaviors:**
 
+- Tagging a run via `tag_record()` also creates a version tag with the same name
 - Tagged versions are **protected** and cannot be pruned
-
 - Pruned versions don't appear in `status()` or STATE.md
-
 - Version numbering continues unaffected
-
 - Pruning is **reversible** via unprune
 
 ### 8. Managing Docker Images
@@ -814,7 +781,7 @@ manage_base_images(action="push", image_type="gpu", target="project")
 - Base images must exist in registry before project images can be built
 - Cloud Build requires `gce.project_id` in goldfish.yaml + Artifact Registry write permission for Cloud Build service account
 
-## Master Tool Reference (33)
+## Master Tool Reference
 
 
 
@@ -884,55 +851,22 @@ manage_base_images(action="push", image_type="gpu", target="project")
 
 ### Execution
 
-
-
-
-
-
-
 | Tool | Purpose | Key Parameters |
-
-
-
 |------|---------|----------------|
-
-
-
-| `run()` | Execute stages (with SVS pre-run) | workspace, stages, reason |
-
-
-
-| `inspect_run()` | Run master view (dashboard, manifest, svs) | run_id, include |
-
-
-
+| `run()` | Execute stages (requires results_spec; finalization gate enforced) | workspace, stages, results_spec, reason |
+| `finalize_run()` | Finalize ML results and outcome (authoritative) | record_or_run_id, results |
+| `list_history()` | Experiment records (runs + checkpoints) | workspace, tagged, stage, metric, min_value |
+| `inspect_record()` | Record details (results, comparison, tags) | ref, include, workspace |
+| `tag_record()` | Tag a run/checkpoint (runs also tag version) | ref, tag |
+| `list_unfinalized_runs()` | Runs needing finalization | workspace |
+| `get_experiment_context()` | Best run + pending finalizations + trends | workspace |
+| `get_debug_info()` | Infra IDs + GCS paths for a record | ref, workspace |
+| `inspect_run()` | Infra status, SVS, provenance | run_id, include |
 | `logs()` | Container logs (supports follow mode) | run_id, tail, follow |
-
-
-
 | `cancel()` | Stop a running stage | run_id, reason |
-
-
-
-| `list_runs()` | Workspace run history (compact) | workspace, stage |
-
-
-
-| `list_all_runs()` | Global experiment timeline | status, limit |
-
-
-
-| `mark_outcome()` | Indicate result quality (success/bad) | run_id, outcome |
-
-
-
-| `compare_runs()` | Side-by-side run comparison | run_id_a, run_id_b |
-
-
-
-
-
-
+| `list_runs()` | Legacy run timeline (infra) | workspace, stage |
+| `list_all_runs()` | Legacy global timeline (infra) | status, limit |
+| `compare_runs()` | Legacy infra comparison | run_id_a, run_id_b |
 
 ### Version Management
 
@@ -1051,6 +985,13 @@ manage_base_images(action="push", image_type="gpu", target="project")
 
 ## Troubleshooting & Recovery
 
+### Finalization Gate
+
+If `run()` is blocked due to unfinalized runs:
+- Call `list_unfinalized_runs(workspace)` to see pending records.
+- Use `inspect_record(record_id, include=["results", "comparison"])` to review auto-results.
+- Call `finalize_run(record_or_run_id, results)` to unlock new runs.
+
 
 
 ### SVS Blocks
@@ -1087,54 +1028,14 @@ Goldfish auto-extracts failure patterns to prevent regression. Be aware of these
 
 ## Best Practices
 
-
-
-
-
-
-
 1. **Always provide clear goals** when creating workspaces
-
-
-
-2. **Save versions frequently** with descriptive messages
-
-
-
-3. **Tag significant milestones** (using `manage_versions(action="tag")`)
-
-
-
-4. **Prune failed experiments** to reduce clutter (using `manage_versions(action="prune")`)
-
-
-
-5. **Use descriptive stage names** that reflect the operation
-
-
-
-6. **Register external data** using `register_source()` before referencing in pipelines
-
-
-
-7. **Check status() or dashboard()** after context recovery
-
-
-
-8. **Use log_thought()** to document decisions
-
-
-
-9. **Monitor runs with inspect_run()** (primary) and dashboard()/logs() (secondary)
-
-
-
+2. **Always provide results_spec** for every `run()` (required)
+3. **Finalize every terminal run** with `finalize_run()` before starting new runs
+4. **Tag significant milestones** with `tag_record()` (also tags versions)
+5. **Use list_history/inspect_record** as primary experiment memory; use `inspect_run`/`logs` for infra
+6. **Save versions for checkpoints** and **prune noise** with `manage_versions(action="prune")`
+7. **Register external data** using `register_source()` before referencing in pipelines
+8. **Check status()/dashboard() + get_experiment_context()** after context recovery
+9. **Use log_thought()** to document decisions and conclusions
 10. **Provide structured reasons** for runs with hypothesis and approach
-
-
-
-11. **MANDATORY: Always use `goldfish.io` and `goldfish.metrics`** for I/O and telemetry. AI monitoring will fail without them.
-
-
-
-
+11. **MANDATORY: Always use `goldfish.io` and `goldfish.metrics`** for I/O and telemetry

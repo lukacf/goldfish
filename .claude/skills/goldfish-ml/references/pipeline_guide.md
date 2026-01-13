@@ -13,7 +13,23 @@ workspace/
     └── evaluation.yaml     # Another named pipeline
 ```
 
-Run specific pipelines with: `run("w1", pipeline="training")`
+Run specific pipelines with: `run("w1", pipeline="training", results_spec=RESULTS_SPEC)`
+
+`results_spec` is required for all runs. After the run is terminal, call `finalize_run()`.
+
+Example results_spec (use as `RESULTS_SPEC` below):
+```json
+{
+  "primary_metric": "dir_acc_binary",
+  "direction": "maximize",
+  "min_value": 0.60,
+  "goal_value": 0.63,
+  "dataset_split": "val",
+  "tolerance": 0.003,
+  "context": "Describe what success means for this pipeline run"
+}
+```
+
 
 ## Basic Structure
 
@@ -369,7 +385,7 @@ environment:
 
 Override configs without editing files:
 ```python
-run("w1", stages=["train"], config_override={
+run("w1", stages=["train"], results_spec=RESULTS_SPEC, config_override={
     "learning_rate": 0.0001,
     "epochs": 200
 })
@@ -377,7 +393,7 @@ run("w1", stages=["train"], config_override={
 
 For multiple stages:
 ```python
-run("w1", config_override={
+run("w1", results_spec=RESULTS_SPEC, config_override={
     "train": {"learning_rate": 0.001},
     "evaluate": {"threshold": 0.5}
 })

@@ -28,13 +28,18 @@ class TestListHistory:
         ]
 
         # Set up mock to return different results for different queries
-        # First call = main query, subsequent calls = enrichment queries (return empty)
+        # First call = count query, second call = main query,
+        # subsequent calls = enrichment queries (return empty)
         mock_conn = MagicMock()
         call_count = [0]
 
         def mock_execute(*args: object, **kwargs: object) -> MagicMock:
             result = MagicMock()
             if call_count[0] == 0:
+                # Count query returns total
+                result.fetchone.return_value = {"cnt": 1}
+            elif call_count[0] == 1:
+                # Main query returns records
                 result.fetchall.return_value = mock_rows
             else:
                 # Enrichment queries return empty lists
