@@ -1010,3 +1010,62 @@ class ExperimentRecordManager:
 
         # Try stage_run_id lookup
         return self.get_record_by_stage_run(ref)
+
+    # Terminal infra outcomes that require finalization before new runs
+    _TERMINAL_INFRA_OUTCOMES = {"completed", "preempted", "crashed", "canceled"}
+
+    def is_terminal_infra_outcome(self, infra_outcome: str) -> bool:
+        """Check if an infra_outcome is terminal.
+
+        Terminal outcomes require finalization before new runs can proceed.
+
+        Args:
+            infra_outcome: The infra outcome to check
+
+        Returns:
+            True if terminal, False otherwise
+        """
+        return infra_outcome in self._TERMINAL_INFRA_OUTCOMES
+
+    def list_unfinalized_runs(self, workspace_name: str) -> list[dict[str, Any]]:
+        """List terminal infra runs that are not finalized.
+
+        Args:
+            workspace_name: Workspace name
+
+        Returns:
+            List of unfinalized run result dicts
+        """
+        validate_workspace_name(workspace_name)
+
+        terminal_outcomes = tuple(self._TERMINAL_INFRA_OUTCOMES)
+
+        with self.db._conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT rr.* FROM run_results rr
+                JOIN experiment_records er ON rr.record_id = er.record_id
+                WHERE er.workspace_name = ?
+                  AND rr.infra_outcome IN ({','.join('?' * len(terminal_outcomes))})
+                  AND rr.results_status != 'finalized'
+                """,
+                (workspace_name, *terminal_outcomes),
+            ).fetchall()
+
+        return [dict(row) for row in rows]
+
+    def check_finalization_gate(self, workspace_name: str) -> dict[str, Any]:
+        """Check if new runs are blocked by unfinalized runs.
+
+        Args:
+            workspace_name: Workspace name
+
+        Returns:
+            Dict with 'blocked' bool and 'unfinalized' list
+        """
+        unfinalized = self.list_unfinalized_runs(workspace_name)
+
+        return {
+            "blocked": len(unfinalized) > 0,
+            "unfinalized": unfinalized,
+        }
