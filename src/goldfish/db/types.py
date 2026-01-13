@@ -242,3 +242,65 @@ class BackupRow(TypedDict):
     created_at: str  # When backup was created
     expires_at: str  # When backup should be cleaned up
     deleted_at: str | None  # When backup was deleted (NULL = still exists)
+
+
+# =============================================================================
+# Experiment Model Types
+# =============================================================================
+
+
+class ExperimentRecordRow(TypedDict):
+    """Row from the experiment_records table.
+
+    User-facing entity representing either a run or checkpoint.
+    Makes experiment memory first-class.
+    """
+
+    record_id: str  # ULID for lexicographic ordering
+    workspace_name: str
+    type: str  # "run" | "checkpoint"
+    stage_run_id: str | None  # FK stage_runs (NULL for checkpoints)
+    version: str  # FK workspace_versions
+    created_at: str
+
+
+class RunResultsRow(TypedDict):
+    """Row from the run_results table.
+
+    Auto + final results with ML/infra outcome separation.
+    """
+
+    stage_run_id: str  # FK stage_runs (PK)
+    record_id: str  # FK experiment_records
+    results_status: str  # "missing" | "auto" | "finalized"
+    infra_outcome: str  # "completed" | "preempted" | "crashed" | "canceled" | "unknown"
+    ml_outcome: str  # "success" | "partial" | "miss" | "unknown"
+    results_auto: str | None  # JSON (immutable)
+    results_final: str | None  # JSON (authoritative)
+    comparison: str | None  # JSON (computed at finalize)
+    finalized_by: str | None
+    finalized_at: str | None
+
+
+class RunResultsSpecRow(TypedDict):
+    """Row from the run_results_spec table.
+
+    Required at run time for structured + verbose results spec.
+    """
+
+    stage_run_id: str  # FK stage_runs (PK)
+    record_id: str  # FK experiment_records
+    spec_json: str  # JSON results spec
+    created_at: str
+
+
+class RunTagRow(TypedDict):
+    """Row from the run_tags table.
+
+    User-defined names for significant runs (e.g., @best-25m-63pct).
+    """
+
+    workspace_name: str
+    record_id: str  # FK experiment_records
+    tag_name: str
+    created_at: str
