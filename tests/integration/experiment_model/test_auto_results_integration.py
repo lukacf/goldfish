@@ -40,7 +40,7 @@ class TestAutoResultsIntegration:
             "tolerance": 0.01,
             "context": "Testing accuracy for auto extraction.",
         }
-        manager.store_results_spec("stage-auto-test", record_id, spec)
+        manager.save_results_spec("stage-auto-test", record_id, spec)
 
         # Add some metrics
         _add_metric(test_db, "stage-auto-test", "accuracy", 0.75)
@@ -85,7 +85,7 @@ class TestAutoResultsIntegration:
             "secondary_metrics": ["loss", "f1"],
             "context": "Testing with secondary metrics.",
         }
-        manager.store_results_spec("stage-secondary", record_id, spec)
+        manager.save_results_spec("stage-secondary", record_id, spec)
 
         _add_metric(test_db, "stage-secondary", "accuracy", 0.75)
         _add_metric(test_db, "stage-secondary", "loss", 0.25)
@@ -139,7 +139,7 @@ class TestAutoResultsIntegration:
             "tolerance": 0.01,
             "context": "Testing missing metric handling.",
         }
-        manager.store_results_spec("stage-missing", record_id, spec)
+        manager.save_results_spec("stage-missing", record_id, spec)
 
         # Don't add any metrics
         auto_results = manager.extract_auto_results("stage-missing")

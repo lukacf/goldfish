@@ -367,6 +367,30 @@ def dashboard() -> dict:
     if review_ids_to_mark:
         db.mark_svs_reviews_notified(review_ids_to_mark)
 
+    # Get pending finalizations across all workspaces
+    pending_finalizations = []
+    try:
+        from goldfish.experiment_model.records import ExperimentRecordManager
+
+        exp_manager = ExperimentRecordManager(db)
+        # Get unique workspace names from mounted workspaces
+        mounted_workspaces: list[str] = [str(ws["name"]) for ws in workspaces if ws.get("is_mounted")]
+        for ws_name in mounted_workspaces:
+            unfinalized = exp_manager.list_unfinalized_runs(ws_name)
+            for run in unfinalized:
+                pending_finalizations.append(
+                    {
+                        "workspace": ws_name,
+                        "record_id": run.get("record_id"),
+                        "stage_run_id": run.get("stage_run_id"),
+                        "stage_name": run.get("stage_name"),
+                        "infra_outcome": run.get("infra_outcome"),
+                    }
+                )
+    except Exception:
+        # If experiment model fails, continue without it
+        pass
+
     return {
         "failed_runs": failed_runs,
         "active_runs": active_runs,
@@ -374,6 +398,7 @@ def dashboard() -> dict:
         "source_count": source_count,
         "recent_outcomes": recent_outcomes,
         "new_svs_reviews": new_svs_reviews,
+        "pending_finalizations": pending_finalizations,
     }
 
 

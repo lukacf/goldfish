@@ -460,6 +460,17 @@ class WorkspaceManager:
         # Get final state
         final_info = self._get_slot_state(slot)
 
+        # Get experiment context
+        experiment_context = None
+        try:
+            from goldfish.experiment_model.records import ExperimentRecordManager
+
+            exp_manager = ExperimentRecordManager(self.db)
+            experiment_context = exp_manager.get_experiment_context(workspace)
+        except Exception:
+            # If experiment context fails, continue without it
+            pass
+
         return MountResponse(
             success=True,
             slot=slot,
@@ -468,6 +479,7 @@ class WorkspaceManager:
             dirty=final_info.dirty or DirtyState.CLEAN,
             last_checkpoint=final_info.last_checkpoint,
             warning=warning,
+            experiment_context=experiment_context,
         )
 
     def hibernate(self, slot: str, reason: str) -> HibernateResponse:

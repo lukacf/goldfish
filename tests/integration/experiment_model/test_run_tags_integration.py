@@ -34,7 +34,7 @@ class TestRunTagsIntegration:
         assert "best-run" in tags
 
     def test_tag_checkpoint_record_integration(self, test_db: Database) -> None:
-        """Can tag a checkpoint record."""
+        """Can tag a checkpoint record - creates version_tag only, NOT run_tag."""
         _setup_workspace_and_version(test_db, "test_ws", "v1")
 
         manager = ExperimentRecordManager(test_db)
@@ -43,10 +43,33 @@ class TestRunTagsIntegration:
             version="v1",
         )
 
-        manager.tag_record(record_id, "stable-checkpoint")
+        result = manager.tag_record(record_id, "stable-checkpoint")
 
+        # Should return confirmation dict
+        assert result["record_id"] == record_id
+        assert result["tag"] == "stable-checkpoint"
+        assert result["record_type"] == "checkpoint"
+
+        # get_record_tags now returns merged tags from both tables
+        # Checkpoint has version_tag so it should appear in the merged list
         tags = manager.get_record_tags(record_id)
-        assert "stable-checkpoint" in tags
+        assert "stable-checkpoint" in tags  # Version tag is returned
+
+        # Verify run_tags table does NOT have this tag (checkpoint doesn't use run_tags)
+        with test_db._conn() as conn:
+            run_tag_row = conn.execute(
+                "SELECT * FROM run_tags WHERE tag_name = ?",
+                ("stable-checkpoint",),
+            ).fetchone()
+            assert run_tag_row is None  # No run_tag for checkpoints
+
+            # Verify version_tag was created
+            version_tag_row = conn.execute(
+                "SELECT * FROM workspace_version_tags WHERE tag_name = ?",
+                ("stable-checkpoint",),
+            ).fetchone()
+            assert version_tag_row is not None
+            assert version_tag_row["workspace_name"] == "test_ws"
 
     def test_multiple_tags_on_record(self, test_db: Database) -> None:
         """Can add multiple tags to same record."""

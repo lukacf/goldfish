@@ -16,7 +16,7 @@ class TestTagRecord:
     """Tests for tagging records."""
 
     def test_tag_run_record(self) -> None:
-        """Can tag a run record."""
+        """Can tag a run record - creates BOTH run_tag AND version_tag."""
         mock_record = {
             "record_id": "rec123",
             "workspace_name": "test_ws",
@@ -25,8 +25,9 @@ class TestTagRecord:
             "version": "v1",
         }
         mock_conn = MagicMock()
-        # First call returns record, second returns None (no existing tag)
-        mock_conn.execute.return_value.fetchone.side_effect = [mock_record, None]
+        # First call returns record for get_record
+        # Then None for run_tags check, None for version_tags check
+        mock_conn.execute.return_value.fetchone.side_effect = [mock_record, None, None]
 
         mock_db = MagicMock()
         mock_db._conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -34,13 +35,18 @@ class TestTagRecord:
 
         manager = ExperimentRecordManager(mock_db)
 
-        manager.tag_record("rec123", "best-run")
+        result = manager.tag_record("rec123", "best-run")
 
-        # Should insert into run_tags
-        assert mock_conn.execute.call_count >= 2  # SELECT record, SELECT existing, INSERT
+        # Should return dict with confirmation
+        assert result["record_id"] == "rec123"
+        assert result["tag"] == "best-run"
+        assert result["record_type"] == "run"
+
+        # For run records: SELECT record, SELECT run_tags, SELECT version_tags, INSERT run_tags, INSERT version_tags
+        assert mock_conn.execute.call_count >= 4
 
     def test_tag_checkpoint_record(self) -> None:
-        """Can tag a checkpoint record (version tag only)."""
+        """Can tag a checkpoint record (version tag ONLY, no run_tag)."""
         mock_record = {
             "record_id": "rec456",
             "workspace_name": "test_ws",
@@ -49,8 +55,9 @@ class TestTagRecord:
             "version": "v1",
         }
         mock_conn = MagicMock()
-        # First call returns record, second returns None (no existing tag)
-        mock_conn.execute.return_value.fetchone.side_effect = [mock_record, None]
+        # First call returns record for get_record
+        # Then None for run_tags check, None for version_tags check
+        mock_conn.execute.return_value.fetchone.side_effect = [mock_record, None, None]
 
         mock_db = MagicMock()
         mock_db._conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -58,9 +65,15 @@ class TestTagRecord:
 
         manager = ExperimentRecordManager(mock_db)
 
-        manager.tag_record("rec456", "stable-checkpoint")
+        result = manager.tag_record("rec456", "stable-checkpoint")
 
-        assert mock_conn.execute.call_count >= 2  # SELECT record, SELECT existing, INSERT
+        # Should return dict with confirmation
+        assert result["record_id"] == "rec456"
+        assert result["tag"] == "stable-checkpoint"
+        assert result["record_type"] == "checkpoint"
+
+        # For checkpoint records: SELECT record, SELECT run_tags, SELECT version_tags, INSERT version_tags (no run_tag)
+        assert mock_conn.execute.call_count >= 3
 
     def test_tag_record_validates_tag_name(self) -> None:
         """Tag names are validated."""
@@ -86,16 +99,27 @@ class TestTagRecord:
 
 
 class TestGetRunTags:
-    """Tests for retrieving run tags."""
+    """Tests for retrieving run tags (merged from run_tags and version_tags)."""
 
     def test_get_run_tags(self) -> None:
-        """Can retrieve tags for a record."""
-        mock_tags = [
-            {"tag_name": "best-run", "record_id": "rec123"},
-            {"tag_name": "v1-final", "record_id": "rec123"},
+        """Can retrieve tags for a record (merged from both tables)."""
+        mock_record = {
+            "record_id": "rec123",
+            "workspace_name": "test_ws",
+            "version": "v1",
+            "type": "run",
+            "stage_run_id": "stage-abc123",
+        }
+        mock_run_tags = [
+            {"tag_name": "best-run"},
+        ]
+        mock_version_tags = [
+            {"tag_name": "v1-final"},
         ]
         mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchall.return_value = mock_tags
+        # First fetchone returns record, then fetchall calls for run_tags and version_tags
+        mock_conn.execute.return_value.fetchone.return_value = mock_record
+        mock_conn.execute.return_value.fetchall.side_effect = [mock_run_tags, mock_version_tags]
 
         mock_db = MagicMock()
         mock_db._conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -111,7 +135,7 @@ class TestGetRunTags:
     def test_get_run_tags_empty(self) -> None:
         """Returns empty list when no tags."""
         mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchall.return_value = []
+        mock_conn.execute.return_value.fetchone.return_value = None  # record not found
 
         mock_db = MagicMock()
         mock_db._conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -163,12 +187,33 @@ class TestGetRecordByTag:
 
         assert record is None
 
+    def test_get_record_by_tag_validates_workspace_name(self) -> None:
+        """Raises error for invalid workspace name."""
+        from goldfish.validation import InvalidWorkspaceNameError
+
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+
+        with pytest.raises(InvalidWorkspaceNameError):
+            manager.get_record_by_tag("invalid@workspace!", "best-run")
+
+    def test_get_record_by_tag_validates_tag_name(self) -> None:
+        """Raises error for empty tag name."""
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+
+        with pytest.raises(ValueError, match="invalid"):
+            manager.get_record_by_tag("test_ws", "")
+
+        with pytest.raises(ValueError, match="invalid"):
+            manager.get_record_by_tag("test_ws", "   ")
+
 
 class TestRemoveTag:
     """Tests for removing tags."""
 
     def test_remove_tag(self) -> None:
-        """Can remove a tag from a record."""
+        """Can remove a tag from BOTH run_tags and version_tags."""
         mock_conn = MagicMock()
         mock_db = MagicMock()
         mock_db._conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -177,6 +222,29 @@ class TestRemoveTag:
         manager = ExperimentRecordManager(mock_db)
         manager.remove_tag("test_ws", "best-run")
 
-        mock_conn.execute.assert_called_once()
-        call_args = mock_conn.execute.call_args
-        assert "DELETE FROM run_tags" in call_args[0][0]
+        # Should delete from both tables
+        assert mock_conn.execute.call_count == 2
+        calls = mock_conn.execute.call_args_list
+        assert "DELETE FROM run_tags" in calls[0][0][0]
+        assert "DELETE FROM workspace_version_tags" in calls[1][0][0]
+
+    def test_remove_tag_validates_workspace_name(self) -> None:
+        """Raises error for invalid workspace name."""
+        from goldfish.validation import InvalidWorkspaceNameError
+
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+
+        with pytest.raises(InvalidWorkspaceNameError):
+            manager.remove_tag("invalid@workspace!", "best-run")
+
+    def test_remove_tag_validates_tag_name(self) -> None:
+        """Raises error for empty tag name."""
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+
+        with pytest.raises(ValueError, match="invalid"):
+            manager.remove_tag("test_ws", "")
+
+        with pytest.raises(ValueError, match="invalid"):
+            manager.remove_tag("test_ws", "   ")
