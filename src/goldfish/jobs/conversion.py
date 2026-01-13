@@ -69,14 +69,14 @@ def stage_run_dict_to_info(row: dict, truncate_error: bool = True) -> StageRunIn
     config_raw = row.get("config_json")
     inputs_raw = row.get("inputs_json")
 
-    # Truncate error for list views - full error available via get_run()
+    # Truncate error for list views - full error available via inspect_run()
     error = row.get("error")
     if error and truncate_error:
         first_line = error.split("\n")[0]
         if len(first_line) > 120:
             first_line = first_line[:120] + "..."
         if len(error) > len(first_line) + 10:
-            error = first_line + " [use get_run() for full error]"
+            error = first_line + " [use inspect_run() for full error]"
         else:
             error = first_line
 
