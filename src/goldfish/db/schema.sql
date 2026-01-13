@@ -461,3 +461,84 @@ CREATE INDEX IF NOT EXISTS idx_backup_history_tier ON backup_history(tier);
 CREATE INDEX IF NOT EXISTS idx_backup_history_created ON backup_history(created_at);
 CREATE INDEX IF NOT EXISTS idx_backup_history_expires ON backup_history(expires_at);
 CREATE INDEX IF NOT EXISTS idx_backup_history_deleted ON backup_history(deleted_at);
+
+
+-- =============================================================================
+-- Experiment Model Tables (New Experiment Memory System)
+-- =============================================================================
+
+-- Experiment Records (user-facing entity representing runs or checkpoints)
+-- Makes experiment memory first-class (results, comparisons, summaries)
+CREATE TABLE IF NOT EXISTS experiment_records (
+    record_id TEXT PRIMARY KEY,           -- ULID for lexicographic ordering
+    workspace_name TEXT NOT NULL,
+    type TEXT NOT NULL,                   -- 'run' | 'checkpoint'
+    stage_run_id TEXT,                    -- FK stage_runs (NULL for checkpoints)
+    version TEXT NOT NULL,                -- FK workspace_versions
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id),
+    FOREIGN KEY (workspace_name, version) REFERENCES workspace_versions(workspace_name, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_experiment_records_workspace
+    ON experiment_records(workspace_name);
+CREATE INDEX IF NOT EXISTS idx_experiment_records_version
+    ON experiment_records(workspace_name, version);
+CREATE INDEX IF NOT EXISTS idx_experiment_records_run
+    ON experiment_records(stage_run_id);
+
+
+-- Run Results (auto + final results with ML/infra outcome separation)
+-- Splits infra outcomes from ML outcomes (preemption != ML failure)
+CREATE TABLE IF NOT EXISTS run_results (
+    stage_run_id TEXT PRIMARY KEY,        -- FK stage_runs
+    record_id TEXT NOT NULL,              -- FK experiment_records
+    results_status TEXT NOT NULL,         -- 'missing' | 'auto' | 'finalized'
+    infra_outcome TEXT NOT NULL,          -- 'completed' | 'preempted' | 'crashed' | 'canceled' | 'unknown'
+    ml_outcome TEXT NOT NULL,             -- 'success' | 'partial' | 'miss' | 'unknown'
+    results_auto TEXT,                    -- JSON (immutable, auto-extracted)
+    results_final TEXT,                   -- JSON (authoritative, set by finalize_run)
+    comparison TEXT,                      -- JSON (computed at finalize time)
+    finalized_by TEXT,                    -- Who finalized (e.g., 'ml_claude')
+    finalized_at TEXT,                    -- When finalized
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id),
+    FOREIGN KEY (record_id) REFERENCES experiment_records(record_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_results_record
+    ON run_results(record_id);
+CREATE INDEX IF NOT EXISTS idx_run_results_status
+    ON run_results(results_status);
+CREATE INDEX IF NOT EXISTS idx_run_results_ml_outcome
+    ON run_results(ml_outcome);
+
+
+-- Run Results Spec (required at run time for structured + verbose results spec)
+-- LLM-friendly, mechanically validated specifications
+CREATE TABLE IF NOT EXISTS run_results_spec (
+    stage_run_id TEXT PRIMARY KEY,        -- FK stage_runs
+    record_id TEXT NOT NULL,              -- FK experiment_records
+    spec_json TEXT NOT NULL,              -- JSON results spec
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id),
+    FOREIGN KEY (record_id) REFERENCES experiment_records(record_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_results_spec_record
+    ON run_results_spec(record_id);
+
+
+-- Run Tags (user-defined names for significant runs)
+-- Allows marking milestones like "@best-25m-63pct"
+-- Tag uniqueness per workspace enforced in code across run_tags and workspace_version_tags
+CREATE TABLE IF NOT EXISTS run_tags (
+    workspace_name TEXT NOT NULL,
+    record_id TEXT NOT NULL,              -- FK experiment_records
+    tag_name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (workspace_name, tag_name),
+    FOREIGN KEY (record_id) REFERENCES experiment_records(record_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_tags_record
+    ON run_tags(record_id);
