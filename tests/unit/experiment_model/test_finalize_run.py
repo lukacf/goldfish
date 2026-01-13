@@ -229,7 +229,8 @@ class TestFinalizeRunByRecordId:
             mock_stage_row,  # finalize_run: stage_name lookup
             mock_record_row,  # _compute_vs_best: get_record_by_stage_run
             None,  # _compute_vs_best: get_results_spec_parsed - None
-            None,  # _compute_vs_best: get_current_best - None
+            None,  # _compute_vs_best: get_current_best - run_tags query
+            None,  # _compute_vs_best: get_current_best - version_tags fallback
         ]
         mock_conn.execute.return_value.fetchall.return_value = []  # no previous runs
 

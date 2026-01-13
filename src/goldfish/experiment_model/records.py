@@ -1239,37 +1239,52 @@ class ExperimentRecordManager:
                 WHERE er.workspace_name = ?
             """
         elif tagged is True:
-            # Need to search BOTH run_tags AND workspace_version_tags (merged tags per spec)
-            # Run records: found via run_tags (run_tag is per-record, version_tag is per-version)
-            # Checkpoint records: found via workspace_version_tags (since they have no run_tag)
+            # For runs: match via run_tags (direct tag on record)
+            # For runs without run_tags: match via version_tags if no run_tag exists for that tag
+            # For checkpoints: match via version_tags
             query = """
                 SELECT DISTINCT er.* FROM experiment_records er
                 WHERE er.workspace_name = ?
                 AND (
+                    -- Records with direct run_tags
                     er.record_id IN (SELECT record_id FROM run_tags WHERE workspace_name = er.workspace_name)
                     OR (
-                        er.type = 'checkpoint' AND er.record_id IN (
-                            SELECT e2.record_id FROM workspace_version_tags vt
-                            JOIN experiment_records e2 ON e2.workspace_name = vt.workspace_name AND e2.version = vt.version
-                            WHERE vt.workspace_name = er.workspace_name AND e2.type = 'checkpoint'
+                        -- Records on tagged versions where the tag is NOT from a run_tag
+                        -- (i.e., tag was created via manage_versions only)
+                        EXISTS (
+                            SELECT 1 FROM workspace_version_tags vt
+                            WHERE vt.workspace_name = er.workspace_name
+                              AND vt.version = er.version
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM run_tags rt
+                                  WHERE rt.workspace_name = vt.workspace_name AND rt.tag_name = vt.tag_name
+                              )
                         )
                     )
                 )
             """
         elif isinstance(tagged, str):
-            # Specific tag filter - search BOTH tables (merged tags per spec)
-            # Run records: found via run_tags (run_tag is per-record, version_tag is per-version)
-            # Checkpoint records: found via workspace_version_tags
+            # Specific tag filter:
+            # 1. Match records with that run_tag directly
+            # 2. Match records on versions with that version_tag, but only if no run_tag exists
+            #    for that tag (backwards compat for tags created via manage_versions)
             query = """
                 SELECT DISTINCT er.* FROM experiment_records er
                 WHERE er.workspace_name = ?
                 AND (
+                    -- Records with this specific run_tag
                     er.record_id IN (SELECT record_id FROM run_tags WHERE workspace_name = er.workspace_name AND tag_name = ?)
                     OR (
-                        er.type = 'checkpoint' AND er.record_id IN (
-                            SELECT e2.record_id FROM workspace_version_tags vt
-                            JOIN experiment_records e2 ON e2.workspace_name = vt.workspace_name AND e2.version = vt.version
-                            WHERE vt.workspace_name = er.workspace_name AND vt.tag_name = ? AND e2.type = 'checkpoint'
+                        -- Records on versions with this tag, but only if tag was NOT created via tag_record
+                        EXISTS (
+                            SELECT 1 FROM workspace_version_tags vt
+                            WHERE vt.workspace_name = er.workspace_name
+                              AND vt.version = er.version
+                              AND vt.tag_name = ?
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM run_tags rt
+                                  WHERE rt.workspace_name = vt.workspace_name AND rt.tag_name = vt.tag_name
+                              )
                         )
                     )
                 )
@@ -1663,26 +1678,49 @@ class ExperimentRecordManager:
             return []
 
         best_value = current_best.get("value")
+        best_metric = current_best.get("metric")
         if best_value is None:
             return []
 
         alerts: list[dict[str, Any]] = []
         for entry in recent_trend:
             value = entry.get("value")
-            if value is not None and isinstance(value, int | float):
-                # A regression is when current value is significantly worse than best
-                # For "maximize" direction, worse = lower; for "minimize", worse = higher
-                # We'll flag any decrease from best for now (assumes maximize)
-                delta = value - best_value
-                if delta < -0.01:  # Threshold for significance
-                    alerts.append(
-                        {
-                            "record_id": entry.get("record_id"),
-                            "value": value,
-                            "best_value": best_value,
-                            "delta": round(delta, 6),
-                        }
-                    )
+            if value is None or not isinstance(value, int | float):
+                continue
+
+            # Only compare if metrics match
+            entry_metric = entry.get("primary_metric")
+            if entry_metric != best_metric:
+                continue
+
+            # Get direction and tolerance from the entry
+            direction = entry.get("direction", "maximize")
+            tolerance = entry.get("tolerance")
+            if tolerance is None:
+                tolerance = 0.01  # Default tolerance
+
+            # Compute delta
+            delta = value - best_value
+
+            # Check for regression based on direction
+            # For "maximize": regression is when value < best_value - tolerance
+            # For "minimize": regression is when value > best_value + tolerance
+            is_regression = False
+            if direction == "maximize" and delta < -tolerance:
+                is_regression = True
+            elif direction == "minimize" and delta > tolerance:
+                is_regression = True
+
+            if is_regression:
+                alerts.append(
+                    {
+                        "record_id": entry.get("record_id"),
+                        "value": value,
+                        "best_value": best_value,
+                        "delta": round(delta, 6),
+                        "direction": direction,
+                    }
+                )
 
         return alerts
 
@@ -1724,6 +1762,9 @@ class ExperimentRecordManager:
                 {
                     "record_id": row["record_id"],
                     "value": results_final.get("value"),
+                    "primary_metric": results_final.get("primary_metric"),
+                    "direction": results_final.get("direction", "maximize"),
+                    "tolerance": results_final.get("tolerance"),
                 }
             )
 
@@ -1737,6 +1778,7 @@ class ExperimentRecordManager:
         """Get current best tagged record.
 
         Looks for tags with the given prefix (default "best-").
+        Checks both run_tags and workspace_version_tags for backwards compatibility.
 
         Args:
             workspace_name: Workspace name
@@ -1747,8 +1789,11 @@ class ExperimentRecordManager:
         """
         validate_workspace_name(workspace_name)
 
+        tag_name: str | None = None
+        record_id: str | None = None
+
         with self.db._conn() as conn:
-            # Find a tag starting with the prefix
+            # First try run_tags
             tag_row = conn.execute(
                 """
                 SELECT tag_name, record_id FROM run_tags
@@ -1759,7 +1804,29 @@ class ExperimentRecordManager:
                 (workspace_name, f"{tag_prefix}%"),
             ).fetchone()
 
-            if tag_row is None:
+            if tag_row:
+                tag_name = tag_row["tag_name"]
+                record_id = tag_row["record_id"]
+            else:
+                # Fall back to workspace_version_tags and resolve to record
+                version_tag_row = conn.execute(
+                    """
+                    SELECT vt.tag_name, er.record_id
+                    FROM workspace_version_tags vt
+                    JOIN experiment_records er
+                        ON er.workspace_name = vt.workspace_name AND er.version = vt.version
+                    WHERE vt.workspace_name = ? AND vt.tag_name LIKE ?
+                    ORDER BY vt.created_at DESC
+                    LIMIT 1
+                    """,
+                    (workspace_name, f"{tag_prefix}%"),
+                ).fetchone()
+
+                if version_tag_row:
+                    tag_name = version_tag_row["tag_name"]
+                    record_id = version_tag_row["record_id"]
+
+            if record_id is None:
                 return None
 
             # Get the finalized results
@@ -1768,7 +1835,7 @@ class ExperimentRecordManager:
                 SELECT results_final FROM run_results
                 WHERE record_id = ? AND results_status = 'finalized'
                 """,
-                (tag_row["record_id"],),
+                (record_id,),
             ).fetchone()
 
         if results_row is None or results_row["results_final"] is None:
@@ -1777,8 +1844,8 @@ class ExperimentRecordManager:
         results_final: dict[str, Any] = json.loads(results_row["results_final"])
 
         return {
-            "record_id": tag_row["record_id"],
-            "tag": tag_row["tag_name"],
+            "record_id": record_id,
+            "tag": tag_name,
             "metric": results_final.get("primary_metric"),
             "value": results_final.get("value"),
         }

@@ -463,15 +463,14 @@ class Database:
                     record_id = generate_record_id()
 
                     # Determine infra_outcome from status
-                    # completed, failed, canceled -> terminal states
-                    # running, pending -> non-terminal
+                    # Only terminal statuses get mapped; non-terminal get "unknown"
+                    # to satisfy CHECK constraint (completed/preempted/crashed/canceled/unknown)
                     infra_outcome_map = {
                         "completed": "completed",
                         "failed": "crashed",
                         "canceled": "canceled",
-                        "running": "running",
-                        "pending": "pending",
                     }
+                    # running/pending -> unknown (valid CHECK value, will be updated later)
                     infra_outcome = infra_outcome_map.get(status, "unknown")
 
                     # Create experiment_record
