@@ -1069,3 +1069,131 @@ class ExperimentRecordManager:
             "blocked": len(unfinalized) > 0,
             "unfinalized": unfinalized,
         }
+
+    def get_experiment_context(self, workspace_name: str) -> dict[str, Any]:
+        """Get experiment context for mount/dashboard.
+
+        Returns context including:
+        - current_best: Best tagged record info
+        - awaiting_finalization: Records needing finalization
+        - recent_trend: Recent finalized values
+
+        Args:
+            workspace_name: Workspace name
+
+        Returns:
+            Dict with experiment context
+        """
+        validate_workspace_name(workspace_name)
+
+        # Get current best tagged record
+        current_best = self.get_current_best(workspace_name)
+
+        # Get runs awaiting finalization
+        awaiting_finalization = self.list_unfinalized_runs(workspace_name)
+
+        # Get recent trend
+        recent_trend = self.get_recent_trend(workspace_name, limit=10)
+
+        return {
+            "current_best": current_best,
+            "awaiting_finalization": awaiting_finalization,
+            "recent_trend": recent_trend,
+        }
+
+    def get_recent_trend(
+        self,
+        workspace_name: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Get recent finalized values for trend display.
+
+        Args:
+            workspace_name: Workspace name
+            limit: Max records to return
+
+        Returns:
+            List of dicts with record_id and value
+        """
+        validate_workspace_name(workspace_name)
+
+        with self.db._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT rr.record_id, rr.results_final
+                FROM run_results rr
+                JOIN experiment_records er ON rr.record_id = er.record_id
+                WHERE er.workspace_name = ?
+                  AND rr.results_status = 'finalized'
+                  AND rr.results_final IS NOT NULL
+                ORDER BY rr.finalized_at DESC
+                LIMIT ?
+                """,
+                (workspace_name, limit),
+            ).fetchall()
+
+        trend = []
+        for row in rows:
+            results_final: dict[str, Any] = json.loads(row["results_final"])
+            trend.append(
+                {
+                    "record_id": row["record_id"],
+                    "value": results_final.get("value"),
+                }
+            )
+
+        return trend
+
+    def get_current_best(
+        self,
+        workspace_name: str,
+        tag_prefix: str = "best-",
+    ) -> dict[str, Any] | None:
+        """Get current best tagged record.
+
+        Looks for tags with the given prefix (default "best-").
+
+        Args:
+            workspace_name: Workspace name
+            tag_prefix: Tag name prefix to search for
+
+        Returns:
+            Dict with record_id, tag, metric, value or None
+        """
+        validate_workspace_name(workspace_name)
+
+        with self.db._conn() as conn:
+            # Find a tag starting with the prefix
+            tag_row = conn.execute(
+                """
+                SELECT tag_name, record_id FROM run_tags
+                WHERE workspace_name = ? AND tag_name LIKE ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (workspace_name, f"{tag_prefix}%"),
+            ).fetchone()
+
+            if tag_row is None:
+                return None
+
+            # Get the finalized results
+            results_row = conn.execute(
+                """
+                SELECT results_final FROM run_results
+                WHERE record_id = ? AND results_status = 'finalized'
+                """,
+                (tag_row["record_id"],),
+            ).fetchone()
+
+        if results_row is None or results_row["results_final"] is None:
+            return None
+
+        results_final: dict[str, Any] = json.loads(results_row["results_final"])
+
+        return {
+            "record_id": tag_row["record_id"],
+            "tag": tag_row["tag_name"],
+            "metric": results_final.get("primary_metric"),
+            "value": results_final.get("value"),
+        }
