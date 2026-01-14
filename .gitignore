@@ -68,3 +68,9 @@ htmlcov/
 workspaces/
 goldfish.yaml
 docs/a_real_project_issues_example.md
+
+# Playwright MCP screenshots
+.playwright-mcp/
+
+# Flash-attention wheel storage
+src/goldfish/infra/base_images/fa3_wheel/
