@@ -295,6 +295,7 @@ This is a test run to verify the AI review system works. You MUST:
                 context={
                     "cwd": str(self.workspace_path),
                     "model": self.svs_config.agent_model or self.config.model,
+                    "fallback_model": self.svs_config.agent_fallback_model,
                     "max_turns": self.config.max_turns,
                     "timeout_seconds": self.config.timeout_seconds,
                     "tool_policy": tool_policy,
