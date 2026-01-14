@@ -176,6 +176,136 @@ class TestFinalizationGateIntegration:
         assert result_ws2["blocked"] is False
 
 
+class TestParallelRunsFinalizationGate:
+    """Tests for parallel runs behavior with finalization gate.
+
+    Per spec: "Block run() only if there exists a terminal infra run in the same
+    workspace with results_status != finalized. Running/pending runs do not block.
+    Parallel runs are allowed."
+    """
+
+    def test_gate_allows_multiple_parallel_running_runs(self, test_db: Database) -> None:
+        """Multiple parallel running runs don't block each other."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(test_db, "stage-train-1", "test_ws", "v1", status="running")
+        _setup_stage_run(test_db, "stage-train-2", "test_ws", "v1", status="running")
+        _setup_stage_run(test_db, "stage-eval", "test_ws", "v1", status="pending")
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-train-1")
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-train-2")
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-eval")
+
+        # All have infra_outcome='unknown' (default for running/pending)
+        result = manager.check_finalization_gate("test_ws")
+
+        assert result["blocked"] is False
+        assert result["unfinalized"] == []
+
+    def test_gate_allows_parallel_runs_in_different_stages(self, test_db: Database) -> None:
+        """Parallel runs in different stages are allowed simultaneously."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(test_db, "stage-preprocess", "test_ws", "v1", status="running", stage="preprocess")
+        _setup_stage_run(test_db, "stage-train", "test_ws", "v1", status="running", stage="train")
+        _setup_stage_run(test_db, "stage-eval", "test_ws", "v1", status="running", stage="evaluate")
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-preprocess")
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-train")
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-eval")
+
+        result = manager.check_finalization_gate("test_ws")
+
+        assert result["blocked"] is False
+
+    def test_gate_blocks_when_one_terminal_among_parallel_runs(self, test_db: Database) -> None:
+        """Gate blocks when at least one terminal run is unfinalized, even with parallel running."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(test_db, "stage-running", "test_ws", "v1", status="running")
+        _setup_stage_run(test_db, "stage-completed", "test_ws", "v1", status="completed")
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-running")
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-completed")
+
+        # Mark one as completed (terminal)
+        with test_db._conn() as conn:
+            conn.execute(
+                "UPDATE run_results SET infra_outcome = 'completed' WHERE stage_run_id = ?",
+                ("stage-completed",),
+            )
+
+        result = manager.check_finalization_gate("test_ws")
+
+        assert result["blocked"] is True
+        assert len(result["unfinalized"]) == 1
+
+    def test_gate_unblocks_after_finalizing_terminal_run(self, test_db: Database) -> None:
+        """Gate unblocks once the terminal run is finalized, even with parallel running."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(test_db, "stage-running", "test_ws", "v1", status="running")
+        _setup_stage_run(test_db, "stage-completed", "test_ws", "v1", status="completed")
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-running")
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-completed")
+
+        with test_db._conn() as conn:
+            conn.execute(
+                "UPDATE run_results SET infra_outcome = 'completed' WHERE stage_run_id = ?",
+                ("stage-completed",),
+            )
+
+        # Initially blocked
+        assert manager.check_finalization_gate("test_ws")["blocked"] is True
+
+        # Finalize the completed run
+        results = {
+            "primary_metric": "accuracy",
+            "direction": "maximize",
+            "value": 0.85,
+            "dataset_split": "val",
+            "ml_outcome": "success",
+            "notes": "Finalized to unblock gate.",
+        }
+        manager.finalize_run("stage-completed", results)
+
+        # Now should be unblocked (running run doesn't count)
+        result = manager.check_finalization_gate("test_ws")
+        assert result["blocked"] is False
+
+    def test_gate_handles_mixed_terminal_statuses(self, test_db: Database) -> None:
+        """Gate correctly handles mix of terminal statuses (completed, preempted, crashed)."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(test_db, "stage-completed", "test_ws", "v1", status="completed")
+        _setup_stage_run(test_db, "stage-preempted", "test_ws", "v1", status="preempted")
+        _setup_stage_run(test_db, "stage-crashed", "test_ws", "v1", status="failed")
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-completed")
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-preempted")
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-crashed")
+
+        with test_db._conn() as conn:
+            conn.execute(
+                "UPDATE run_results SET infra_outcome = 'completed' WHERE stage_run_id = ?",
+                ("stage-completed",),
+            )
+            conn.execute(
+                "UPDATE run_results SET infra_outcome = 'preempted' WHERE stage_run_id = ?",
+                ("stage-preempted",),
+            )
+            conn.execute(
+                "UPDATE run_results SET infra_outcome = 'crashed' WHERE stage_run_id = ?",
+                ("stage-crashed",),
+            )
+
+        result = manager.check_finalization_gate("test_ws")
+
+        assert result["blocked"] is True
+        assert len(result["unfinalized"]) == 3
+
+
 # Helper functions
 
 
@@ -225,6 +355,7 @@ def _setup_stage_run(
     workspace: str,
     version: str,
     status: str = "completed",
+    stage: str = "test_stage",
 ) -> None:
     """Set up a stage run for foreign key constraints."""
     with db._conn() as conn:
@@ -240,5 +371,5 @@ def _setup_stage_run(
                 (id, workspace_name, version, stage_name, status, started_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (run_id, workspace, version, "test_stage", status, datetime.now(UTC).isoformat()),
+                (run_id, workspace, version, stage, status, datetime.now(UTC).isoformat()),
             )

@@ -384,3 +384,185 @@ class TestExperimentModelMigration:
             expected = ["workspace_name", "record_id", "tag_name", "created_at"]
             for col in expected:
                 assert col in columns, f"Column {col} should exist in run_tags"
+
+
+class TestMigrationV5Backfill:
+    """Tests for migration v5: backfilling orphaned stage_runs with running/pending status.
+
+    These tests verify that migration v5 correctly handles stage_runs that exist
+    in the database but don't have corresponding experiment_records. This can happen
+    when a database was created before the experiment model was added, or when
+    stage_runs are created through other paths.
+    """
+
+    def test_migration_v5_backfills_running_status_as_unknown(self, tmp_path: Path) -> None:
+        """Migration v5 maps 'running' status to 'unknown' infra_outcome.
+
+        This is critical: running/pending are non-terminal statuses and cannot be
+        mapped to terminal infra_outcomes (completed/preempted/crashed/canceled).
+        The CHECK constraint requires a valid value, so we map to 'unknown'.
+        """
+        db_path = tmp_path / "test.db"
+        _create_db_with_orphaned_run_at_v4(db_path, "stage-running", status="running")
+
+        # Trigger migration by re-opening database
+        db = Database(db_path)
+
+        with db._conn() as conn:
+            # Verify experiment_record was created
+            record = conn.execute(
+                "SELECT * FROM experiment_records WHERE stage_run_id = ?",
+                ("stage-running",),
+            ).fetchone()
+            assert record is not None, "Should create experiment_record for orphaned stage_run"
+            assert record["type"] == "run"
+
+            # Verify run_results has infra_outcome='unknown' (not a CHECK violation)
+            results = conn.execute(
+                "SELECT * FROM run_results WHERE stage_run_id = ?",
+                ("stage-running",),
+            ).fetchone()
+            assert results is not None, "Should create run_results"
+            assert results["infra_outcome"] == "unknown"
+            assert results["ml_outcome"] == "unknown"
+            assert results["results_status"] == "missing"
+
+    def test_migration_v5_backfills_pending_status_as_unknown(self, tmp_path: Path) -> None:
+        """Migration v5 maps 'pending' status to 'unknown' infra_outcome."""
+        db_path = tmp_path / "test.db"
+        _create_db_with_orphaned_run_at_v4(db_path, "stage-pending", status="pending")
+
+        db = Database(db_path)
+
+        with db._conn() as conn:
+            results = conn.execute(
+                "SELECT infra_outcome FROM run_results WHERE stage_run_id = ?",
+                ("stage-pending",),
+            ).fetchone()
+            assert results is not None
+            assert results["infra_outcome"] == "unknown"
+
+    def test_migration_v5_maps_completed_correctly(self, tmp_path: Path) -> None:
+        """Migration v5 maps 'completed' status to 'completed' infra_outcome."""
+        db_path = tmp_path / "test.db"
+        _create_db_with_orphaned_run_at_v4(db_path, "stage-completed", status="completed")
+
+        db = Database(db_path)
+
+        with db._conn() as conn:
+            results = conn.execute(
+                "SELECT infra_outcome FROM run_results WHERE stage_run_id = ?",
+                ("stage-completed",),
+            ).fetchone()
+            assert results is not None
+            assert results["infra_outcome"] == "completed"
+
+    def test_migration_v5_maps_failed_to_crashed(self, tmp_path: Path) -> None:
+        """Migration v5 maps 'failed' status to 'crashed' infra_outcome."""
+        db_path = tmp_path / "test.db"
+        _create_db_with_orphaned_run_at_v4(db_path, "stage-failed", status="failed")
+
+        db = Database(db_path)
+
+        with db._conn() as conn:
+            results = conn.execute(
+                "SELECT infra_outcome FROM run_results WHERE stage_run_id = ?",
+                ("stage-failed",),
+            ).fetchone()
+            assert results is not None
+            assert results["infra_outcome"] == "crashed"
+
+    def test_migration_v5_maps_canceled_correctly(self, tmp_path: Path) -> None:
+        """Migration v5 maps 'canceled' status to 'canceled' infra_outcome."""
+        db_path = tmp_path / "test.db"
+        _create_db_with_orphaned_run_at_v4(db_path, "stage-canceled", status="canceled")
+
+        db = Database(db_path)
+
+        with db._conn() as conn:
+            results = conn.execute(
+                "SELECT infra_outcome FROM run_results WHERE stage_run_id = ?",
+                ("stage-canceled",),
+            ).fetchone()
+            assert results is not None
+            assert results["infra_outcome"] == "canceled"
+
+    def test_migration_v5_handles_multiple_orphaned_runs(self, tmp_path: Path) -> None:
+        """Migration v5 backfills multiple orphaned stage_runs correctly."""
+        db_path = tmp_path / "test.db"
+
+        # Create database at version 5 first
+        db = Database(db_path)
+
+        # Add workspace and version
+        db.create_workspace_lineage("ws1")
+        db.create_version("ws1", "v1", "ws1-v1", "abc123", "manual")
+
+        # Add multiple stage_runs directly (bypassing experiment record creation)
+        statuses = [("stage-1", "running"), ("stage-2", "pending"), ("stage-3", "completed")]
+        with db._conn() as conn:
+            for run_id, status in statuses:
+                conn.execute(
+                    """
+                    INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at)
+                    VALUES (?, 'ws1', 'v1', 'test', ?, datetime('now'))
+                    """,
+                    (run_id, status),
+                )
+            # Set version back to 4 to trigger migration v5
+            conn.execute("UPDATE schema_version SET version = 4")
+
+        # Re-open database to trigger migration
+        db2 = Database(db_path)
+
+        with db2._conn() as conn:
+            for run_id, _ in statuses:
+                results = conn.execute(
+                    "SELECT infra_outcome FROM run_results WHERE stage_run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                assert results is not None, f"Should create run_results for {run_id}"
+
+            # Verify running/pending -> unknown, completed -> completed
+            running_result = conn.execute(
+                "SELECT infra_outcome FROM run_results WHERE stage_run_id = 'stage-1'"
+            ).fetchone()
+            assert running_result["infra_outcome"] == "unknown"
+
+            pending_result = conn.execute(
+                "SELECT infra_outcome FROM run_results WHERE stage_run_id = 'stage-2'"
+            ).fetchone()
+            assert pending_result["infra_outcome"] == "unknown"
+
+            completed_result = conn.execute(
+                "SELECT infra_outcome FROM run_results WHERE stage_run_id = 'stage-3'"
+            ).fetchone()
+            assert completed_result["infra_outcome"] == "completed"
+
+
+def _create_db_with_orphaned_run_at_v4(db_path: Path, run_id: str, status: str) -> None:
+    """Create a database with an orphaned stage_run and set version to 4.
+
+    This simulates a database that:
+    1. Has all current tables (from schema.sql)
+    2. Has a stage_run without a corresponding experiment_record
+    3. Is at schema version 4 (so migration v5 will run)
+    """
+    # Create full database first
+    db = Database(db_path)
+
+    # Add workspace and version
+    db.create_workspace_lineage("test_ws")
+    db.create_version("test_ws", "v1", "test_ws-v1", "abc123", "manual")
+
+    # Add orphaned stage_run directly (bypassing experiment record creation)
+    with db._conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at)
+            VALUES (?, 'test_ws', 'v1', 'test_stage', ?, datetime('now'))
+            """,
+            (run_id, status),
+        )
+        # Set version back to 4 to trigger migration v5 on next open
+        conn.execute("UPDATE schema_version SET version = 4")

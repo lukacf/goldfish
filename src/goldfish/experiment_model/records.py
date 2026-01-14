@@ -50,21 +50,24 @@ def generate_record_id() -> str:
         A new ULID-like string.
     """
     # Get millisecond timestamp and mask to 48 bits per ULID spec
-    timestamp_ms = int(time.time() * 1000) & 0xFFFFFFFFFFFF  # 48-bit mask
+    # 0xFFFFFFFFFFFF = 2^48 - 1 = 281,474,976,710,655 (max ~8,925 years from epoch)
+    timestamp_ms = int(time.time() * 1000) & 0xFFFFFFFFFFFF
 
-    # Encode timestamp into 10 base32 chars (48 bits = 10 chars at 5 bits each, with
-    # the most significant char limited to 3 bits, values 0-7)
+    # Encode timestamp into 10 base32 chars (48 bits = 10 chars × 5 bits each)
+    # Note: MSB char uses only 3 bits (values 0-7), remaining 9 chars use full 5 bits
     timestamp_chars = []
     for _ in range(10):
+        # 0x1F = 31 = 0b11111 masks lowest 5 bits for one base32 digit (0-31 → A-Z/0-9)
         timestamp_chars.append(_CROCKFORD_ALPHABET[timestamp_ms & 0x1F])
-        timestamp_ms >>= 5
+        timestamp_ms >>= 5  # Shift right 5 bits to get next base32 digit
     timestamp_part = "".join(reversed(timestamp_chars))
 
-    # Generate 80 bits of randomness (16 chars in base32)
-    random_bytes = os.urandom(10)
+    # Generate 80 bits of randomness (16 chars × 5 bits = 80 bits)
+    random_bytes = os.urandom(10)  # 10 bytes = 80 bits
     random_int = int.from_bytes(random_bytes, "big")
     random_chars = []
     for _ in range(16):
+        # Same 5-bit extraction as timestamp
         random_chars.append(_CROCKFORD_ALPHABET[random_int & 0x1F])
         random_int >>= 5
     random_part = "".join(reversed(random_chars))
