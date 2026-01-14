@@ -73,6 +73,7 @@ class DummyStageExecutor:
         wait: bool = False,
         skip_review: bool = False,
         experiment_group: str | None = None,
+        results_spec: dict | None = None,
     ) -> StageRunInfo:
         self._ensure_workspace_version(workspace)
         stage_run_id = f"stage-{len(self.calls) + 1}"
@@ -1019,3 +1020,230 @@ class TestReasonPropagation:
         stored_reason = json.loads(stage_run["reason_json"])
         assert stored_reason["description"] == "Full flow test"
         assert stored_reason["hypothesis"] == "Reason should be in stage_runs"
+
+
+class TestResultsSpecPersistence:
+    """Test that results_spec is saved during async pipeline execution."""
+
+    def test_results_spec_stored_in_run_results_spec_table(self, test_db, monkeypatch):
+        """REGRESSION: results_spec provided to run() should be saved to run_results_spec table.
+
+        Bug: results_spec was accepted by run() and stored in pipeline_runs.results_spec_json
+        but never copied to run_results_spec table for individual stage runs.
+        """
+        from goldfish.experiment_model.records import ExperimentRecordManager
+
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+
+        # Create a stage executor that creates experiment records and saves results_spec
+        class ExperimentTrackingStageExecutor(DummyStageExecutor):
+            def run_stage(
+                self,
+                workspace: str,
+                stage_name: str,
+                pipeline_name: str | None = None,
+                pipeline_run_id: str | None = None,
+                config_override=None,
+                inputs_override=None,
+                reason: str | None = None,
+                reason_structured: dict | None = None,
+                wait: bool = False,
+                skip_review: bool = False,
+                experiment_group: str | None = None,
+                results_spec: dict | None = None,  # NEW: accept results_spec
+            ) -> StageRunInfo:
+                self._ensure_workspace_version(workspace)
+                stage_run_id = f"stage-{len(self.calls) + 1}"
+                self.calls.append(stage_name)
+
+                # Create stage run
+                self.db.create_stage_run(
+                    stage_run_id=stage_run_id,
+                    workspace_name=workspace,
+                    version=self.version,
+                    stage_name=stage_name,
+                    pipeline_run_id=pipeline_run_id,
+                    pipeline_name=pipeline_name,
+                    config=config_override or {},
+                    inputs={},
+                    reason=reason_structured,
+                    profile=None,
+                    hints=None,
+                    backend_type="local",
+                    backend_handle=stage_run_id,
+                )
+
+                # Create experiment record (critical for results_spec FK)
+                exp_manager = ExperimentRecordManager(self.db)
+                record_id = exp_manager.create_run_record(
+                    workspace_name=workspace,
+                    version=self.version,
+                    stage_run_id=stage_run_id,
+                    experiment_group=experiment_group,
+                )
+
+                # Save results_spec immediately after experiment record creation
+                # This matches the real StageExecutor behavior
+                if results_spec and record_id:
+                    exp_manager.save_results_spec(stage_run_id, record_id, results_spec)
+
+                self.db.update_stage_run_status(stage_run_id, status=StageRunStatus.RUNNING)
+
+                return StageRunInfo(
+                    stage_run_id=stage_run_id,
+                    workspace=workspace,
+                    version=self.version,
+                    stage=stage_name,
+                    pipeline=pipeline_name,
+                    pipeline_run_id=pipeline_run_id,
+                    record_id=record_id,  # Return the record_id!
+                    status=StageRunStatus.RUNNING,
+                )
+
+        stage_executor = ExperimentTrackingStageExecutor(test_db)
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+
+        # Disable thread pool to control execution
+        # Must patch the class-level _pool, not the ThreadPoolExecutor constructor
+        # because _pool is created at module import time
+        mock_pool = MagicMock()
+        monkeypatch.setattr(PipelineExecutor, "_pool", mock_pool)
+
+        executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
+
+        # The results_spec that should be saved
+        results_spec = {
+            "primary_metric": "accuracy",
+            "direction": "maximize",
+            "min_value": 0.60,
+            "goal_value": 0.80,
+            "dataset_split": "val",
+            "tolerance": 0.01,
+            "context": "Testing that results_spec is saved during async run.",
+        }
+
+        # Run with results_spec
+        result = executor.run_stages(
+            workspace="ws",
+            pipeline_name="train",
+            reason="Test results_spec persistence",
+            async_mode=True,
+            results_spec=results_spec,
+        )
+
+        prun_id = result["pipeline_run_id"]
+
+        # Verify results_spec is stored in pipeline_runs table
+        with test_db._conn() as conn:
+            prun_row = conn.execute(
+                "SELECT results_spec_json FROM pipeline_runs WHERE id = ?",
+                (prun_id,),
+            ).fetchone()
+        assert prun_row is not None
+        assert prun_row["results_spec_json"] is not None
+        stored_pipeline_spec = json.loads(prun_row["results_spec_json"])
+        assert stored_pipeline_spec["primary_metric"] == "accuracy"
+
+        # Process queue with results_spec parameter
+        launched = executor._process_pipeline_queue_once(
+            prun_id,
+            workspace="ws",
+            pipeline_name="train",
+            config_override=None,
+            inputs_override=None,
+            reason="Test results_spec persistence",
+            reason_structured=None,
+            results_spec=results_spec,  # Critical: must pass results_spec
+            experiment_group=None,
+        )
+
+        # Verify stage was launched
+        assert len(launched) == 1, f"Expected 1 launched stage, got {len(launched)}"
+
+        # Get the stage_run_id that was created
+        stage_runs = test_db.list_stage_runs(workspace_name="ws")
+        assert len(stage_runs) == 1, f"Expected 1 stage run, got {len(stage_runs)} - launched: {launched}"
+        stage_run_id = stage_runs[0]["id"]
+
+        # REGRESSION CHECK: Verify results_spec is saved to run_results_spec table
+        exp_manager = ExperimentRecordManager(test_db)
+        stored_spec = exp_manager.get_results_spec(stage_run_id)
+
+        assert stored_spec is not None, (
+            "results_spec was not saved to run_results_spec table! "
+            "This is the bug - results_spec should be saved after stage launch."
+        )
+        parsed_spec = json.loads(stored_spec["spec_json"])
+        assert parsed_spec["primary_metric"] == "accuracy"
+        assert parsed_spec["goal_value"] == 0.80
+
+    def test_results_spec_not_saved_when_no_experiment_record(self, test_db, monkeypatch):
+        """When no experiment record is created, results_spec should NOT be saved.
+
+        The DummyStageExecutor doesn't create experiment records, so results_spec
+        won't be saved. This verifies the behavior when run_stage() is called
+        without creating an experiment record.
+        """
+        pipeline_def = PipelineDef(
+            name="train",
+            stages=[StageDef(name="prep", inputs={}, outputs={})],
+        )
+
+        # Use the basic DummyStageExecutor which doesn't create experiment records
+        stage_executor = DummyStageExecutor(test_db)
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = pipeline_def
+
+        # Disable thread pool - must patch class-level _pool
+        mock_pool = MagicMock()
+        monkeypatch.setattr(PipelineExecutor, "_pool", mock_pool)
+
+        executor = PipelineExecutor(stage_executor, pipeline_manager, test_db)
+
+        results_spec = {
+            "primary_metric": "accuracy",
+            "direction": "maximize",
+            "min_value": 0.60,
+            "goal_value": 0.80,
+            "dataset_split": "val",
+            "tolerance": 0.01,
+            "context": "Testing results_spec not saved without experiment record.",
+        }
+
+        result = executor.run_stages(
+            workspace="ws",
+            pipeline_name="train",
+            reason="Test no experiment record",
+            async_mode=True,
+            results_spec=results_spec,
+        )
+
+        prun_id = result["pipeline_run_id"]
+
+        # Process queue - DummyStageExecutor doesn't create experiment records
+        executor._process_pipeline_queue_once(
+            prun_id,
+            workspace="ws",
+            pipeline_name="train",
+            config_override=None,
+            inputs_override=None,
+            reason="Test no experiment record",
+            reason_structured=None,
+            results_spec=results_spec,
+            experiment_group=None,
+        )
+
+        # Stage was created
+        stage_runs = test_db.list_stage_runs(workspace_name="ws")
+        assert len(stage_runs) == 1
+
+        # Verify results_spec was NOT saved (because no experiment record was created)
+        from goldfish.experiment_model.records import ExperimentRecordManager
+
+        exp_manager = ExperimentRecordManager(test_db)
+        stored_spec = exp_manager.get_results_spec(stage_runs[0]["id"])
+        assert stored_spec is None, "results_spec should NOT be saved when no experiment record exists"

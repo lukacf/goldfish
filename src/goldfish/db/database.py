@@ -444,11 +444,15 @@ class Database:
                 from goldfish.experiment_model.records import generate_record_id
 
                 # Find stage_runs without experiment_records
+                # IMPORTANT: Only include runs where workspace_version exists (FK constraint)
                 orphaned = conn.execute(
                     """
                     SELECT sr.id, sr.workspace_name, sr.version, sr.status
                     FROM stage_runs sr
                     LEFT JOIN experiment_records er ON er.stage_run_id = sr.id
+                    INNER JOIN workspace_versions wv
+                        ON sr.workspace_name = wv.workspace_name
+                        AND sr.version = wv.version
                     WHERE er.record_id IS NULL
                     """
                 ).fetchall()

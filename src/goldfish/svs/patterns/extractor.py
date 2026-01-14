@@ -249,6 +249,14 @@ def extract_failure_pattern(
             allow_tools=["Read", "Glob", "Grep"],
         )
 
+        fallback_model = None
+        try:
+            from goldfish.server_core import _get_config
+
+            fallback_model = _get_config().svs.agent_fallback_model
+        except Exception:
+            fallback_model = None
+
         request = ReviewRequest(
             review_type="pattern_extraction",
             context={
@@ -259,6 +267,7 @@ def extract_failure_pattern(
                 "stage_run_id": stage_run_id,
                 "workspace": workspace_name,
                 "stage_type": stage_name,
+                "fallback_model": fallback_model,
                 "timeout_seconds": 120,  # 2-minute timeout for pattern extraction
                 "max_turns": 1,  # Single turn - just analyze and respond
                 "tool_policy": tool_policy,
