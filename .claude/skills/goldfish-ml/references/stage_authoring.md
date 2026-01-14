@@ -219,6 +219,192 @@ learning_rate = config.get("learning_rate", 0.001)
 batch_size = config.get("batch_size", 32)
 ```
 
+## Checkpoint API (Preemption Protection)
+
+The checkpoint API provides **immediate GCS upload** for training state. Unlike `save_output()` which batches uploads after stage completion, checkpoints are uploaded immediately—essential for spot instance preemption protection.
+
+### save_checkpoint(name, data, step, local_ok)
+
+```python
+def save_checkpoint(name: str, data: Any, step: int | None = None, local_ok: bool = False) -> None
+```
+
+Save a checkpoint with immediate GCS upload.
+
+```python
+from goldfish.io import save_checkpoint
+
+# Save model checkpoint every 1000 steps
+if step % 1000 == 0:
+    save_checkpoint("model", model_dir, step=step)
+
+# Save training state for exact resume
+save_checkpoint("training_state", {
+    "step": step,
+    "optimizer_state": optimizer.state_dict(),
+    "rng_state": torch.get_rng_state(),
+    "best_loss": best_loss,
+})
+```
+
+**Parameters:**
+- `name`: Checkpoint name (e.g., "model", "optimizer", "training_state")
+- `data`: Data to checkpoint. Can be:
+  - `Path` to file or directory
+  - `np.ndarray` (saved as .npy)
+  - Any picklable object (saved as .pkl)
+- `step`: Optional training step for versioned checkpoints. If provided, saves to `{name}/step_{step}/`
+- `local_ok`: If True, save locally when GCS not configured (for local dev). Default False raises error without GCS.
+
+**GCS Path:** `gs://{bucket}/checkpoints/{run_id}/{name}/` or `gs://{bucket}/checkpoints/{run_id}/{name}/step_{step}/`
+
+---
+
+### load_checkpoint(name, step, run_id)
+
+```python
+def load_checkpoint(name: str, step: int | None = None, run_id: str | None = None) -> Path | None
+```
+
+Load a checkpoint from GCS or local storage.
+
+```python
+from goldfish.io import load_checkpoint
+
+# Resume from previous checkpoint
+ckpt_path = load_checkpoint("model", run_id="stage-previous123")
+if ckpt_path:
+    model.load_state_dict(torch.load(ckpt_path / "model.pt"))
+
+# Load specific step
+state = load_checkpoint("training_state", step=5000)
+if state:
+    start_step = pickle.load(open(state, "rb"))["step"]
+```
+
+**Parameters:**
+- `name`: Checkpoint name to load
+- `step`: Specific step to load. If None, loads the base checkpoint.
+- `run_id`: Run ID to load from. If None, uses current run. Use this to resume from a previous run's checkpoint.
+
+**Returns:** Path to downloaded checkpoint (file or directory), or None if not found.
+
+---
+
+### list_checkpoints(run_id)
+
+```python
+def list_checkpoints(run_id: str | None = None) -> dict[str, dict]
+```
+
+List available checkpoints for a run.
+
+```python
+from goldfish.io import list_checkpoints
+
+# List checkpoints from previous run
+checkpoints = list_checkpoints(run_id="stage-abc123")
+# Returns: {"model": {"steps": [1000, 2000, 3000]}, "optimizer": {"steps": []}}
+
+# Find latest step
+if "model" in checkpoints and checkpoints["model"]["steps"]:
+    latest_step = max(checkpoints["model"]["steps"])
+```
+
+---
+
+### Complete Example: Preemption-Safe Training
+
+```python
+#!/usr/bin/env python3
+"""Stage: train - Training with checkpoint resume support."""
+
+from goldfish.io import (
+    load_input, get_output_path, get_config,
+    save_checkpoint, load_checkpoint, list_checkpoints,
+    runtime_log, heartbeat
+)
+import torch
+
+def main():
+    config = get_config()
+    epochs = config.get("epochs", 100)
+    checkpoint_every = config.get("checkpoint_every", 10)
+    resume_from = config.get("resume_from_run")  # Optional: previous run ID
+
+    # Load data
+    features = torch.FloatTensor(load_input("features"))
+    labels = torch.FloatTensor(load_input("labels"))
+
+    # Initialize model
+    model = create_model(config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.get("lr", 0.001))
+    start_epoch = 0
+    best_loss = float("inf")
+
+    # Resume from checkpoint if available
+    if resume_from:
+        runtime_log(f"Checking for checkpoints from {resume_from}")
+        ckpts = list_checkpoints(run_id=resume_from)
+
+        if "training_state" in ckpts:
+            state_path = load_checkpoint("training_state", run_id=resume_from)
+            if state_path:
+                import pickle
+                state = pickle.load(open(state_path, "rb"))
+                start_epoch = state["epoch"] + 1
+                best_loss = state["best_loss"]
+
+                model_path = load_checkpoint("model", run_id=resume_from)
+                if model_path:
+                    model.load_state_dict(torch.load(model_path / "model.pt"))
+                    optimizer.load_state_dict(torch.load(model_path / "optimizer.pt"))
+                    runtime_log(f"Resumed from epoch {start_epoch}, best_loss={best_loss:.4f}")
+
+    # Training loop with checkpointing
+    for epoch in range(start_epoch, epochs):
+        heartbeat(f"Epoch {epoch}/{epochs}")
+
+        model.train()
+        loss = train_epoch(model, optimizer, features, labels)
+
+        print(f"Epoch {epoch}: loss={loss:.4f}")
+
+        # Save checkpoint periodically (survives preemption!)
+        if epoch % checkpoint_every == 0 or loss < best_loss:
+            # Save model weights
+            model_dir = get_output_path("model")
+            torch.save(model.state_dict(), model_dir / "model.pt")
+            torch.save(optimizer.state_dict(), model_dir / "optimizer.pt")
+            save_checkpoint("model", model_dir, step=epoch)
+
+            # Save training state
+            save_checkpoint("training_state", {
+                "epoch": epoch,
+                "best_loss": min(best_loss, loss),
+                "config": config,
+            })
+
+            runtime_log(f"Checkpoint saved at epoch {epoch}")
+
+        if loss < best_loss:
+            best_loss = loss
+
+    runtime_log(f"Training complete. Best loss: {best_loss:.4f}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+**Key Points:**
+- `save_checkpoint()` uploads **immediately** to GCS—if preempted, checkpoints are safe
+- Use `resume_from_run` config to continue from a previous run's checkpoint
+- Checkpoints go to `/checkpoints/{run_id}/` (separate from `/runs/{run_id}/outputs/`)
+- Always use `save_checkpoint()` for critical training state on spot instances
+
+---
+
 ## SVS Runtime API (Monitoring)
 
 The SVS Runtime API allows stages to interact with background AI monitoring.
@@ -823,9 +1009,13 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 ## Common Patterns
 
-### Checkpointing During Training
+### Checkpointing During Training (Preemption-Safe)
+
+Use `save_checkpoint()` for immediate GCS upload that survives spot preemption:
 
 ```python
+from goldfish.io import save_checkpoint, get_output_path
+
 def main():
     model = create_model()
     best_loss = float("inf")
@@ -835,32 +1025,46 @@ def main():
 
         if loss < best_loss:
             best_loss = loss
-            save_checkpoint(model, "best")
+            # Save to local path first
+            model_dir = get_output_path("model")
+            torch.save(model.state_dict(), model_dir / "model.pt")
+            # Upload immediately to GCS (survives preemption!)
+            save_checkpoint("model", model_dir, step=epoch)
+            save_checkpoint("best_loss", {"loss": best_loss, "epoch": epoch})
             print(f"New best model: loss={loss:.4f}")
-
-    # Final save
-    save_output("model", checkpoint_dir)
 ```
 
-### Resumable Training
+### Resumable Training (Cross-Run)
+
+Use `load_checkpoint()` to resume from a previous run:
 
 ```python
+from goldfish.io import load_checkpoint, list_checkpoints, get_config
+
 def main():
     config = get_config()
+    resume_from = config.get("resume_from_run")  # e.g., "stage-abc123"
 
-    # Check for existing checkpoint
-    checkpoint_path = Path("/mnt/inputs/checkpoint")
-    if checkpoint_path.exists():
-        model, start_epoch = load_checkpoint(checkpoint_path)
-        print(f"Resuming from epoch {start_epoch}")
-    else:
-        model = create_model()
-        start_epoch = 0
+    model = create_model()
+    start_epoch = 0
+
+    # Resume from previous run's checkpoint
+    if resume_from:
+        ckpts = list_checkpoints(run_id=resume_from)
+        if "model" in ckpts and ckpts["model"]["steps"]:
+            latest_step = max(ckpts["model"]["steps"])
+            model_path = load_checkpoint("model", step=latest_step, run_id=resume_from)
+            if model_path:
+                model.load_state_dict(torch.load(model_path / "model.pt"))
+                start_epoch = latest_step + 1
+                print(f"Resumed from {resume_from} step {latest_step}")
 
     # Continue training
     for epoch in range(start_epoch, config["epochs"]):
         train_epoch(model)
 ```
+
+See [Checkpoint API](#checkpoint-api-preemption-protection) for full documentation.
 
 ### Multi-GPU Training
 
