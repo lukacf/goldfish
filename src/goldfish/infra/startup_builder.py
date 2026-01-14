@@ -608,62 +608,6 @@ start_log_syncer() {{
 """
 
 
-def output_syncer_section(bucket: str, bucket_path: str, sync_interval: int = 60) -> str:
-    """Generate background output syncer that periodically uploads outputs to GCS.
-
-    This protects against spot instance preemption by syncing model checkpoints
-    and other outputs before the post-run commands (which never execute on preemption).
-
-    Uses rsync for efficiency - only changed files are uploaded.
-
-    Args:
-        bucket: GCS bucket name (without gs:// prefix)
-        bucket_path: Path within bucket for this run
-        sync_interval: Seconds between syncs (default 60, longer than log sync
-                      since outputs can be large)
-
-    Returns:
-        Shell script fragment with start_output_syncer function
-    """
-    outputs_gcs_path = f"gs://{bucket}/{bucket_path}/outputs"
-
-    return f"""
-# === OUTPUT SYNCER (Preemption protection for checkpoints) ===
-# Background process that periodically uploads outputs to GCS
-# This ensures model checkpoints survive spot instance preemption
-OUTPUT_SYNC_INTERVAL={sync_interval}
-OUTPUTS_GCS_PATH="{outputs_gcs_path}"
-
-start_output_syncer() {{
-    (
-        # Wait for Docker to start and potentially create outputs
-        sleep 30
-
-        # Sync outputs periodically while Docker is running
-        while kill -0 $DOCKER_PID 2>/dev/null; do
-            sleep $OUTPUT_SYNC_INTERVAL
-
-            # Sync outputs directory (rsync only uploads changed files)
-            # Exclude .goldfish directory (handled by log syncer) and temp files
-            if [[ -d "/mnt/outputs" ]] && [[ "$(ls -A /mnt/outputs 2>/dev/null)" ]]; then
-                echo "[output_syncer] Syncing outputs to GCS..."
-                gsutil -m rsync -r -x '^\\.goldfish/.*$|.*\\.tmp$|.*\\.part$' /mnt/outputs/ "$OUTPUTS_GCS_PATH/" 2>/dev/null || true
-            fi
-        done
-
-        # Final sync after Docker exits
-        sleep 2
-        if [[ -d "/mnt/outputs" ]] && [[ "$(ls -A /mnt/outputs 2>/dev/null)" ]]; then
-            echo "[output_syncer] Final output sync to GCS..."
-            gsutil -m rsync -r -x '^\\.goldfish/.*$|.*\\.tmp$|.*\\.part$' /mnt/outputs/ "$OUTPUTS_GCS_PATH/" 2>/dev/null || true
-        fi
-    ) &
-    OUTPUT_SYNCER_PID=$!
-    echo "Output syncer started (PID=$OUTPUT_SYNCER_PID, interval={sync_interval}s)"
-}}
-"""
-
-
 def metadata_syncer_section(sync_interval: int = 1) -> str:
     """Generate metadata syncer for Overdrive-style on-demand log refresh.
 
@@ -824,10 +768,6 @@ def build_startup_script(
     if use_log_syncer and log_sync_interval is not None:
         parts.append(log_syncer_section(bucket, bucket_path, log_sync_interval))
 
-    # Add output syncer for checkpoint preemption protection (always enabled for spot instances)
-    # Syncs /mnt/outputs/ to GCS every 60s so checkpoints survive preemption
-    parts.append(output_syncer_section(bucket, bucket_path, sync_interval=60))
-
     # Add metadata syncer for on-demand Overdrive sync
     parts.append(metadata_syncer_section())
 
@@ -942,10 +882,6 @@ fi
     # Start log syncer after Docker begins (needs DOCKER_PID)
     if use_log_syncer:
         parts.append("start_log_syncer")
-
-    # Start output syncer for checkpoint preemption protection
-    # This runs every 60s and syncs /mnt/outputs/ to GCS so checkpoints survive preemption
-    parts.append("start_output_syncer")
 
     # Wait for Docker and capture its exit code (no || true - we need real exit code)
     parts.append("wait $DOCKER_PID")
