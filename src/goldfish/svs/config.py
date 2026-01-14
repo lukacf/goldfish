@@ -95,6 +95,7 @@ class SVSConfig(BaseModel):
     # Agent settings
     agent_provider: Literal["claude_code", "codex_cli", "gemini_cli", "null"] = "claude_code"
     agent_model: str | None = None
+    agent_fallback_model: str | None = None
     agent_timeout: int = Field(default=120, ge=0)
     agent_max_turns: int = Field(default=30, ge=1)
     rate_limit_per_hour: int = Field(default=60, ge=0)

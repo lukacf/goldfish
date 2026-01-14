@@ -269,6 +269,7 @@ class DuringRunMonitor(threading.Thread):
                 "prompt": prompt,
                 "output_format": "json",
                 "model": self.config.agent_model,
+                "fallback_model": self.config.agent_fallback_model,
                 "max_turns": self.config.agent_max_turns,
                 "timeout_seconds": self.config.agent_timeout,
                 "tool_policy": tool_policy,

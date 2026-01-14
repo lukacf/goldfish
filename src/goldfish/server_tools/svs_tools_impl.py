@@ -161,6 +161,7 @@ def librarian_review_patterns(
             "prompt": prompt,
             "output_format": "json",
             "model": config.agent_model,
+            "fallback_model": config.agent_fallback_model,
             "timeout_seconds": config.agent_timeout,
             "max_turns": config.agent_max_turns,
             "tool_policy": tool_policy,
