@@ -1,8 +1,6 @@
 """Custom logging handlers with timeout support."""
 
-import os
 import sys
-import traceback
 
 import requests
 from logging_loki import LokiHandler
@@ -14,6 +12,7 @@ class TimeoutLokiHandler(LokiHandler):
     """Custom LokiHandler that enforces a network timeout on all requests.
 
     This prevents the logging thread from hanging indefinitely on stale connections.
+    Fails gracefully when VictoriaLogs is unavailable - never crashes the server.
     """
 
     def __init__(self, *args, timeout: float = 10.0, **kwargs):
@@ -27,13 +26,24 @@ class TimeoutLokiHandler(LokiHandler):
         self.handler_url = args[0] if args else kwargs.get("url", "")
         super().__init__(*args, **kwargs)
         self.timeout = timeout
+        self._disabled = False
+        self._error_logged = False
 
         # Override the emitter's session to use our timeout
         if hasattr(self, "emitter") and hasattr(self.emitter, "_session"):
             self.emitter._session = None
 
     def emit(self, record):
-        """Emit a record with timeout protection."""
+        """Emit a record with timeout protection.
+
+        Fails gracefully - if VictoriaLogs is unavailable, logs are silently
+        dropped after a single warning message. This ensures the MCP server
+        never crashes due to an optional logging backend being unavailable.
+        """
+        # If handler has been disabled due to errors, silently drop logs
+        if self._disabled:
+            return
+
         settings = get_settings()
 
         # In E2E mode, skip localhost connections
@@ -67,47 +77,38 @@ class TimeoutLokiHandler(LokiHandler):
             super().emit(record)
 
         except requests.exceptions.Timeout:
-            print(
-                f"LokiHandler timeout after {self.timeout}s - connection may be stale",
-                file=sys.stderr,
-            )
-            if hasattr(self.emitter, "close"):
-                self.emitter.close()
+            self._handle_connection_failure(f"VictoriaLogs timeout after {self.timeout}s - disabling remote logging")
         except requests.exceptions.RequestException as e:
-            self._handle_request_error(e)
-        except Exception:
-            if not self._is_suppressed_error():
-                self.handleError(record)
+            self._handle_connection_failure(f"VictoriaLogs unavailable ({type(e).__name__}) - disabling remote logging")
+        except Exception as e:
+            # Catch ALL exceptions - logging should NEVER crash the server
+            self._handle_connection_failure(f"VictoriaLogs error ({type(e).__name__}: {e}) - disabling remote logging")
 
-    def _handle_request_error(self, e: Exception) -> None:
-        """Handle request exceptions with E2E suppression."""
-        settings = get_settings()
-        error_str = str(e)
-        is_localhost_error = "localhost" in error_str and "9428" in error_str
-        is_e2e_test = settings.dev.ci_e2e
-        victoria_url = settings.logging.victoria_logs_url
-        has_proper_url = victoria_url and "host.docker.internal" in victoria_url
+    def _handle_connection_failure(self, message: str) -> None:
+        """Handle connection failures gracefully.
 
-        if not (is_localhost_error and is_e2e_test and has_proper_url):
-            print(f"LokiHandler network error: {e}", file=sys.stderr)
+        Logs a warning once and disables the handler to prevent log spam.
+        """
+        if not self._error_logged:
+            print(f"Warning: {message}", file=sys.stderr)
+            self._error_logged = True
 
+        # Disable handler after first failure to avoid repeated errors
+        self._disabled = True
+
+        # Clean up emitter resources
         if hasattr(self.emitter, "close"):
-            self.emitter.close()
-
-    def _is_suppressed_error(self) -> bool:
-        """Check if current exception should be suppressed."""
-        exc_info = sys.exc_info()
-        if exc_info[0] is None:
-            return False
-
-        exc_text = "".join(traceback.format_exception(*exc_info))
-        is_localhost_error = "localhost" in exc_text and "9428" in exc_text
-        is_e2e_test = os.getenv("CI_E2E") == "1"
-
-        return is_localhost_error and is_e2e_test
+            try:
+                self.emitter.close()
+            except Exception:
+                pass  # Ignore cleanup errors
 
     def handleError(self, record):
-        """Override to suppress localhost connection errors in E2E tests."""
-        if self._is_suppressed_error():
-            return
-        super().handleError(record)
+        """Override to never print ugly tracebacks.
+
+        VictoriaLogs is optional - errors should be handled gracefully,
+        not with verbose tracebacks that confuse users.
+        """
+        # Silently handle all errors - we've already logged a warning
+        # in _handle_connection_failure if needed
+        pass

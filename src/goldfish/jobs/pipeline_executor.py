@@ -629,6 +629,7 @@ class PipelineExecutor:
                     reason=reason,
                     reason_structured=reason_structured,
                     experiment_group=experiment_group,
+                    results_spec=results_spec,  # Saved immediately after experiment record creation
                 )
                 launched.append(stage_run)
                 # Update queue with the stage_run_id for status tracking
@@ -637,24 +638,6 @@ class PipelineExecutor:
                         "UPDATE pipeline_stage_queue SET stage_run_id = ? WHERE id = ?",
                         (stage_run.stage_run_id, queue_id),
                     )
-
-                # Save results_spec for experiment tracking (async runs)
-                if results_spec and stage_run.record_id:
-                    try:
-                        from goldfish.experiment_model.records import ExperimentRecordManager
-
-                        exp_manager = ExperimentRecordManager(self.db)
-                        exp_manager.save_results_spec(
-                            stage_run.stage_run_id,
-                            stage_run.record_id,
-                            results_spec,
-                        )
-                    except Exception as e:
-                        self._logger.warning(
-                            "Failed to save results_spec for %s: %s",
-                            stage_run.stage_run_id,
-                            e,
-                        )
             except Exception as e:
                 # Mark queue entry as failed with error message so it's visible to the user
                 error_msg = str(e)
