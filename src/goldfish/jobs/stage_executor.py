@@ -2447,18 +2447,55 @@ echo "Stage completed successfully"
                 elif status == "not_found":
                     now = time.time()
                     if now - last_log >= 60:
-                        import logging
-
-                        logger = logging.getLogger(__name__)
                         logger.info(
                             f"Instance {stage_run_id} not yet visible in GCE API "
                             f"(elapsed: {int(elapsed)}s, may be launching or searching capacity)"
                         )
                         last_log = now
                     if elapsed >= not_found_timeout:
-                        raise GoldfishError(
-                            f"GCE instance {stage_run_id} not found after {not_found_timeout} seconds; abandoning run"
-                        )
+                        # Instance disappeared - could be preemption or failed startup
+                        # Check if instance ever ran by looking at progress
+                        row = self.db.get_stage_run(stage_run_id)
+                        progress = row.get("progress") if row else None
+
+                        # Check if instance ever ran by looking at progress or GCS artifacts
+                        # Exit code in GCS proves the instance ran, even if progress wasn't updated
+                        exit_code = self.gce_launcher._get_exit_code(stage_run_id)
+                        instance_ran = progress == StageRunProgress.RUNNING or exit_code is not None
+
+                        if instance_ran:
+                            # Instance ran and got preempted - finalize based on exit code
+                            logger.warning(
+                                f"GCE instance {stage_run_id} disappeared after running "
+                                f"(likely spot preemption), finalizing with exit_code={exit_code}"
+                            )
+                            resolved = StageRunStatus.COMPLETED if exit_code == 0 else StageRunStatus.FAILED
+                            error_msg = (
+                                f"Instance preempted/terminated unexpectedly (exit_code={exit_code})"
+                                if resolved == StageRunStatus.FAILED
+                                else None
+                            )
+                            self.db.update_stage_run_status(
+                                stage_run_id=stage_run_id,
+                                status=StageRunStatus.RUNNING,
+                                progress=StageRunProgress.FINALIZING,
+                                error=error_msg,
+                            )
+                            self._finalize_stage_run(stage_run_id, backend, resolved)
+                            return resolved
+                        else:
+                            # Never ran - mark as failed
+                            logger.error(
+                                f"GCE instance {stage_run_id} not found after {not_found_timeout}s "
+                                f"(progress={progress}), marking as failed"
+                            )
+                            self.db.update_stage_run_status(
+                                stage_run_id=stage_run_id,
+                                status=StageRunStatus.FAILED,
+                                completed_at=datetime.now(UTC).isoformat(),
+                                error=f"Instance not found after {not_found_timeout}s (may have failed to launch)",
+                            )
+                            return StageRunStatus.FAILED
                     time.sleep(poll_interval)
                     continue
 
@@ -2534,12 +2571,7 @@ echo "Stage completed successfully"
                 if not row:
                     return status
 
-                # Don't apply not_found timeout during build/launch phases
-                # Instance doesn't exist yet - Cloud Build may still be running
                 progress = row.get("progress")
-                if progress in (StageRunProgress.BUILD, StageRunProgress.LAUNCH):
-                    return status
-
                 not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
                 started_at = row.get("started_at")
                 elapsed = float(not_found_timeout)
@@ -2550,17 +2582,28 @@ echo "Stage completed successfully"
                     except ValueError:
                         elapsed = float(not_found_timeout)
 
+                # Check for GCS artifacts - proves instance ran even if progress wasn't updated
+                exit_code = self.gce_launcher._get_exit_code(stage_run_id)
+                instance_ran = progress == StageRunProgress.RUNNING or exit_code is not None
+
+                # If in build/launch phase and no evidence of running, skip recovery
+                if progress in (StageRunProgress.BUILD, StageRunProgress.LAUNCH) and not instance_ran:
+                    return status
+
                 if elapsed < not_found_timeout:
                     return status
 
-                exit_code = self.gce_launcher._get_exit_code(stage_run_id)
+                # Instance disappeared after timeout - finalize it
                 resolved = StageRunStatus.COMPLETED if exit_code == 0 else StageRunStatus.FAILED
 
                 current = self.db.get_stage_run(stage_run_id)
                 if current and current.get("status") not in terminal_statuses:
                     error_msg = None
                     if resolved == StageRunStatus.FAILED:
-                        error_msg = f"GCE instance {stage_run_id} not found after {not_found_timeout} seconds"
+                        if instance_ran:
+                            error_msg = f"Instance preempted/terminated unexpectedly (exit_code={exit_code})"
+                        else:
+                            error_msg = f"Instance not found after {not_found_timeout}s (may have failed to launch)"
                     self.db.update_stage_run_status(
                         stage_run_id=stage_run_id,
                         status=StageRunStatus.RUNNING,
