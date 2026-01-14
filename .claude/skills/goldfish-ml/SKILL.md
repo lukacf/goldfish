@@ -861,6 +861,7 @@ manage_base_images(action="push", image_type="gpu", target="project")
 | `inspect_run()` | Infra status, SVS, provenance | run_id, include |
 | `logs()` | Container logs (supports follow mode) | run_id, tail, follow |
 | `cancel()` | Stop a running stage | run_id, reason |
+| `save_results_spec()` | Pre-save results_spec for a run | workspace, stage, results_spec |
 
 ### Version Management
 
@@ -925,6 +926,15 @@ manage_base_images(action="push", image_type="gpu", target="project")
 - `backend="local"` (default) - build using local Docker daemon
 - `backend="cloud"` - build using Google Cloud Build (recommended for GPU images)
 
+### Backup
+
+| Tool | Purpose | Key Parameters |
+|------|---------|----------------|
+| `list_backups()` | List database backups | tier, include_deleted |
+| `create_backup()` | Create manual backup | trigger, details |
+| `cleanup_backups()` | Remove old backups per retention policy | None |
+| `get_backup_status()` | Current backup configuration and health | None |
+
 ### Utility
 
 
@@ -966,10 +976,6 @@ manage_base_images(action="push", image_type="gpu", target="project")
 
 
 | `reload_config()` | Hot-reload goldfish.yaml | None |
-
-
-
-| `get_audit_log()` | View recent state changes | limit, workspace |
 
 
 
