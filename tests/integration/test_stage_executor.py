@@ -1606,3 +1606,337 @@ class TestLocalExecutorConfigFromYaml:
         assert executor.local_executor.memory_limit == "4g"
         assert executor.local_executor.cpu_limit == "2.0"
         assert executor.local_executor.pids_limit == 100
+
+
+class TestGCEPreemptionHandling:
+    """Regression tests for GCE spot instance preemption handling.
+
+    These tests verify that when a GCE spot instance gets preempted:
+    1. wait_for_completion() properly finalizes the run instead of throwing
+    2. The status is correctly updated based on exit code in GCS
+    3. The dashboard shows correct status (not stuck on "launching")
+    """
+
+    def test_preempted_instance_with_running_progress_finalizes_as_failed(
+        self, test_db, test_config, temp_dir, monkeypatch
+    ):
+        """Preempted instance that was RUNNING should finalize based on exit code.
+
+        Regression test: Previously, preempted instances would throw GoldfishError
+        and remain stuck with progress=LAUNCH/RUNNING forever.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from goldfish.models import StageRunProgress
+
+        # Setup workspace and stage run
+        test_db.create_workspace_lineage("test_workspace", description="Test")
+        test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
+
+        run_id = "stage-preempt001"
+        test_db.create_stage_run(
+            stage_run_id=run_id,
+            workspace_name="test_workspace",
+            version="v1",
+            stage_name="train",
+            pipeline_run_id=None,
+            pipeline_name=None,
+            config={},
+            inputs={},
+            profile="h100-spot",
+            hints=None,
+            backend_type="gce",
+            backend_handle=run_id,
+        )
+        # Set to RUNNING progress (instance was running before preemption)
+        started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        with test_db._conn() as conn:
+            conn.execute(
+                "UPDATE stage_runs SET status=?, progress=?, started_at=? WHERE id=?",
+                (StageRunStatus.RUNNING, StageRunProgress.RUNNING, started_at, run_id),
+            )
+
+        # Create executor with GCE backend
+        config = test_config.model_copy(deep=True)
+        config.jobs.backend = "gce"
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+            dataset_registry=None,
+        )
+
+        # Mock GCE launcher to simulate preemption
+        executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
+        executor.gce_launcher._get_exit_code = MagicMock(return_value=137)  # Killed by signal
+        executor._finalize_stage_run = MagicMock()
+        monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
+
+        # Execute - should NOT throw, should finalize
+        status = executor.wait_for_completion(run_id)
+
+        # Verify finalization happened
+        assert status == StageRunStatus.FAILED
+        executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageRunStatus.FAILED)
+
+        # Verify database was updated with error message
+        row = test_db.get_stage_run(run_id)
+        assert row is not None
+        assert row["progress"] == StageRunProgress.FINALIZING
+        assert "preempted" in row["error"].lower() or "terminated" in row["error"].lower()
+
+    def test_preempted_instance_with_launch_progress_but_exit_code_finalizes(
+        self, test_db, test_config, temp_dir, monkeypatch
+    ):
+        """Preemption between polls may leave progress=LAUNCH but exit code exists.
+
+        Regression test: Instance could run and be preempted before status poll
+        updated progress to RUNNING. The exit code in GCS proves it ran.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from goldfish.models import StageRunProgress
+
+        # Setup
+        test_db.create_workspace_lineage("test_workspace", description="Test")
+        test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
+
+        run_id = "stage-preempt002"
+        test_db.create_stage_run(
+            stage_run_id=run_id,
+            workspace_name="test_workspace",
+            version="v1",
+            stage_name="train",
+            pipeline_run_id=None,
+            pipeline_name=None,
+            config={},
+            inputs={},
+            profile="h100-spot",
+            hints=None,
+            backend_type="gce",
+            backend_handle=run_id,
+        )
+        # Still at LAUNCH progress (polls never caught it running)
+        started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        with test_db._conn() as conn:
+            conn.execute(
+                "UPDATE stage_runs SET status=?, progress=?, started_at=? WHERE id=?",
+                (StageRunStatus.RUNNING, StageRunProgress.LAUNCH, started_at, run_id),
+            )
+
+        config = test_config.model_copy(deep=True)
+        config.jobs.backend = "gce"
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+            dataset_registry=None,
+        )
+
+        executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
+        executor.gce_launcher._get_exit_code = MagicMock(return_value=0)  # Completed OK before preempt
+        executor._finalize_stage_run = MagicMock()
+        monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
+
+        status = executor.wait_for_completion(run_id)
+
+        # Should finalize as COMPLETED because exit_code=0
+        assert status == StageRunStatus.COMPLETED
+        executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageRunStatus.COMPLETED)
+
+    def test_launch_failure_without_exit_code_marks_failed(self, test_db, test_config, temp_dir, monkeypatch):
+        """Instance that never ran (no exit code) should be marked FAILED.
+
+        Regression test: Previously this would throw GoldfishError.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from goldfish.models import StageRunProgress
+
+        # Setup
+        test_db.create_workspace_lineage("test_workspace", description="Test")
+        test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
+
+        run_id = "stage-preempt003"
+        test_db.create_stage_run(
+            stage_run_id=run_id,
+            workspace_name="test_workspace",
+            version="v1",
+            stage_name="train",
+            pipeline_run_id=None,
+            pipeline_name=None,
+            config={},
+            inputs={},
+            profile="h100-spot",
+            hints=None,
+            backend_type="gce",
+            backend_handle=run_id,
+        )
+        started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        with test_db._conn() as conn:
+            conn.execute(
+                "UPDATE stage_runs SET status=?, progress=?, started_at=? WHERE id=?",
+                (StageRunStatus.RUNNING, StageRunProgress.LAUNCH, started_at, run_id),
+            )
+
+        config = test_config.model_copy(deep=True)
+        config.jobs.backend = "gce"
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+            dataset_registry=None,
+        )
+
+        executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
+        executor.gce_launcher._get_exit_code = MagicMock(return_value=None)  # No exit code = never ran
+        executor._finalize_stage_run = MagicMock()
+        monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
+
+        status = executor.wait_for_completion(run_id)
+
+        # Should mark as FAILED without calling finalize (never ran)
+        assert status == StageRunStatus.FAILED
+        executor._finalize_stage_run.assert_not_called()
+
+        # Verify error message in DB
+        row = test_db.get_stage_run(run_id)
+        assert row is not None
+        assert row["status"] == StageRunStatus.FAILED
+        assert "not found" in row["error"].lower() or "failed to launch" in row["error"].lower()
+
+    def test_refresh_status_recovers_preempted_run_with_launch_progress(
+        self, test_db, test_config, temp_dir, monkeypatch
+    ):
+        """refresh_status_once should recover preempted runs even at LAUNCH progress.
+
+        Regression test: _refresh_status_once_unlocked would skip recovery when
+        progress was BUILD/LAUNCH, even if exit code in GCS proved it ran.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from goldfish.models import StageRunProgress
+
+        # Setup
+        test_db.create_workspace_lineage("test_workspace", description="Test")
+        test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
+
+        run_id = "stage-preempt004"
+        test_db.create_stage_run(
+            stage_run_id=run_id,
+            workspace_name="test_workspace",
+            version="v1",
+            stage_name="train",
+            pipeline_run_id=None,
+            pipeline_name=None,
+            config={},
+            inputs={},
+            profile="h100-spot",
+            hints=None,
+            backend_type="gce",
+            backend_handle=run_id,
+        )
+        started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        with test_db._conn() as conn:
+            conn.execute(
+                "UPDATE stage_runs SET status=?, progress=?, started_at=? WHERE id=?",
+                (StageRunStatus.RUNNING, StageRunProgress.LAUNCH, started_at, run_id),
+            )
+
+        config = test_config.model_copy(deep=True)
+        config.jobs.backend = "gce"
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+            dataset_registry=None,
+        )
+
+        executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
+        executor.gce_launcher._get_exit_code = MagicMock(return_value=1)  # Exit code proves it ran
+        executor._finalize_stage_run = MagicMock()
+        monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
+
+        # Use refresh_status_once (async path)
+        status = executor.refresh_status_once(run_id)
+
+        # Should finalize as FAILED
+        assert status == StageRunStatus.FAILED
+        executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageRunStatus.FAILED)
+
+    def test_dashboard_shows_correct_status_after_preemption(self, test_db, test_config, temp_dir, monkeypatch):
+        """After preemption recovery, list_runs should show correct status.
+
+        Regression test: Dashboard was showing 'launching' for runs that had
+        actually run for 9 epochs and been preempted.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from goldfish.models import StageRunProgress
+
+        # Setup
+        test_db.create_workspace_lineage("test_workspace", description="Test")
+        test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
+
+        run_id = "stage-preempt005"
+        test_db.create_stage_run(
+            stage_run_id=run_id,
+            workspace_name="test_workspace",
+            version="v1",
+            stage_name="train",
+            pipeline_run_id=None,
+            pipeline_name=None,
+            config={},
+            inputs={},
+            profile="h100-spot",
+            hints=None,
+            backend_type="gce",
+            backend_handle=run_id,
+        )
+        started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        with test_db._conn() as conn:
+            conn.execute(
+                "UPDATE stage_runs SET status=?, progress=?, started_at=? WHERE id=?",
+                (StageRunStatus.RUNNING, StageRunProgress.RUNNING, started_at, run_id),
+            )
+
+        config = test_config.model_copy(deep=True)
+        config.jobs.backend = "gce"
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=temp_dir,
+            dataset_registry=None,
+        )
+
+        executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
+        executor.gce_launcher._get_exit_code = MagicMock(return_value=137)
+        executor._finalize_stage_run = MagicMock()
+        monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
+
+        # Recover the preempted run
+        executor.wait_for_completion(run_id)
+
+        # Verify list_runs shows FAILED, not RUNNING/launching
+        runs = test_db.list_stage_runs(workspace_name="test_workspace")
+        assert len(runs) == 1
+        assert runs[0]["id"] == run_id
+        assert runs[0]["progress"] == StageRunProgress.FINALIZING
+        # Status will be RUNNING during finalization, but error should be set
+        assert runs[0]["error"] is not None
+        assert "preempted" in runs[0]["error"].lower() or "terminated" in runs[0]["error"].lower()
