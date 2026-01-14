@@ -151,6 +151,57 @@ class TestClaudeCodeProvider:
         assert len(result.findings) > 0
         assert any("AI review failed" in f for f in result.findings)
 
+    @patch("shutil.which")
+    @patch("subprocess.run")
+    def test_cli_retry_with_fallback_model_on_api_error(self, mock_run, mock_which):
+        """Should retry with fallback model when API error is returned."""
+        mock_which.return_value = "claude"
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout="API Error: Repeated 529 Overloaded errors",
+                stderr="",
+                text=True,
+            ),
+            MagicMock(returncode=0, stdout="OK", stderr="", text=True),
+        ]
+
+        provider = ClaudeCodeProvider()
+        request = AgentRequest(
+            prompt="Test",
+            context={"fallback_model": "sonnet-4.5"},
+        )
+
+        result = provider.run(request)
+
+        assert result.decision == "approved"
+        assert result.findings == []
+        assert mock_run.call_count == 2
+        second_cmd = mock_run.call_args_list[1][0][0]
+        assert "--model" in second_cmd
+        assert "sonnet-4.5" in second_cmd
+
+    @patch("shutil.which")
+    @patch("subprocess.run")
+    def test_cli_api_error_detected_as_failure(self, mock_run, mock_which):
+        """Should treat API-side error messages as CLI failure (fail-open with warning)."""
+        mock_which.return_value = "claude"
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="API Error: Repeated 529 Overloaded errors",
+            stderr="",
+            text=True,
+        )
+
+        provider = ClaudeCodeProvider()
+        request = AgentRequest(prompt="Test")
+
+        result = provider.run(request)
+
+        assert result.decision == "approved"
+        assert len(result.findings) > 0
+        assert any("AI review failed" in f for f in result.findings)
+
 
 class TestCodexCLIProvider:
     """Tests for CodexCLIProvider CLI mapping."""

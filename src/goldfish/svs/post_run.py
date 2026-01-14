@@ -125,6 +125,7 @@ def run_post_run_review(
         context={
             "outputs_dir": str(outputs_dir),
             "model": config.agent_model,
+            "fallback_model": config.agent_fallback_model,
             "max_turns": config.agent_max_turns,
             "timeout_seconds": config.agent_timeout,
             "tool_policy": tool_policy,

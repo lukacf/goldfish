@@ -433,6 +433,39 @@ def _unwrap_cli_response(text: str) -> str:
     return text
 
 
+def _is_cli_error_output(text: str) -> bool:
+    """Return True if CLI output indicates a provider/API failure."""
+    unwrapped = _unwrap_cli_response(text).strip()
+    if not unwrapped:
+        return False
+
+    lower = unwrapped.lower()
+    if lower.startswith("error:") or lower.startswith("api error"):
+        return True
+
+    # Common provider failure patterns (Anthropic/CLI outages, rate limits, timeouts)
+    error_markers = (
+        "overloaded",
+        "rate limit",
+        "rate-limit",
+        "timeout",
+        "timed out",
+        "service unavailable",
+        "gateway timeout",
+        "internal server error",
+        "http 429",
+        "http 5",
+        "status 429",
+        "status 5",
+        " 429 ",
+        " 529 ",
+        " 502 ",
+        " 503 ",
+    )
+
+    return any(marker in lower for marker in error_markers)
+
+
 def _parse_findings(text: str) -> tuple[str, list[str]]:
     """Parse decision + findings from agent output text."""
     # First unwrap CLI JSON response if present
@@ -513,31 +546,39 @@ class ClaudeCodeProvider:
             raise GoldfishError("Claude CLI binary not configured")
         _ensure_binary(binary)
 
-        cmd = [binary, "-p", agent_request.prompt]
+        def _build_cmd(model_override: str | None = None) -> list[str]:
+            cmd = [binary, "-p", agent_request.prompt]
 
-        if agent_request.output_format == "json":
-            cmd += ["--output-format", "json"]
-        if agent_request.model:
-            cmd += ["--model", agent_request.model]
-        if agent_request.max_turns:
-            cmd += ["--max-turns", str(agent_request.max_turns)]
-        if agent_request.tool_policy is not None:
-            cmd += ["--permission-mode", agent_request.tool_policy.permission_mode]
-            if agent_request.tool_policy.allow_tools:
-                for tool in agent_request.tool_policy.allow_tools:
-                    cmd += ["--allowed-tools", tool]
-            if agent_request.tool_policy.deny_tools:
-                for tool in agent_request.tool_policy.deny_tools:
-                    cmd += ["--disallowed-tools", tool]
-            if agent_request.tool_policy.mcp_servers:
-                for server in agent_request.tool_policy.mcp_servers:
-                    cmd += ["--mcp-server", server]
+            if agent_request.output_format == "json":
+                cmd += ["--output-format", "json"]
+
+            model_to_use = model_override if model_override is not None else agent_request.model
+            if model_to_use:
+                cmd += ["--model", model_to_use]
+            if agent_request.max_turns:
+                cmd += ["--max-turns", str(agent_request.max_turns)]
+            if agent_request.tool_policy is not None:
+                cmd += ["--permission-mode", agent_request.tool_policy.permission_mode]
+                if agent_request.tool_policy.allow_tools:
+                    for tool in agent_request.tool_policy.allow_tools:
+                        cmd += ["--allowed-tools", tool]
+                if agent_request.tool_policy.deny_tools:
+                    for tool in agent_request.tool_policy.deny_tools:
+                        cmd += ["--disallowed-tools", tool]
+                if agent_request.tool_policy.mcp_servers:
+                    for server in agent_request.tool_policy.mcp_servers:
+                        cmd += ["--mcp-server", server]
+
+            return cmd
+
+        fallback_model = agent_request.context.get("fallback_model")
 
         env = os.environ.copy()
         extra_env = agent_request.context.get("env")
         if isinstance(extra_env, dict):
             env.update({k: str(v) for k, v in extra_env.items()})
 
+        cmd = _build_cmd()
         exit_code, stdout, stderr, duration_ms = _run_command(
             cmd,
             cwd=agent_request.cwd,
@@ -545,7 +586,11 @@ class ClaudeCodeProvider:
             env=env,
         )
 
-        raw_output = stdout.strip() if stdout else stderr.strip()
+        stdout_text = stdout.strip() if stdout else ""
+        stderr_text = stderr.strip() if stderr else ""
+        raw_output = stdout_text or stderr_text
+
+        total_duration_ms = duration_ms
 
         # Detect CLI failures (fail-open: still approve, caller handles error tracking)
         cli_failed = False
@@ -555,9 +600,37 @@ class ClaudeCodeProvider:
                 f"Claude CLI exited with code {exit_code}. "
                 f"AI review may not have run correctly. stderr: {stderr[:500] if stderr else 'none'}"
             )
-        elif raw_output.lower().startswith("error:"):
+        elif _is_cli_error_output(raw_output):
             cli_failed = True
             logger.debug(f"Claude CLI returned error: {raw_output[:500]}. " "AI review may not have run correctly.")
+
+        # Retry once with fallback model if configured and different from primary
+        if cli_failed and fallback_model and str(fallback_model) != str(agent_request.model):
+            logger.debug(f"Retrying Claude CLI with fallback model: {fallback_model}")
+            retry_cmd = _build_cmd(model_override=str(fallback_model))
+            exit_code, stdout, stderr, duration_ms = _run_command(
+                retry_cmd,
+                cwd=agent_request.cwd,
+                timeout_seconds=agent_request.timeout_seconds,
+                env=env,
+            )
+            total_duration_ms += duration_ms
+            stdout_text = stdout.strip() if stdout else ""
+            stderr_text = stderr.strip() if stderr else ""
+            raw_output = stdout_text or stderr_text
+
+            cli_failed = False
+            if exit_code != 0:
+                cli_failed = True
+                logger.debug(
+                    f"Claude CLI fallback exited with code {exit_code}. "
+                    f"AI review may not have run correctly. stderr: {stderr[:500] if stderr else 'none'}"
+                )
+            elif _is_cli_error_output(raw_output):
+                cli_failed = True
+                logger.debug(
+                    f"Claude CLI fallback returned error: {raw_output[:500]}. " "AI review may not have run correctly."
+                )
 
         if cli_failed:
             # Return approved with a clear finding that the review itself failed
@@ -565,7 +638,7 @@ class ClaudeCodeProvider:
                 decision="approved",
                 findings=[f"WARNING: AI review failed to run (exit_code={exit_code}). Failing open."],
                 response_text=raw_output,
-                duration_ms=duration_ms,
+                duration_ms=total_duration_ms,
             )
 
         decision, findings = _parse_findings(raw_output)
@@ -574,7 +647,7 @@ class ClaudeCodeProvider:
             decision=decision,
             findings=findings,
             response_text=raw_output,
-            duration_ms=duration_ms,
+            duration_ms=total_duration_ms,
         )
 
 
