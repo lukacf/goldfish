@@ -539,6 +539,110 @@ class TestMigrationV5Backfill:
             ).fetchone()
             assert completed_result["infra_outcome"] == "completed"
 
+    def test_migration_v5_skips_runs_without_matching_workspace_version(self, tmp_path: Path) -> None:
+        """Migration v5 skips stage_runs that reference non-existent workspace versions.
+
+        REGRESSION TEST for foreign key constraint failure during migration.
+
+        This tests the scenario where:
+        1. A stage_run exists with workspace_name/version that don't exist in workspace_versions
+        2. Migration v5 attempts to backfill experiment_records
+        3. The FK constraint (workspace_name, version) -> workspace_versions would fail
+
+        The fix ensures we only backfill runs where workspace_version exists.
+        """
+        db_path = tmp_path / "test.db"
+
+        # Create full database first
+        db = Database(db_path)
+
+        # Create workspace but DON'T create the version
+        db.create_workspace_lineage("test_ws")
+        # Intentionally NOT calling: db.create_version("test_ws", "v1", ...)
+
+        # Add orphaned stage_run that references non-existent version
+        with db._conn() as conn:
+            # Disable FK checks temporarily to insert invalid data
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at)
+                VALUES ('stage-orphan', 'test_ws', 'v1', 'test_stage', 'completed', datetime('now'))
+                """
+            )
+            conn.execute("PRAGMA foreign_keys = ON")
+            # Set version back to 4 to trigger migration v5 on next open
+            conn.execute("UPDATE schema_version SET version = 4")
+
+        # Re-open database - migration v5 should NOT fail with FK constraint error
+        db2 = Database(db_path)  # This would raise IntegrityError before the fix
+
+        with db2._conn() as conn:
+            # Verify the orphaned stage_run was NOT backfilled (skipped)
+            record = conn.execute("SELECT * FROM experiment_records WHERE stage_run_id = 'stage-orphan'").fetchone()
+            assert record is None, "Should NOT create experiment_record for run without valid workspace_version"
+
+            results = conn.execute("SELECT * FROM run_results WHERE stage_run_id = 'stage-orphan'").fetchone()
+            assert results is None, "Should NOT create run_results for run without valid workspace_version"
+
+    def test_migration_v5_backfills_only_valid_runs_when_mixed(self, tmp_path: Path) -> None:
+        """Migration v5 backfills valid runs and skips invalid ones in the same batch.
+
+        Tests that when there's a mix of:
+        - Stage runs WITH valid workspace_versions (should be backfilled)
+        - Stage runs WITHOUT valid workspace_versions (should be skipped)
+
+        The migration handles both correctly without failing.
+        """
+        db_path = tmp_path / "test.db"
+
+        # Create full database
+        db = Database(db_path)
+
+        # Create workspace and ONE version
+        db.create_workspace_lineage("test_ws")
+        db.create_version("test_ws", "v1", "test_ws-v1", "abc123", "manual")
+        # v2 does NOT exist
+
+        with db._conn() as conn:
+            # Disable FK to insert both valid and invalid runs
+            conn.execute("PRAGMA foreign_keys = OFF")
+
+            # Valid run (v1 exists)
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at)
+                VALUES ('stage-valid', 'test_ws', 'v1', 'test', 'completed', datetime('now'))
+                """
+            )
+
+            # Invalid run (v2 does NOT exist)
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at)
+                VALUES ('stage-invalid', 'test_ws', 'v2', 'test', 'completed', datetime('now'))
+                """
+            )
+
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("UPDATE schema_version SET version = 4")
+
+        # Re-open - should not fail
+        db2 = Database(db_path)
+
+        with db2._conn() as conn:
+            # Valid run should be backfilled
+            valid_record = conn.execute(
+                "SELECT * FROM experiment_records WHERE stage_run_id = 'stage-valid'"
+            ).fetchone()
+            assert valid_record is not None, "Should backfill run with valid workspace_version"
+
+            # Invalid run should be skipped
+            invalid_record = conn.execute(
+                "SELECT * FROM experiment_records WHERE stage_run_id = 'stage-invalid'"
+            ).fetchone()
+            assert invalid_record is None, "Should skip run without valid workspace_version"
+
 
 def _create_db_with_orphaned_run_at_v4(db_path: Path, run_id: str, status: str) -> None:
     """Create a database with an orphaned stage_run and set version to 4.

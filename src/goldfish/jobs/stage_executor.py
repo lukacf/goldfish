@@ -201,6 +201,7 @@ class StageExecutor:
         stage_run_id: str | None = None,
         skip_review: bool = False,
         experiment_group: str | None = None,
+        results_spec: dict | None = None,
     ) -> StageRunInfo:
         """Run a single pipeline stage.
 
@@ -218,6 +219,7 @@ class StageExecutor:
                          updates existing record; if None, creates new one.
             skip_review: Skip pre-run review (default False)
             experiment_group: Optional experiment group for filtering
+            results_spec: Expected results specification for experiment tracking
 
         Flow:
             1. Auto-version workspace (git tag)
@@ -314,6 +316,7 @@ class StageExecutor:
                 preflight_errors=preflight_errors,
                 preflight_warnings=preflight_warnings,
                 experiment_group=experiment_group,
+                results_spec=results_spec,
             )
 
         # 3. Resolve inputs
@@ -867,6 +870,7 @@ class StageExecutor:
         preflight_errors: list[str] | None = None,
         preflight_warnings: list[str] | None = None,
         experiment_group: str | None = None,
+        results_spec: dict | None = None,
     ) -> str:
         """Create stage run record in database with input lineage tracking.
 
@@ -919,6 +923,14 @@ class StageExecutor:
             experiment_group=experiment_group,
         )
 
+        # Save results_spec immediately after experiment record creation
+        # This ensures results_spec is persisted even if later steps fail (e.g., Docker build)
+        if results_spec and record_id:
+            try:
+                exp_manager.save_results_spec(stage_run_id, record_id, results_spec)
+            except Exception as e:
+                logger.warning(f"Failed to save results_spec for {stage_run_id}: {e}")
+
         return record_id
 
     def _update_queued_stage_run(
@@ -936,6 +948,7 @@ class StageExecutor:
         preflight_errors: list[str] | None = None,
         create_experiment_record: bool = True,
         experiment_group: str | None = None,
+        results_spec: dict | None = None,
     ) -> str | None:
         """Update a queued stage run record with resolved values.
 
@@ -957,6 +970,7 @@ class StageExecutor:
             create_experiment_record: Whether to create an experiment record (True for
                 pipeline-queued runs that don't already have one)
             experiment_group: Optional experiment group for filtering
+            results_spec: Expected results specification for experiment tracking
 
         Returns:
             The generated experiment record_id (ULID) if created, None otherwise
@@ -1022,6 +1036,15 @@ class StageExecutor:
                 stage_run_id=stage_run_id,
                 experiment_group=experiment_group,
             )
+
+            # Save results_spec immediately after experiment record creation
+            # This ensures results_spec is persisted even if later steps fail
+            if results_spec and record_id:
+                try:
+                    exp_manager.save_results_spec(stage_run_id, record_id, results_spec)
+                except Exception as e:
+                    logger.warning(f"Failed to save results_spec for {stage_run_id}: {e}")
+
             return record_id
 
         return None
