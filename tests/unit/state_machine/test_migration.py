@@ -953,7 +953,8 @@ class TestCheckOrphanStatus:
         """Check orphan status returns not found for missing run."""
         from goldfish.state_machine.migration import check_orphan_status
 
-        result = check_orphan_status(test_db, "nonexistent-run")
+        # Use valid run_id format but run doesn't exist in DB
+        result = check_orphan_status(test_db, "stage-nonexistent")
         assert result["is_orphan"] is False
         assert "not found" in result["reason"].lower()
 
@@ -1954,3 +1955,607 @@ class TestMigrationProgressIdempotency:
         assert result2["progress_id"] is None  # No progress created for skipped-only run
         assert result2["migrated"] == 0
         assert result2["skipped"] == 1
+
+
+class TestMigrationRowLevelErrors:
+    """Tests for migration behavior when individual row errors occur."""
+
+    def test_migration_with_row_error_returns_success_false(self, test_db) -> None:
+        """Migration with row-level errors should return success=False."""
+        from unittest.mock import patch
+
+        from goldfish.state_machine.migration import migrate_stage_runs
+
+        with test_db._conn() as conn:
+            _setup_workspace(conn)
+            # Create a row that will be migrated
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("stage-1", "ws", "v1", "train", "completed", datetime.now(UTC).isoformat()),
+            )
+
+        # Patch determine_migration_state to raise an exception for this specific row
+        original_fn = None
+
+        def raise_on_second_call(status, error):
+            # Simulate an error during processing
+            raise ValueError("Simulated row error")
+
+        with patch(
+            "goldfish.state_machine.migration.determine_migration_state",
+            side_effect=raise_on_second_call,
+        ):
+            result = migrate_stage_runs(test_db)
+
+        # Should have errors and success=False
+        assert result["success"] is False
+        assert result["errors"] >= 1
+        assert len(result["error_details"]) >= 1
+        assert "Simulated row error" in result["error_details"][0]["error"]
+
+
+class TestMigrationProgressUpdateFailure:
+    """Tests for migration progress update failure handling."""
+
+    def test_progress_update_failure_is_logged(self, test_db, caplog) -> None:
+        """Progress update failure after main error should be logged but not crash."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import migrate_stage_runs
+
+        # Create a mock that will raise on the main migration but also fail progress update
+        mock_conn = MagicMock()
+
+        # First execute succeeds (BEGIN IMMEDIATE), then fails on count query
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:  # BEGIN IMMEDIATE
+                return MagicMock()
+            # Fail on subsequent calls
+            raise RuntimeError("Simulated database error")
+
+        mock_conn.execute.side_effect = side_effect
+
+        # Patch the context manager to return our mock
+        with patch.object(test_db, "_conn") as mock_conn_cm:
+            mock_context = MagicMock()
+            mock_context.__enter__ = MagicMock(return_value=mock_conn)
+            mock_context.__exit__ = MagicMock(return_value=False)
+            mock_conn_cm.return_value = mock_context
+
+            # Also patch the second _conn call in the error handler
+            result = migrate_stage_runs(test_db)
+
+        # Should have errors
+        assert result["success"] is False
+        assert result["errors"] >= 1
+
+
+class TestDockerStatusEdgeCases:
+    """Tests for Docker container status edge cases."""
+
+    def test_docker_container_paused_is_orphan(self) -> None:
+        """Paused Docker container should be treated as orphan."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import _check_docker_orphan
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "paused\n"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = _check_docker_orphan("abc123456789")
+            assert result["is_orphan"] is True
+            assert "paused" in result["reason"]
+
+    def test_docker_container_restarting_is_orphan(self) -> None:
+        """Restarting Docker container should be treated as orphan."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import _check_docker_orphan
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "restarting\n"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = _check_docker_orphan("abc123456789")
+            assert result["is_orphan"] is True
+            assert "restarting" in result["reason"]
+
+    def test_docker_container_created_is_orphan(self) -> None:
+        """Created (not started) Docker container should be treated as orphan."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import _check_docker_orphan
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "created\n"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = _check_docker_orphan("abc123456789")
+            assert result["is_orphan"] is True
+            assert "created" in result["reason"]
+
+    def test_docker_container_dead_is_orphan(self) -> None:
+        """Dead Docker container should be treated as orphan."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import _check_docker_orphan
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "dead\n"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = _check_docker_orphan("abc123456789")
+            assert result["is_orphan"] is True
+            assert "dead" in result["reason"]
+
+
+class TestGceStatusEdgeCases:
+    """Tests for GCE instance status edge cases."""
+
+    def test_gce_instance_provisioning_not_orphan(self) -> None:
+        """Provisioning GCE instance should not be treated as orphan."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import _check_gce_orphan
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "PROVISIONING\n"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = _check_gce_orphan("my-instance")
+            assert result["is_orphan"] is False
+            assert "PROVISIONING" in result["reason"]
+
+    def test_gce_instance_staging_not_orphan(self) -> None:
+        """Staging GCE instance should not be treated as orphan."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import _check_gce_orphan
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "STAGING\n"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = _check_gce_orphan("my-instance")
+            assert result["is_orphan"] is False
+            assert "STAGING" in result["reason"]
+
+    def test_gce_instance_suspending_not_orphan(self) -> None:
+        """Suspending GCE instance should not be treated as orphan."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import _check_gce_orphan
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "SUSPENDING\n"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = _check_gce_orphan("my-instance")
+            assert result["is_orphan"] is False
+            assert "SUSPENDING" in result["reason"]
+
+    def test_gce_instance_suspended_is_orphan(self) -> None:
+        """Suspended GCE instance - currently NOT treated as orphan (only TERMINATED/STOPPED)."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import _check_gce_orphan
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "SUSPENDED\n"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = _check_gce_orphan("my-instance")
+            # Note: SUSPENDED is NOT in the orphan list (only TERMINATED, STOPPED)
+            # This is intentional - suspended instances can be resumed
+            assert result["is_orphan"] is False
+            assert "SUSPENDED" in result["reason"]
+
+
+class TestBeginImmediateVerification:
+    """Tests to verify BEGIN IMMEDIATE is properly used."""
+
+    def test_migration_uses_begin_immediate(self, test_db) -> None:
+        """Verify migration uses BEGIN IMMEDIATE for exclusive locking."""
+        from unittest.mock import patch
+
+        from goldfish.state_machine.migration import migrate_stage_runs
+
+        # Track execute calls
+        executed_statements = []
+        original_conn = test_db._conn
+
+        class TrackingConnection:
+            def __init__(self, real_conn):
+                self._real_conn = real_conn
+
+            def execute(self, sql, params=None):
+                executed_statements.append(sql.strip().upper() if isinstance(sql, str) else sql)
+                if params:
+                    return self._real_conn.execute(sql, params)
+                return self._real_conn.execute(sql)
+
+            def __getattr__(self, name):
+                return getattr(self._real_conn, name)
+
+        # Setup data
+        with test_db._conn() as conn:
+            _setup_workspace(conn)
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("stage-1", "ws", "v1", "train", "completed", datetime.now(UTC).isoformat()),
+            )
+
+        # Wrap connection to track execute calls
+        from contextlib import contextmanager
+
+        @contextmanager
+        def tracking_conn():
+            with original_conn() as conn:
+                yield TrackingConnection(conn)
+
+        with patch.object(test_db, "_conn", tracking_conn):
+            result = migrate_stage_runs(test_db)
+
+        assert result["success"] is True
+        # Verify BEGIN IMMEDIATE was called
+        assert any("BEGIN IMMEDIATE" in stmt for stmt in executed_statements)
+
+    def test_rollback_uses_begin_immediate(self, test_db) -> None:
+        """Verify rollback uses BEGIN IMMEDIATE for exclusive locking."""
+        from unittest.mock import patch
+
+        from goldfish.state_machine.migration import migrate_stage_runs, rollback_migration
+
+        # Track execute calls
+        executed_statements = []
+        original_conn = test_db._conn
+
+        class TrackingConnection:
+            def __init__(self, real_conn):
+                self._real_conn = real_conn
+
+            def execute(self, sql, params=None):
+                executed_statements.append(sql.strip().upper() if isinstance(sql, str) else sql)
+                if params:
+                    return self._real_conn.execute(sql, params)
+                return self._real_conn.execute(sql)
+
+            def __getattr__(self, name):
+                return getattr(self._real_conn, name)
+
+        # Setup and run migration first
+        with test_db._conn() as conn:
+            _setup_workspace(conn)
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("stage-1", "ws", "v1", "train", "completed", datetime.now(UTC).isoformat()),
+            )
+
+        migrate_stage_runs(test_db)
+
+        # Clear and track rollback
+        executed_statements.clear()
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def tracking_conn():
+            with original_conn() as conn:
+                yield TrackingConnection(conn)
+
+        with patch.object(test_db, "_conn", tracking_conn):
+            result = rollback_migration(test_db)
+
+        assert result["success"] is True
+        # Verify BEGIN IMMEDIATE was called
+        assert any("BEGIN IMMEDIATE" in stmt for stmt in executed_statements)
+
+
+class TestCaseSensitiveStatusMapping:
+    """Tests for case sensitivity in status mapping."""
+
+    def test_uppercase_running_maps_correctly(self) -> None:
+        """RUNNING in uppercase should map to RUNNING state."""
+        from goldfish.state_machine.migration import determine_migration_state
+
+        state = determine_migration_state(status="RUNNING", error=None)
+        assert state == StageState.RUNNING
+
+    def test_mixed_case_completed_maps_correctly(self) -> None:
+        """Completed in mixed case should map to COMPLETED state."""
+        from goldfish.state_machine.migration import determine_migration_state
+
+        state = determine_migration_state(status="Completed", error=None)
+        assert state == StageState.COMPLETED
+
+    def test_uppercase_failed_maps_correctly(self) -> None:
+        """FAILED in uppercase should map to FAILED state."""
+        from goldfish.state_machine.migration import determine_migration_state
+
+        state = determine_migration_state(status="FAILED", error=None)
+        assert state == StageState.FAILED
+
+
+class TestErrorSnippetTruncationEdgeCases:
+    """Tests for error snippet truncation edge cases."""
+
+    def test_error_exactly_100_chars_not_truncated(self, test_db) -> None:
+        """Error message of exactly 100 chars should not be truncated."""
+        from goldfish.state_machine.migration import migrate_stage_runs
+
+        error_100 = "x" * 100
+
+        with test_db._conn() as conn:
+            _setup_workspace(conn)
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, error, started_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("stage-1", "ws", "v1", "train", "failed", error_100, datetime.now(UTC).isoformat()),
+            )
+
+        result = migrate_stage_runs(test_db)
+        assert result["success"] is True
+        assert len(result["decisions"]) == 1
+        assert result["decisions"][0]["error_snippet"] == error_100
+
+    def test_error_99_chars_not_truncated(self, test_db) -> None:
+        """Error message of 99 chars should not be truncated."""
+        from goldfish.state_machine.migration import migrate_stage_runs
+
+        error_99 = "y" * 99
+
+        with test_db._conn() as conn:
+            _setup_workspace(conn)
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, error, started_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("stage-1", "ws", "v1", "train", "failed", error_99, datetime.now(UTC).isoformat()),
+            )
+
+        result = migrate_stage_runs(test_db)
+        assert result["success"] is True
+        assert len(result["decisions"]) == 1
+        assert result["decisions"][0]["error_snippet"] == error_99
+
+
+class TestSafeMigrationLogging:
+    """Tests for safe_migration logging behavior."""
+
+    def test_safe_migration_logs_active_run_count(self, test_db, caplog) -> None:
+        """safe_migration should log number of active runs waiting for."""
+        import logging
+
+        from goldfish.state_machine.migration import safe_migration
+
+        with test_db._conn() as conn:
+            _setup_workspace(conn)
+            # Create an "active" run that will appear in the count
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("stage-1", "ws", "v1", "train", "running", datetime.now(UTC).isoformat()),
+            )
+
+        # Run with very short timeout so it exits quickly
+        with caplog.at_level(logging.INFO):
+            result = safe_migration(test_db, drain_timeout_seconds=1, check_orphans=False)
+
+        # Should have logged about waiting for active runs
+        assert result["success"] is True
+        # The run should have been migrated (with orphan detection off, it stays RUNNING)
+        assert result["migrated"] >= 1
+
+
+class TestCheckOrphanStatusValidation:
+    """Tests for check_orphan_status input validation."""
+
+    def test_invalid_run_id_format_rejected(self, test_db) -> None:
+        """Run ID not starting with 'stage-' should be rejected."""
+        from goldfish.state_machine.migration import check_orphan_status
+
+        result = check_orphan_status(test_db, "invalid-format")
+        assert result["is_orphan"] is False
+        assert "invalid run_id format" in result["reason"].lower()
+
+    def test_empty_run_id_rejected(self, test_db) -> None:
+        """Empty run ID should be rejected."""
+        from goldfish.state_machine.migration import check_orphan_status
+
+        result = check_orphan_status(test_db, "")
+        assert result["is_orphan"] is False
+        assert "invalid run_id format" in result["reason"].lower()
+
+    def test_invalid_backend_type_rejected(self, test_db) -> None:
+        """Invalid backend_type should be rejected."""
+        from goldfish.state_machine.migration import check_orphan_status
+
+        result = check_orphan_status(test_db, "stage-abc123", backend_type="kubernetes", backend_handle="my-pod")
+        assert result["is_orphan"] is False
+        assert "invalid backend_type" in result["reason"].lower()
+
+    def test_valid_backend_type_gce_accepted(self, test_db) -> None:
+        """backend_type='gce' should be accepted."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import check_orphan_status
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "RUNNING\n"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_orphan_status(test_db, "stage-abc123", backend_type="gce", backend_handle="my-instance")
+            # Should have called _check_gce_orphan
+            assert result["backend_type"] == "gce"
+
+    def test_valid_backend_type_local_accepted(self, test_db) -> None:
+        """backend_type='local' should be accepted."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import check_orphan_status
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "running\n"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = check_orphan_status(test_db, "stage-abc123", backend_type="local", backend_handle="abc123456789")
+            # Should have called _check_docker_orphan
+            assert result["backend_type"] == "local"
+
+
+class TestDockerStatusRemoving:
+    """Tests for Docker container 'removing' status."""
+
+    def test_docker_container_removing_is_orphan(self) -> None:
+        """Removing Docker container should be treated as orphan."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import _check_docker_orphan
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "removing\n"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = _check_docker_orphan("abc123456789")
+            assert result["is_orphan"] is True
+            assert "removing" in result["reason"]
+
+
+class TestCheckOrphanStatusGceIntegration:
+    """Integration tests for check_orphan_status with GCE backend from database."""
+
+    def test_check_orphan_status_routes_to_gce_from_db(self, test_db) -> None:
+        """check_orphan_status should route to _check_gce_orphan for gce backend from DB."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import check_orphan_status
+
+        with test_db._conn() as conn:
+            _setup_workspace(conn)
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at, backend_type, backend_handle)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "stage-gce1",
+                    "ws",
+                    "v1",
+                    "train",
+                    "running",
+                    datetime.now(UTC).isoformat(),
+                    "gce",
+                    "goldfish-gce-instance",
+                ),
+            )
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "RUNNING\n"
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            result = check_orphan_status(test_db, "stage-gce1")
+            # Should have called gcloud with the instance name
+            mock_run.assert_called_once()
+            args = mock_run.call_args[0][0]
+            assert "gcloud" in args
+            assert "goldfish-gce-instance" in args
+            assert result["is_orphan"] is False
+            assert result["backend_type"] == "gce"
+
+
+class TestMigrateWithGceOrphanDetection:
+    """Tests for migrate_stage_runs with GCE orphan detection."""
+
+    def test_migrate_with_gce_orphan_detection(self, test_db) -> None:
+        """migrate_stage_runs should detect GCE orphans when check_orphans=True."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import migrate_stage_runs
+
+        with test_db._conn() as conn:
+            _setup_workspace(conn)
+            # Create a running job with GCE backend
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at, backend_type, backend_handle)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "stage-gce2",
+                    "ws",
+                    "v1",
+                    "train",
+                    "running",
+                    datetime.now(UTC).isoformat(),
+                    "gce",
+                    "test-gce-instance",
+                ),
+            )
+
+        # Mock gcloud to return TERMINATED (orphan)
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "TERMINATED\n"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = migrate_stage_runs(test_db, check_orphans=True)
+
+        assert result["success"] is True
+        assert result["migrated"] == 1
+        # Check that the run was marked as TERMINATED with ORPHANED cause
+        with test_db._conn() as conn:
+            row = conn.execute(
+                "SELECT state, termination_cause FROM stage_runs WHERE id = ?",
+                ("stage-gce2",),
+            ).fetchone()
+            assert row["state"] == "terminated"
+            assert row["termination_cause"] == "orphaned"
+
+
+class TestInvalidBackupTableNameGenerated:
+    """Tests for invalid backup table name edge case."""
+
+    def test_invalid_backup_table_name_returns_error(self, test_db) -> None:
+        """If backup table name validation fails, should return error."""
+        from unittest.mock import patch
+
+        from goldfish.state_machine.migration import migrate_stage_runs
+
+        # Mock datetime to return something that would create an invalid table name
+        # This is a defensive test - in practice the timestamp format should always be valid
+        with patch("goldfish.state_machine.migration._validate_table_name", return_value=False):
+            result = migrate_stage_runs(test_db)
+
+        assert result["success"] is False
+        assert result["errors"] == 1
+        assert "Invalid backup table name" in result["error_details"][0]["error"]

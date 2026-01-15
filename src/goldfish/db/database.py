@@ -2454,6 +2454,23 @@ class Database:
                 (outcome, stage_run_id),
             )
 
+    def update_stage_run_gcs_outage(self, stage_run_id: str, gcs_outage_started: str | None) -> None:
+        """Update stage run GCS outage start time.
+
+        Used by the state machine to track GCS outages. When GCS becomes unavailable
+        while checking for exit codes, the outage start time is recorded. After 1 hour,
+        the run is transitioned to a terminal state.
+
+        Args:
+            stage_run_id: Stage run ID.
+            gcs_outage_started: ISO timestamp when outage started, or None to clear.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE stage_runs SET gcs_outage_started = ? WHERE id = ?",
+                (gcs_outage_started, stage_run_id),
+            )
+
     def get_stage_run(self, stage_run_id: str) -> dict | None:
         """Get a stage run by ID.
 

@@ -17,6 +17,20 @@ See docs/state-machine-spec.md for the full specification.
 """
 
 from goldfish.state_machine.core import transition, update_phase
+from goldfish.state_machine.event_emission import (
+    clear_gcs_outage_started,
+    detect_termination_cause,
+    determine_exit_event,
+    determine_instance_event,
+    get_gcs_outage_started,
+    set_gcs_outage_started,
+    verify_instance_stopped,
+)
+from goldfish.state_machine.exit_code import (
+    ExitCodeResult,
+    get_exit_code_docker,
+    get_exit_code_gce,
+)
 from goldfish.state_machine.transitions import (
     ACTIVE_STATES,
     LIMBO_STATES,
@@ -48,16 +62,28 @@ __all__ = [
     "EventContext",
     "TransitionResult",
     "TransitionDef",
+    "ExitCodeResult",
     # Constants
     "TRANSITIONS",
     "STATE_ENTRY_PHASES",
     "TERMINAL_STATES",
     "ACTIVE_STATES",
     "LIMBO_STATES",
-    # Functions
+    # Functions - core
     "find_transition",
     "get_transitions_from_state",
     "get_transitions_for_event",
     "transition",
     "update_phase",
+    # Functions - exit code
+    "get_exit_code_gce",
+    "get_exit_code_docker",
+    # Functions - event emission
+    "determine_exit_event",
+    "determine_instance_event",
+    "verify_instance_stopped",
+    "detect_termination_cause",
+    "get_gcs_outage_started",
+    "set_gcs_outage_started",
+    "clear_gcs_outage_started",
 ]

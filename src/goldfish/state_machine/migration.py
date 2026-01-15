@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from goldfish.state_machine.types import StageState, TerminationCause
 
@@ -42,8 +42,8 @@ class MigrationResult(TypedDict):
     migrated: int
     skipped: int
     errors: int
-    error_details: list[dict]
-    decisions: list[dict]
+    error_details: list[dict[str, Any]]
+    decisions: list[dict[str, Any]]
     progress_id: int | None
 
 
@@ -92,7 +92,7 @@ def determine_migration_state(status: str | None, error: str | None) -> StageSta
         error: Error message (may contain hints about termination cause)
 
     Returns:
-        StageState: The appropriate state for this run
+        The appropriate state for this run
     """
     if status is None or status == "":
         return StageState.UNKNOWN
@@ -189,6 +189,9 @@ def detect_termination_cause(error: str | None) -> TerminationCause | None:
     return None
 
 
+_VALID_BACKEND_TYPES = {"gce", "local"}
+
+
 def check_orphan_status(
     db: Database,
     run_id: str,
@@ -209,6 +212,30 @@ def check_orphan_status(
     Returns:
         OrphanCheckResult with is_orphan status and reason
     """
+    # Validate run_id format (must match stage-{hex} pattern)
+    if not run_id or not run_id.startswith("stage-"):
+        return cast(
+            OrphanCheckResult,
+            {
+                "is_orphan": False,
+                "reason": "Invalid run_id format",
+                "backend_type": None,
+                "backend_handle": None,
+            },
+        )
+
+    # Validate backend_type if provided
+    if backend_type is not None and backend_type not in _VALID_BACKEND_TYPES:
+        return cast(
+            OrphanCheckResult,
+            {
+                "is_orphan": False,
+                "reason": "Invalid backend_type",
+                "backend_type": backend_type,
+                "backend_handle": backend_handle,
+            },
+        )
+
     # Get run info if not provided
     if backend_type is None or backend_handle is None:
         with db._conn() as conn:
@@ -217,21 +244,27 @@ def check_orphan_status(
                 (run_id,),
             ).fetchone()
             if row is None:
-                return OrphanCheckResult(
-                    is_orphan=False,
-                    reason="Run not found",
-                    backend_type=None,
-                    backend_handle=None,
+                return cast(
+                    OrphanCheckResult,
+                    {
+                        "is_orphan": False,
+                        "reason": "Run not found",
+                        "backend_type": None,
+                        "backend_handle": None,
+                    },
                 )
             backend_type = row["backend_type"]
             backend_handle = row["backend_handle"]
 
     if not backend_handle:
-        return OrphanCheckResult(
-            is_orphan=True,
-            reason="No backend handle recorded",
-            backend_type=backend_type,
-            backend_handle=backend_handle,
+        return cast(
+            OrphanCheckResult,
+            {
+                "is_orphan": True,
+                "reason": "No backend handle recorded",
+                "backend_type": backend_type,
+                "backend_handle": backend_handle,
+            },
         )
 
     # GCE orphan detection
@@ -242,11 +275,14 @@ def check_orphan_status(
     if backend_type == "local":
         return _check_docker_orphan(backend_handle)
 
-    return OrphanCheckResult(
-        is_orphan=False,
-        reason=f"Unknown backend type: {backend_type}",
-        backend_type=backend_type,
-        backend_handle=backend_handle,
+    return cast(
+        OrphanCheckResult,
+        {
+            "is_orphan": False,
+            "reason": f"Unknown backend type: {backend_type}",
+            "backend_type": backend_type,
+            "backend_handle": backend_handle,
+        },
     )
 
 
@@ -255,16 +291,25 @@ def _check_gce_orphan(instance_name: str) -> OrphanCheckResult:
 
     Uses gcloud CLI to check instance existence.
     Returns orphan=True if instance not found.
+
+    Args:
+        instance_name: GCE instance name to check
+
+    Returns:
+        OrphanCheckResult with is_orphan status and reason
     """
     import subprocess
 
     # Validate instance name to prevent command injection
     if not _GCE_INSTANCE_PATTERN.match(instance_name):
-        return OrphanCheckResult(
-            is_orphan=False,
-            reason=f"Invalid GCE instance name format: {instance_name[:50]}",
-            backend_type="gce",
-            backend_handle=instance_name,
+        return cast(
+            OrphanCheckResult,
+            {
+                "is_orphan": False,
+                "reason": f"Invalid GCE instance name format: {instance_name[:50]}",
+                "backend_type": "gce",
+                "backend_handle": instance_name,
+            },
         )
 
     try:
@@ -285,57 +330,78 @@ def _check_gce_orphan(instance_name: str) -> OrphanCheckResult:
         if result.returncode != 0:
             # Instance not found
             if "not found" in result.stderr.lower():
-                return OrphanCheckResult(
-                    is_orphan=True,
-                    reason=f"Instance '{instance_name}' not found in GCE",
-                    backend_type="gce",
-                    backend_handle=instance_name,
+                return cast(
+                    OrphanCheckResult,
+                    {
+                        "is_orphan": True,
+                        "reason": f"Instance '{instance_name}' not found in GCE",
+                        "backend_type": "gce",
+                        "backend_handle": instance_name,
+                    },
                 )
             # Other error - can't determine orphan status
-            return OrphanCheckResult(
-                is_orphan=False,
-                reason=f"GCE check failed: {result.stderr}",
-                backend_type="gce",
-                backend_handle=instance_name,
+            return cast(
+                OrphanCheckResult,
+                {
+                    "is_orphan": False,
+                    "reason": f"GCE check failed: {result.stderr}",
+                    "backend_type": "gce",
+                    "backend_handle": instance_name,
+                },
             )
 
         # Instance exists
         status = result.stdout.strip()
         if status in ("TERMINATED", "STOPPED"):
-            return OrphanCheckResult(
-                is_orphan=True,
-                reason=f"Instance exists but is {status}",
-                backend_type="gce",
-                backend_handle=instance_name,
+            return cast(
+                OrphanCheckResult,
+                {
+                    "is_orphan": True,
+                    "reason": f"Instance exists but is {status}",
+                    "backend_type": "gce",
+                    "backend_handle": instance_name,
+                },
             )
 
-        return OrphanCheckResult(
-            is_orphan=False,
-            reason=f"Instance exists with status: {status}",
-            backend_type="gce",
-            backend_handle=instance_name,
+        return cast(
+            OrphanCheckResult,
+            {
+                "is_orphan": False,
+                "reason": f"Instance exists with status: {status}",
+                "backend_type": "gce",
+                "backend_handle": instance_name,
+            },
         )
 
     except subprocess.TimeoutExpired:
-        return OrphanCheckResult(
-            is_orphan=False,
-            reason="GCE check timed out",
-            backend_type="gce",
-            backend_handle=instance_name,
+        return cast(
+            OrphanCheckResult,
+            {
+                "is_orphan": False,
+                "reason": "GCE check timed out",
+                "backend_type": "gce",
+                "backend_handle": instance_name,
+            },
         )
     except FileNotFoundError:
-        return OrphanCheckResult(
-            is_orphan=False,
-            reason="gcloud CLI not available",
-            backend_type="gce",
-            backend_handle=instance_name,
+        return cast(
+            OrphanCheckResult,
+            {
+                "is_orphan": False,
+                "reason": "gcloud CLI not available",
+                "backend_type": "gce",
+                "backend_handle": instance_name,
+            },
         )
     except Exception as e:
-        return OrphanCheckResult(
-            is_orphan=False,
-            reason=f"GCE check error: {e}",
-            backend_type="gce",
-            backend_handle=instance_name,
+        return cast(
+            OrphanCheckResult,
+            {
+                "is_orphan": False,
+                "reason": f"GCE check error: {e}",
+                "backend_type": "gce",
+                "backend_handle": instance_name,
+            },
         )
 
 
@@ -344,16 +410,25 @@ def _check_docker_orphan(container_id: str) -> OrphanCheckResult:
 
     Uses docker CLI to check container status.
     Returns orphan=True if container not found or not running.
+
+    Args:
+        container_id: Docker container ID or name to check
+
+    Returns:
+        OrphanCheckResult with is_orphan status and reason
     """
     import subprocess
 
     # Validate container ID to prevent command injection
     if not _DOCKER_CONTAINER_PATTERN.match(container_id):
-        return OrphanCheckResult(
-            is_orphan=False,
-            reason=f"Invalid Docker container ID format: {container_id[:50]}",
-            backend_type="local",
-            backend_handle=container_id,
+        return cast(
+            OrphanCheckResult,
+            {
+                "is_orphan": False,
+                "reason": f"Invalid Docker container ID format: {container_id[:50]}",
+                "backend_type": "local",
+                "backend_handle": container_id,
+            },
         )
 
     try:
@@ -366,49 +441,67 @@ def _check_docker_orphan(container_id: str) -> OrphanCheckResult:
 
         if result.returncode != 0:
             # Container not found
-            return OrphanCheckResult(
-                is_orphan=True,
-                reason=f"Container '{container_id}' not found",
-                backend_type="local",
-                backend_handle=container_id,
+            return cast(
+                OrphanCheckResult,
+                {
+                    "is_orphan": True,
+                    "reason": f"Container '{container_id}' not found",
+                    "backend_type": "local",
+                    "backend_handle": container_id,
+                },
             )
 
         status = result.stdout.strip()
         if status != "running":
-            return OrphanCheckResult(
-                is_orphan=True,
-                reason=f"Container exists but is {status}",
-                backend_type="local",
-                backend_handle=container_id,
+            return cast(
+                OrphanCheckResult,
+                {
+                    "is_orphan": True,
+                    "reason": f"Container exists but is {status}",
+                    "backend_type": "local",
+                    "backend_handle": container_id,
+                },
             )
 
-        return OrphanCheckResult(
-            is_orphan=False,
-            reason="Container is running",
-            backend_type="local",
-            backend_handle=container_id,
+        return cast(
+            OrphanCheckResult,
+            {
+                "is_orphan": False,
+                "reason": "Container is running",
+                "backend_type": "local",
+                "backend_handle": container_id,
+            },
         )
 
     except subprocess.TimeoutExpired:
-        return OrphanCheckResult(
-            is_orphan=False,
-            reason="Docker check timed out",
-            backend_type="local",
-            backend_handle=container_id,
+        return cast(
+            OrphanCheckResult,
+            {
+                "is_orphan": False,
+                "reason": "Docker check timed out",
+                "backend_type": "local",
+                "backend_handle": container_id,
+            },
         )
     except FileNotFoundError:
-        return OrphanCheckResult(
-            is_orphan=False,
-            reason="docker CLI not available",
-            backend_type="local",
-            backend_handle=container_id,
+        return cast(
+            OrphanCheckResult,
+            {
+                "is_orphan": False,
+                "reason": "docker CLI not available",
+                "backend_type": "local",
+                "backend_handle": container_id,
+            },
         )
     except Exception as e:
-        return OrphanCheckResult(
-            is_orphan=False,
-            reason=f"Docker check error: {e}",
-            backend_type="local",
-            backend_handle=container_id,
+        return cast(
+            OrphanCheckResult,
+            {
+                "is_orphan": False,
+                "reason": f"Docker check error: {e}",
+                "backend_type": "local",
+                "backend_handle": container_id,
+            },
         )
 
 
@@ -442,18 +535,21 @@ def migrate_stage_runs(
 
     # Validate generated table name (should always pass, but defense in depth)
     if not _validate_table_name(backup_table):
-        return MigrationResult(
-            success=False,
-            migrated=0,
-            skipped=0,
-            errors=1,
-            error_details=[{"error": "Invalid backup table name generated"}],
-            decisions=[],
-            progress_id=None,
+        return cast(
+            MigrationResult,
+            {
+                "success": False,
+                "migrated": 0,
+                "skipped": 0,
+                "errors": 1,
+                "error_details": [{"error": "Invalid backup table name generated"}],
+                "decisions": [],
+                "progress_id": None,
+            },
         )
 
-    decisions: list[dict] = []
-    error_details: list[dict] = []
+    decisions: list[dict[str, Any]] = []
+    error_details: list[dict[str, Any]] = []
     migrated = 0
     skipped = 0
     errors = 0
@@ -474,23 +570,29 @@ def migrate_stage_runs(
                     all_count = conn.execute("SELECT COUNT(*) as cnt FROM stage_runs").fetchone()
                     conn.execute("COMMIT")
                     if all_count and all_count["cnt"] > 0:
-                        return MigrationResult(
-                            success=True,
-                            migrated=0,
-                            skipped=all_count["cnt"],
-                            errors=0,
-                            error_details=[],
-                            decisions=[],
-                            progress_id=None,
+                        return cast(
+                            MigrationResult,
+                            {
+                                "success": True,
+                                "migrated": 0,
+                                "skipped": all_count["cnt"],
+                                "errors": 0,
+                                "error_details": [],
+                                "decisions": [],
+                                "progress_id": None,
+                            },
                         )
-                    return MigrationResult(
-                        success=True,
-                        migrated=0,
-                        skipped=0,
-                        errors=0,
-                        error_details=[],
-                        decisions=[],
-                        progress_id=None,
+                    return cast(
+                        MigrationResult,
+                        {
+                            "success": True,
+                            "migrated": 0,
+                            "skipped": 0,
+                            "errors": 0,
+                            "error_details": [],
+                            "decisions": [],
+                            "progress_id": None,
+                        },
                     )
 
                 # 2. Record migration start in progress table
@@ -679,14 +781,17 @@ def migrate_stage_runs(
             },
         )
 
-    return MigrationResult(
-        success=errors == 0,
-        migrated=migrated,
-        skipped=skipped,
-        errors=errors,
-        error_details=error_details,
-        decisions=decisions,
-        progress_id=progress_id,
+    return cast(
+        MigrationResult,
+        {
+            "success": errors == 0,
+            "migrated": migrated,
+            "skipped": skipped,
+            "errors": errors,
+            "error_details": error_details,
+            "decisions": decisions,
+            "progress_id": progress_id,
+        },
     )
 
 
@@ -721,10 +826,13 @@ def rollback_migration(db: Database, backup_table: str | None = None) -> Rollbac
 
                 if not tables:
                     conn.execute("ROLLBACK")
-                    return RollbackResult(
-                        success=False,
-                        restored=0,
-                        error="No backup table found. Cannot rollback.",
+                    return cast(
+                        RollbackResult,
+                        {
+                            "success": False,
+                            "restored": 0,
+                            "error": "No backup table found. Cannot rollback.",
+                        },
                     )
 
                 backup_table = tables["name"]
@@ -732,10 +840,13 @@ def rollback_migration(db: Database, backup_table: str | None = None) -> Rollbac
             # Validate table name to prevent SQL injection
             if not _validate_table_name(backup_table):
                 conn.execute("ROLLBACK")
-                return RollbackResult(
-                    success=False,
-                    restored=0,
-                    error=f"Invalid backup table name: {backup_table}",
+                return cast(
+                    RollbackResult,
+                    {
+                        "success": False,
+                        "restored": 0,
+                        "error": f"Invalid backup table name: {backup_table}",
+                    },
                 )
 
             # Verify table exists
@@ -746,10 +857,13 @@ def rollback_migration(db: Database, backup_table: str | None = None) -> Rollbac
 
             if not exists:
                 conn.execute("ROLLBACK")
-                return RollbackResult(
-                    success=False,
-                    restored=0,
-                    error=f"Backup table '{backup_table}' not found.",
+                return cast(
+                    RollbackResult,
+                    {
+                        "success": False,
+                        "restored": 0,
+                        "error": f"Backup table '{backup_table}' not found.",
+                    },
                 )
 
             # Reset state columns for rows in backup
@@ -778,10 +892,13 @@ def rollback_migration(db: Database, backup_table: str | None = None) -> Rollbac
 
             conn.execute("COMMIT")
 
-            return RollbackResult(
-                success=True,
-                restored=result.rowcount,
-                error=None,
+            return cast(
+                RollbackResult,
+                {
+                    "success": True,
+                    "restored": result.rowcount,
+                    "error": None,
+                },
             )
 
         except Exception:
@@ -800,8 +917,7 @@ def safe_migration(
     This function:
     1. Checks for active runs (running state in old status column)
     2. Waits up to drain_timeout for active runs to complete
-    3. If any active runs remain, marks them as orphans for review
-    4. Proceeds with migration
+    3. Proceeds with migration (orphan detection handles any remaining active runs)
 
     Args:
         db: Database instance
