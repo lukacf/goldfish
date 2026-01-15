@@ -16,6 +16,7 @@ Key components:
 See docs/state-machine-spec.md for the full specification.
 """
 
+from goldfish.state_machine.core import transition, update_phase
 from goldfish.state_machine.transitions import (
     ACTIVE_STATES,
     LIMBO_STATES,
@@ -57,4 +58,6 @@ __all__ = [
     "find_transition",
     "get_transitions_from_state",
     "get_transitions_for_event",
+    "transition",
+    "update_phase",
 ]
