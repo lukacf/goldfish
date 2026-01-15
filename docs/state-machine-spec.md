@@ -1,9 +1,38 @@
 # Stage Execution State Machine Specification
 
-> **Status**: Draft v3.3 (Agent Review Fixes)
+> **Status**: Draft v3.5 (Minor Fixes)
 > **Author**: Claude + Luka
 > **Created**: 2025-01-15
 > **Updated**: 2025-01-15
+
+## v3.5 Changes (Minor Fixes)
+
+**MEDIUM Fixes:**
+1. **UNKNOWN auto-cleanup contradiction**: Clarified that UNKNOWN has TIMEOUT escape (not "no automatic transitions out")
+2. **GCS outage path**: Added `gcs_error` and `gcs_outage_started` fields to EventContext for >1h escalation
+3. **Guard-aware idempotency**: Idempotency check now verifies guard passes for this context (not just any transition)
+4. **critical_phases_done persistence**: Added `output_sync_done`, `output_recording_done` columns to schema
+5. **Q1 feedback update**: Documented that `completed_with_warnings` also set for TIMEOUT→COMPLETED
+
+## v3.4 Changes (Agent Review Fixes)
+
+This version addresses all CRITICAL and HIGH findings from the 5-agent review:
+
+**CRITICAL Fixes:**
+1. **TOCTOU race in `transition()`**: Moved database read inside the transaction
+2. **`find_transition()` guard bug**: Now iterates ALL matches until a guard passes
+3. **Leader election race**: Added `BEGIN IMMEDIATE` for atomic lease acquisition
+4. **Missing INSTANCE_LOST from PREPARING**: Added transition for Cloud Build failures
+5. **EXIT_MISSING GCS unavailability**: Added documentation for prolonged outage handling
+6. **Non-existent functions**: Added clarification that code examples are proposals
+7. **SQLite DROP COLUMN rollback**: Changed to table recreation (works on all SQLite versions)
+
+**HIGH Fixes:**
+8. **Guard context critical=None**: Changed guards to use explicit `is True`/`is False`
+9. **No escape from UNKNOWN**: Added TIMEOUT transition from UNKNOWN
+10. **Idempotency in `transition()`**: Returns success if already in target state
+11. **`critical_phases_done` tracking**: Added detailed mechanism specification
+12. **Migration transaction boundaries**: Fixed batch transactions with proper atomicity
 
 ## Overview
 
@@ -35,6 +64,18 @@ This document specifies a state machine to **replace** the ad-hoc if/then/else s
 - **Auto-recovery from PREEMPTED/ORPHANED** - Future roadmap item
 - **Intelligent timeout detection** - Separate problem; use sensible defaults for now
 - **Daemon implementation** - Spec the interface; implement after state machine is solid
+
+### Code Examples in This Spec
+
+**IMPORTANT**: All code examples in this specification are **proposals for implementation**, not references to existing code. Functions like `transition()`, `find_transition()`, `get_exit_code()`, `verify_instance_stopped()`, `detect_termination_cause()`, etc. are specifications of what needs to be built - they do not currently exist in the codebase.
+
+Existing functions that need to be **fixed or replaced** during implementation:
+- `daemon.py:_get_exit_code()` - returns `1` when file doesn't exist (bug)
+- `gce_launcher.py:_get_exit_code()` - same bug
+- `daemon.py:_check_orphaned_runs()` - if/then/else mess to be replaced by event emission
+- `stage_executor.py:refresh_status_once()` - to be rewritten to return events
+
+The spec code shows the **target design**. Implementation will adapt these to fit the existing Goldfish patterns (TypedDict returns, db._conn() context managers, error types, etc.).
 
 ---
 
@@ -234,6 +275,10 @@ class EventContext:
     # Progress context
     phase: ProgressPhase | None = None
 
+    # GCS context (for handling outages)
+    gcs_error: bool = False               # GCS unavailable when checking exit code
+    gcs_outage_started: datetime | None = None  # When GCS outage was first detected (for >1h escalation)
+
     # Finalization context
     critical: bool = False                   # For FINALIZE_FAIL: True → FAILED, False → COMPLETED
     critical_phases_done: bool = False       # For TIMEOUT in FINALIZING: True → COMPLETED, False → FAILED
@@ -258,6 +303,104 @@ SOURCE_VALUES = {
 
 **critical_phases_done**: For TIMEOUT events in FINALIZING state, this field determines whether we transition to COMPLETED (outputs were saved) or FAILED (outputs may be lost). Set to True if OUTPUT_SYNC and OUTPUT_RECORDING phases completed successfully before the timeout.
 
+### Tracking critical_phases_done
+
+The `critical_phases_done` field must be tracked during FINALIZING to determine outcome on TIMEOUT. The mechanism:
+
+```python
+# In finalization code (within _finalize_stage_run or equivalent)
+class FinalizationTracker:
+    """Tracks completion of critical finalization phases.
+
+    Critical phases (in order):
+    1. OUTPUT_SYNC - gsutil rsync from container to GCS
+    2. OUTPUT_RECORDING - register outputs in signal_lineage table
+
+    Non-critical phases:
+    3. METRICS_SYNC - metrics.json upload (nice to have)
+    4. CLEANUP - instance deletion, docker cleanup
+
+    If timeout occurs after OUTPUT_SYNC + OUTPUT_RECORDING complete,
+    the run is COMPLETED (with warnings). Otherwise, it's FAILED.
+    """
+
+    def __init__(self, run_id: str):
+        self.run_id = run_id
+        self.output_sync_done = False
+        self.output_recording_done = False
+
+    @property
+    def critical_phases_done(self) -> bool:
+        """True if all critical phases completed."""
+        return self.output_sync_done and self.output_recording_done
+
+    def mark_output_sync_done(self):
+        """Called after gsutil rsync succeeds."""
+        self.output_sync_done = True
+        self._persist_progress()
+
+    def mark_output_recording_done(self):
+        """Called after signal_lineage INSERT succeeds."""
+        self.output_recording_done = True
+        self._persist_progress()
+
+    def _persist_progress(self):
+        """Persist progress to DB so daemon can check on timeout.
+
+        Uses stage_runs.output_sync_done and output_recording_done columns.
+        This allows daemon to determine critical_phases_done if
+        the executor process dies during finalization.
+        """
+        with db._conn() as conn:
+            conn.execute(
+                """UPDATE stage_runs
+                   SET output_sync_done = ?, output_recording_done = ?
+                   WHERE id = ?""",
+                (1 if self.output_sync_done else 0,
+                 1 if self.output_recording_done else 0,
+                 self.run_id)
+            )
+
+# Usage in finalization
+tracker = FinalizationTracker(run_id)
+
+# Step 1: Sync outputs (critical)
+rsync_outputs_to_gcs(run_id)
+tracker.mark_output_sync_done()
+
+# Step 2: Record in signal_lineage (critical)
+register_outputs_in_db(run_id, outputs)
+tracker.mark_output_recording_done()
+
+# Step 3: Sync metrics (non-critical)
+try:
+    sync_metrics(run_id)
+except Exception as e:
+    logger.warning(f"Metrics sync failed (non-critical): {e}")
+
+# Step 4: Cleanup (non-critical)
+try:
+    cleanup_resources(run_id)
+except Exception as e:
+    logger.warning(f"Cleanup failed (non-critical): {e}")
+
+
+# When daemon detects TIMEOUT in FINALIZING state:
+def determine_timeout_outcome(run_id: str) -> EventContext:
+    progress = db.get_finalization_progress(run_id)
+    critical_done = (
+        progress.get("output_sync_done") is True
+        and progress.get("output_recording_done") is True
+    )
+    return EventContext(
+        timestamp=datetime.now(UTC),
+        source="daemon",
+        critical_phases_done=critical_done,
+    )
+```
+
+**Database storage**: The `phase_data` JSON column in `stage_runs` (or a separate `finalization_progress` table) stores the progress markers. This ensures the daemon can determine `critical_phases_done` even if the executor process died mid-finalization.
+
 ---
 
 ## Transition Table
@@ -270,6 +413,7 @@ From State    | Event              | To State    | Guard                    | No
 PREPARING     | BUILD_START        | BUILDING    |                          | Preparation complete
 PREPARING     | PREPARE_FAIL       | FAILED      |                          | Pipeline/version/input error
 PREPARING     | SVS_BLOCK          | FAILED      |                          | Preflight or pre-run blocked
+PREPARING     | INSTANCE_LOST      | TERMINATED  |                          | Cloud Build disappeared
 PREPARING     | TIMEOUT            | TERMINATED  | cause=TIMEOUT            | Stuck in preparation
 PREPARING     | USER_CANCEL        | CANCELED    |                          |
 PREPARING     | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
@@ -306,12 +450,13 @@ FINALIZING    | USER_CANCEL        | CANCELED    |                          | Pa
 FINALIZING    | FORCE_COMPLETE     | COMPLETED   |                          | Admin override
 FINALIZING    | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
               |                    |             |                          |
+UNKNOWN       | TIMEOUT            | TERMINATED  |                          | Auto-cleanup after 24h
 UNKNOWN       | FORCE_TERMINATE    | TERMINATED  |                          | Admin cleanup
 UNKNOWN       | FORCE_COMPLETE     | COMPLETED   |                          | Admin override (verified ok)
 UNKNOWN       | FORCE_FAIL         | FAILED      |                          | Admin override (verified bad)
 ```
 
-**UNKNOWN state**: Migration fallback only.
+**UNKNOWN state**: Requires investigation. Can be resolved via admin tools or auto-cleaned via TIMEOUT after 24h investigation period (configurable). TIMEOUT transition prevents runs from being stuck in UNKNOWN forever.
 
 ### Default Phases Per State
 
@@ -334,7 +479,11 @@ STATE_ENTRY_PHASES = {
 }
 ```
 
-**Usage in transition()**: When `context.phase` is None and the state is changing, use `STATE_ENTRY_PHASES[to_state]` instead of COALESCE. COALESCE only applies for within-state phase preservation (shouldn't happen in transitions since transitions always change state). Admin tools provide escape hatches. No automatic transitions into or out of UNKNOWN.
+**Usage in transition()**: When `context.phase` is None and the state is changing, use `STATE_ENTRY_PHASES[to_state]` instead of COALESCE. COALESCE only applies for within-state phase preservation (shouldn't happen in transitions since transitions always change state). Admin tools provide escape hatches.
+
+**UNKNOWN transitions**: Runs can only enter UNKNOWN via migration (not normal operation). Once in UNKNOWN, runs can exit via:
+1. Admin tools: FORCE_TERMINATE, FORCE_COMPLETE, FORCE_FAIL
+2. Auto-cleanup: TIMEOUT after 24h investigation period (configurable) to prevent runs stuck forever
 
 ### Finalization Criticality
 
@@ -391,61 +540,85 @@ class TransitionDef:
 
 
 # Transition table - all valid transitions
+# IMPORTANT: Guards must use explicit `is True` / `is False` checks, never truthiness.
+# Using `not ctx.critical` is a bug because None is falsy (treats missing data as False).
 TRANSITIONS: list[TransitionDef] = [
+    # PREPARING: GCS checks, pre-run validation
     TransitionDef('preparing', StageEvent.BUILD_START, 'building'),
     TransitionDef('preparing', StageEvent.PREPARE_FAIL, 'failed'),
     TransitionDef('preparing', StageEvent.SVS_BLOCK, 'failed'),
+    TransitionDef('preparing', StageEvent.INSTANCE_LOST, 'terminated'),  # Cloud Build disappeared
     TransitionDef('preparing', StageEvent.TIMEOUT, 'terminated'),
     TransitionDef('preparing', StageEvent.USER_CANCEL, 'canceled'),
     TransitionDef('preparing', StageEvent.FORCE_TERMINATE, 'terminated'),
+
+    # BUILDING: Docker image build (local or Cloud Build)
     TransitionDef('building', StageEvent.BUILD_OK, 'launching'),
     TransitionDef('building', StageEvent.BUILD_FAIL, 'failed'),
     TransitionDef('building', StageEvent.INSTANCE_LOST, 'terminated'),
     TransitionDef('building', StageEvent.TIMEOUT, 'terminated'),
     TransitionDef('building', StageEvent.USER_CANCEL, 'canceled'),
     TransitionDef('building', StageEvent.FORCE_TERMINATE, 'terminated'),
+
+    # LAUNCHING: Instance creation, container start
     TransitionDef('launching', StageEvent.LAUNCH_OK, 'running'),
     TransitionDef('launching', StageEvent.LAUNCH_FAIL, 'failed'),
     TransitionDef('launching', StageEvent.INSTANCE_LOST, 'terminated'),
     TransitionDef('launching', StageEvent.TIMEOUT, 'terminated'),
     TransitionDef('launching', StageEvent.USER_CANCEL, 'canceled'),
     TransitionDef('launching', StageEvent.FORCE_TERMINATE, 'terminated'),
+
+    # RUNNING: Stage code executing
     TransitionDef('running', StageEvent.EXIT_SUCCESS, 'finalizing'),
     TransitionDef('running', StageEvent.EXIT_FAILURE, 'failed'),
     TransitionDef('running', StageEvent.EXIT_MISSING, 'terminated',
-                  guard=lambda ctx: ctx.instance_confirmed_dead),
+                  guard=lambda ctx: ctx.instance_confirmed_dead is True),
     TransitionDef('running', StageEvent.INSTANCE_LOST, 'terminated'),
     TransitionDef('running', StageEvent.TIMEOUT, 'terminated'),
     TransitionDef('running', StageEvent.USER_CANCEL, 'canceled'),
     TransitionDef('running', StageEvent.FORCE_TERMINATE, 'terminated'),
+
+    # FINALIZING: Output registration, metrics sync, cleanup
+    # Guards use explicit `is True`/`is False` to avoid None truthiness bugs
     TransitionDef('finalizing', StageEvent.FINALIZE_OK, 'completed'),
     TransitionDef('finalizing', StageEvent.FINALIZE_FAIL, 'failed',
-                  guard=lambda ctx: ctx.critical),
+                  guard=lambda ctx: ctx.critical is True),
     TransitionDef('finalizing', StageEvent.FINALIZE_FAIL, 'completed',
-                  guard=lambda ctx: not ctx.critical),
+                  guard=lambda ctx: ctx.critical is False),
     TransitionDef('finalizing', StageEvent.INSTANCE_LOST, 'terminated'),
     TransitionDef('finalizing', StageEvent.TIMEOUT, 'completed',
-                  guard=lambda ctx: ctx.critical_phases_done),
+                  guard=lambda ctx: ctx.critical_phases_done is True),
     TransitionDef('finalizing', StageEvent.TIMEOUT, 'failed',
-                  guard=lambda ctx: not ctx.critical_phases_done),
+                  guard=lambda ctx: ctx.critical_phases_done is False),
     TransitionDef('finalizing', StageEvent.USER_CANCEL, 'canceled'),
     TransitionDef('finalizing', StageEvent.FORCE_COMPLETE, 'completed'),
     TransitionDef('finalizing', StageEvent.FORCE_TERMINATE, 'terminated'),
+
+    # UNKNOWN: Needs manual investigation via admin tools
+    # TIMEOUT allows escape after investigation period (e.g., 24h with no resolution)
+    TransitionDef('unknown', StageEvent.TIMEOUT, 'terminated'),  # Auto-cleanup after investigation period
     TransitionDef('unknown', StageEvent.FORCE_TERMINATE, 'terminated'),
     TransitionDef('unknown', StageEvent.FORCE_COMPLETE, 'completed'),
     TransitionDef('unknown', StageEvent.FORCE_FAIL, 'failed'),
 ]
 
 
-def find_transition(from_state: str, event: StageEvent) -> TransitionDef | None:
+def find_transition(from_state: str, event: StageEvent, context: EventContext) -> TransitionDef | None:
     """Find a valid transition definition for the given state and event.
 
-    Returns the first matching transition, or None if no valid transition exists.
-    For events with guards (like FINALIZE_FAIL), caller must check guard separately.
+    Iterates ALL matching transitions and returns the first one whose guard passes.
+    This fixes the bug where FINALIZE_FAIL with critical=False would hit the wrong
+    guard (the first match has guard=lambda ctx: ctx.critical which fails, but we
+    need to try the second match with guard=lambda ctx: not ctx.critical).
+
+    Returns None if no valid transition exists or no guard passes.
     """
     for t in TRANSITIONS:
         if t.from_state == from_state and t.event == event:
-            return t
+            # If no guard, or guard passes, this is our transition
+            if t.guard is None or t.guard(context):
+                return t
+            # Otherwise, keep looking for another matching transition
     return None
 ```
 
@@ -455,55 +628,94 @@ def find_transition(from_state: str, event: StageEvent) -> TransitionDef | None:
 def transition(db: Database, run_id: str, event: StageEvent, context: EventContext) -> TransitionResult:
     """Atomically transition state using compare-and-swap.
 
+    CRITICAL: State read AND state update happen in the SAME transaction.
+    This eliminates TOCTOU (time-of-check-time-of-use) races where state
+    could change between read and update.
+
     CRITICAL: State update AND audit insert happen in the SAME transaction.
     This ensures we never have state changes without audit or vice versa.
+
+    IDEMPOTENCY: If we're already in a valid target state for this event,
+    return success without making changes. This handles retries gracefully.
     """
 
-    # 1. Read current state
-    current = db.get_stage_run(run_id)
-    if not current:
-        return TransitionResult(success=False, reason="not_found")
-
-    # 2. Find valid transition
-    transition_def = find_transition(current["state"], event)
-    if not transition_def:
-        return TransitionResult(success=False, reason="invalid_transition",
-            details=f"No transition from {current['state']} on {event}")
-
-    # 3. Check guard
-    if transition_def.guard and not transition_def.guard(context):
-        return TransitionResult(success=False, reason="guard_failed")
-
-    # 4. Determine if this is a "completed with warnings" case
-    # Two scenarios: FINALIZE_FAIL(critical=False) or TIMEOUT in FINALIZING with outputs saved
-    completed_with_warnings = (
-        transition_def.to_state == 'completed'
-        and (
-            (event == StageEvent.FINALIZE_FAIL and not context.critical)
-            or (event == StageEvent.TIMEOUT and context.critical_phases_done)
-        )
-    )
-
-    # 5. Default termination_cause for TIMEOUT → TERMINATED only
-    # termination_cause is ONLY for TERMINATED state (see "Termination Cause" section)
-    # TIMEOUT → COMPLETED/FAILED should NOT set termination_cause
-    termination_cause = context.termination_cause
-    if (event == StageEvent.TIMEOUT
-        and transition_def.to_state == 'terminated'
-        and termination_cause is None):
-        termination_cause = TerminationCause.TIMEOUT
-
-    # 6. Determine phase for the new state
-    # If context.phase provided, use it; otherwise use entry phase for new state
-    new_phase = (
-        context.phase.value if context.phase
-        else STATE_ENTRY_PHASES.get(transition_def.to_state)
-    )
-
-    # 7. ATOMIC: CAS update + audit insert in same transaction
+    # ATOMIC TRANSACTION: Read + validate + update + audit all happen together
+    # This fixes the TOCTOU race where state could change between read and update.
     with db._conn() as conn:
-        # CAS update - only succeeds if state hasn't changed
-        # Update both state_entered_at (for timeouts) and phase_updated_at (observability)
+        # 1. Read current state INSIDE transaction
+        row = conn.execute(
+            "SELECT state, phase FROM stage_runs WHERE id = ?",
+            (run_id,)
+        ).fetchone()
+
+        if not row:
+            return TransitionResult(success=False, reason="not_found")
+
+        current_state = row["state"]
+        current_phase = row["phase"]
+
+        # 2. Find valid transition (passes context so guards can be checked)
+        transition_def = find_transition(current_state, event, context)
+
+        # 3. Handle idempotency: if already in a valid target state, return success
+        # This handles retries where the first attempt succeeded but response was lost
+        #
+        # IMPORTANT: Guard-aware idempotency check
+        # We must verify that THIS context would have led to the current state,
+        # not just that SOME transition for this event leads to current state.
+        # Example: FINALIZE_FAIL with critical=True should NOT be idempotent
+        # if we're in COMPLETED (that transition requires critical=False).
+        if transition_def is None:
+            # Check if we're already in a valid target state for this event
+            # Must match: event, to_state=current_state, AND guard passes for this context
+            for t in TRANSITIONS:
+                if t.event == event and t.to_state == current_state:
+                    # Check guard - must pass for THIS context
+                    if t.guard is None or t.guard(context):
+                        # Already in target state AND guard matches - idempotent success
+                        return TransitionResult(
+                            success=True,
+                            new_state=current_state,
+                            reason="already_in_target_state"
+                        )
+            # Not a valid transition and not already in valid target state
+            return TransitionResult(
+                success=False,
+                reason="invalid_transition",
+                details=f"No transition from {current_state} on {event}"
+            )
+
+        # 4. Determine if this is a "completed with warnings" case
+        # Two scenarios: FINALIZE_FAIL(critical=False) or TIMEOUT in FINALIZING with outputs saved
+        # IMPORTANT: Use explicit None check for critical to avoid truthiness bugs
+        # (critical=None should NOT be treated as critical=False)
+        completed_with_warnings = (
+            transition_def.to_state == 'completed'
+            and (
+                (event == StageEvent.FINALIZE_FAIL and context.critical is False)
+                or (event == StageEvent.TIMEOUT and context.critical_phases_done is True)
+            )
+        )
+
+        # 5. Default termination_cause for TIMEOUT → TERMINATED only
+        # termination_cause is ONLY for TERMINATED state (see "Termination Cause" section)
+        # TIMEOUT → COMPLETED/FAILED should NOT set termination_cause
+        termination_cause = context.termination_cause
+        if (event == StageEvent.TIMEOUT
+            and transition_def.to_state == 'terminated'
+            and termination_cause is None):
+            termination_cause = TerminationCause.TIMEOUT
+
+        # 6. Determine phase for the new state
+        # If context.phase provided, use it; otherwise use entry phase for new state
+        new_phase = (
+            context.phase.value if context.phase
+            else STATE_ENTRY_PHASES.get(transition_def.to_state)
+        )
+
+        # 7. CAS update - only succeeds if state hasn't changed since our read
+        # Since we read inside the same transaction, this is guaranteed to match
+        # (no other writer can modify the row while we hold the transaction)
         result = conn.execute(
             """UPDATE stage_runs
                SET state = ?,
@@ -516,31 +728,34 @@ def transition(db: Database, run_id: str, event: StageEvent, context: EventConte
                WHERE id = ? AND state = ?""",
             (transition_def.to_state,
              new_phase,
-             context.timestamp.isoformat(),  # state_entered_at: state change
-             context.timestamp.isoformat(),  # phase_updated_at: phase also changes
-             termination_cause.value if termination_cause else None,  # Uses defaulted value
+             context.timestamp.isoformat(),
+             context.timestamp.isoformat(),
+             termination_cause.value if termination_cause else None,
              context.error_message,
              1 if completed_with_warnings else 0,
-             run_id, current["state"])
+             run_id, current_state)
         )
+
         if result.rowcount == 0:
+            # This should not happen since we read inside the same transaction
+            # But handle defensively in case of edge cases
             return TransitionResult(success=False, reason="state_changed")
 
-        # Audit insert - SAME transaction, guaranteed atomic
+        # 8. Audit insert - SAME transaction, guaranteed atomic with state change
         conn.execute(
             """INSERT INTO stage_state_transitions
                (stage_run_id, from_state, event, to_state, phase,
                 termination_cause, exit_code, exit_code_exists,
                 error_message, source, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (run_id, current["state"], event.value, transition_def.to_state,
+            (run_id, current_state, event.value, transition_def.to_state,
              new_phase,
-             termination_cause.value if termination_cause else None,  # Uses defaulted value
+             termination_cause.value if termination_cause else None,
              context.exit_code, 1 if context.exit_code_exists else 0,
              context.error_message, context.source,
              context.timestamp.isoformat())
         )
-        # Transaction commits here - both succeed or both fail
+        # Transaction commits here - read + update + audit all succeed or all fail
 
     return TransitionResult(success=True, new_state=transition_def.to_state)
 ```
@@ -665,9 +880,43 @@ def determine_exit_event(run_id: str, backend: str) -> tuple[StageEvent, EventCo
             )
 
     # Case 2: GCS unavailable - can't determine, retry later
+    # CRITICAL: This is NOT the same as "exit code missing"!
+    # If GCS is down, we genuinely don't know the state - must wait for recovery.
+    #
+    # Track GCS outage start time in stage_runs.gcs_outage_started:
+    # - First GCS error: set gcs_outage_started = now()
+    # - GCS recovers: clear gcs_outage_started = NULL
+    # - Outage duration = now() - gcs_outage_started
+    #
+    # For prolonged GCS outages (>1hr), the daemon should:
+    # 1. Check if instance is still running (via GCE API, not GCS)
+    # 2. If instance is dead AND GCS unavailable >1hr, emit EXIT_MISSING with
+    #    termination_cause=ORPHANED and gcs_error=True in context for audit
+    # 3. This prevents runs from being stuck forever due to GCS issues
     if result.gcs_error:
-        logger.warning(f"GCS unavailable for {run_id}, will retry: {result.error}")
-        # Do NOT emit any event - wait for next poll when GCS might be back
+        # Track outage start time for escalation
+        outage_started = get_gcs_outage_started(run_id)  # Returns datetime or None
+        if outage_started is None:
+            set_gcs_outage_started(run_id, now)
+            outage_started = now
+
+        outage_duration = now - outage_started
+        if outage_duration > timedelta(hours=1):
+            # Prolonged outage - check if instance is dead
+            instance_dead = verify_instance_stopped(run_id, backend)
+            if instance_dead:
+                # Instance is dead but we can't read exit code - orphaned
+                return StageEvent.EXIT_MISSING, EventContext(
+                    exit_code_exists=False,
+                    instance_confirmed_dead=True,
+                    termination_cause=TerminationCause.ORPHANED,
+                    gcs_error=True,
+                    gcs_outage_started=outage_started,
+                    error_message=f"GCS unavailable for {outage_duration}, instance dead",
+                    timestamp=now, source="daemon"
+                )
+            # Instance still running - keep waiting
+        logger.warning(f"GCS unavailable for {run_id} ({outage_duration}), will retry: {result.error}")
         return None
 
     # Case 3: Exit code genuinely doesn't exist (404)
@@ -850,6 +1099,14 @@ ALTER TABLE stage_runs ADD COLUMN state_entered_at TEXT;    -- When state was en
 ALTER TABLE stage_runs ADD COLUMN phase_updated_at TEXT;    -- When phase last changed (observability)
 ALTER TABLE stage_runs ADD COLUMN completed_with_warnings INTEGER DEFAULT 0;  -- Non-critical finalization failures OR finalization timeout with outputs saved
 ALTER TABLE stage_runs ADD COLUMN error TEXT;               -- Error message for failed/terminated states
+
+-- Finalization progress tracking (for critical_phases_done determination)
+-- If executor dies during finalization, daemon can check these flags
+ALTER TABLE stage_runs ADD COLUMN output_sync_done INTEGER DEFAULT 0;      -- 1 if outputs synced to GCS
+ALTER TABLE stage_runs ADD COLUMN output_recording_done INTEGER DEFAULT 0; -- 1 if signal_lineage recorded
+
+-- GCS outage tracking (for >1h escalation)
+ALTER TABLE stage_runs ADD COLUMN gcs_outage_started TEXT;  -- ISO timestamp when GCS outage first detected
 
 -- Index for daemon polling (get_active_runs query)
 CREATE INDEX idx_stage_runs_state ON stage_runs(state)
@@ -1142,8 +1399,13 @@ def migrate_with_rollback():
 
     try:
         # Step 4: Migrate in batches
+        # CRITICAL: Each batch is a single transaction. This ensures:
+        # - Atomic commit of batch (all-or-nothing)
+        # - Progress can be resumed if migration is interrupted
+        # - Database isn't locked for the entire migration
         batch_size = 100
         while True:
+            # Read pending runs outside transaction (non-blocking read)
             with db._conn() as conn:
                 pending = conn.execute("""
                     SELECT run_id FROM migration_progress
@@ -1153,24 +1415,46 @@ def migrate_with_rollback():
             if not pending:
                 break
 
-            for row in pending:
-                run_id = row["run_id"]
+            # Migrate batch in a SINGLE transaction
+            # This ensures the batch is atomic: if any row fails, the batch rolls back
+            # and we retry the individual failures in a separate pass
+            with db._conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                batch_success = True
+                failed_runs = []
+
                 try:
-                    migrate_single_run(run_id)
-                    with db._conn() as conn:
-                        conn.execute("""
-                            UPDATE migration_progress
-                            SET status = 'migrated', migrated_at = ?
-                            WHERE run_id = ?
-                        """, (datetime.now(UTC).isoformat(), run_id))
-                except Exception as e:
-                    logger.error(f"Migration failed for {run_id}: {e}")
-                    with db._conn() as conn:
+                    for row in pending:
+                        run_id = row["run_id"]
+                        try:
+                            # migrate_single_run should NOT open its own transaction
+                            # It receives the connection and operates within our transaction
+                            migrate_single_run_in_txn(conn, run_id)
+                            conn.execute("""
+                                UPDATE migration_progress
+                                SET status = 'migrated', migrated_at = ?
+                                WHERE run_id = ?
+                            """, (datetime.now(UTC).isoformat(), run_id))
+                        except Exception as e:
+                            # Record failure but continue batch
+                            logger.warning(f"Run {run_id} failed: {e}")
+                            failed_runs.append((run_id, str(e)))
+
+                    # Update failed runs within same transaction
+                    for run_id, error in failed_runs:
                         conn.execute("""
                             UPDATE migration_progress
                             SET status = 'failed', error = ?
                             WHERE run_id = ?
-                        """, (str(e), run_id))
+                        """, (error, run_id))
+
+                    conn.execute("COMMIT")
+                    logger.info(f"Migrated batch: {len(pending) - len(failed_runs)} success, {len(failed_runs)} failed")
+
+                except Exception as e:
+                    conn.execute("ROLLBACK")
+                    logger.error(f"Batch failed, rolling back: {e}")
+                    raise
 
         # Step 5: Check for failures
         with db._conn() as conn:
@@ -1189,23 +1473,83 @@ def migrate_with_rollback():
         raise
 
 
-def rollback_migration(backup_table: str):
-    """Restore stage_runs from backup."""
-    logger.warning(f"Rolling back migration from {backup_table}")
-    with db._conn() as conn:
-        # Drop new columns
-        conn.execute("ALTER TABLE stage_runs DROP COLUMN state")
-        conn.execute("ALTER TABLE stage_runs DROP COLUMN phase")
-        conn.execute("ALTER TABLE stage_runs DROP COLUMN termination_cause")
-        conn.execute("ALTER TABLE stage_runs DROP COLUMN state_entered_at")
-        conn.execute("ALTER TABLE stage_runs DROP COLUMN phase_updated_at")
-        conn.execute("ALTER TABLE stage_runs DROP COLUMN completed_with_warnings")
-        conn.execute("ALTER TABLE stage_runs DROP COLUMN error")
+def migrate_single_run_in_txn(conn, run_id: str):
+    """Migrate a single run within an existing transaction.
 
-        # Note: SQLite doesn't support DROP COLUMN in older versions
-        # Alternative: Recreate table from backup
-        # conn.execute("DROP TABLE stage_runs")
-        # conn.execute(f"ALTER TABLE {backup_table} RENAME TO stage_runs")
+    IMPORTANT: This function does NOT open a transaction - it operates
+    within the caller's transaction. This allows batch atomicity.
+    """
+    row = conn.execute(
+        "SELECT status, progress FROM stage_runs WHERE id = ?",
+        (run_id,)
+    ).fetchone()
+
+    if not row:
+        raise MigrationError(f"Run {run_id} not found")
+
+    # Map old status/progress to new state
+    new_state = map_legacy_to_state(row["status"], row["progress"])
+
+    conn.execute("""
+        UPDATE stage_runs
+        SET state = ?, state_entered_at = ?
+        WHERE id = ?
+    """, (new_state, datetime.now(UTC).isoformat(), run_id))
+
+
+def rollback_migration(backup_table: str):
+    """Restore stage_runs from backup using table recreation.
+
+    IMPORTANT: SQLite DROP COLUMN was added in version 3.35.0 (2021-03-12).
+    Many production systems run older SQLite versions, so we use the
+    portable table recreation approach that works on ALL SQLite versions.
+
+    This approach:
+    1. Drops the migrated table
+    2. Renames backup to original name
+    3. Recreates any indexes that were on the original table
+    """
+    logger.warning(f"Rolling back migration from {backup_table}")
+
+    # Validate backup table name to prevent SQL injection
+    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', backup_table):
+        raise MigrationError(f"Invalid backup table name: {backup_table}")
+
+    with db._conn() as conn:
+        # Use a single transaction for atomic rollback
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Step 1: Verify backup table exists and has data
+            backup_count = conn.execute(
+                f"SELECT COUNT(*) FROM {backup_table}"  # noqa: S608 - validated above
+            ).fetchone()[0]
+            if backup_count == 0:
+                raise MigrationError(f"Backup table {backup_table} is empty")
+
+            # Step 2: Drop the partially-migrated table
+            conn.execute("DROP TABLE IF EXISTS stage_runs")
+
+            # Step 3: Rename backup to original name
+            conn.execute(f"ALTER TABLE {backup_table} RENAME TO stage_runs")  # noqa: S608
+
+            # Step 4: Recreate indexes (backup table won't have them)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_stage_runs_workspace
+                ON stage_runs(workspace_name, version)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_stage_runs_status
+                ON stage_runs(status)
+            """)
+            # Note: Don't create idx_stage_runs_state since we rolled back
+
+            conn.execute("COMMIT")
+            logger.info(f"Rollback complete: restored {backup_count} rows from {backup_table}")
+
+        except Exception as e:
+            conn.execute("ROLLBACK")
+            logger.error(f"Rollback failed: {e}")
+            raise MigrationError(f"Rollback failed: {e}") from e
 ```
 
 ### Phase 1d: Handling Active Runs During Migration
@@ -1588,30 +1932,48 @@ class DaemonLeaderElection:
         """Try to acquire or renew the daemon lease.
 
         Returns True if this daemon is the leader.
+
+        CRITICAL: Uses BEGIN IMMEDIATE to acquire a write lock at transaction start.
+        This prevents the race condition where:
+        1. Two daemons both read "no lease exists"
+        2. Both try to INSERT
+        3. One wins, but both think they're leader
+
+        With BEGIN IMMEDIATE, the second daemon blocks on step 1 until the first
+        daemon's transaction commits, then sees the updated lease.
         """
         now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=self.LEASE_DURATION_SECONDS)
 
         with self.db._conn() as conn:
-            # Try to acquire expired or non-existent lease
-            result = conn.execute("""
-                INSERT INTO daemon_leases (key, holder_id, acquired_at, expires_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    holder_id = excluded.holder_id,
-                    acquired_at = excluded.acquired_at,
-                    expires_at = excluded.expires_at
-                WHERE daemon_leases.holder_id = excluded.holder_id
-                   OR daemon_leases.expires_at < ?
-            """, (self.LEASE_KEY, holder_id, now.isoformat(),
-                  expires_at.isoformat(), now.isoformat()))
+            # BEGIN IMMEDIATE acquires write lock immediately
+            # This prevents TOCTOU race between INSERT and SELECT
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                # Try to acquire expired or non-existent lease
+                conn.execute("""
+                    INSERT INTO daemon_leases (key, holder_id, acquired_at, expires_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        holder_id = excluded.holder_id,
+                        acquired_at = excluded.acquired_at,
+                        expires_at = excluded.expires_at
+                    WHERE daemon_leases.holder_id = excluded.holder_id
+                       OR daemon_leases.expires_at < ?
+                """, (self.LEASE_KEY, holder_id, now.isoformat(),
+                      expires_at.isoformat(), now.isoformat()))
 
-            # Check if we hold the lease
-            row = conn.execute("""
-                SELECT holder_id FROM daemon_leases WHERE key = ?
-            """, (self.LEASE_KEY,)).fetchone()
+                # Check if we hold the lease - guaranteed accurate due to write lock
+                row = conn.execute("""
+                    SELECT holder_id FROM daemon_leases WHERE key = ?
+                """, (self.LEASE_KEY,)).fetchone()
 
-            return row and row["holder_id"] == holder_id
+                is_leader = row and row["holder_id"] == holder_id
+                conn.execute("COMMIT")
+                return is_leader
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
     def release_lease(self, holder_id: str):
         """Release the lease on shutdown."""
@@ -1916,9 +2278,11 @@ class TestCAS:
 ALTER TABLE stage_runs ADD COLUMN completed_with_warnings INTEGER DEFAULT 0;
 ```
 
-Set to 1 when `FINALIZE_FAIL(critical=False)` → COMPLETED. Dashboard shows warning icon.
+Set to 1 in two scenarios:
+1. `FINALIZE_FAIL(critical=False)` → COMPLETED (non-critical finalization failure)
+2. `TIMEOUT(critical_phases_done=True)` → COMPLETED (finalization timed out but outputs were saved)
 
-The audit trail (`stage_state_transitions`) already captures the `FINALIZE_FAIL` event with details, so the full history is preserved.
+Dashboard shows warning icon. The audit trail (`stage_state_transitions`) captures the event with details, so the full history is preserved.
 
 ### Q2: Audit table growth with phase updates?
 
