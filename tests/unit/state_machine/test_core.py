@@ -801,103 +801,6 @@ class TestTransitionAudit:
         assert "timestamp" in context_data  # Timestamp should be serialized
 
 
-class TestTransitionAdminEvents:
-    """Test admin force events."""
-
-    def test_force_terminate_from_any_active_state(self, mock_db: MagicMock, now: datetime) -> None:
-        """FORCE_TERMINATE works from any active state."""
-        from goldfish.state_machine.core import transition
-
-        ctx = EventContext(timestamp=now, source="admin", termination_cause=TerminationCause.MANUAL)
-
-        for state in [
-            StageState.PREPARING,
-            StageState.BUILDING,
-            StageState.LAUNCHING,
-            StageState.RUNNING,
-            StageState.FINALIZING,
-        ]:
-            mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-                "state": state.value
-            }
-            mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
-
-            result = transition(mock_db, "stage-abc", StageEvent.FORCE_TERMINATE, ctx)
-
-            assert result.success is True, f"FORCE_TERMINATE should work from {state}"
-            assert result.new_state == StageState.TERMINATED
-
-    def test_force_complete_from_finalizing(self, mock_db: MagicMock, now: datetime) -> None:
-        """FORCE_COMPLETE works from FINALIZING."""
-        from goldfish.state_machine.core import transition
-
-        ctx = EventContext(timestamp=now, source="admin")
-
-        mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "finalizing"
-        }
-        mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
-
-        result = transition(mock_db, "stage-abc", StageEvent.FORCE_COMPLETE, ctx)
-
-        assert result.success is True
-        assert result.new_state == StageState.COMPLETED
-
-    def test_force_complete_from_unknown(self, mock_db: MagicMock, now: datetime) -> None:
-        """FORCE_COMPLETE works from UNKNOWN (manual resolution)."""
-        from goldfish.state_machine.core import transition
-
-        ctx = EventContext(timestamp=now, source="admin")
-
-        mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "unknown"
-        }
-        mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
-
-        result = transition(mock_db, "stage-abc", StageEvent.FORCE_COMPLETE, ctx)
-
-        assert result.success is True
-        assert result.new_state == StageState.COMPLETED
-
-    def test_force_fail_only_from_unknown(self, mock_db: MagicMock, now: datetime) -> None:
-        """FORCE_FAIL only works from UNKNOWN state."""
-        from goldfish.state_machine.core import transition
-
-        ctx = EventContext(timestamp=now, source="admin", error_message="Admin marked as failed")
-
-        mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "unknown"
-        }
-        mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
-
-        result = transition(mock_db, "stage-abc", StageEvent.FORCE_FAIL, ctx)
-
-        assert result.success is True
-        assert result.new_state == StageState.FAILED
-
-    def test_force_fail_not_from_active_states(self, mock_db: MagicMock, now: datetime) -> None:
-        """FORCE_FAIL does NOT work from active states (only UNKNOWN)."""
-        from goldfish.state_machine.core import transition
-
-        ctx = EventContext(timestamp=now, source="admin")
-
-        for state in [
-            StageState.PREPARING,
-            StageState.BUILDING,
-            StageState.LAUNCHING,
-            StageState.RUNNING,
-            StageState.FINALIZING,
-        ]:
-            mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-                "state": state.value
-            }
-
-            result = transition(mock_db, "stage-abc", StageEvent.FORCE_FAIL, ctx)
-
-            assert result.success is False, f"FORCE_FAIL should NOT work from {state}"
-            assert result.reason == "no_transition"
-
-
 class TestTransitionCompletedWithWarnings:
     """Test completed_with_warnings flag setting."""
 
@@ -1176,22 +1079,6 @@ class TestTerminalStateIdempotency:
         calls = mock_db._conn.return_value.__enter__.return_value.execute.call_args_list
         audit_calls = [c for c in calls if "stage_state_transitions" in str(c)]
         assert len(audit_calls) == 0, "No audit for idempotent transition"
-
-    def test_force_terminate_in_terminated_is_idempotent(self, mock_db: MagicMock, now: datetime) -> None:
-        """FORCE_TERMINATE in TERMINATED is idempotent."""
-        from goldfish.state_machine.core import transition
-
-        ctx = EventContext(timestamp=now, source="admin", termination_cause=TerminationCause.MANUAL)
-
-        mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "terminated"
-        }
-
-        result = transition(mock_db, "stage-abc", StageEvent.FORCE_TERMINATE, ctx)
-
-        assert result.success is True
-        assert result.new_state == StageState.TERMINATED
-        assert result.reason == "already_in_target_state"
 
     def test_user_cancel_in_canceled_is_idempotent(self, mock_db: MagicMock, now: datetime) -> None:
         """USER_CANCEL in CANCELED is idempotent."""

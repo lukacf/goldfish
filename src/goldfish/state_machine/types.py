@@ -45,7 +45,6 @@ class StageEvent(str, Enum):
     - Executor: BUILD_START, BUILD_OK, BUILD_FAIL, LAUNCH_OK, LAUNCH_FAIL, etc.
     - Daemon: EXIT_SUCCESS, EXIT_FAILURE, EXIT_MISSING, INSTANCE_LOST, TIMEOUT
     - MCP tools: USER_CANCEL
-    - Admin tools: FORCE_TERMINATE, FORCE_COMPLETE, FORCE_FAIL
     - SVS: SVS_BLOCK
     """
 
@@ -78,11 +77,6 @@ class StageEvent(str, Enum):
     PREPARE_FAIL = "prepare_fail"  # Pre-execution validation failed
     SVS_BLOCK = "svs_block"  # SVS pre-run review blocked execution
 
-    # Admin override events
-    FORCE_TERMINATE = "force_terminate"
-    FORCE_COMPLETE = "force_complete"
-    FORCE_FAIL = "force_fail"
-
 
 class TerminationCause(str, Enum):
     """Reason for TERMINATED state.
@@ -96,7 +90,7 @@ class TerminationCause(str, Enum):
     ORPHANED = "orphaned"  # Lost track of instance (timeout, no evidence of run)
     TIMEOUT = "timeout"  # Exceeded configured timeout threshold
     AI_STOPPED = "ai_stopped"  # AI/SVS requested stop
-    MANUAL = "manual"  # Admin force_terminate_run via MCP
+    MANUAL = "manual"  # Manual termination (reserved for future use)
 
 
 class ProgressPhase(str, Enum):

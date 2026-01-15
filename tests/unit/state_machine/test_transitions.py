@@ -26,8 +26,8 @@ class TestTransitionTable:
     """Tests for the TRANSITIONS constant."""
 
     def test_transition_count(self) -> None:
-        """Verify we have exactly 39 transitions as specified."""
-        assert len(TRANSITIONS) == 39
+        """Verify we have exactly 30 transitions (FORCE_* admin events removed)."""
+        assert len(TRANSITIONS) == 30
 
     def test_all_active_states_have_transitions(self) -> None:
         """Every active state should have at least one outgoing transition."""
@@ -41,17 +41,12 @@ class TestTransitionTable:
             assert t.from_state not in TERMINAL_STATES, f"Terminal state {t.from_state} has transition on {t.event}"
 
     def test_unknown_state_has_transitions(self) -> None:
-        """UNKNOWN state should have escape transitions."""
+        """UNKNOWN state should have TIMEOUT escape transition."""
         unknown_transitions = [t for t in TRANSITIONS if t.from_state == StageState.UNKNOWN]
-        assert len(unknown_transitions) == 4
-        # Should have TIMEOUT, FORCE_TERMINATE, FORCE_COMPLETE, FORCE_FAIL
+        assert len(unknown_transitions) == 1
+        # Should only have TIMEOUT (admin FORCE_* events removed)
         events = {t.event for t in unknown_transitions}
-        assert events == {
-            StageEvent.TIMEOUT,
-            StageEvent.FORCE_TERMINATE,
-            StageEvent.FORCE_COMPLETE,
-            StageEvent.FORCE_FAIL,
-        }
+        assert events == {StageEvent.TIMEOUT}
 
     def test_all_transitions_have_valid_states(self) -> None:
         """All transitions should reference valid StageState values."""
@@ -239,12 +234,6 @@ class TestPreparingTransitions:
         assert t is not None
         assert t.to_state == StageState.CANCELED
 
-    def test_force_terminate(self, force_terminate_context: EventContext) -> None:
-        """FORCE_TERMINATE → TERMINATED."""
-        t = find_transition(StageState.PREPARING, StageEvent.FORCE_TERMINATE, force_terminate_context)
-        assert t is not None
-        assert t.to_state == StageState.TERMINATED
-
 
 class TestBuildingTransitions:
     """Tests for BUILDING state transitions."""
@@ -327,18 +316,6 @@ class TestFinalizingTransitions:
         assert t is not None
         assert t.to_state == StageState.CANCELED
 
-    def test_force_complete(self, force_complete_context: EventContext) -> None:
-        """FORCE_COMPLETE → COMPLETED."""
-        t = find_transition(StageState.FINALIZING, StageEvent.FORCE_COMPLETE, force_complete_context)
-        assert t is not None
-        assert t.to_state == StageState.COMPLETED
-
-    def test_force_terminate(self, force_terminate_context: EventContext) -> None:
-        """FORCE_TERMINATE → TERMINATED."""
-        t = find_transition(StageState.FINALIZING, StageEvent.FORCE_TERMINATE, force_terminate_context)
-        assert t is not None
-        assert t.to_state == StageState.TERMINATED
-
 
 class TestUnknownTransitions:
     """Tests for UNKNOWN state transitions."""
@@ -348,24 +325,6 @@ class TestUnknownTransitions:
         t = find_transition(StageState.UNKNOWN, StageEvent.TIMEOUT, timeout_context)
         assert t is not None
         assert t.to_state == StageState.TERMINATED
-
-    def test_force_terminate(self, force_terminate_context: EventContext) -> None:
-        """FORCE_TERMINATE → TERMINATED."""
-        t = find_transition(StageState.UNKNOWN, StageEvent.FORCE_TERMINATE, force_terminate_context)
-        assert t is not None
-        assert t.to_state == StageState.TERMINATED
-
-    def test_force_complete(self, force_complete_context: EventContext) -> None:
-        """FORCE_COMPLETE → COMPLETED."""
-        t = find_transition(StageState.UNKNOWN, StageEvent.FORCE_COMPLETE, force_complete_context)
-        assert t is not None
-        assert t.to_state == StageState.COMPLETED
-
-    def test_force_fail(self, force_fail_context: EventContext) -> None:
-        """FORCE_FAIL → FAILED."""
-        t = find_transition(StageState.UNKNOWN, StageEvent.FORCE_FAIL, force_fail_context)
-        assert t is not None
-        assert t.to_state == StageState.FAILED
 
 
 class TestBuildingTransitionsComplete:
@@ -380,12 +339,6 @@ class TestBuildingTransitionsComplete:
     def test_timeout(self, timeout_context: EventContext) -> None:
         """TIMEOUT → TERMINATED."""
         t = find_transition(StageState.BUILDING, StageEvent.TIMEOUT, timeout_context)
-        assert t is not None
-        assert t.to_state == StageState.TERMINATED
-
-    def test_force_terminate(self, force_terminate_context: EventContext) -> None:
-        """FORCE_TERMINATE → TERMINATED."""
-        t = find_transition(StageState.BUILDING, StageEvent.FORCE_TERMINATE, force_terminate_context)
         assert t is not None
         assert t.to_state == StageState.TERMINATED
 
@@ -411,12 +364,6 @@ class TestLaunchingTransitionsComplete:
         assert t is not None
         assert t.to_state == StageState.CANCELED
 
-    def test_force_terminate(self, force_terminate_context: EventContext) -> None:
-        """FORCE_TERMINATE → TERMINATED."""
-        t = find_transition(StageState.LAUNCHING, StageEvent.FORCE_TERMINATE, force_terminate_context)
-        assert t is not None
-        assert t.to_state == StageState.TERMINATED
-
 
 class TestRunningTransitionsComplete:
     """Complete tests for RUNNING state transitions (all 7)."""
@@ -432,12 +379,6 @@ class TestRunningTransitionsComplete:
         t = find_transition(StageState.RUNNING, StageEvent.USER_CANCEL, user_cancel_context)
         assert t is not None
         assert t.to_state == StageState.CANCELED
-
-    def test_force_terminate(self, force_terminate_context: EventContext) -> None:
-        """FORCE_TERMINATE → TERMINATED."""
-        t = find_transition(StageState.RUNNING, StageEvent.FORCE_TERMINATE, force_terminate_context)
-        assert t is not None
-        assert t.to_state == StageState.TERMINATED
 
 
 class TestLimboStates:
@@ -492,13 +433,13 @@ class TestUtilityFunctions:
     def test_get_transitions_from_preparing(self) -> None:
         """get_transitions_from_state returns correct transitions for PREPARING."""
         transitions = get_transitions_from_state(StageState.PREPARING)
-        assert len(transitions) == 7
+        assert len(transitions) == 6
         assert all(t.from_state == StageState.PREPARING for t in transitions)
 
     def test_get_transitions_from_finalizing(self) -> None:
         """get_transitions_from_state returns correct transitions for FINALIZING."""
         transitions = get_transitions_from_state(StageState.FINALIZING)
-        assert len(transitions) == 9
+        assert len(transitions) == 7
         assert all(t.from_state == StageState.FINALIZING for t in transitions)
 
     def test_get_transitions_from_terminal_state(self) -> None:
