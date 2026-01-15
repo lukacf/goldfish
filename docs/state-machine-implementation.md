@@ -179,21 +179,11 @@ Goal: Replace the if/then/else mess in daemon.py with event-driven architecture 
 
 ---
 
-## Phase 6 — MCP Tools & Finalization
+## Phase 6 — Cancel Flow & Finalization
 
-Goal: Update MCP tools to use state machine, implement admin tools, and integrate finalization tracking.
+Goal: Update cancel to use state machine and integrate finalization tracking.
 
-### 6.1 — Admin Tools
-
-- [ ] `test_admin_tools.py`: Test `force_terminate_run()` from all non-terminal states.
-- [ ] `test_admin_tools.py`: Test `force_complete_run()` from FINALIZING and UNKNOWN.
-- [ ] `test_admin_tools.py`: Test `force_fail_run()` from UNKNOWN only.
-- [ ] `test_admin_tools.py`: Test admin tools record audit with source="admin".
-- [ ] Implement `force_terminate_run(run_id, reason, termination_cause)` MCP tool.
-- [ ] Implement `force_complete_run(run_id, reason)` MCP tool.
-- [ ] Implement `force_fail_run(run_id, reason)` MCP tool.
-
-### 6.2 — Cancel Flow
+### 6.1 — Cancel Flow
 
 - [ ] `test_cancel.py`: Test `cancel()` uses state machine transition.
 - [ ] `test_cancel.py`: Test `cancel()` from all active states goes to CANCELED.
@@ -201,7 +191,7 @@ Goal: Update MCP tools to use state machine, implement admin tools, and integrat
 - [ ] Rewrite `cancel()` MCP tool to use `state_machine.transition(run_id, USER_CANCEL, ctx)`.
 - [ ] Implement backend cleanup helper `_cleanup_backend(run_id)`.
 
-### 6.3 — Finalization Tracking
+### 6.2 — Finalization Tracking
 
 - [ ] `test_finalization.py`: Test `FinalizationTracker` persists progress to database.
 - [ ] `test_finalization.py`: Test `critical_phases_done` derivation from output_sync_done and output_recording_done.
@@ -209,13 +199,10 @@ Goal: Update MCP tools to use state machine, implement admin tools, and integrat
 - [ ] Implement `FinalizationTracker` class with `mark_output_sync_done()` and `mark_output_recording_done()`.
 - [ ] Integrate tracker into `_finalize_stage_run()`.
 
-### 6.4 — Backwards Compatibility Layer
+### 6.3 — TypedDict Updates & Review
 
-- [ ] Implement `get_legacy_status(state, termination_cause)` for old API consumers.
-- [ ] Implement `get_legacy_progress(state, phase)` for old API consumers.
-- [ ] Add deprecation warnings when legacy mapping is used.
 - [ ] Update `StageRunRow` TypedDict to include new columns.
-- [ ] **Ralph loop review**: 5 subagents validate admin tools work correctly, cancel flow uses state machine, and finalization tracking prevents data loss.
+- [ ] **Ralph loop review**: 5 subagents validate cancel flow uses state machine and finalization tracking prevents data loss.
 
 ---
 
@@ -262,7 +249,6 @@ Goal: Comprehensive end-to-end tests, performance validation, and final cleanup.
 - [ ] `tests/integration/test_state_machine_e2e.py`: Cancel during each active state.
 - [ ] `tests/integration/test_state_machine_e2e.py`: Timeout in each active state.
 - [ ] `tests/integration/test_state_machine_e2e.py`: Finalization failure (critical vs non-critical).
-- [ ] `tests/integration/test_state_machine_e2e.py`: Admin force tools from various states.
 - [ ] `tests/integration/test_state_machine_e2e.py`: Concurrent transitions (CAS validation).
 - [ ] `tests/integration/test_state_machine_e2e.py`: Migration script on production-like data.
 
@@ -283,10 +269,9 @@ Goal: Comprehensive end-to-end tests, performance validation, and final cleanup.
 ### 8.4 — Documentation & Cleanup
 
 - [ ] Update CLAUDE.md with state machine patterns and event emission guidelines.
-- [ ] Remove backwards compatibility layer after verification period.
 - [ ] Remove old `status` and `progress` columns from schema.
 - [ ] Archive old daemon.py code (or delete if fully replaced).
-- [ ] Update MCP tool documentation for new states and admin tools.
+- [ ] Update MCP tool documentation for new states.
 - [ ] **Ralph loop review**: 5 subagents validate all tests pass, performance is acceptable, documentation is complete, and migration is safe for production.
 
 ---
@@ -323,7 +308,6 @@ Before declaring implementation complete, verify:
 | `src/goldfish/jobs/stage_executor.py` | Modify | Emit events instead of direct updates |
 | `src/goldfish/infra/gce_launcher.py` | Modify | Fix _get_exit_code(), add preemption detection |
 | `src/goldfish/db/schema.sql` | Modify | Add new columns and tables |
-| `src/goldfish/server_tools/admin_tools.py` | Create | force_terminate, force_complete, force_fail |
 | `tests/unit/state_machine/` | Create | Unit test directory |
 | `tests/integration/test_state_machine_e2e.py` | Create | Integration tests |
 

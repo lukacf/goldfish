@@ -2175,14 +2175,21 @@ class Database:
             # Compute attempt_num: increment after a successful run, otherwise continue current attempt
             attempt_num = self._compute_attempt_num(conn, workspace_name, stage_name)
 
+            # Initial state machine state: PREPARING with GCS_CHECK phase
+            from goldfish.state_machine.types import ProgressPhase, StageState
+
+            initial_state = StageState.PREPARING.value
+            initial_phase = ProgressPhase.GCS_CHECK.value
+
             conn.execute(
                 """
                 INSERT INTO stage_runs
                 (id, job_id, pipeline_run_id, workspace_name, pipeline_name, version, stage_name, status,
                  started_at, profile, hints_json, config_json, inputs_json, reason_json,
                  preflight_errors_json, preflight_warnings_json,
-                 backend_type, backend_handle, attempt_num)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 backend_type, backend_handle, attempt_num,
+                 state, phase, state_entered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stage_run_id,
@@ -2204,6 +2211,9 @@ class Database:
                     backend_type,
                     backend_handle,
                     attempt_num,
+                    initial_state,
+                    initial_phase,
+                    timestamp,  # state_entered_at = same as started_at initially
                 ),
             )
 

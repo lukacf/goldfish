@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from goldfish.validation import validate_stage_run_id
+
 if TYPE_CHECKING:
     from goldfish.db.database import Database
 
@@ -35,7 +37,11 @@ class FinalizationTracker:
         Args:
             db: Database instance.
             run_id: Stage run ID to track.
+
+        Raises:
+            InvalidStageRunIdError: If run_id format is invalid.
         """
+        validate_stage_run_id(run_id)
         self._db = db
         self._run_id = run_id
 
@@ -100,5 +106,9 @@ def get_critical_phases_done(db: Database, run_id: str) -> bool | None:
 
     Returns:
         True if both critical phases done, False if not, None if run not found.
+
+    Raises:
+        InvalidStageRunIdError: If run_id format is invalid.
     """
+    # Validation happens in FinalizationTracker.__init__
     return FinalizationTracker(db, run_id).critical_phases_done
