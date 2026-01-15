@@ -558,7 +558,8 @@ class ClaudeCodeProvider:
             if agent_request.max_turns:
                 cmd += ["--max-turns", str(agent_request.max_turns)]
             if agent_request.tool_policy is not None:
-                cmd += ["--permission-mode", agent_request.tool_policy.permission_mode]
+                # Use --dangerously-skip-permissions for automated reviews in Docker
+                cmd += ["--dangerously-skip-permissions"]
                 if agent_request.tool_policy.allow_tools:
                     for tool in agent_request.tool_policy.allow_tools:
                         cmd += ["--allowed-tools", tool]
