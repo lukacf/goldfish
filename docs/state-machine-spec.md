@@ -159,6 +159,17 @@ def update_phase(run_id: str, expected_state: str, new_phase: ProgressPhase, tim
 - Timestamp is passed in (canonical time source, not `now()`)
 - `'phase_update'` is a pseudo-event for audit trail, not a real state machine event
 
+### Pseudo-Events (Audit-Only)
+
+These event strings appear in `stage_state_transitions.event` but are NOT in `StageEvent` enum:
+
+| Pseudo-Event | Purpose | When Used |
+|--------------|---------|-----------|
+| `run_start` | Records initial state machine entry | `create_stage_run()` |
+| `phase_update` | Records within-state phase changes | `update_phase()` |
+
+These are allowed in the audit trail for observability but don't drive state machine transitions.
+
 ---
 
 ## Event Model
@@ -382,13 +393,22 @@ def transition(run_id: str, event: StageEvent, context: EventContext) -> Transit
         return TransitionResult(success=False, reason="guard_failed")
 
     # 4. Determine if this is a "completed with warnings" case
+    # Two scenarios: FINALIZE_FAIL(critical=False) or TIMEOUT in FINALIZING with outputs saved
     completed_with_warnings = (
-        event == StageEvent.FINALIZE_FAIL
-        and not context.critical
-        and transition_def.to_state == 'completed'
+        transition_def.to_state == 'completed'
+        and (
+            (event == StageEvent.FINALIZE_FAIL and not context.critical)
+            or (event == StageEvent.TIMEOUT and context.critical_phases_done)
+        )
     )
 
-    # 5. Determine phase for the new state
+    # 5. Default termination_cause for TIMEOUT events
+    # TIMEOUT transitions always need cause=TIMEOUT for proper infra_outcome mapping
+    termination_cause = context.termination_cause
+    if event == StageEvent.TIMEOUT and termination_cause is None:
+        termination_cause = TerminationCause.TIMEOUT
+
+    # 6. Determine phase for the new state
     # If context.phase provided, use it; otherwise use entry phase for new state
     new_phase = (
         context.phase.value if context.phase
@@ -413,7 +433,7 @@ def transition(run_id: str, event: StageEvent, context: EventContext) -> Transit
              new_phase,
              context.timestamp.isoformat(),  # state_entered_at: state change
              context.timestamp.isoformat(),  # phase_updated_at: phase also changes
-             context.termination_cause.value if context.termination_cause else None,
+             termination_cause.value if termination_cause else None,  # Uses defaulted value
              context.error_message,
              1 if completed_with_warnings else 0,
              run_id, current["state"])
@@ -429,8 +449,8 @@ def transition(run_id: str, event: StageEvent, context: EventContext) -> Transit
                 error_message, source, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (run_id, current["state"], event.value, transition_def.to_state,
-             new_phase,  # Use the determined phase (context or entry default)
-             context.termination_cause.value if context.termination_cause else None,
+             new_phase,
+             termination_cause.value if termination_cause else None,  # Uses defaulted value
              context.exit_code, 1 if context.exit_code_exists else 0,
              context.error_message, context.source,
              context.timestamp.isoformat())
@@ -542,14 +562,34 @@ def detect_termination_cause(run_id: str, backend: str) -> TerminationCause:
     Returns: PREEMPTED, CRASHED, or ORPHANED
     """
     if backend == "gce":
-        # Check GCE operations for preemption
-        if gce_launcher.was_preempted(run_id):
-            return TerminationCause.PREEMPTED
-        # No preemption detected, assume crash
-        return TerminationCause.CRASHED
+        try:
+            # Check GCE operations for preemption
+            if gce_launcher.was_preempted(run_id):
+                return TerminationCause.PREEMPTED
+
+            # Check if instance has any termination evidence (delete operations, errors)
+            if gce_launcher.has_termination_evidence(run_id):
+                return TerminationCause.CRASHED
+
+            # No evidence of how it terminated - orphaned
+            return TerminationCause.ORPHANED
+        except Exception as e:
+            # Can't determine cause - treat as orphaned (unknown state)
+            logger.warning(f"Can't detect termination cause for {run_id}: {e}")
+            return TerminationCause.ORPHANED
     else:
-        # Local Docker doesn't have preemption concept
-        return TerminationCause.CRASHED
+        # Local Docker: check container exit reason
+        try:
+            exit_reason = docker_client.get_container_exit_reason(run_id)
+            if exit_reason in ("OOMKilled", "Error", "ContainerCannotRun"):
+                return TerminationCause.CRASHED
+            if exit_reason is None:
+                # Container vanished with no trace - orphaned
+                return TerminationCause.ORPHANED
+            # Unknown exit reason, assume crash
+            return TerminationCause.CRASHED
+        except Exception:
+            return TerminationCause.ORPHANED
 
 
 def verify_instance_stopped(run_id: str, backend: str) -> bool:
@@ -1375,7 +1415,7 @@ class TestCAS:
 - [ ] Update all status readers to use new columns (70+ call sites)
 - [ ] Add transition logging/monitoring
 - [ ] **Add UNKNOWN cleanup job** (periodic investigation + admin tool resolution)
-- [ ] Add audit retention policy (90 days / 1000 per run)
+- [ ] Add audit retention policy (90 days / 100 per run)
 - [ ] Test with real workloads
 
 ### Phase 3: Cleanup
