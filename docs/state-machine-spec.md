@@ -1,6 +1,6 @@
 # Stage Execution State Machine Specification
 
-> **Status**: Draft v3.2 (Daemon Rewrite Strategy)
+> **Status**: Draft v3.3 (Agent Review Fixes)
 > **Author**: Claude + Luka
 > **Created**: 2025-01-15
 > **Updated**: 2025-01-15
@@ -276,6 +276,7 @@ PREPARING     | FORCE_TERMINATE    | TERMINATED  |                          | Ad
               |                    |             |                          |
 BUILDING      | BUILD_OK           | LAUNCHING   |                          |
 BUILDING      | BUILD_FAIL         | FAILED      |                          |
+BUILDING      | INSTANCE_LOST      | TERMINATED  |                          | Cloud Build instance died
 BUILDING      | TIMEOUT            | TERMINATED  | cause=TIMEOUT            | Build took too long
 BUILDING      | USER_CANCEL        | CANCELED    |                          |
 BUILDING      | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
@@ -298,6 +299,7 @@ RUNNING       | FORCE_TERMINATE    | TERMINATED  |                          | Ad
 FINALIZING    | FINALIZE_OK        | COMPLETED   |                          | All finalization done
 FINALIZING    | FINALIZE_FAIL      | FAILED      | ctx.critical=True        | Critical step failed
 FINALIZING    | FINALIZE_FAIL      | COMPLETED   | ctx.critical=False       | Non-critical, still complete
+FINALIZING    | INSTANCE_LOST      | TERMINATED  |                          | Preempted during finalization
 FINALIZING    | TIMEOUT            | COMPLETED   | critical_phases_done     | Timeout but outputs saved
 FINALIZING    | TIMEOUT            | FAILED      | !critical_phases_done    | Timeout, outputs lost
 FINALIZING    | USER_CANCEL        | CANCELED    |                          | Partial outputs possible
@@ -367,10 +369,90 @@ Without CAS:
 3. Daemon overwrites state to COMPLETED
 4. User's cancel is silently undone
 
+### Supporting Types and Functions
+
+```python
+@dataclass
+class TransitionResult:
+    """Result of a state transition attempt."""
+    success: bool
+    new_state: str | None = None
+    reason: str | None = None     # 'not_found', 'invalid_transition', 'guard_failed', 'state_changed'
+    details: str | None = None    # Additional context for failures
+
+
+@dataclass
+class TransitionDef:
+    """Definition of a valid state transition."""
+    from_state: str
+    event: StageEvent
+    to_state: str
+    guard: Callable[[EventContext], bool] | None = None
+
+
+# Transition table - all valid transitions
+TRANSITIONS: list[TransitionDef] = [
+    TransitionDef('preparing', StageEvent.BUILD_START, 'building'),
+    TransitionDef('preparing', StageEvent.PREPARE_FAIL, 'failed'),
+    TransitionDef('preparing', StageEvent.SVS_BLOCK, 'failed'),
+    TransitionDef('preparing', StageEvent.TIMEOUT, 'terminated'),
+    TransitionDef('preparing', StageEvent.USER_CANCEL, 'canceled'),
+    TransitionDef('preparing', StageEvent.FORCE_TERMINATE, 'terminated'),
+    TransitionDef('building', StageEvent.BUILD_OK, 'launching'),
+    TransitionDef('building', StageEvent.BUILD_FAIL, 'failed'),
+    TransitionDef('building', StageEvent.INSTANCE_LOST, 'terminated'),
+    TransitionDef('building', StageEvent.TIMEOUT, 'terminated'),
+    TransitionDef('building', StageEvent.USER_CANCEL, 'canceled'),
+    TransitionDef('building', StageEvent.FORCE_TERMINATE, 'terminated'),
+    TransitionDef('launching', StageEvent.LAUNCH_OK, 'running'),
+    TransitionDef('launching', StageEvent.LAUNCH_FAIL, 'failed'),
+    TransitionDef('launching', StageEvent.INSTANCE_LOST, 'terminated'),
+    TransitionDef('launching', StageEvent.TIMEOUT, 'terminated'),
+    TransitionDef('launching', StageEvent.USER_CANCEL, 'canceled'),
+    TransitionDef('launching', StageEvent.FORCE_TERMINATE, 'terminated'),
+    TransitionDef('running', StageEvent.EXIT_SUCCESS, 'finalizing'),
+    TransitionDef('running', StageEvent.EXIT_FAILURE, 'failed'),
+    TransitionDef('running', StageEvent.EXIT_MISSING, 'terminated',
+                  guard=lambda ctx: ctx.instance_confirmed_dead),
+    TransitionDef('running', StageEvent.INSTANCE_LOST, 'terminated'),
+    TransitionDef('running', StageEvent.TIMEOUT, 'terminated'),
+    TransitionDef('running', StageEvent.USER_CANCEL, 'canceled'),
+    TransitionDef('running', StageEvent.FORCE_TERMINATE, 'terminated'),
+    TransitionDef('finalizing', StageEvent.FINALIZE_OK, 'completed'),
+    TransitionDef('finalizing', StageEvent.FINALIZE_FAIL, 'failed',
+                  guard=lambda ctx: ctx.critical),
+    TransitionDef('finalizing', StageEvent.FINALIZE_FAIL, 'completed',
+                  guard=lambda ctx: not ctx.critical),
+    TransitionDef('finalizing', StageEvent.INSTANCE_LOST, 'terminated'),
+    TransitionDef('finalizing', StageEvent.TIMEOUT, 'completed',
+                  guard=lambda ctx: ctx.critical_phases_done),
+    TransitionDef('finalizing', StageEvent.TIMEOUT, 'failed',
+                  guard=lambda ctx: not ctx.critical_phases_done),
+    TransitionDef('finalizing', StageEvent.USER_CANCEL, 'canceled'),
+    TransitionDef('finalizing', StageEvent.FORCE_COMPLETE, 'completed'),
+    TransitionDef('finalizing', StageEvent.FORCE_TERMINATE, 'terminated'),
+    TransitionDef('unknown', StageEvent.FORCE_TERMINATE, 'terminated'),
+    TransitionDef('unknown', StageEvent.FORCE_COMPLETE, 'completed'),
+    TransitionDef('unknown', StageEvent.FORCE_FAIL, 'failed'),
+]
+
+
+def find_transition(from_state: str, event: StageEvent) -> TransitionDef | None:
+    """Find a valid transition definition for the given state and event.
+
+    Returns the first matching transition, or None if no valid transition exists.
+    For events with guards (like FINALIZE_FAIL), caller must check guard separately.
+    """
+    for t in TRANSITIONS:
+        if t.from_state == from_state and t.event == event:
+            return t
+    return None
+```
+
 ### The Solution
 
 ```python
-def transition(run_id: str, event: StageEvent, context: EventContext) -> TransitionResult:
+def transition(db: Database, run_id: str, event: StageEvent, context: EventContext) -> TransitionResult:
     """Atomically transition state using compare-and-swap.
 
     CRITICAL: State update AND audit insert happen in the SAME transaction.
@@ -415,7 +497,7 @@ def transition(run_id: str, event: StageEvent, context: EventContext) -> Transit
         else STATE_ENTRY_PHASES.get(transition_def.to_state)
     )
 
-    # 6. ATOMIC: CAS update + audit insert in same transaction
+    # 7. ATOMIC: CAS update + audit insert in same transaction
     with db._conn() as conn:
         # CAS update - only succeeds if state hasn't changed
         # Update both state_entered_at (for timeouts) and phase_updated_at (observability)
@@ -487,27 +569,67 @@ def _get_exit_code(self, instance_name: str) -> int:
 ```python
 @dataclass
 class ExitCodeResult:
+    """Result of exit code retrieval with explicit status.
+
+    CRITICAL: Distinguish between:
+    - exists=True, code=N: File found with exit code N
+    - exists=False, gcs_error=False: File genuinely doesn't exist (404)
+    - exists=False, gcs_error=True: GCS unavailable, can't determine
+    """
     exists: bool
     code: int | None
+    gcs_error: bool = False        # NEW: True if GCS API failed (not 404)
     error: str | None = None
 
+
+class GCSError(Exception):
+    """GCS API error (not 404 NotFound)."""
+    pass
+
+
 def get_exit_code(run_id: str) -> ExitCodeResult:
-    """Get exit code, distinguishing 'file missing' from 'file contains 1'."""
+    """Get exit code, distinguishing 'file missing' from 'GCS unavailable'.
+
+    CRITICAL: GCS unavailability should NOT be treated as "file missing".
+    If GCS is down, we can't know if the file exists - must retry later.
+    """
     gcs_path = f"gs://{bucket}/runs/{run_id}/logs/exit_code.txt"
 
     for attempt in range(max_attempts):
         try:
             content = gsutil_cat(gcs_path)
             return ExitCodeResult(exists=True, code=int(content.strip()))
+
         except NotFoundError:
+            # 404 - file genuinely doesn't exist
             if attempt < max_attempts - 1:
                 time.sleep(retry_delay)  # GCS eventual consistency
                 continue
-            return ExitCodeResult(exists=False, code=None)
-        except Exception as e:
-            return ExitCodeResult(exists=False, code=None, error=str(e))
+            return ExitCodeResult(exists=False, code=None, gcs_error=False)
 
-    return ExitCodeResult(exists=False, code=None)
+        except (ConnectionError, TimeoutError, GCSError) as e:
+            # GCS unavailable - NOT the same as "file doesn't exist"
+            # Do NOT return exists=False here - we don't know!
+            logger.warning(f"GCS unavailable for {run_id} (attempt {attempt + 1}): {e}")
+            if attempt < max_attempts - 1:
+                time.sleep(retry_delay * 2)  # Longer wait for API issues
+                continue
+            return ExitCodeResult(
+                exists=False, code=None,
+                gcs_error=True,  # CRITICAL: Mark as GCS error, not "file missing"
+                error=f"GCS unavailable: {e}"
+            )
+
+        except Exception as e:
+            # Unknown error - treat as GCS error (conservative)
+            logger.error(f"Unexpected error reading exit code for {run_id}: {e}")
+            return ExitCodeResult(
+                exists=False, code=None,
+                gcs_error=True,
+                error=str(e)
+            )
+
+    return ExitCodeResult(exists=False, code=None, gcs_error=False)
 ```
 
 ### Usage in Event Emission
@@ -519,10 +641,14 @@ def determine_exit_event(run_id: str, backend: str) -> tuple[StageEvent, EventCo
     CRITICAL: EXIT_MISSING requires verification that instance is actually dead.
     Otherwise we risk marking running jobs as terminated due to GCS eventual
     consistency or delayed log sync.
+
+    CRITICAL: GCS unavailability is NOT the same as "exit code missing".
+    If we can't reach GCS, we must wait and retry - not assume failure.
     """
     result = get_exit_code(run_id)
     now = datetime.now(UTC)
 
+    # Case 1: Exit code found
     if result.exists:
         if result.code == 0:
             return StageEvent.EXIT_SUCCESS, EventContext(
@@ -534,23 +660,30 @@ def determine_exit_event(run_id: str, backend: str) -> tuple[StageEvent, EventCo
                 exit_code=result.code, exit_code_exists=True,
                 timestamp=now, source="daemon"
             )
-    else:
-        # No exit code - but is the instance actually dead?
-        instance_dead = verify_instance_stopped(run_id, backend)
 
-        if not instance_dead:
-            # Instance still running, exit code just not written yet
-            # Do NOT emit EXIT_MISSING - wait for next poll
-            return None
+    # Case 2: GCS unavailable - can't determine, retry later
+    if result.gcs_error:
+        logger.warning(f"GCS unavailable for {run_id}, will retry: {result.error}")
+        # Do NOT emit any event - wait for next poll when GCS might be back
+        return None
 
-        # Instance confirmed dead + no exit code = need to detect WHY
-        cause = detect_termination_cause(run_id, backend)
-        return StageEvent.EXIT_MISSING, EventContext(
-            exit_code_exists=False,
-            instance_confirmed_dead=True,  # Guard requirement satisfied
-            termination_cause=cause,
-            timestamp=now, source="daemon"
-        )
+    # Case 3: Exit code genuinely doesn't exist (404)
+    # But is the instance actually dead?
+    instance_dead = verify_instance_stopped(run_id, backend)
+
+    if not instance_dead:
+        # Instance still running, exit code just not written yet
+        # Do NOT emit EXIT_MISSING - wait for next poll
+        return None
+
+    # Instance confirmed dead + no exit code = need to detect WHY
+    cause = detect_termination_cause(run_id, backend)
+    return StageEvent.EXIT_MISSING, EventContext(
+        exit_code_exists=False,
+        instance_confirmed_dead=True,  # Guard requirement satisfied
+        termination_cause=cause,
+        timestamp=now, source="daemon"
+    )
 
 
 def detect_termination_cause(run_id: str, backend: str) -> TerminationCause:
@@ -703,12 +836,17 @@ def force_fail_run(run_id: str, reason: str, error_message: str | None = None) -
 
 ```sql
 -- Add new columns
-ALTER TABLE stage_runs ADD COLUMN state TEXT;
+ALTER TABLE stage_runs ADD COLUMN state TEXT
+    CHECK(state IN ('preparing', 'building', 'launching', 'running', 'finalizing',
+                    'completed', 'failed', 'terminated', 'canceled', 'unknown'));
 ALTER TABLE stage_runs ADD COLUMN phase TEXT;
-ALTER TABLE stage_runs ADD COLUMN termination_cause TEXT;
+ALTER TABLE stage_runs ADD COLUMN termination_cause TEXT
+    CHECK(termination_cause IS NULL OR termination_cause IN
+          ('preempted', 'crashed', 'orphaned', 'timeout', 'ai_stopped', 'manual'));
 ALTER TABLE stage_runs ADD COLUMN state_entered_at TEXT;    -- When state was entered (for timeouts)
 ALTER TABLE stage_runs ADD COLUMN phase_updated_at TEXT;    -- When phase last changed (observability)
 ALTER TABLE stage_runs ADD COLUMN completed_with_warnings INTEGER DEFAULT 0;  -- Non-critical finalization failures
+ALTER TABLE stage_runs ADD COLUMN error TEXT;               -- Error message for failed/terminated states
 
 -- Keep old columns during migration (remove after verified)
 -- status TEXT (keep for backwards compat)
@@ -956,6 +1094,172 @@ def check_orphan_status(run_id: str, started_at: str, backend_type: str) -> str:
 3. **UNKNOWN for ambiguous**: Can't confirm status → mark UNKNOWN for manual review
 4. **Audit logging**: Every decision logged for review
 5. **Conservative fallback**: 30 days threshold only when backend check fails
+
+### Phase 1c: Migration Rollback Strategy
+
+**CRITICAL**: Migrations can fail partway. Without rollback, the database is left in an inconsistent state.
+
+```python
+def migrate_with_rollback():
+    """Migrate stage_runs with rollback capability.
+
+    Strategy:
+    1. Create backup table before migration
+    2. Migrate in batches with progress tracking
+    3. On failure, restore from backup
+    """
+    backup_table = f"stage_runs_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    with db._conn() as conn:
+        # Step 1: Create backup
+        conn.execute(f"CREATE TABLE {backup_table} AS SELECT * FROM stage_runs")
+        logger.info(f"Created backup: {backup_table}")
+
+        # Step 2: Track migration progress
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS migration_progress (
+                id INTEGER PRIMARY KEY,
+                run_id TEXT UNIQUE,
+                status TEXT,  -- 'pending', 'migrated', 'failed'
+                error TEXT,
+                migrated_at TEXT
+            )
+        """)
+
+        # Step 3: Mark all runs as pending
+        conn.execute("""
+            INSERT OR IGNORE INTO migration_progress (run_id, status)
+            SELECT id, 'pending' FROM stage_runs WHERE state IS NULL
+        """)
+
+    try:
+        # Step 4: Migrate in batches
+        batch_size = 100
+        while True:
+            with db._conn() as conn:
+                pending = conn.execute("""
+                    SELECT run_id FROM migration_progress
+                    WHERE status = 'pending' LIMIT ?
+                """, (batch_size,)).fetchall()
+
+            if not pending:
+                break
+
+            for row in pending:
+                run_id = row["run_id"]
+                try:
+                    migrate_single_run(run_id)
+                    with db._conn() as conn:
+                        conn.execute("""
+                            UPDATE migration_progress
+                            SET status = 'migrated', migrated_at = ?
+                            WHERE run_id = ?
+                        """, (datetime.now(UTC).isoformat(), run_id))
+                except Exception as e:
+                    logger.error(f"Migration failed for {run_id}: {e}")
+                    with db._conn() as conn:
+                        conn.execute("""
+                            UPDATE migration_progress
+                            SET status = 'failed', error = ?
+                            WHERE run_id = ?
+                        """, (str(e), run_id))
+
+        # Step 5: Check for failures
+        with db._conn() as conn:
+            failures = conn.execute(
+                "SELECT COUNT(*) FROM migration_progress WHERE status = 'failed'"
+            ).fetchone()[0]
+
+        if failures > 0:
+            raise MigrationError(f"{failures} runs failed to migrate - manual review required")
+
+        logger.info("Migration completed successfully")
+
+    except Exception as e:
+        logger.error(f"Migration failed: {e}")
+        rollback_migration(backup_table)
+        raise
+
+
+def rollback_migration(backup_table: str):
+    """Restore stage_runs from backup."""
+    logger.warning(f"Rolling back migration from {backup_table}")
+    with db._conn() as conn:
+        # Drop new columns
+        conn.execute("ALTER TABLE stage_runs DROP COLUMN state")
+        conn.execute("ALTER TABLE stage_runs DROP COLUMN phase")
+        conn.execute("ALTER TABLE stage_runs DROP COLUMN termination_cause")
+        conn.execute("ALTER TABLE stage_runs DROP COLUMN state_entered_at")
+        conn.execute("ALTER TABLE stage_runs DROP COLUMN phase_updated_at")
+        conn.execute("ALTER TABLE stage_runs DROP COLUMN completed_with_warnings")
+        conn.execute("ALTER TABLE stage_runs DROP COLUMN error")
+
+        # Note: SQLite doesn't support DROP COLUMN in older versions
+        # Alternative: Recreate table from backup
+        # conn.execute("DROP TABLE stage_runs")
+        # conn.execute(f"ALTER TABLE {backup_table} RENAME TO stage_runs")
+```
+
+### Phase 1d: Handling Active Runs During Migration
+
+**Problem**: What if runs are actively executing while migration runs?
+
+**Solution**: Migration window + drain mode
+
+```python
+def safe_migration():
+    """Migration with active run handling."""
+    # Step 1: Enable drain mode - no new runs can start
+    with db._conn() as conn:
+        conn.execute("INSERT INTO config (key, value) VALUES ('drain_mode', 'true')")
+
+    # Step 2: Wait for active runs to complete (with timeout)
+    timeout = timedelta(hours=2)
+    start = datetime.now(UTC)
+
+    while datetime.now(UTC) - start < timeout:
+        with db._conn() as conn:
+            active = conn.execute("""
+                SELECT COUNT(*) FROM stage_runs
+                WHERE status = 'running' AND progress NOT IN ('completed', 'failed')
+            """).fetchone()[0]
+
+        if active == 0:
+            break
+
+        logger.info(f"Waiting for {active} active runs to complete...")
+        time.sleep(60)
+
+    # Step 3: Check for stragglers
+    with db._conn() as conn:
+        active = conn.execute("""
+            SELECT id FROM stage_runs
+            WHERE status = 'running' AND progress NOT IN ('completed', 'failed')
+        """).fetchall()
+
+    if active:
+        # Mark stragglers as UNKNOWN for manual review
+        for row in active:
+            logger.warning(f"Run {row['id']} still active after timeout - marking UNKNOWN")
+            with db._conn() as conn:
+                conn.execute("""
+                    UPDATE stage_runs SET state = 'unknown'
+                    WHERE id = ?
+                """, (row["id"],))
+
+    # Step 4: Run migration
+    migrate_with_rollback()
+
+    # Step 5: Disable drain mode
+    with db._conn() as conn:
+        conn.execute("DELETE FROM config WHERE key = 'drain_mode'")
+```
+
+**Key principles**:
+1. **Drain mode**: Stop new runs before migration
+2. **Graceful wait**: Give active runs time to complete
+3. **Timeout handling**: Mark long-running stragglers as UNKNOWN
+4. **Atomic transition**: Old code still works until migration complete
 
 ### Phase 2: Backwards Compatibility Layer
 
