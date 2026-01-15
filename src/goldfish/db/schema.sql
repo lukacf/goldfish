@@ -208,7 +208,7 @@ CREATE INDEX IF NOT EXISTS idx_stage_runs_ws_stage_attempt ON stage_runs(workspa
 CREATE INDEX IF NOT EXISTS idx_stage_runs_outcome ON stage_runs(outcome);
 -- Partial index for active states (used by daemon polling)
 CREATE INDEX IF NOT EXISTS idx_stage_runs_active_state ON stage_runs(state)
-    WHERE state IN ('preparing', 'building', 'launching', 'running', 'finalizing');
+    WHERE state IN ('preparing', 'building', 'launching', 'running', 'finalizing', 'unknown');
 
 
 -- Stage state transitions (audit trail for state machine)
@@ -595,3 +595,17 @@ CREATE TABLE IF NOT EXISTS run_tags (
 
 CREATE INDEX IF NOT EXISTS idx_run_tags_record
     ON run_tags(record_id);
+
+
+-- =============================================================================
+-- Daemon Leader Election
+-- =============================================================================
+
+-- Daemon leases (prevents duplicate event emission from multiple daemons)
+-- Uses single-row lease with optimistic locking for leader election
+CREATE TABLE IF NOT EXISTS daemon_leases (
+    lease_name TEXT PRIMARY KEY,
+    holder_id TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);

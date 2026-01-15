@@ -336,7 +336,7 @@ class Database:
                 -- Partial index for active states (used by daemon polling)
                 CREATE INDEX IF NOT EXISTS idx_stage_runs_active_state
                     ON stage_runs(state)
-                    WHERE state IN ('preparing', 'building', 'launching', 'running', 'finalizing');
+                    WHERE state IN ('preparing', 'building', 'launching', 'running', 'finalizing', 'unknown');
 
                 -- Migration progress tracking (for safe batch migrations)
                 CREATE TABLE IF NOT EXISTS migration_progress (
@@ -594,6 +594,20 @@ class Database:
             raise
         finally:
             conn.close()
+
+    def _get_raw_conn(self) -> sqlite3.Connection:
+        """Get a raw database connection for manual transaction control.
+
+        This is used for leader election with BEGIN IMMEDIATE.
+        The caller is responsible for committing/rolling back and closing.
+
+        Returns:
+            Raw SQLite connection (caller must close).
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
 
     # --- Audit operations ---
 

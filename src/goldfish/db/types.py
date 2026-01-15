@@ -233,6 +233,7 @@ class BackupRow(TypedDict):
     Tracks database backups with tiered retention (GFS).
     """
 
+    id: int
     backup_id: str  # "backup-{uuid8}"
     tier: str  # "event", "daily", "weekly", "monthly"
     trigger: str  # "run", "save_version", "create_workspace", "manual", etc.
@@ -261,6 +262,7 @@ class ExperimentRecordRow(TypedDict):
     type: str  # "run" | "checkpoint"
     stage_run_id: str | None  # FK stage_runs (NULL for checkpoints)
     version: str  # FK workspace_versions
+    experiment_group: str | None  # Optional grouping for filtering
     created_at: str
 
 
