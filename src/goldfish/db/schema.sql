@@ -184,6 +184,16 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     outcome TEXT,                     -- NULL (unset), 'success', 'bad_results' - semantic result quality
     attempt_num INTEGER,              -- Groups consecutive runs; increments after outcome='success'
     svs_findings_json TEXT,           -- JSON: SVS post-run findings (stats + AI review)
+    -- State machine columns (Phase 3)
+    state TEXT CHECK(state IS NULL OR state IN ('preparing', 'building', 'launching', 'running', 'finalizing', 'completed', 'failed', 'terminated', 'canceled', 'unknown')),
+    phase TEXT,                       -- Sub-phase within state (gcs_check, docker_build, etc.)
+    termination_cause TEXT CHECK(termination_cause IS NULL OR termination_cause IN ('preempted', 'crashed', 'orphaned', 'timeout', 'ai_stopped', 'manual')),
+    state_entered_at TEXT,            -- When current state was entered (for timeout calculations)
+    phase_updated_at TEXT,            -- When phase was last updated
+    completed_with_warnings INTEGER DEFAULT 0,  -- 1 if completed with non-critical failures
+    output_sync_done INTEGER DEFAULT 0,         -- 1 if output sync completed
+    output_recording_done INTEGER DEFAULT 0,    -- 1 if output recording completed
+    gcs_outage_started TEXT,          -- When GCS outage was first detected
     FOREIGN KEY (workspace_name, version) REFERENCES workspace_versions(workspace_name, version),
     FOREIGN KEY (stage_version_id) REFERENCES stage_versions(id)
 );
@@ -196,6 +206,44 @@ CREATE INDEX IF NOT EXISTS idx_stage_runs_pipeline_run ON stage_runs(pipeline_ru
 CREATE INDEX IF NOT EXISTS idx_stage_runs_ws_stage_status ON stage_runs(workspace_name, stage_name, status);
 CREATE INDEX IF NOT EXISTS idx_stage_runs_ws_stage_attempt ON stage_runs(workspace_name, stage_name, attempt_num);
 CREATE INDEX IF NOT EXISTS idx_stage_runs_outcome ON stage_runs(outcome);
+-- Partial index for active states (used by daemon polling)
+CREATE INDEX IF NOT EXISTS idx_stage_runs_active_state ON stage_runs(state)
+    WHERE state IN ('preparing', 'building', 'launching', 'running', 'finalizing');
+
+
+-- Stage state transitions (audit trail for state machine)
+CREATE TABLE IF NOT EXISTS stage_state_transitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_run_id TEXT NOT NULL,
+    from_state TEXT NOT NULL,
+    to_state TEXT NOT NULL,
+    event TEXT NOT NULL,
+    context_json TEXT NOT NULL,       -- JSON: full EventContext
+    timestamp TEXT NOT NULL,
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_state_transitions_stage_run ON stage_state_transitions(stage_run_id);
+CREATE INDEX IF NOT EXISTS idx_state_transitions_timestamp ON stage_state_transitions(timestamp);
+
+
+-- Migration progress tracking (for safe batch migrations)
+CREATE TABLE IF NOT EXISTS migration_progress (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    migration_name TEXT NOT NULL,       -- Name of migration (e.g., "state_machine_v1")
+    started_at TEXT NOT NULL,           -- When migration started
+    completed_at TEXT,                  -- When migration completed (NULL if in progress)
+    status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'completed', 'completed_with_errors', 'failed', 'rolled_back')),
+    total_rows INTEGER,                 -- Total rows to migrate
+    migrated_rows INTEGER DEFAULT 0,    -- Rows successfully migrated
+    failed_rows INTEGER DEFAULT 0,      -- Rows that failed migration
+    last_processed_id TEXT,             -- Last successfully processed run ID
+    error TEXT,                         -- Error message if failed
+    backup_table TEXT                   -- Name of backup table
+);
+
+CREATE INDEX IF NOT EXISTS idx_migration_progress_name ON migration_progress(migration_name);
+
 
 -- Pipeline runs (group stages for one pipeline invocation)
 CREATE TABLE IF NOT EXISTS pipeline_runs (

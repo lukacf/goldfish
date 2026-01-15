@@ -109,6 +109,16 @@ class Database:
                 ("outcome", "TEXT"),  # NULL, 'success', 'bad_results' - semantic result quality
                 ("attempt_num", "INTEGER"),  # Groups consecutive runs per stage
                 ("svs_findings_json", "TEXT"),  # SVS post-run findings
+                # State machine columns (Phase 3)
+                ("state", "TEXT"),  # State machine state
+                ("phase", "TEXT"),  # Sub-phase within state
+                ("termination_cause", "TEXT"),  # Why run terminated
+                ("state_entered_at", "TEXT"),  # When current state was entered
+                ("phase_updated_at", "TEXT"),  # When phase was last updated
+                ("completed_with_warnings", "INTEGER DEFAULT 0"),  # Completed with non-critical failures
+                ("output_sync_done", "INTEGER DEFAULT 0"),  # Output sync completed
+                ("output_recording_done", "INTEGER DEFAULT 0"),  # Output recording completed
+                ("gcs_outage_started", "TEXT"),  # When GCS outage was first detected
             ],
             "signal_lineage": [
                 ("source_stage_run_id", "TEXT"),  # Upstream stage run
@@ -306,6 +316,44 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_run_tags_record
                     ON run_tags(record_id);
+
+                -- Stage state transitions (audit trail for state machine)
+                CREATE TABLE IF NOT EXISTS stage_state_transitions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stage_run_id TEXT NOT NULL,
+                    from_state TEXT NOT NULL,
+                    to_state TEXT NOT NULL,
+                    event TEXT NOT NULL,
+                    context_json TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_state_transitions_stage_run
+                    ON stage_state_transitions(stage_run_id);
+                CREATE INDEX IF NOT EXISTS idx_state_transitions_timestamp
+                    ON stage_state_transitions(timestamp);
+
+                -- Partial index for active states (used by daemon polling)
+                CREATE INDEX IF NOT EXISTS idx_stage_runs_active_state
+                    ON stage_runs(state)
+                    WHERE state IN ('preparing', 'building', 'launching', 'running', 'finalizing');
+
+                -- Migration progress tracking (for safe batch migrations)
+                CREATE TABLE IF NOT EXISTS migration_progress (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    migration_name TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'completed', 'completed_with_errors', 'failed', 'rolled_back')),
+                    total_rows INTEGER,
+                    migrated_rows INTEGER DEFAULT 0,
+                    failed_rows INTEGER DEFAULT 0,
+                    last_processed_id TEXT,
+                    error TEXT,
+                    backup_table TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_migration_progress_name
+                    ON migration_progress(migration_name);
                 """
             )
 
