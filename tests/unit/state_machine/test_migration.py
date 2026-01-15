@@ -2559,3 +2559,196 @@ class TestInvalidBackupTableNameGenerated:
         assert result["success"] is False
         assert result["errors"] == 1
         assert "Invalid backup table name" in result["error_details"][0]["error"]
+
+
+class TestCheckOrphanStatusPartialOverride:
+    """Tests for check_orphan_status with partial override parameters."""
+
+    def test_check_orphan_status_none_backend_type_with_handle(self, test_db) -> None:
+        """When backend_type is None but handle provided, should read type from DB."""
+        from unittest.mock import patch
+
+        from goldfish.state_machine.migration import check_orphan_status
+
+        # Set up workspace and version first
+        test_db.create_workspace_lineage("test", description="Test")
+        test_db.create_version("test", "v1", "tag-1", "abc123", "run")
+
+        # Insert a stage_run with GCE backend
+        with test_db._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at,
+                    backend_type, backend_handle)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "stage-partial1",
+                    "test",
+                    "v1",
+                    "train",
+                    "running",
+                    "2024-01-01T00:00:00",
+                    "gce",
+                    "my-instance",
+                ),
+            )
+
+        # Call with backend_type=None but backend_handle provided
+        # Should read backend_type from DB
+        with patch("goldfish.state_machine.migration._check_gce_orphan") as mock_gce:
+            mock_gce.return_value = {"is_orphan": True, "reason": "not_found"}
+            result = check_orphan_status(
+                test_db,
+                "stage-partial1",
+                backend_type=None,  # Will be read from DB
+                backend_handle="my-instance",  # Provided by caller
+            )
+
+        # Should have called GCE checker (read type from DB)
+        mock_gce.assert_called_once_with("my-instance")
+        assert result["is_orphan"] is True
+
+
+class TestGceInstanceNameMinLength:
+    """Tests for minimum GCE instance name length."""
+
+    def test_gce_instance_name_single_char_valid(self) -> None:
+        """Single character GCE instance name should be valid."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import _check_gce_orphan
+
+        with patch("subprocess.run") as mock_run:
+            # gcloud --format=value(status) returns just the status, not JSON
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="RUNNING",
+            )
+            result = _check_gce_orphan("a")
+
+        # Should have called gcloud (name is valid)
+        mock_run.assert_called_once()
+        assert result["is_orphan"] is False
+        assert "Instance exists with status: RUNNING" in result["reason"]
+
+    def test_gce_instance_name_starts_with_digit_invalid(self) -> None:
+        """GCE instance name starting with digit should be invalid."""
+        from goldfish.state_machine.migration import _check_gce_orphan
+
+        result = _check_gce_orphan("1invalid")
+
+        # Invalid names return is_orphan=False (not None) with descriptive reason
+        assert result["is_orphan"] is False
+        assert "Invalid GCE instance name format" in result["reason"]
+
+
+class TestDockerContainerName128Char:
+    """Tests for Docker container name at maximum length."""
+
+    def test_docker_container_name_128_chars_valid(self) -> None:
+        """128-character Docker container name should be valid."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.migration import _check_docker_orphan
+
+        # Create a valid 128-char container name (starts with letter, alphanumeric)
+        long_name = "a" + "b" * 127  # 128 chars total
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="running",
+            )
+            result = _check_docker_orphan(long_name)
+
+        # Should have called docker (name is valid)
+        mock_run.assert_called_once()
+        assert result["is_orphan"] is False
+
+    def test_docker_container_name_129_chars_invalid(self) -> None:
+        """129-character Docker container name should be invalid."""
+        from goldfish.state_machine.migration import _check_docker_orphan
+
+        long_name = "a" * 129  # 129 chars - exceeds limit
+
+        result = _check_docker_orphan(long_name)
+
+        # Invalid names return is_orphan=False (not None) with descriptive reason
+        assert result["is_orphan"] is False
+        assert "Invalid Docker container ID format" in result["reason"]
+
+
+class TestDetectTerminationCausePriority:
+    """Tests for termination cause detection priority."""
+
+    def test_preemption_takes_priority_over_crash(self) -> None:
+        """When error contains both preemption and crash keywords, PREEMPTED wins."""
+        from goldfish.state_machine.migration import detect_termination_cause
+        from goldfish.state_machine.types import TerminationCause
+
+        # Error message containing both preemption and crash/OOM keywords
+        cause = detect_termination_cause("Instance was preempted and crashed due to OOM")
+        assert cause == TerminationCause.PREEMPTED
+
+    def test_preemption_takes_priority_over_timeout(self) -> None:
+        """When error contains both preemption and timeout keywords, PREEMPTED wins."""
+        from goldfish.state_machine.migration import detect_termination_cause
+        from goldfish.state_machine.types import TerminationCause
+
+        cause = detect_termination_cause("Spot instance preempted after timeout warning")
+        assert cause == TerminationCause.PREEMPTED
+
+
+class TestMigrateRunningJobStartedAt:
+    """Tests for migrating running job started_at handling.
+
+    Note: The current schema has a NOT NULL constraint on started_at,
+    so the NULL started_at code path in migration is defensive code
+    for potential legacy data. This test verifies the normal case
+    where started_at is used for state_entered_at.
+    """
+
+    def test_running_job_uses_started_at_for_state_entered_at(self, test_db) -> None:
+        """Running job should use started_at for state_entered_at during migration."""
+        from goldfish.state_machine.migration import migrate_stage_runs
+
+        # Set up workspace and version first
+        test_db.create_workspace_lineage("test", description="Test")
+        test_db.create_version("test", "v1", "tag-1", "abc123", "run")
+
+        # Insert a running job with a specific started_at
+        started_at = "2024-06-15T10:30:00"
+        with test_db._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at,
+                    backend_type, backend_handle)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "stage-startedtest",
+                    "test",
+                    "v1",
+                    "train",
+                    "running",
+                    started_at,
+                    "local",
+                    "container-123",
+                ),
+            )
+
+        # Run migration
+        result = migrate_stage_runs(test_db, check_orphans=False)
+
+        assert result["success"] is True
+
+        # Verify state_entered_at was set to the original started_at
+        with test_db._conn() as conn:
+            row = conn.execute(
+                "SELECT state, state_entered_at FROM stage_runs WHERE id = ?",
+                ("stage-startedtest",),
+            ).fetchone()
+
+        assert row["state"] == "running"
+        assert row["state_entered_at"] == started_at

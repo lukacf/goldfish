@@ -31,6 +31,8 @@ from goldfish.state_machine.exit_code import (
     get_exit_code_docker,
     get_exit_code_gce,
 )
+from goldfish.state_machine.leader_election import DaemonLeaderElection
+from goldfish.state_machine.stage_daemon import StageDaemon
 from goldfish.state_machine.transitions import (
     ACTIVE_STATES,
     LIMBO_STATES,
@@ -86,4 +88,7 @@ __all__ = [
     "get_gcs_outage_started",
     "set_gcs_outage_started",
     "clear_gcs_outage_started",
+    # Classes - daemon
+    "DaemonLeaderElection",
+    "StageDaemon",
 ]
