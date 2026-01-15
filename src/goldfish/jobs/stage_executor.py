@@ -2149,6 +2149,9 @@ echo "Stage completed successfully"
         if "ANTHROPIC_API_KEY" in os.environ:
             goldfish_env["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
 
+        # Set HOME to writable directory - Claude CLI requires this for config files
+        goldfish_env["HOME"] = "/tmp"
+
         if backend == "local":
             # Create work directory for this run
             run_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id
@@ -2344,16 +2347,29 @@ echo "Stage completed successfully"
         with self._metrics_sync_lock:
             self._metrics_sync_state.pop(stage_run_id, None)
 
+        # Preserve meaningful error messages set before finalize (e.g., "Instance preempted")
+        # Only use logs as error if no meaningful error was already set
+        final_error = None
+        if status == StageRunStatus.FAILED:
+            # Check for existing meaningful error (set by monitor/refresh before finalize)
+            existing_error = stage_run.get("error")
+            if existing_error and not existing_error.startswith("[GCE logs unavailable"):
+                # Preserve meaningful error, optionally append log snippet
+                final_error = existing_error
+                if logs and logs != "[GCE logs unavailable - instance may have been deleted or logs not synced]":
+                    # Append last 200 chars of logs for context
+                    log_snippet = self._redact_logs(logs[-200:])
+                    final_error = f"{existing_error}\n\nLast logs:\n{log_snippet}"
+            elif logs:
+                # No meaningful error - use logs as error
+                final_error = self._redact_logs(logs[-STAGE_LOG_TAIL_FOR_FINALIZE:])
+
         self.db.update_stage_run_status(
             stage_run_id=stage_run_id,
             status=status,
             completed_at=datetime.now(UTC).isoformat(),
             log_uri=log_uri,
-            error=(
-                self._redact_logs(logs[-STAGE_LOG_TAIL_FOR_FINALIZE:])
-                if (status == StageRunStatus.FAILED and logs)
-                else None
-            ),
+            error=final_error,
             progress=StageRunProgress.FINALIZING,
         )
 
@@ -2452,17 +2468,25 @@ echo "Stage completed successfully"
                             f"(elapsed: {int(elapsed)}s, may be launching or searching capacity)"
                         )
                         last_log = now
-                    if elapsed >= not_found_timeout:
-                        # Instance disappeared - could be preemption or failed startup
-                        # Check if instance ever ran by looking at progress
-                        row = self.db.get_stage_run(stage_run_id)
-                        progress = row.get("progress") if row else None
 
-                        # Check if instance ever ran by looking at progress or GCS artifacts
-                        # Exit code in GCS proves the instance ran, even if progress wasn't updated
-                        exit_code = self.gce_launcher._get_exit_code(stage_run_id)
-                        instance_ran = progress == StageRunProgress.RUNNING or exit_code is not None
+                    # Check progress before timeout handling
+                    row = self.db.get_stage_run(stage_run_id)
+                    progress = row.get("progress") if row else None
 
+                    # Check if instance ever ran by looking at progress or GCS artifacts
+                    # Exit code in GCS proves the instance ran, even if progress wasn't updated
+                    exit_code = self.gce_launcher._get_exit_code(stage_run_id)
+                    instance_ran = progress == StageRunProgress.RUNNING or exit_code is not None
+
+                    # Use longer timeout for BUILD/LAUNCH phases (GPU provisioning can take 15+ minutes)
+                    launch_timeout = int(os.getenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "1200"))  # 20 min default
+                    effective_timeout = (
+                        launch_timeout
+                        if progress in (StageRunProgress.BUILD, StageRunProgress.LAUNCH) and not instance_ran
+                        else not_found_timeout
+                    )
+
+                    if elapsed >= effective_timeout:
                         if instance_ran:
                             # Instance ran and got preempted - finalize based on exit code
                             logger.warning(

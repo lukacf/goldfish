@@ -324,6 +324,7 @@ def test_wait_for_completion_launch_failure_no_exit_code(test_db, test_config, t
     executor.gce_launcher._get_exit_code = MagicMock(return_value=None)  # No exit code
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
+    monkeypatch.setenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "0")  # Also set launch timeout for LAUNCH phase
 
     status = executor.wait_for_completion(run_id)
 
