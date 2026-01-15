@@ -188,7 +188,9 @@ class TransitionResult:
 
     success: bool
     new_state: StageState | None = None
-    reason: str | None = None  # "ok", "not_found", "invalid_transition", "already_in_target_state"
+    reason: str | None = (
+        None  # "ok", "not_found", "state_not_set", "invalid_state", "no_transition", "stale_state", "already_in_target_state"
+    )
     details: str | None = None  # Additional error details
 
 
