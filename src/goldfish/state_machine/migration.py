@@ -796,10 +796,17 @@ def migrate_stage_runs(
 
 
 def rollback_migration(db: Database, backup_table: str | None = None) -> RollbackResult:
-    """Rollback migration by restoring state column to NULL.
+    """Rollback migration by resetting state columns to NULL.
 
-    Finds the most recent backup table (or uses provided one) and
-    restores original values.
+    This function resets state, termination_cause, and state_entered_at to NULL
+    for all rows in the backup table's scope. This returns the database to the
+    pre-migration state where those columns were unpopulated, allowing the
+    migration to be re-run.
+
+    Design note: The backup table preserves a snapshot of all column values
+    at migration start for audit purposes. The rollback intentionally resets
+    to NULL (the pre-migration state) rather than restoring from backup,
+    because the migration is designed to be idempotent and re-runnable.
 
     Args:
         db: Database instance

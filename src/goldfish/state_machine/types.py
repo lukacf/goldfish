@@ -17,7 +17,8 @@ class StageState(str, Enum):
     """All possible states for a stage run.
 
     Active states: PREPARING, BUILDING, LAUNCHING, RUNNING, FINALIZING
-    Terminal states: COMPLETED, FAILED, TERMINATED, CANCELED, UNKNOWN
+    Terminal states: COMPLETED, FAILED, TERMINATED, CANCELED
+    Limbo states: UNKNOWN (for runs in indeterminate state, auto-cleanup after 24h)
     """
 
     # Active states
@@ -32,6 +33,8 @@ class StageState(str, Enum):
     FAILED = "failed"
     TERMINATED = "terminated"
     CANCELED = "canceled"
+
+    # Limbo state (not terminal - can transition out via timeout or admin actions)
     UNKNOWN = "unknown"
 
 
