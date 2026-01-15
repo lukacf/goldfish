@@ -104,22 +104,27 @@ class TestBuildImageBackendSelection:
         builder = DockerBuilder(config=mock_config_with_gce, db=mock_db)
 
         # Mock successful cloud build submission and completion
-        with patch("subprocess.run") as mock_run:
-            # First call: gcloud builds submit
-            submit_response = {
-                "id": "cloud-build-123",
-                "status": "QUEUED",
-            }
-            # Second call: gcloud builds describe (polling)
-            describe_response = {
-                "status": "SUCCESS",
-                "logUrl": "https://console.cloud.google.com/logs/build-123",
-            }
-            mock_run.side_effect = [
-                MagicMock(returncode=0, stdout=json.dumps(submit_response), stderr=""),
-                MagicMock(returncode=0, stdout=json.dumps(describe_response), stderr=""),
-            ]
+        def mock_subprocess(cmd, **kwargs):
+            # Image existence check - return not found to trigger build
+            if "artifacts" in cmd and "describe" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
+            # Cloud Build submission
+            if "builds" in cmd and "submit" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"id": "cloud-build-123", "status": "QUEUED"}),
+                    stderr="",
+                )
+            # Cloud Build polling
+            if "builds" in cmd and "describe" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"status": "SUCCESS", "logUrl": "https://logs.url"}),
+                    stderr="",
+                )
+            return MagicMock(returncode=0)
 
+        with patch("subprocess.run", side_effect=mock_subprocess):
             result = builder.build_image(
                 workspace_dir=workspace_dir,
                 workspace_name="test_ws",
@@ -145,6 +150,9 @@ class TestCloudBuildSubmission:
         captured_config = {}
 
         def capture_submit(cmd, **kwargs):
+            # Image existence check - return not found to trigger build
+            if "artifacts" in cmd and "describe" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
             # Find the cloudbuild.yaml path from the command
             if "builds" in cmd and "submit" in cmd:
                 for i, arg in enumerate(cmd):
@@ -196,9 +204,14 @@ class TestCloudBuildSubmission:
         """Cloud build submission failure should raise CloudBuildError."""
         builder = DockerBuilder(config=mock_config_with_gce, db=mock_db)
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="Permission denied")
+        def mock_subprocess(cmd, **kwargs):
+            # Image existence check - return not found to trigger build
+            if "artifacts" in cmd and "describe" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
+            # Submission fails with permission denied
+            return MagicMock(returncode=1, stdout="", stderr="Permission denied")
 
+        with patch("subprocess.run", side_effect=mock_subprocess):
             with pytest.raises(CloudBuildError) as exc_info:
                 builder.build_image(
                     workspace_dir=workspace_dir,
@@ -220,6 +233,9 @@ class TestCloudBuildPolling:
         call_count = [0]
 
         def mock_subprocess(cmd, **kwargs):
+            # Image existence check - return not found to trigger build
+            if "artifacts" in cmd and "describe" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
             if "builds" in cmd and "submit" in cmd:
                 return MagicMock(
                     returncode=0,
@@ -262,6 +278,9 @@ class TestCloudBuildPolling:
         builder = DockerBuilder(config=mock_config_with_gce, db=mock_db)
 
         def mock_subprocess(cmd, **kwargs):
+            # Image existence check - return not found to trigger build
+            if "artifacts" in cmd and "describe" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
             if "builds" in cmd and "submit" in cmd:
                 return MagicMock(
                     returncode=0,
@@ -305,6 +324,9 @@ class TestCloudBuildPolling:
         mock_config_with_gce.docker.cloud_build.timeout_minutes = 0.01
 
         def mock_subprocess(cmd, **kwargs):
+            # Image existence check - return not found to trigger build
+            if "artifacts" in cmd and "describe" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
             if "builds" in cmd and "submit" in cmd:
                 return MagicMock(
                     returncode=0,
@@ -342,6 +364,9 @@ class TestCloudBuildDatabaseTracking:
         builder = DockerBuilder(config=mock_config_with_gce, db=mock_db)
 
         def mock_subprocess(cmd, **kwargs):
+            # Image existence check - return not found to trigger build
+            if "artifacts" in cmd and "describe" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
             if "builds" in cmd and "submit" in cmd:
                 return MagicMock(
                     returncode=0,
@@ -378,6 +403,9 @@ class TestCloudBuildDatabaseTracking:
         builder = DockerBuilder(config=mock_config_with_gce, db=mock_db)
 
         def mock_subprocess(cmd, **kwargs):
+            # Image existence check - return not found to trigger build
+            if "artifacts" in cmd and "describe" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
             if "builds" in cmd and "submit" in cmd:
                 return MagicMock(
                     returncode=0,
@@ -412,6 +440,9 @@ class TestCloudBuildDatabaseTracking:
         builder = DockerBuilder(config=mock_config_with_gce, db=mock_db)
 
         def mock_subprocess(cmd, **kwargs):
+            # Image existence check - return not found to trigger build
+            if "artifacts" in cmd and "describe" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
             if "builds" in cmd and "submit" in cmd:
                 return MagicMock(
                     returncode=0,
@@ -459,6 +490,9 @@ class TestCloudBuildCaching:
         captured_cloudbuild = {}
 
         def mock_subprocess(cmd, **kwargs):
+            # Image existence check - return not found to trigger build
+            if "artifacts" in cmd and "describe" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
             if "builds" in cmd and "submit" in cmd:
                 for i, arg in enumerate(cmd):
                     if arg == "--config":
@@ -510,6 +544,9 @@ class TestCloudBuildCaching:
         captured_cloudbuild = {}
 
         def mock_subprocess(cmd, **kwargs):
+            # Image existence check - return not found to trigger build
+            if "artifacts" in cmd and "describe" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="NOT_FOUND")
             if "builds" in cmd and "submit" in cmd:
                 for i, arg in enumerate(cmd):
                     if arg == "--config":
@@ -547,3 +584,132 @@ class TestCloudBuildCaching:
         assert len(build_steps) > 0
         build_args = " ".join(str(a) for a in build_steps[0]["args"])
         assert "--no-cache" in build_args
+
+
+class TestCloudBuildImageExistsCheck:
+    """Tests for skipping builds when image already exists in registry."""
+
+    def test_skips_build_if_image_exists_in_registry(
+        self, workspace_dir: Path, mock_config_with_gce: GoldfishConfig, mock_db
+    ):
+        """Should skip Cloud Build if image already exists in Artifact Registry."""
+        builder = DockerBuilder(config=mock_config_with_gce, db=mock_db)
+
+        call_log = []
+
+        def mock_subprocess(cmd, **kwargs):
+            call_log.append(cmd)
+            # gcloud artifacts docker images describe should succeed (image exists)
+            if "artifacts" in cmd and "describe" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"image_summary": {"digest": "sha256:abc123"}}),
+                    stderr="",
+                )
+            # If we get here with builds submit, it means we didn't skip - fail the test
+            if "builds" in cmd and "submit" in cmd:
+                return MagicMock(returncode=0, stdout=json.dumps({"id": "build-123"}), stderr="")
+            if "builds" in cmd and "describe" in cmd:
+                return MagicMock(returncode=0, stdout=json.dumps({"status": "SUCCESS"}), stderr="")
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=mock_subprocess):
+            result = builder.build_image(
+                workspace_dir=workspace_dir,
+                workspace_name="test_ws",
+                version="v1",
+                backend="cloud",
+                wait=True,
+            )
+
+        # Should return registry tag
+        assert "goldfish-test_ws-v1" in result
+
+        # Should NOT have called gcloud builds submit (skipped the build)
+        submit_calls = [c for c in call_log if "builds" in c and "submit" in c]
+        assert len(submit_calls) == 0, "Should not call builds submit when image exists"
+
+        # Should have checked if image exists
+        describe_calls = [c for c in call_log if "artifacts" in c and "describe" in c]
+        assert len(describe_calls) == 1, "Should check if image exists"
+
+    def test_builds_if_image_does_not_exist(self, workspace_dir: Path, mock_config_with_gce: GoldfishConfig, mock_db):
+        """Should proceed with Cloud Build if image does not exist."""
+        builder = DockerBuilder(config=mock_config_with_gce, db=mock_db)
+
+        call_log = []
+
+        def mock_subprocess(cmd, **kwargs):
+            call_log.append(cmd)
+            # Image does not exist - describe returns error
+            if "artifacts" in cmd and "describe" in cmd:
+                return MagicMock(
+                    returncode=1,
+                    stdout="",
+                    stderr="NOT_FOUND: image not found",
+                )
+            # Cloud Build submission and completion
+            if "builds" in cmd and "submit" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"id": "cloud-build-123"}),
+                    stderr="",
+                )
+            if "builds" in cmd and "describe" in cmd:
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"status": "SUCCESS", "logUrl": "url"}),
+                    stderr="",
+                )
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=mock_subprocess):
+            result = builder.build_image(
+                workspace_dir=workspace_dir,
+                workspace_name="test_ws",
+                version="v1",
+                backend="cloud",
+                wait=True,
+            )
+
+        # Should return registry tag
+        assert "goldfish-test_ws-v1" in result
+
+        # Should have called gcloud builds submit (did the build)
+        submit_calls = [c for c in call_log if "builds" in c and "submit" in c]
+        assert len(submit_calls) == 1, "Should call builds submit when image doesn't exist"
+
+    def test_image_exists_check_uses_correct_tag(
+        self, workspace_dir: Path, mock_config_with_gce: GoldfishConfig, mock_db
+    ):
+        """Should check for the correct image tag in Artifact Registry."""
+        builder = DockerBuilder(config=mock_config_with_gce, db=mock_db)
+
+        checked_image = []
+
+        def mock_subprocess(cmd, **kwargs):
+            if "artifacts" in cmd and "describe" in cmd:
+                # Capture which image was checked
+                for arg in cmd:
+                    if "goldfish-" in arg:
+                        checked_image.append(arg)
+                return MagicMock(
+                    returncode=0,
+                    stdout=json.dumps({"digest": "sha256:abc"}),
+                    stderr="",
+                )
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=mock_subprocess):
+            builder.build_image(
+                workspace_dir=workspace_dir,
+                workspace_name="my_workspace",
+                version="v42",
+                backend="cloud",
+                wait=True,
+            )
+
+        assert len(checked_image) == 1
+        # Tag should be properly formed from workspace name and version
+        assert "goldfish-my_workspace-v42" in checked_image[0]
+        assert "us-docker.pkg.dev/my-gcp-project/goldfish" in checked_image[0]
