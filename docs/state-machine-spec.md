@@ -1053,28 +1053,52 @@ The container-side polling is already implemented - just need to add "stop" comm
 
 ---
 
-## Container Boundary (Known Limitation)
+## Container ↔ Outside Communication
 
-### The Problem
+### Bidirectional Metadata Bus
 
-SVS events that happen **inside** the container cannot directly emit events to the state machine running **outside**:
+The GCP instance metadata system provides **bidirectional** communication:
 
-- Schema validation in `save_output()` - runs inside container
-- During-run SVS findings - written to `.goldfish/` files
-- Stats computation - runs inside container
+**Outside → Container (daemon triggers container):**
+```python
+# Daemon sets signal
+metadata_bus.set_signal("goldfish", MetadataSignal(command="sync", request_id=uuid4().hex, ...))
 
-### Current Approach
+# Container polls (shell script in startup_builder.py)
+# curl http://metadata.google.internal/computeMetadata/v1/instance/attributes/goldfish
+```
 
-Container-side SVS writes to files:
-- `.goldfish/svs_stats.json`
-- `.goldfish/svs_findings.json`
-- `.goldfish/svs_findings_during.json`
+**Container → Outside (container acknowledges, uploads):**
+```bash
+# Container sets ACK (from metadata_syncer_section in startup_builder.py)
+gcloud compute instances add-metadata "$INSTANCE_NAME" \
+    --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \
+    --metadata "goldfish_ack=$REQ_ID"
 
-These are read during FINALIZING phase (post-execution).
+# Daemon polls for ACK
+ack = metadata_bus.get_ack("goldfish", target=instance_name)
+```
 
-### Future Enhancement
+### Container-Side Event Emission
 
-Container-side event bus (`.goldfish/events.jsonl`) that daemon polls for real-time event emission. Not in scope for Phase 1.
+The container CAN emit events to the outside:
+
+1. **Via Metadata**: Container sets `goldfish_ack` or custom metadata keys that daemon polls
+2. **Via GCS Files**: Container writes to GCS, daemon polls:
+   - `.goldfish/svs_findings_during.json` - real-time SVS findings
+   - `.goldfish/metrics.json` - training metrics
+   - `exit_code.txt` - completion status
+
+### Current SVS Pattern
+
+The "Overdrive" system already provides on-demand sync:
+1. Daemon sets `MetadataSignal(command="sync", ...)`
+2. Container polls, sees new request_id
+3. Container sets ACK immediately (tells daemon "I received it")
+4. Container uploads metrics/SVS files to GCS
+5. Daemon polls ACK, then reads GCS files
+
+This same pattern works for any container→outside event emission. The container writes state to GCS or metadata, daemon polls and emits corresponding state machine events.
 
 ---
 
