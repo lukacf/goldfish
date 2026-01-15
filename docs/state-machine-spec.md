@@ -1,12 +1,13 @@
 # Stage Execution State Machine Specification
 
-> **Status**: Draft
+> **Status**: Draft v2 (Post-Review)
 > **Author**: Claude + Luka
 > **Created**: 2025-01-15
+> **Updated**: 2025-01-15
 
 ## Overview
 
-This document specifies a hierarchical state machine to replace the current ad-hoc state management in Goldfish stage execution. The goal is to eliminate state synchronization bugs, provide full audit trails, and enable reliable ghost run cleanup.
+This document specifies a state machine to replace the ad-hoc state management in Goldfish stage execution. The design incorporates feedback from critical review identifying race conditions, migration risks, and over-engineering concerns.
 
 ### Problems Being Solved
 
@@ -14,23 +15,35 @@ This document specifies a hierarchical state machine to replace the current ad-h
 2. **False Exit Code Detection**: `_get_exit_code()` returns `1` when file doesn't exist, causing false failures
 3. **Lost State Tracking**: Runs complete successfully but database state never updates
 4. **State Desync**: `status` and `progress` columns managed independently, can get out of sync
-5. **Scattered Updates**: 14+ places in code that mutate status with subtly different logic
+5. **Scattered Updates**: 70+ places in code that read/write status with subtly different logic
 6. **No Audit Trail**: No record of state transitions for debugging
+7. **Race Conditions**: Daemon and MCP tools can finalize simultaneously with no CAS protection
 
 ### Design Principles
 
 1. **Single Source of Truth**: State machine owns the state. No scattered updates.
 2. **Event-Driven**: External systems emit events. State machine processes them.
-3. **Explicit Transitions**: Every valid state change is documented in a transition table.
-4. **Hierarchical**: Top-level states have sub-states for fine-grained observability.
+3. **Explicit Transitions**: Every valid state change documented in transition table.
+4. **CAS Semantics**: All transitions use compare-and-swap to prevent races.
 5. **Fail Loudly**: Invalid transitions raise errors during development.
 6. **Full Audit**: Every transition recorded with timestamp, event, and context.
+7. **TDD**: Comprehensive test suite written before implementation.
+8. **Incremental Migration**: Backwards compatibility layer during transition.
+
+### Non-Goals (Deferred)
+
+- **Auto-recovery from PREEMPTED/ORPHANED** - Future roadmap item
+- **AI-initiated stop (STOPPED state)** - Deferred until trigger mechanism exists
+- **Intelligent timeout detection** - Separate problem; use sensible defaults for now
+- **Daemon implementation** - Spec the interface; implement after state machine is solid
 
 ---
 
 ## State Model
 
-### Top-Level States
+### Top-Level States (Simplified)
+
+Based on review feedback, we reduce terminal states from 7 to 5. The distinction between CRASHED/PREEMPTED/ORPHANED doesn't change user action (all require manual retry), so we capture specifics in `termination_cause` field instead.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -45,153 +58,121 @@ This document specifies a hierarchical state machine to replace the current ad-h
 │                          TERMINAL STATES                                │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  COMPLETED    │ Successful completion                                   │
-│  FAILED       │ Explicit failure (build, code, validation)              │
-│  PREEMPTED    │ Spot instance preempted (terminal, future: retryable)   │
-│  CRASHED      │ Instance disappeared without exit code                  │
+│  FAILED       │ Explicit failure (build, code, validation, SVS block)   │
+│  TERMINATED   │ Infrastructure death (preemption, crash, orphan, timeout)│
 │  CANCELED     │ User-initiated cancellation                             │
-│  STOPPED      │ AI-initiated stop (during-run SVS detected issue)       │
-│  ORPHANED     │ Lost track of instance (ghost run detection)            │
+│  UNKNOWN      │ Fallback for migration edge cases                       │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Hierarchical Sub-States
-
-Each active top-level state has sub-states for detailed progress tracking.
-
-#### PREPARING Sub-States
+### Termination Cause (for TERMINATED state)
 
 ```python
-class PreparingPhase(str, Enum):
-    GCS_CHECK = "gcs_check"              # Verify GCS access
-    VERSIONING = "versioning"            # Sync + commit + tag
-    PIPELINE_LOAD = "pipeline_load"      # Load pipeline.yaml
-    SVS_PREFLIGHT = "svs_preflight"      # Mechanistic validation
-    CONFIG_LOAD = "config_load"          # Load stage config
-    RECORD_CREATE = "record_create"      # Create DB record
-    INPUT_RESOLVE = "input_resolve"      # Resolve input sources
-    PRE_RUN_REVIEW = "pre_run_review"    # AI code review
-    RECORD_UPDATE = "record_update"      # Update with resolved values
+class TerminationCause(str, Enum):
+    PREEMPTED = "preempted"       # Spot instance preempted (detected via GCE API)
+    CRASHED = "crashed"           # Instance died without exit code
+    ORPHANED = "orphaned"         # Lost track of instance (timeout, no evidence of run)
+    TIMEOUT = "timeout"           # Exceeded configured timeout threshold
+    AI_STOPPED = "ai_stopped"     # Future: AI requested stop
 ```
 
-#### BUILDING Sub-States
+### Progress Phase (Observability, Not State)
+
+Sub-phases are **metadata for observability**, not true states with their own transition tables. They indicate "what's happening within this state" but don't affect transition logic.
 
 ```python
-class BuildingPhase(str, Enum):
-    IMAGE_CHECK = "image_check"          # Check if image exists
-    DOCKERFILE_GEN = "dockerfile_gen"    # Generate Dockerfile
-    DOCKER_BUILD = "docker_build"        # Execute docker build
-    IMAGE_TAG = "image_tag"              # Tag image
-```
+class ProgressPhase(str, Enum):
+    # PREPARING phases
+    GCS_CHECK = "gcs_check"
+    VERSIONING = "versioning"
+    PIPELINE_LOAD = "pipeline_load"
+    SVS_PREFLIGHT = "svs_preflight"
+    CONFIG_LOAD = "config_load"
+    INPUT_RESOLVE = "input_resolve"
+    PRE_RUN_REVIEW = "pre_run_review"
 
-#### LAUNCHING Sub-States
+    # BUILDING phases
+    IMAGE_CHECK = "image_check"
+    DOCKER_BUILD = "docker_build"
 
-```python
-class LaunchingPhase(str, Enum):
-    ENTRYPOINT_GEN = "entrypoint_gen"    # Generate startup script
-    INSTANCE_CREATE = "instance_create"  # Create GCE instance / container
-    INSTANCE_PROVISIONING = "provisioning"  # GCE: PROVISIONING state
-    INSTANCE_STAGING = "staging"         # GCE: STAGING state
-    INSTANCE_STARTING = "starting"       # Container starting
-```
+    # LAUNCHING phases
+    INSTANCE_CREATE = "instance_create"
+    INSTANCE_PROVISIONING = "instance_provisioning"
+    INSTANCE_STAGING = "instance_staging"
 
-#### RUNNING Sub-States
+    # RUNNING phases
+    CONTAINER_INIT = "container_init"
+    CODE_EXECUTION = "code_execution"
 
-```python
-class RunningPhase(str, Enum):
-    CONTAINER_INIT = "container_init"    # goldfish.io bootstrap
-    CODE_EXECUTION = "code_execution"    # User code running
-    # Note: Schema validation, stats computation, and during-run SVS
-    # happen within CODE_EXECUTION but are tracked via events, not sub-states
-```
-
-#### FINALIZING Sub-States
-
-```python
-class FinalizingPhase(str, Enum):
-    OUTPUT_SYNC = "output_sync"          # Sync outputs to GCS
-    OUTPUT_RECORDING = "output_recording"  # Record in signal_lineage
-    LOG_FETCH = "log_fetch"              # Fetch logs from GCS/container
-    METRICS_COLLECTION = "metrics_collection"  # Collect metrics.jsonl
-    AUTO_RESULTS = "auto_results"        # Extract auto-results
-    POST_RUN_REVIEW = "post_run_review"  # AI output review
-    SVS_MANIFEST = "svs_manifest"        # Collect SVS findings
-    PATTERN_EXTRACT = "pattern_extract"  # Extract failure patterns
-    CLEANUP = "cleanup"                  # Delete instance/container
+    # FINALIZING phases
+    OUTPUT_SYNC = "output_sync"
+    OUTPUT_RECORDING = "output_recording"
+    LOG_FETCH = "log_fetch"
+    METRICS_COLLECTION = "metrics_collection"
+    POST_RUN_REVIEW = "post_run_review"
+    CLEANUP = "cleanup"
 ```
 
 ---
 
 ## Event Model
 
-### Event Categories
-
-#### Progress Events
+### Events
 
 ```python
-# Phase completion
-PHASE_COMPLETE = "phase_complete"    # Sub-phase completed successfully
-PHASE_FAIL = "phase_fail"            # Sub-phase failed
+class StageEvent(str, Enum):
+    # Progress events
+    PREPARE_COMPLETE = "prepare_complete"    # All preparation done
+    BUILD_START = "build_start"              # Starting Docker build
+    BUILD_OK = "build_ok"                    # Build succeeded
+    BUILD_FAIL = "build_fail"                # Build failed
+    LAUNCH_OK = "launch_ok"                  # Instance/container running
+    FINALIZE_START = "finalize_start"        # Starting finalization
+    FINALIZE_OK = "finalize_ok"              # Finalization complete
+    FINALIZE_FAIL = "finalize_fail"          # Critical finalization failed
 
-# Build events
-BUILD_START = "build_start"
-BUILD_OK = "build_ok"
-BUILD_FAIL = "build_fail"
+    # Exit events (CRITICAL: must distinguish these!)
+    EXIT_SUCCESS = "exit_success"            # exit_code.txt exists, value=0
+    EXIT_FAILURE = "exit_failure"            # exit_code.txt exists, value!=0
+    EXIT_MISSING = "exit_missing"            # exit_code.txt does NOT exist
 
-# Instance lifecycle (from GCE API / Docker)
-INSTANCE_PROVISIONING = "instance_provisioning"
-INSTANCE_STAGING = "instance_staging"
-INSTANCE_RUNNING = "instance_running"
-INSTANCE_TERMINATED = "instance_terminated"
-INSTANCE_NOT_FOUND = "instance_not_found"
+    # Failure/termination events
+    SVS_BLOCK = "svs_block"                  # SVS preflight or pre-run review blocked
+    INSTANCE_LOST = "instance_lost"          # Instance gone, termination_cause in context
+
+    # User events
+    USER_CANCEL = "user_cancel"
+
+    # Admin events
+    FORCE_TERMINATE = "force_terminate"      # Admin override for stuck runs
+    FORCE_COMPLETE = "force_complete"        # Admin override to mark complete
 ```
 
-#### Exit Events
+### Event Context
 
 ```python
-# Exit code detection (CRITICAL: must distinguish these!)
-EXIT_CODE_0 = "exit_code_0"              # exit_code.txt exists, value=0
-EXIT_CODE_NONZERO = "exit_code_nonzero"  # exit_code.txt exists, value!=0
-EXIT_CODE_MISSING = "exit_code_missing"  # exit_code.txt does NOT exist
-```
+@dataclass
+class EventContext:
+    """Context attached to each event for audit and decision-making."""
+    timestamp: datetime
+    source: str                              # 'mcp_tool', 'daemon', 'container', 'admin'
 
-#### SVS Events
+    # Exit context
+    exit_code: int | None = None
+    exit_code_exists: bool = False           # CRITICAL: distinguishes missing from failure
 
-```python
-# Pre-execution SVS
-SVS_PREFLIGHT_PASS = "svs_preflight_pass"
-SVS_PREFLIGHT_BLOCK = "svs_preflight_block"
-PRE_RUN_REVIEW_PASS = "pre_run_review_pass"
-PRE_RUN_REVIEW_BLOCK = "pre_run_review_block"
+    # Termination context
+    termination_cause: TerminationCause | None = None
 
-# During execution SVS (informational, not state-changing unless stop requested)
-SCHEMA_VALIDATION_PASS = "schema_validation_pass"
-SCHEMA_VALIDATION_WARN = "schema_validation_warn"
-SCHEMA_VALIDATION_BLOCK = "schema_validation_block"
-DURING_RUN_FINDING = "during_run_finding"
-DURING_RUN_STOP_REQUEST = "during_run_stop_request"
+    # Error context
+    error_message: str | None = None
 
-# Post execution SVS (informational)
-POST_RUN_REVIEW_COMPLETE = "post_run_review_complete"
-```
+    # Progress context
+    phase: ProgressPhase | None = None
 
-#### Failure Events
-
-```python
-PREEMPTION = "preemption"        # Spot instance preempted
-TIMEOUT = "timeout"              # Heartbeat timeout exceeded
-CRASH = "crash"                  # Instance gone, no exit code
-```
-
-#### User Events
-
-```python
-USER_CANCEL = "user_cancel"      # User requested cancellation
-```
-
-#### Recovery Events
-
-```python
-RECOVER = "recover"              # Retry orphaned run (future)
+    # SVS context
+    svs_decision: str | None = None          # 'approved', 'blocked', 'warning'
+    svs_findings: list[dict] | None = None
 ```
 
 ---
@@ -201,339 +182,547 @@ RECOVER = "recover"              # Retry orphaned run (future)
 ### Core Transitions
 
 ```
-From State    | Event                  | To State    | Guard/Notes
---------------|------------------------|-------------|---------------------------
-PREPARING     | SVS_PREFLIGHT_BLOCK    | FAILED      | Preflight validation failed
-PREPARING     | PRE_RUN_REVIEW_BLOCK   | FAILED      | AI review blocked run
-PREPARING     | PHASE_FAIL             | FAILED      | Any preparation phase failed
-PREPARING     | BUILD_START            | BUILDING    | Preparation complete
-PREPARING     | USER_CANCEL            | CANCELED    |
-              |                        |             |
-BUILDING      | BUILD_OK               | LAUNCHING   |
-BUILDING      | BUILD_FAIL             | FAILED      |
-BUILDING      | USER_CANCEL            | CANCELED    |
-BUILDING      | TIMEOUT                | FAILED      | Build timeout exceeded
-              |                        |             |
-LAUNCHING     | INSTANCE_RUNNING       | RUNNING     | Instance/container up
-LAUNCHING     | PREEMPTION             | PREEMPTED   | Preempted during launch
-LAUNCHING     | TIMEOUT                | ORPHANED    | Guard: no exit_code exists
-LAUNCHING     | TIMEOUT                | FAILED      | Guard: exit_code exists (rare)
-LAUNCHING     | USER_CANCEL            | CANCELED    |
-              |                        |             |
-RUNNING       | EXIT_CODE_0            | FINALIZING  | Successful exit
-RUNNING       | EXIT_CODE_NONZERO      | FAILED      | Non-zero exit code
-RUNNING       | EXIT_CODE_MISSING      | CRASHED     | No exit code = crashed
-RUNNING       | PREEMPTION             | PREEMPTED   |
-RUNNING       | DURING_RUN_STOP_REQUEST| STOPPED     | AI requested stop
-RUNNING       | TIMEOUT                | ORPHANED    | Guard: no exit_code
-RUNNING       | TIMEOUT                | CRASHED     | Guard: instance terminated
-RUNNING       | USER_CANCEL            | CANCELED    |
-              |                        |             |
-FINALIZING    | PHASE_COMPLETE         | COMPLETED   | All finalization done
-FINALIZING    | PHASE_FAIL             | FAILED      | Critical finalization failed
-FINALIZING    | USER_CANCEL            | CANCELED    | (outputs may be partial)
-              |                        |             |
-ORPHANED      | RECOVER                | PREPARING   | Future: retry mechanism
+From State    | Event              | To State    | Guard                    | Notes
+--------------|--------------------| ------------|--------------------------|------------------
+PREPARING     | SVS_BLOCK          | FAILED      |                          | Preflight or pre-run blocked
+PREPARING     | BUILD_START        | BUILDING    |                          | Preparation complete
+PREPARING     | USER_CANCEL        | CANCELED    |                          |
+PREPARING     | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
+              |                    |             |                          |
+BUILDING      | BUILD_OK           | LAUNCHING   |                          |
+BUILDING      | BUILD_FAIL         | FAILED      |                          |
+BUILDING      | USER_CANCEL        | CANCELED    |                          |
+BUILDING      | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
+              |                    |             |                          |
+LAUNCHING     | LAUNCH_OK          | RUNNING     |                          | Instance confirmed running
+LAUNCHING     | INSTANCE_LOST      | TERMINATED  |                          | Preemption, timeout, etc.
+LAUNCHING     | USER_CANCEL        | CANCELED    |                          |
+LAUNCHING     | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
+              |                    |             |                          |
+RUNNING       | EXIT_SUCCESS       | FINALIZING  |                          | exit_code.txt=0
+RUNNING       | EXIT_FAILURE       | FAILED      |                          | exit_code.txt!=0
+RUNNING       | EXIT_MISSING       | TERMINATED  | cause=CRASHED            | No exit code written
+RUNNING       | INSTANCE_LOST      | TERMINATED  |                          | Preemption, timeout, etc.
+RUNNING       | USER_CANCEL        | CANCELED    |                          |
+RUNNING       | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
+              |                    |             |                          |
+FINALIZING    | FINALIZE_OK        | COMPLETED   |                          | All finalization done
+FINALIZING    | FINALIZE_FAIL      | FAILED      | critical=True            | Critical step failed
+FINALIZING    | FINALIZE_FAIL      | COMPLETED   | critical=False           | Non-critical, still complete
+FINALIZING    | USER_CANCEL        | CANCELED    |                          | Partial outputs possible
+FINALIZING    | FORCE_COMPLETE     | COMPLETED   |                          | Admin override
+FINALIZING    | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
 ```
 
-### SVS Enforcement Behavior
+### Finalization Criticality
 
-SVS validation failures are configurable per-check type. The enforcement level determines whether a validation failure emits a blocking event or just a warning.
+Not all finalization failures should cause FAILED:
 
-```yaml
-# Example configuration (goldfish.yaml)
-svs:
-  enabled: true
-  enforcement:
-    preflight: blocking        # SVS_PREFLIGHT_BLOCK → FAILED
-    pre_run_review: blocking   # PRE_RUN_REVIEW_BLOCK → FAILED
-    schema_validation: warning # SCHEMA_VALIDATION_WARN (no state change)
-    during_run: warning        # DURING_RUN_FINDING (logged only)
-    post_run: silent           # POST_RUN_REVIEW_COMPLETE (informational)
-```
+| Phase | Critical? | On Failure |
+|-------|-----------|------------|
+| OUTPUT_SYNC | Yes | FAILED - user's work is lost |
+| OUTPUT_RECORDING | Yes | FAILED - provenance broken |
+| LOG_FETCH | No | COMPLETED with warning |
+| METRICS_COLLECTION | No | COMPLETED with warning |
+| POST_RUN_REVIEW | No | COMPLETED with warning |
+| CLEANUP | No | COMPLETED with warning |
 
-When `enforcement=blocking`, the corresponding `*_BLOCK` event is emitted and triggers a transition to FAILED. When `enforcement=warning` or `silent`, only informational events are emitted (no state transition).
+### FINALIZING Timeout
+
+Add maximum FINALIZING duration (default: 30 minutes). If exceeded:
+- If OUTPUT_SYNC and OUTPUT_RECORDING completed: COMPLETED with warning
+- Otherwise: FAILED with "finalization timeout"
 
 ---
 
-## State Diagram
+## CAS (Compare-And-Swap) Semantics
 
-```
-                                    USER_CANCEL (from any active state)
-                                              │
-                                              ▼
-                                        ┌──────────┐
-                                        │ CANCELED │
-                                        └──────────┘
+**All state transitions MUST use CAS to prevent race conditions.**
 
-┌───────────┐                                              ┌───────────┐
-│  PENDING  │─────────────────────────────────────────────▶│  FAILED   │
-└───────────┘  SVS_PREFLIGHT_BLOCK / PRE_RUN_REVIEW_BLOCK  └───────────┘
-      │                                                          ▲
-      │ (implicit: record created)                               │
-      ▼                                                          │
-┌───────────┐  BUILD_FAIL                                        │
-│ PREPARING │────────────────────────────────────────────────────┤
-└───────────┘                                                    │
-      │                                                          │
-      │ BUILD_START                                              │
-      ▼                                                          │
-┌───────────┐  BUILD_FAIL                                        │
-│ BUILDING  │────────────────────────────────────────────────────┤
-└───────────┘                                                    │
-      │                                                          │
-      │ BUILD_OK                                                 │
-      ▼                                                          │
-┌───────────┐  PREEMPTION    ┌───────────┐                       │
-│ LAUNCHING │───────────────▶│ PREEMPTED │                       │
-└───────────┘                └───────────┘                       │
-      │                                                          │
-      │ INSTANCE_RUNNING           TIMEOUT (no exit code)        │
-      │                                   │                      │
-      ▼                                   ▼                      │
-┌───────────┐  EXIT_CODE_NONZERO   ┌───────────┐                 │
-│  RUNNING  │─────────────────────▶│  FAILED   │◀────────────────┤
-└───────────┘                      └───────────┘                 │
-      │                                   ▲                      │
-      │                                   │                      │
-      │ EXIT_CODE_MISSING                 │                      │
-      │         │                         │                      │
-      │         ▼                         │                      │
-      │   ┌───────────┐                   │                      │
-      │   │  CRASHED  │                   │                      │
-      │   └───────────┘                   │                      │
-      │                                   │                      │
-      │ DURING_RUN_STOP_REQUEST           │                      │
-      │         │                         │                      │
-      │         ▼                         │                      │
-      │   ┌───────────┐                   │                      │
-      │   │  STOPPED  │                   │                      │
-      │   └───────────┘                   │                      │
-      │                                   │                      │
-      │ PREEMPTION                        │                      │
-      │         │                         │                      │
-      │         ▼                         │                      │
-      │   ┌───────────┐                   │                      │
-      │   │ PREEMPTED │                   │                      │
-      │   └───────────┘                   │                      │
-      │                                   │                      │
-      │ TIMEOUT (no exit code)            │                      │
-      │         │                         │                      │
-      │         ▼                         │                      │
-      │   ┌───────────┐  RECOVER          │                      │
-      │   │ ORPHANED  │─────────▶ PREPARING (future)             │
-      │   └───────────┘                   │                      │
-      │                                   │                      │
-      │ EXIT_CODE_0                       │                      │
-      ▼                                   │                      │
-┌─────────────┐  PHASE_FAIL              │                      │
-│ FINALIZING  │──────────────────────────┘                      │
-└─────────────┘                                                  │
-      │                                                          │
-      │ PHASE_COMPLETE                                           │
-      ▼                                                          │
-┌───────────┐                                                    │
-│ COMPLETED │                                                    │
-└───────────┘                                                    │
-```
+### The Problem
 
----
+Without CAS:
+1. User calls `cancel()`, state becomes CANCELED
+2. Daemon poll (1 second later) finds exit_code=0
+3. Daemon overwrites state to COMPLETED
+4. User's cancel is silently undone
 
-## Database Schema
-
-### New Table: `stage_state_transitions`
-
-Records every state transition for audit trail and debugging.
-
-```sql
-CREATE TABLE stage_state_transitions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    stage_run_id TEXT NOT NULL REFERENCES stage_runs(id),
-
-    -- Transition details
-    from_state TEXT NOT NULL,
-    from_phase TEXT,              -- Sub-state (nullable)
-    event TEXT NOT NULL,
-    to_state TEXT NOT NULL,
-    to_phase TEXT,                -- Sub-state (nullable)
-
-    -- Context
-    context_json TEXT,            -- Event-specific data (exit_code, error, etc.)
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-
-    -- Indexes
-    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id)
-);
-
-CREATE INDEX idx_stage_transitions_run ON stage_state_transitions(stage_run_id, created_at);
-CREATE INDEX idx_stage_transitions_state ON stage_state_transitions(to_state, created_at);
-```
-
-### Modified Table: `stage_runs`
-
-Replace `status` + `progress` with unified `state` + `phase`:
-
-```sql
--- Remove: status TEXT, progress TEXT
--- Add:
-ALTER TABLE stage_runs ADD COLUMN state TEXT NOT NULL DEFAULT 'preparing';
-ALTER TABLE stage_runs ADD COLUMN phase TEXT;  -- Current sub-state (nullable)
-ALTER TABLE stage_runs ADD COLUMN state_updated_at TEXT;  -- Last state change
-```
-
-**Migration Note**: The `status` column will be replaced in-place. During development, invalid transitions will raise errors loudly to catch any code paths still using old patterns.
-
----
-
-## Daemon Specification
-
-### Purpose
-
-The MCP-side daemon is the **event emitter** for infrastructure state changes. It polls active runs and emits events to the state machine.
-
-### Polling Behavior
+### The Solution
 
 ```python
-class StageDaemon:
-    """Background daemon that polls active runs and emits state events."""
+def transition(run_id: str, event: Event, context: EventContext) -> TransitionResult:
+    """Atomically transition state using compare-and-swap."""
 
-    poll_interval: int = 30  # seconds
+    # 1. Read current state
+    current = db.get_stage_run(run_id)
+    if not current:
+        return TransitionResult(success=False, reason="not_found")
 
-    def poll_active_runs(self):
-        """Poll all runs in active states."""
-        active_states = ['preparing', 'building', 'launching', 'running', 'finalizing']
-        runs = db.get_runs_by_states(active_states)
+    # 2. Find valid transition
+    transition = find_transition(current.state, event)
+    if not transition:
+        return TransitionResult(success=False, reason="invalid_transition")
 
-        for run in runs:
-            events = self.check_run(run)
-            for event in events:
-                state_machine.handle_event(run.id, event)
+    # 3. Check guard
+    if transition.guard and not transition.guard(context):
+        return TransitionResult(success=False, reason="guard_failed")
 
-    def check_run(self, run: StageRun) -> list[Event]:
-        """Check a single run and return events to emit."""
-        events = []
+    # 4. CAS update - only succeeds if state hasn't changed
+    with db._conn() as conn:
+        result = conn.execute(
+            """UPDATE stage_runs
+               SET state = ?, phase = ?, state_updated_at = ?,
+                   termination_cause = ?, error = ?
+               WHERE id = ? AND state = ?""",
+            (transition.to_state, context.phase, now_iso(),
+             context.termination_cause, context.error_message,
+             run_id, current.state)
+        )
+        if result.rowcount == 0:
+            return TransitionResult(success=False, reason="state_changed")
 
-        if run.state in ('launching', 'running'):
-            # Check GCE instance status
-            instance_state = gce.get_instance_status(run.id)
+    # 5. Record audit trail
+    db.record_transition(run_id, current.state, event, transition.to_state, context)
 
-            if instance_state == 'RUNNING' and run.state == 'launching':
-                events.append(Event.INSTANCE_RUNNING)
-
-            elif instance_state == 'TERMINATED':
-                exit_result = gcs.get_exit_code(run.id)
-                if exit_result.exists:
-                    if exit_result.code == 0:
-                        events.append(Event.EXIT_CODE_0)
-                    else:
-                        events.append(Event.EXIT_CODE_NONZERO)
-                else:
-                    events.append(Event.EXIT_CODE_MISSING)
-
-            elif instance_state is None:  # Not found
-                elapsed = now() - run.started_at
-                if elapsed > timeout_threshold:
-                    exit_result = gcs.get_exit_code(run.id)
-                    if exit_result.exists:
-                        # Had exit code but instance gone
-                        events.append(Event.CRASH)
-                    else:
-                        # Never got exit code
-                        events.append(Event.TIMEOUT)
-
-        return events
+    return TransitionResult(success=True, new_state=transition.to_state)
 ```
 
-### Exit Code Detection (Critical Fix)
+### Idempotency
 
-The current `_get_exit_code()` returns `1` when the file doesn't exist. This MUST be fixed:
+If a transition fails due to `state_changed`, the caller should:
+1. Re-read current state
+2. If already in expected terminal state, treat as success
+3. Otherwise, log warning and don't retry
+
+---
+
+## Exit Code Detection (Critical Fix)
+
+### Current Bug
+
+```python
+# gce_launcher.py - BROKEN
+def _get_exit_code(self, instance_name: str) -> int:
+    # ... retry logic ...
+    return 1  # Returns 1 when file doesn't exist!
+```
+
+### Fixed Implementation
 
 ```python
 @dataclass
 class ExitCodeResult:
     exists: bool
     code: int | None
+    error: str | None = None
 
 def get_exit_code(run_id: str) -> ExitCodeResult:
-    """Get exit code from GCS, distinguishing missing from failure."""
-    try:
-        content = gcs_cat(f"gs://{bucket}/runs/{run_id}/logs/exit_code.txt")
-        return ExitCodeResult(exists=True, code=int(content.strip()))
-    except NotFoundError:
-        return ExitCodeResult(exists=False, code=None)
-    except Exception:
-        return ExitCodeResult(exists=False, code=None)
+    """Get exit code, distinguishing 'file missing' from 'file contains 1'."""
+    gcs_path = f"gs://{bucket}/runs/{run_id}/logs/exit_code.txt"
+
+    for attempt in range(max_attempts):
+        try:
+            content = gsutil_cat(gcs_path)
+            return ExitCodeResult(exists=True, code=int(content.strip()))
+        except NotFoundError:
+            if attempt < max_attempts - 1:
+                time.sleep(retry_delay)  # GCS eventual consistency
+                continue
+            return ExitCodeResult(exists=False, code=None)
+        except Exception as e:
+            return ExitCodeResult(exists=False, code=None, error=str(e))
+
+    return ExitCodeResult(exists=False, code=None)
 ```
 
----
-
-## Event Context
-
-Each event carries context for debugging and audit:
+### Usage in Event Emission
 
 ```python
-@dataclass
-class EventContext:
-    """Context attached to each event."""
-    timestamp: datetime
-    source: str              # 'daemon', 'mcp_tool', 'container'
+def determine_exit_event(run_id: str) -> tuple[Event, EventContext]:
+    result = get_exit_code(run_id)
 
-    # Optional context fields
-    exit_code: int | None = None
-    error_message: str | None = None
-    instance_state: str | None = None
-    gcs_artifacts: list[str] | None = None
-    svs_findings: list[dict] | None = None
-    metrics_summary: dict | None = None
+    if result.exists:
+        if result.code == 0:
+            return Event.EXIT_SUCCESS, EventContext(exit_code=0, exit_code_exists=True)
+        else:
+            return Event.EXIT_FAILURE, EventContext(exit_code=result.code, exit_code_exists=True)
+    else:
+        return Event.EXIT_MISSING, EventContext(
+            exit_code_exists=False,
+            termination_cause=TerminationCause.CRASHED
+        )
 ```
 
 ---
 
-## Terminal State Semantics
+## Admin Tools
 
-| State | Meaning | Recoverable? | User Action |
-|-------|---------|--------------|-------------|
-| COMPLETED | Success | N/A | Finalize results |
-| FAILED | Explicit failure | Manual retry | Fix issue, re-run |
-| PREEMPTED | Spot preemption | Future: auto | Re-run (maybe on-demand) |
-| CRASHED | Unexpected death | Manual retry | Check logs, re-run |
-| CANCELED | User stopped | Manual retry | Re-run if needed |
-| STOPPED | AI stopped | Manual retry | Review findings, fix, re-run |
-| ORPHANED | Lost track | Future: auto | Manual cleanup or recover |
+### force_terminate_run
+
+For stuck runs that can't be cleaned up normally:
+
+```python
+@mcp.tool()
+def force_terminate_run(
+    run_id: str,
+    reason: str,
+    termination_cause: str = "orphaned"
+) -> dict:
+    """Force a stuck run to TERMINATED state.
+
+    Use when normal cleanup fails. Records admin action in audit trail.
+
+    Args:
+        run_id: Stage run ID
+        reason: Why forcing termination (required for audit)
+        termination_cause: One of 'orphaned', 'crashed', 'timeout', 'manual'
+    """
+    context = EventContext(
+        source="admin",
+        termination_cause=TerminationCause(termination_cause),
+        error_message=f"Admin force terminate: {reason}"
+    )
+    result = state_machine.transition(run_id, Event.FORCE_TERMINATE, context)
+    return {"success": result.success, "new_state": result.new_state}
+```
+
+### force_complete_run
+
+For runs stuck in FINALIZING where outputs are safe:
+
+```python
+@mcp.tool()
+def force_complete_run(run_id: str, reason: str) -> dict:
+    """Force a stuck FINALIZING run to COMPLETED.
+
+    Use when finalization hangs but outputs are recorded.
+    """
+```
 
 ---
 
-## Future Roadmap
+## Database Schema
 
-### Phase 1: Core State Machine (Current)
-- Implement state machine with transitions
-- Fix `_get_exit_code()` to return `ExitCodeResult`
-- Add `stage_state_transitions` table
-- Replace scattered status updates
+### Modified Table: `stage_runs`
 
-### Phase 2: Daemon Integration
-- Implement polling daemon
-- Emit events from daemon to state machine
-- Add ORPHANED detection and cleanup
+```sql
+-- Add new columns
+ALTER TABLE stage_runs ADD COLUMN state TEXT;
+ALTER TABLE stage_runs ADD COLUMN phase TEXT;
+ALTER TABLE stage_runs ADD COLUMN termination_cause TEXT;
+ALTER TABLE stage_runs ADD COLUMN state_updated_at TEXT;
 
-### Phase 3: Auto-Recovery
-- PREEMPTED → auto-retry with backoff
-- ORPHANED → auto-recover mechanism
-- Configurable retry policies
+-- Keep old columns during migration (remove after verified)
+-- status TEXT (keep for backwards compat)
+-- progress TEXT (keep for backwards compat)
+```
 
-### Phase 4: SVS Integration
-- Granular enforcement per SVS check type
-- STOPPED state triggers and handling
-- During-run stop request flow
+### New Table: `stage_state_transitions`
+
+```sql
+CREATE TABLE stage_state_transitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_run_id TEXT NOT NULL,
+
+    from_state TEXT NOT NULL,
+    event TEXT NOT NULL,
+    to_state TEXT NOT NULL,
+
+    -- Context
+    phase TEXT,
+    termination_cause TEXT,
+    exit_code INTEGER,
+    exit_code_exists INTEGER,  -- 0 or 1
+    error_message TEXT,
+    source TEXT,               -- 'mcp_tool', 'daemon', 'admin'
+
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id)
+);
+
+CREATE INDEX idx_transitions_run ON stage_state_transitions(stage_run_id, created_at);
+CREATE INDEX idx_transitions_state ON stage_state_transitions(to_state, created_at);
+```
+
+---
+
+## Migration Strategy
+
+### Phase 1: Add New Columns (Non-Breaking)
+
+```sql
+-- Migration 001: Add state machine columns
+ALTER TABLE stage_runs ADD COLUMN state TEXT;
+ALTER TABLE stage_runs ADD COLUMN phase TEXT;
+ALTER TABLE stage_runs ADD COLUMN termination_cause TEXT;
+ALTER TABLE stage_runs ADD COLUMN state_updated_at TEXT;
+
+-- Populate from existing data
+UPDATE stage_runs SET state = CASE
+    WHEN status = 'pending' THEN 'preparing'
+    WHEN status = 'running' AND progress = 'building' THEN 'building'
+    WHEN status = 'running' AND progress = 'launching' THEN 'launching'
+    WHEN status = 'running' AND progress = 'running' THEN 'running'
+    WHEN status = 'running' AND progress = 'finalizing' THEN 'finalizing'
+    WHEN status = 'running' AND started_at < datetime('now', '-7 days') THEN 'terminated'
+    WHEN status = 'running' THEN 'running'
+    WHEN status = 'completed' THEN 'completed'
+    WHEN status = 'failed' AND error LIKE '%preempted%' THEN 'terminated'
+    WHEN status = 'failed' THEN 'failed'
+    WHEN status = 'canceled' THEN 'canceled'
+    ELSE 'unknown'
+END;
+
+-- Set termination_cause for terminated runs
+UPDATE stage_runs SET termination_cause = 'preempted'
+WHERE state = 'terminated' AND error LIKE '%preempted%';
+
+UPDATE stage_runs SET termination_cause = 'orphaned'
+WHERE state = 'terminated' AND termination_cause IS NULL;
+```
+
+### Phase 2: Backwards Compatibility Layer
+
+```python
+# In models.py or database.py
+
+def get_legacy_status(state: str, termination_cause: str | None) -> str:
+    """Map new state to old status for backwards compatibility."""
+    if state in ('preparing', 'building', 'launching', 'running', 'finalizing'):
+        return 'running'
+    if state == 'completed':
+        return 'completed'
+    if state in ('failed', 'terminated', 'unknown'):
+        return 'failed'
+    if state == 'canceled':
+        return 'canceled'
+    return 'failed'
+
+def get_legacy_progress(state: str, phase: str | None) -> str | None:
+    """Map new state/phase to old progress."""
+    if state == 'building':
+        return 'building'
+    if state == 'launching':
+        return 'launching'
+    if state == 'running':
+        return 'running'
+    if state == 'finalizing':
+        return 'finalizing'
+    return None
+```
+
+### Phase 3: Update All Readers
+
+Update 70+ call sites to use new columns. Track with:
+```python
+# Temporary: log when legacy mapping is used
+if using_legacy_status:
+    logger.warning(f"Legacy status access at {caller}", stack_info=True)
+```
+
+### Phase 4: Remove Old Columns
+
+After verification:
+```sql
+-- Migration 002: Remove legacy columns (AFTER all code updated)
+ALTER TABLE stage_runs DROP COLUMN status;
+ALTER TABLE stage_runs DROP COLUMN progress;
+```
+
+---
+
+## Daemon Interface (Spec Only)
+
+The daemon is **not implemented in Phase 1**. This section specs the interface for future implementation.
+
+### Responsibilities
+
+1. Poll active runs for infrastructure state changes
+2. Emit events to state machine (via `transition()`)
+3. Detect orphaned runs (no progress for extended period)
+4. Coordinate with MCP tools (don't double-finalize)
+
+### Coordination with MCP Tools
+
+When daemon is implemented:
+- Daemon is the **primary** status checker for active runs
+- MCP tools read from database (daemon keeps it fresh)
+- `refresh_status_once()` becomes a no-op or removes entirely
+- CAS semantics prevent race conditions
+
+### Timeout Configuration (Sensible Defaults)
+
+Timeouts are a **state detection problem**, not a state machine problem. For now, use sensible defaults:
+
+```python
+DEFAULT_TIMEOUTS = {
+    "build": 1800,      # 30 min (covers GPU image with cuda)
+    "launch": 900,      # 15 min (covers H100 provisioning)
+    "not_found": 300,   # 5 min grace period
+    "finalizing": 1800, # 30 min (covers slow GCS sync)
+}
+```
+
+Future: Intelligent timeout detection via SVS-like agent that monitors build/startup progress.
+
+---
+
+## Container Boundary (Known Limitation)
+
+### The Problem
+
+SVS events that happen **inside** the container cannot directly emit events to the state machine running **outside**:
+
+- Schema validation in `save_output()` - runs inside container
+- During-run SVS findings - written to `.goldfish/` files
+- Stats computation - runs inside container
+
+### Current Approach
+
+Container-side SVS writes to files:
+- `.goldfish/svs_stats.json`
+- `.goldfish/svs_findings.json`
+- `.goldfish/svs_findings_during.json`
+
+These are read during FINALIZING phase (post-execution).
+
+### Future Enhancement
+
+Container-side event bus (`.goldfish/events.jsonl`) that daemon polls for real-time event emission. Not in scope for Phase 1.
+
+---
+
+## Relationship to `run_results.infra_outcome`
+
+### The Duplication
+
+The `run_results` table already has:
+```sql
+infra_outcome TEXT CHECK(infra_outcome IN ('completed', 'preempted', 'crashed', 'canceled', 'unknown'))
+```
+
+This overlaps with `stage_runs.state` + `termination_cause`.
+
+### Resolution
+
+- `stage_runs.state` is the **live** state (updated during execution)
+- `run_results.infra_outcome` is the **finalized** outcome (set once at end)
+- `run_results.infra_outcome` should be derived from `stage_runs.state` at finalization
+
+```python
+def derive_infra_outcome(state: str, termination_cause: str | None) -> str:
+    if state == 'completed':
+        return 'completed'
+    if state == 'canceled':
+        return 'canceled'
+    if state == 'terminated':
+        return termination_cause or 'unknown'
+    if state == 'failed':
+        return 'crashed'  # Code failure, not infra
+    return 'unknown'
+```
+
+---
+
+## TDD Approach
+
+### Test Categories
+
+```
+tests/unit/state_machine/
+├── test_transitions.py       # Valid transitions
+├── test_invalid.py           # Invalid transitions raise errors
+├── test_cas.py               # Concurrent access handling
+├── test_guards.py            # Guard conditions
+├── test_context.py           # Event context handling
+├── test_audit.py             # Transition recording
+├── test_migration.py         # Legacy status mapping
+└── test_exit_code.py         # Exit code detection
+```
+
+### Example Tests
+
+```python
+class TestValidTransitions:
+    @pytest.mark.parametrize("from_state,event,to_state", [
+        ("preparing", "build_start", "building"),
+        ("building", "build_ok", "launching"),
+        ("launching", "launch_ok", "running"),
+        ("running", "exit_success", "finalizing"),
+        ("finalizing", "finalize_ok", "completed"),
+    ])
+    def test_happy_path_transitions(self, from_state, event, to_state):
+        sm = StageStateMachine(initial=from_state)
+        result = sm.handle_event(event, EventContext())
+        assert result.success
+        assert sm.state == to_state
+
+class TestExitCodeDistinction:
+    def test_exit_missing_goes_to_terminated_not_failed(self):
+        sm = StageStateMachine(initial="running")
+        ctx = EventContext(exit_code_exists=False, termination_cause="crashed")
+        result = sm.handle_event("exit_missing", ctx)
+        assert sm.state == "terminated"
+        assert sm.termination_cause == "crashed"
+
+    def test_exit_failure_goes_to_failed(self):
+        sm = StageStateMachine(initial="running")
+        ctx = EventContext(exit_code=1, exit_code_exists=True)
+        result = sm.handle_event("exit_failure", ctx)
+        assert sm.state == "failed"
+
+class TestCAS:
+    def test_concurrent_transitions_one_wins(self, test_db):
+        run_id = create_test_run(test_db, state="running")
+
+        # Simulate concurrent transitions
+        result1 = transition(run_id, "exit_success", EventContext())
+        result2 = transition(run_id, "user_cancel", EventContext())
+
+        # One succeeds, one fails
+        assert result1.success != result2.success
+
+        # Final state is consistent
+        run = test_db.get_stage_run(run_id)
+        assert run["state"] in ("finalizing", "canceled")
+```
+
+---
+
+## Implementation Phases
+
+### Phase 1: Foundation (Current)
+- [x] Write spec (this document)
+- [ ] Fix `_get_exit_code()` to return `ExitCodeResult`
+- [ ] Write comprehensive test suite (TDD)
+- [ ] Implement state machine core (transitions, CAS, audit)
+- [ ] Write migration script
+- [ ] Add backwards compatibility layer
+- [ ] Add `force_terminate_run` admin tool
+
+### Phase 2: Integration
+- [ ] Wire state machine into `stage_executor.py`
+- [ ] Update all status readers to use new columns
+- [ ] Add transition logging/monitoring
+- [ ] Test with real workloads
+
+### Phase 3: Cleanup
+- [ ] Remove backwards compatibility layer
+- [ ] Drop old `status`/`progress` columns
+- [ ] Update documentation
+
+### Phase 4: Daemon (Future)
+- [ ] Implement daemon polling
+- [ ] Add intelligent timeout detection
+- [ ] Add AI-initiated stop (STOPPED state)
+- [ ] Add auto-recovery from TERMINATED
 
 ---
 
 ## Open Questions
 
-1. **Library vs Custom**: Use `transitions` library or roll our own? Custom gives full control, library gives battle-tested edge case handling.
-
-2. **Daemon Deployment**: Should daemon run as separate process, thread in MCP server, or triggered by cron/scheduler?
-
-3. **Metrics Sync**: Should daemon sync metrics to DB on every poll, or only on state transitions?
-
-4. **Partial Finalization**: If CANCELED during FINALIZING, how much cleanup do we do? Record partial outputs?
+1. **Daemon deployment model**: Separate process vs. integrated?
+2. **Metrics sync during polling**: Every poll or only on transitions?
+3. **Partial finalization outputs**: What to do with them on CANCELED?
+4. **UNKNOWN state cleanup**: Periodic job to investigate and resolve?
