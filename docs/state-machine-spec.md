@@ -298,7 +298,30 @@ UNKNOWN       | FORCE_COMPLETE     | COMPLETED   |                          | Ad
 UNKNOWN       | FORCE_FAIL         | FAILED      |                          | Admin override (verified bad)
 ```
 
-**UNKNOWN state**: Migration fallback only. Admin tools provide escape hatches. No automatic transitions into or out of UNKNOWN.
+**UNKNOWN state**: Migration fallback only.
+
+### Default Phases Per State
+
+When a transition doesn't provide `context.phase`, use COALESCE to preserve the existing phase. However, to prevent invalid state/phase combinations (e.g., state=RUNNING with phase=docker_build), define entry phases for state transitions:
+
+```python
+# Entry phase when transitioning INTO this state (if context.phase not provided)
+STATE_ENTRY_PHASES = {
+    'preparing': 'gcs_check',
+    'building': 'image_check',
+    'launching': 'instance_create',
+    'running': 'container_init',
+    'finalizing': 'output_sync',
+    # Terminal states don't have phases
+    'completed': None,
+    'failed': None,
+    'terminated': None,
+    'canceled': None,
+    'unknown': None,
+}
+```
+
+**Usage in transition()**: When `context.phase` is None and the state is changing, use `STATE_ENTRY_PHASES[to_state]` instead of COALESCE. COALESCE only applies for within-state phase preservation (shouldn't happen in transitions since transitions always change state). Admin tools provide escape hatches. No automatic transitions into or out of UNKNOWN.
 
 ### Finalization Criticality
 
@@ -365,22 +388,31 @@ def transition(run_id: str, event: StageEvent, context: EventContext) -> Transit
         and transition_def.to_state == 'completed'
     )
 
-    # 5. ATOMIC: CAS update + audit insert in same transaction
+    # 5. Determine phase for the new state
+    # If context.phase provided, use it; otherwise use entry phase for new state
+    new_phase = (
+        context.phase.value if context.phase
+        else STATE_ENTRY_PHASES.get(transition_def.to_state)
+    )
+
+    # 6. ATOMIC: CAS update + audit insert in same transaction
     with db._conn() as conn:
         # CAS update - only succeeds if state hasn't changed
-        # COALESCE preserves existing phase if context.phase is None
+        # Update both state_entered_at (for timeouts) and phase_updated_at (observability)
         result = conn.execute(
             """UPDATE stage_runs
                SET state = ?,
-                   phase = COALESCE(?, phase),
+                   phase = ?,
                    state_entered_at = ?,
+                   phase_updated_at = ?,
                    termination_cause = ?,
                    error = ?,
                    completed_with_warnings = ?
                WHERE id = ? AND state = ?""",
             (transition_def.to_state,
-             context.phase.value if context.phase else None,
-             context.timestamp.isoformat(),  # state_entered_at: only on state change
+             new_phase,
+             context.timestamp.isoformat(),  # state_entered_at: state change
+             context.timestamp.isoformat(),  # phase_updated_at: phase also changes
              context.termination_cause.value if context.termination_cause else None,
              context.error_message,
              1 if completed_with_warnings else 0,
@@ -397,7 +429,7 @@ def transition(run_id: str, event: StageEvent, context: EventContext) -> Transit
                 error_message, source, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (run_id, current["state"], event.value, transition_def.to_state,
-             context.phase.value if context.phase else current.get("phase"),
+             new_phase,  # Use the determined phase (context or entry default)
              context.termination_cause.value if context.termination_cause else None,
              context.exit_code, 1 if context.exit_code_exists else 0,
              context.error_message, context.source,
@@ -665,7 +697,7 @@ CREATE TABLE stage_state_transitions (
     exit_code INTEGER,
     exit_code_exists INTEGER,  -- 0 or 1
     error_message TEXT,
-    source TEXT,               -- 'mcp_tool', 'daemon', 'admin'
+    source TEXT,               -- See SOURCE_VALUES: mcp_tool, executor, daemon, container, admin, migration
 
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
 
@@ -700,13 +732,14 @@ def create_stage_run(
         conn.execute(
             """INSERT INTO stage_runs
                (id, workspace_name, version, stage_name, backend_type,
-                state, phase, state_updated_at, started_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                state, phase, state_entered_at, phase_updated_at, started_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (run_id, workspace_name, version, stage_name, backend_type,
              'preparing',        # Initial state
              'gcs_check',        # Initial phase
-             now,                # state_updated_at
-             now)                # started_at
+             now,                # state_entered_at (for timeout calcs)
+             now,                # phase_updated_at (observability)
+             now)                # started_at (total runtime)
         )
 
         # Record initial transition (state machine entry point)
@@ -714,7 +747,7 @@ def create_stage_run(
             """INSERT INTO stage_state_transitions
                (stage_run_id, from_state, event, to_state, phase, source, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (run_id, 'none', 'run_start', 'preparing', 'gcs_check', 'mcp_tool', now)
+            (run_id, 'none', 'run_start', 'preparing', 'gcs_check', 'executor', now)
         )
 
     return run_id
@@ -723,7 +756,7 @@ def create_stage_run(
 **Invariants for new runs**:
 - `state` = 'preparing' (always start here)
 - `phase` = 'gcs_check' (first phase of PREPARING)
-- `state_updated_at` = creation timestamp
+- `state_entered_at` = `phase_updated_at` = `started_at` = creation timestamp
 - Initial transition recorded in audit trail with `from_state='none'`
 
 ---
@@ -765,13 +798,15 @@ def migrate_stage_runs():
         state, phase, cause = determine_migration_state(row)
         log_migration(row["id"], row["status"], state, cause)
 
+        now = datetime.now(UTC).isoformat()
         with db._conn() as conn:
             conn.execute(
                 """UPDATE stage_runs
                    SET state = ?, phase = ?, termination_cause = ?,
-                       state_entered_at = COALESCE(completed_at, ?)
+                       state_entered_at = COALESCE(completed_at, ?),
+                       phase_updated_at = COALESCE(completed_at, ?)
                    WHERE id = ?""",
-                (state, phase, cause, datetime.now(UTC).isoformat(), row["id"])
+                (state, phase, cause, now, now, row["id"])
             )
 
 
@@ -1413,23 +1448,12 @@ def update_phase(run_id: str, expected_state: str, new_phase: ProgressPhase) -> 
 
 ### Q4: Migration edge case - 25-day orphaned run?
 
-**Answer**: Good catch. Migration script should mark these as UNKNOWN (not keep as running):
+**Answer**: Good catch. Migration script uses `check_orphan_status()` (see Migration section) with three-way return:
+- `confirmed_orphaned`: Backend API confirms instance/container gone → TERMINATED
+- `possibly_orphaned`: Can't verify but >30 days old → UNKNOWN (manual review)
+- `not_orphaned`: Instance still exists → keep as active state
 
-```python
-def is_likely_orphaned(run_id: str, started_at: str) -> bool:
-    # ... existing GCE check ...
-
-    # For migration: any 'running' > 7 days old gets marked
-    # Daemon will clean up UNKNOWN runs in Phase 2
-    if started_at:
-        age = datetime.now(UTC) - parse_iso(started_at)
-        if age > timedelta(days=7):  # More aggressive during migration
-            return True
-
-    return False
-```
-
-And move UNKNOWN cleanup to Phase 2 (not "future"):
+This avoids falsely marking active runs and provides an escape hatch (UNKNOWN) for ambiguous cases. Daemon cleans up UNKNOWN runs in Phase 2 via admin tool investigation.
 
 ### Suggestions Incorporated
 
