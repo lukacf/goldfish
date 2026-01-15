@@ -114,7 +114,7 @@ class TerminationCause(str, Enum):
     ORPHANED = "orphaned"         # Lost track of instance (timeout, no evidence of run)
     TIMEOUT = "timeout"           # Exceeded configured timeout threshold
     AI_STOPPED = "ai_stopped"     # AI/SVS requested stop (trigger mechanism TBD)
-    MANUAL = "manual"             # Admin force_terminate_run via MCP
+    MANUAL = "manual"             # User cancel via MCP tool
 ```
 
 ### Progress Phase (Observability, Not State)
@@ -243,11 +243,6 @@ class StageEvent(str, Enum):
 
     # User events
     USER_CANCEL = "user_cancel"
-
-    # Admin events
-    FORCE_TERMINATE = "force_terminate"      # Admin override for stuck runs
-    FORCE_COMPLETE = "force_complete"        # Admin override to mark complete
-    FORCE_FAIL = "force_fail"                # Admin override to mark failed (from UNKNOWN)
 ```
 
 **Removed events**: `PREPARE_COMPLETE` and `FINALIZE_START` were defined but never used in transitions. The state machine infers these from the transition itself (PREPARING→BUILDING means preparation complete).
@@ -290,11 +285,10 @@ class EventContext:
 
 # Allowed source values for EventContext.source
 SOURCE_VALUES = {
-    'mcp_tool',   # MCP tool invocation (cancel, force_* admin tools)
+    'mcp_tool',   # MCP tool invocation (cancel)
     'executor',   # StageExecutor during run orchestration
     'daemon',     # Background daemon polling
     'container',  # Container-side events (via metadata/GCS)
-    'admin',      # Administrative operations
     'migration',  # Migration script
 }
 ```
@@ -416,21 +410,18 @@ PREPARING     | SVS_BLOCK          | FAILED      |                          | Pr
 PREPARING     | INSTANCE_LOST      | TERMINATED  |                          | Cloud Build disappeared
 PREPARING     | TIMEOUT            | TERMINATED  | cause=TIMEOUT            | Stuck in preparation
 PREPARING     | USER_CANCEL        | CANCELED    |                          |
-PREPARING     | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
               |                    |             |                          |
 BUILDING      | BUILD_OK           | LAUNCHING   |                          |
 BUILDING      | BUILD_FAIL         | FAILED      |                          |
 BUILDING      | INSTANCE_LOST      | TERMINATED  |                          | Cloud Build instance died
 BUILDING      | TIMEOUT            | TERMINATED  | cause=TIMEOUT            | Build took too long
 BUILDING      | USER_CANCEL        | CANCELED    |                          |
-BUILDING      | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
               |                    |             |                          |
 LAUNCHING     | LAUNCH_OK          | RUNNING     |                          | Instance confirmed running
 LAUNCHING     | LAUNCH_FAIL        | FAILED      |                          | Quota, capacity, config error
 LAUNCHING     | INSTANCE_LOST      | TERMINATED  |                          | Preemption during startup
 LAUNCHING     | TIMEOUT            | TERMINATED  | cause=TIMEOUT            | No capacity after timeout
 LAUNCHING     | USER_CANCEL        | CANCELED    |                          |
-LAUNCHING     | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
               |                    |             |                          |
 RUNNING       | EXIT_SUCCESS       | FINALIZING  |                          | exit_code.txt=0
 RUNNING       | EXIT_FAILURE       | FAILED      |                          | exit_code.txt!=0
@@ -438,7 +429,6 @@ RUNNING       | EXIT_MISSING       | TERMINATED  | instance_confirmed_dead  | No
 RUNNING       | INSTANCE_LOST      | TERMINATED  |                          | Preemption, crash, etc.
 RUNNING       | TIMEOUT            | TERMINATED  | cause=TIMEOUT            | Exceeded max runtime
 RUNNING       | USER_CANCEL        | CANCELED    |                          |
-RUNNING       | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
               |                    |             |                          |
 FINALIZING    | FINALIZE_OK        | COMPLETED   |                          | All finalization done
 FINALIZING    | FINALIZE_FAIL      | FAILED      | ctx.critical=True        | Critical step failed
@@ -447,16 +437,11 @@ FINALIZING    | INSTANCE_LOST      | TERMINATED  |                          | Pr
 FINALIZING    | TIMEOUT            | COMPLETED   | critical_phases_done     | Timeout but outputs saved
 FINALIZING    | TIMEOUT            | FAILED      | !critical_phases_done    | Timeout, outputs lost
 FINALIZING    | USER_CANCEL        | CANCELED    |                          | Partial outputs possible
-FINALIZING    | FORCE_COMPLETE     | COMPLETED   |                          | Admin override
-FINALIZING    | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
               |                    |             |                          |
 UNKNOWN       | TIMEOUT            | TERMINATED  |                          | Auto-cleanup after 24h
-UNKNOWN       | FORCE_TERMINATE    | TERMINATED  |                          | Admin cleanup
-UNKNOWN       | FORCE_COMPLETE     | COMPLETED   |                          | Admin override (verified ok)
-UNKNOWN       | FORCE_FAIL         | FAILED      |                          | Admin override (verified bad)
 ```
 
-**UNKNOWN state**: Requires investigation. Can be resolved via admin tools or auto-cleaned via TIMEOUT after 24h investigation period (configurable). TIMEOUT transition prevents runs from being stuck in UNKNOWN forever.
+**UNKNOWN state**: Requires investigation. Auto-cleaned via TIMEOUT after 24h investigation period (configurable). TIMEOUT transition prevents runs from being stuck in UNKNOWN forever.
 
 ### Default Phases Per State
 
@@ -479,11 +464,9 @@ STATE_ENTRY_PHASES = {
 }
 ```
 
-**Usage in transition()**: When `context.phase` is None and the state is changing, use `STATE_ENTRY_PHASES[to_state]` instead of COALESCE. COALESCE only applies for within-state phase preservation (shouldn't happen in transitions since transitions always change state). Admin tools provide escape hatches.
+**Usage in transition()**: When `context.phase` is None and the state is changing, use `STATE_ENTRY_PHASES[to_state]` instead of COALESCE. COALESCE only applies for within-state phase preservation (shouldn't happen in transitions since transitions always change state).
 
-**UNKNOWN transitions**: Runs can only enter UNKNOWN via migration (not normal operation). Once in UNKNOWN, runs can exit via:
-1. Admin tools: FORCE_TERMINATE, FORCE_COMPLETE, FORCE_FAIL
-2. Auto-cleanup: TIMEOUT after 24h investigation period (configurable) to prevent runs stuck forever
+**UNKNOWN transitions**: Runs can only enter UNKNOWN via migration (not normal operation). Once in UNKNOWN, runs exit via auto-cleanup: TIMEOUT after 24h investigation period (configurable) to prevent runs stuck forever.
 
 ### Finalization Criticality
 
@@ -550,7 +533,6 @@ TRANSITIONS: list[TransitionDef] = [
     TransitionDef('preparing', StageEvent.INSTANCE_LOST, 'terminated'),  # Cloud Build disappeared
     TransitionDef('preparing', StageEvent.TIMEOUT, 'terminated'),
     TransitionDef('preparing', StageEvent.USER_CANCEL, 'canceled'),
-    TransitionDef('preparing', StageEvent.FORCE_TERMINATE, 'terminated'),
 
     # BUILDING: Docker image build (local or Cloud Build)
     TransitionDef('building', StageEvent.BUILD_OK, 'launching'),
@@ -558,7 +540,6 @@ TRANSITIONS: list[TransitionDef] = [
     TransitionDef('building', StageEvent.INSTANCE_LOST, 'terminated'),
     TransitionDef('building', StageEvent.TIMEOUT, 'terminated'),
     TransitionDef('building', StageEvent.USER_CANCEL, 'canceled'),
-    TransitionDef('building', StageEvent.FORCE_TERMINATE, 'terminated'),
 
     # LAUNCHING: Instance creation, container start
     TransitionDef('launching', StageEvent.LAUNCH_OK, 'running'),
@@ -566,7 +547,6 @@ TRANSITIONS: list[TransitionDef] = [
     TransitionDef('launching', StageEvent.INSTANCE_LOST, 'terminated'),
     TransitionDef('launching', StageEvent.TIMEOUT, 'terminated'),
     TransitionDef('launching', StageEvent.USER_CANCEL, 'canceled'),
-    TransitionDef('launching', StageEvent.FORCE_TERMINATE, 'terminated'),
 
     # RUNNING: Stage code executing
     TransitionDef('running', StageEvent.EXIT_SUCCESS, 'finalizing'),
@@ -576,7 +556,6 @@ TRANSITIONS: list[TransitionDef] = [
     TransitionDef('running', StageEvent.INSTANCE_LOST, 'terminated'),
     TransitionDef('running', StageEvent.TIMEOUT, 'terminated'),
     TransitionDef('running', StageEvent.USER_CANCEL, 'canceled'),
-    TransitionDef('running', StageEvent.FORCE_TERMINATE, 'terminated'),
 
     # FINALIZING: Output registration, metrics sync, cleanup
     # Guards use explicit `is True`/`is False` to avoid None truthiness bugs
@@ -591,15 +570,9 @@ TRANSITIONS: list[TransitionDef] = [
     TransitionDef('finalizing', StageEvent.TIMEOUT, 'failed',
                   guard=lambda ctx: ctx.critical_phases_done is False),
     TransitionDef('finalizing', StageEvent.USER_CANCEL, 'canceled'),
-    TransitionDef('finalizing', StageEvent.FORCE_COMPLETE, 'completed'),
-    TransitionDef('finalizing', StageEvent.FORCE_TERMINATE, 'terminated'),
 
-    # UNKNOWN: Needs manual investigation via admin tools
-    # TIMEOUT allows escape after investigation period (e.g., 24h with no resolution)
+    # UNKNOWN: Auto-cleanup via timeout
     TransitionDef('unknown', StageEvent.TIMEOUT, 'terminated'),  # Auto-cleanup after investigation period
-    TransitionDef('unknown', StageEvent.FORCE_TERMINATE, 'terminated'),
-    TransitionDef('unknown', StageEvent.FORCE_COMPLETE, 'completed'),
-    TransitionDef('unknown', StageEvent.FORCE_FAIL, 'failed'),
 ]
 
 
@@ -997,91 +970,6 @@ def verify_instance_stopped(run_id: str, backend: str) -> bool:
 
 ---
 
-## Admin Tools
-
-### force_terminate_run
-
-For stuck runs that can't be cleaned up normally:
-
-```python
-@mcp.tool()
-def force_terminate_run(
-    run_id: str,
-    reason: str,
-    termination_cause: str = "manual"
-) -> dict:
-    """Force a stuck run to TERMINATED state.
-
-    Use when normal cleanup fails. Records admin action in audit trail.
-
-    Args:
-        run_id: Stage run ID
-        reason: Why forcing termination (required for audit)
-        termination_cause: One of 'orphaned', 'crashed', 'timeout', 'manual'
-    """
-    context = EventContext(
-        timestamp=datetime.now(UTC),
-        source="admin",
-        termination_cause=TerminationCause(termination_cause),
-        error_message=f"Admin force terminate: {reason}"
-    )
-    result = state_machine.transition(run_id, StageEvent.FORCE_TERMINATE, context)
-    return {"success": result.success, "new_state": result.new_state}
-```
-
-### force_complete_run
-
-For runs stuck in FINALIZING or UNKNOWN where outputs are safe:
-
-```python
-@mcp.tool()
-def force_complete_run(run_id: str, reason: str) -> dict:
-    """Force a run to COMPLETED state.
-
-    Valid from: FINALIZING (outputs recorded), UNKNOWN (verified ok)
-    Use when finalization hangs but outputs are recorded.
-
-    Args:
-        run_id: Stage run ID
-        reason: Why forcing completion (required for audit)
-    """
-    context = EventContext(
-        timestamp=datetime.now(UTC),
-        source="admin",
-        error_message=f"Admin force complete: {reason}"
-    )
-    result = state_machine.transition(run_id, StageEvent.FORCE_COMPLETE, context)
-    return {"success": result.success, "new_state": result.new_state}
-```
-
-### force_fail_run
-
-For UNKNOWN runs that need to be marked as failed after investigation:
-
-```python
-@mcp.tool()
-def force_fail_run(run_id: str, reason: str, error_message: str | None = None) -> dict:
-    """Force an UNKNOWN run to FAILED state.
-
-    Valid from: UNKNOWN only (use force_terminate for others)
-    Use after investigating an UNKNOWN run and determining it failed.
-
-    Args:
-        run_id: Stage run ID
-        reason: Why marking as failed (required for audit)
-        error_message: Optional error message to record
-    """
-    context = EventContext(
-        timestamp=datetime.now(UTC),
-        source="admin",
-        error_message=error_message or f"Admin force fail: {reason}"
-    )
-    result = state_machine.transition(run_id, StageEvent.FORCE_FAIL, context)
-    return {"success": result.success, "new_state": result.new_state}
-```
-
----
-
 ## Database Schema
 
 ### Modified Table: `stage_runs`
@@ -1140,7 +1028,7 @@ CREATE TABLE stage_state_transitions (
     exit_code_exists INTEGER,  -- 0 or 1
     error_message TEXT,
     source TEXT NOT NULL
-        CHECK(source IN ('mcp_tool', 'executor', 'daemon', 'container', 'admin', 'migration')),
+        CHECK(source IN ('mcp_tool', 'executor', 'daemon', 'container', 'migration')),
 
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
 
@@ -2242,7 +2130,6 @@ class TestCAS:
 - [ ] Implement state machine core (transitions, CAS, audit)
 - [ ] Write migration script
 - [ ] Add backwards compatibility layer
-- [ ] Add `force_terminate_run`, `force_complete_run`, `force_fail_run` admin tools
 - [ ] Add `completed_with_warnings` column for non-critical finalization failures and finalization timeouts with outputs saved
 
 ### Phase 2: Daemon Rewrite + Integration
@@ -2252,7 +2139,7 @@ class TestCAS:
 - [ ] Update `cancel()` MCP tool to emit `USER_CANCEL` event
 - [ ] Update all status readers to use new columns (70+ call sites)
 - [ ] Add transition logging/monitoring
-- [ ] **Add UNKNOWN cleanup job** (periodic investigation + admin tool resolution)
+- [ ] **Add UNKNOWN cleanup job** (auto-timeout after 24h investigation period)
 - [ ] Add audit retention policy (90 days / 100 per run)
 - [ ] Test with real workloads
 
@@ -2333,13 +2220,13 @@ def update_phase(run_id: str, expected_state: str, new_phase: ProgressPhase) -> 
 - `possibly_orphaned`: Can't verify but >30 days old → UNKNOWN (manual review)
 - `not_orphaned`: Instance still exists → keep as active state
 
-This avoids falsely marking active runs and provides an escape hatch (UNKNOWN) for ambiguous cases. Daemon cleans up UNKNOWN runs in Phase 2 via admin tool investigation.
+This avoids falsely marking active runs and provides an escape hatch (UNKNOWN) for ambiguous cases. Daemon auto-cleans UNKNOWN runs via TIMEOUT after 24h investigation period.
 
 ### Suggestions Incorporated
 
 1. **completed_at on terminal transitions**: Already set by existing `_finalize_stage_run()`. The state machine preserves this - `completed_at` is set when transitioning to any terminal state.
 
-2. **UNKNOWN cleanup job**: Moved to Phase 2. Periodic job investigates UNKNOWN runs and resolves via admin tools.
+2. **UNKNOWN cleanup job**: Moved to Phase 2. Periodic job investigates UNKNOWN runs and auto-resolves via TIMEOUT after 24h.
 
 ---
 
