@@ -1,6 +1,6 @@
 # Stage Execution State Machine Specification
 
-> **Status**: Draft v2 (Post-Review)
+> **Status**: Draft v3 (Post-Critical-Review)
 > **Author**: Claude + Luka
 > **Created**: 2025-01-15
 > **Updated**: 2025-01-15
@@ -33,7 +33,6 @@ This document specifies a state machine to replace the ad-hoc state management i
 ### Non-Goals (Deferred)
 
 - **Auto-recovery from PREEMPTED/ORPHANED** - Future roadmap item
-- **AI-initiated stop (STOPPED state)** - Deferred until trigger mechanism exists
 - **Intelligent timeout detection** - Separate problem; use sensible defaults for now
 - **Daemon implementation** - Spec the interface; implement after state machine is solid
 
@@ -73,7 +72,8 @@ class TerminationCause(str, Enum):
     CRASHED = "crashed"           # Instance died without exit code
     ORPHANED = "orphaned"         # Lost track of instance (timeout, no evidence of run)
     TIMEOUT = "timeout"           # Exceeded configured timeout threshold
-    AI_STOPPED = "ai_stopped"     # Future: AI requested stop
+    AI_STOPPED = "ai_stopped"     # AI/SVS requested stop (trigger mechanism TBD)
+    MANUAL = "manual"             # Admin force_terminate_run via MCP
 ```
 
 ### Progress Phase (Observability, Not State)
@@ -113,6 +113,38 @@ class ProgressPhase(str, Enum):
     CLEANUP = "cleanup"
 ```
 
+### Phase Updates (Within-State Progress)
+
+Phase is observability metadata that changes **within** a state without triggering state transitions. To avoid the status/progress desync problem, phase updates use the same CAS pattern:
+
+```python
+def update_phase(run_id: str, expected_state: str, new_phase: ProgressPhase) -> bool:
+    """Update phase within a state using CAS.
+
+    Returns True if update succeeded, False if state changed underneath us.
+    """
+    with db._conn() as conn:
+        result = conn.execute(
+            """UPDATE stage_runs
+               SET phase = ?, state_updated_at = ?
+               WHERE id = ? AND state = ?""",
+            (new_phase.value, now_iso(), run_id, expected_state)
+        )
+        if result.rowcount == 0:
+            return False  # State changed, phase update rejected
+
+        # Record phase change in audit (same transaction)
+        conn.execute(
+            """INSERT INTO stage_state_transitions
+               (stage_run_id, from_state, event, to_state, phase, source, created_at)
+               VALUES (?, ?, 'phase_update', ?, ?, ?, ?)""",
+            (run_id, expected_state, expected_state, new_phase.value, 'internal', now_iso())
+        )
+        return True
+```
+
+**Key principle**: Phase updates are rejected if the state has changed. This prevents stale phase writes from overwriting meaningful state transitions.
+
 ---
 
 ## Event Model
@@ -121,24 +153,27 @@ class ProgressPhase(str, Enum):
 
 ```python
 class StageEvent(str, Enum):
-    # Progress events
-    PREPARE_COMPLETE = "prepare_complete"    # All preparation done
-    BUILD_START = "build_start"              # Starting Docker build
+    # State transition events
+    BUILD_START = "build_start"              # Preparation done, starting build
     BUILD_OK = "build_ok"                    # Build succeeded
     BUILD_FAIL = "build_fail"                # Build failed
-    LAUNCH_OK = "launch_ok"                  # Instance/container running
-    FINALIZE_START = "finalize_start"        # Starting finalization
+    LAUNCH_OK = "launch_ok"                  # Instance/container confirmed running
+    LAUNCH_FAIL = "launch_fail"              # Launch failed (quota, capacity, config)
     FINALIZE_OK = "finalize_ok"              # Finalization complete
-    FINALIZE_FAIL = "finalize_fail"          # Critical finalization failed
+    FINALIZE_FAIL = "finalize_fail"          # Finalization failed (context.critical determines target)
 
     # Exit events (CRITICAL: must distinguish these!)
     EXIT_SUCCESS = "exit_success"            # exit_code.txt exists, value=0
     EXIT_FAILURE = "exit_failure"            # exit_code.txt exists, value!=0
-    EXIT_MISSING = "exit_missing"            # exit_code.txt does NOT exist
+    EXIT_MISSING = "exit_missing"            # exit_code.txt does NOT exist AND instance confirmed dead
 
-    # Failure/termination events
+    # Failure events (explicit failures, not infrastructure death)
+    PREPARE_FAIL = "prepare_fail"            # Pipeline parse, versioning, input resolution failed
     SVS_BLOCK = "svs_block"                  # SVS preflight or pre-run review blocked
+
+    # Infrastructure death events
     INSTANCE_LOST = "instance_lost"          # Instance gone, termination_cause in context
+    TIMEOUT = "timeout"                      # Exceeded configured timeout for current state
 
     # User events
     USER_CANCEL = "user_cancel"
@@ -146,7 +181,10 @@ class StageEvent(str, Enum):
     # Admin events
     FORCE_TERMINATE = "force_terminate"      # Admin override for stuck runs
     FORCE_COMPLETE = "force_complete"        # Admin override to mark complete
+    FORCE_FAIL = "force_fail"                # Admin override to mark failed (from UNKNOWN)
 ```
+
+**Removed events**: `PREPARE_COMPLETE` and `FINALIZE_START` were defined but never used in transitions. The state machine infers these from the transition itself (PREPARING→BUILDING means preparation complete).
 
 ### Event Context
 
@@ -154,7 +192,7 @@ class StageEvent(str, Enum):
 @dataclass
 class EventContext:
     """Context attached to each event for audit and decision-making."""
-    timestamp: datetime
+    timestamp: datetime                      # Canonical time for this event (used in audit)
     source: str                              # 'mcp_tool', 'daemon', 'container', 'admin'
 
     # Exit context
@@ -163,6 +201,7 @@ class EventContext:
 
     # Termination context
     termination_cause: TerminationCause | None = None
+    instance_confirmed_dead: bool = False    # For EXIT_MISSING: verified instance is not running
 
     # Error context
     error_message: str | None = None
@@ -170,10 +209,15 @@ class EventContext:
     # Progress context
     phase: ProgressPhase | None = None
 
+    # Finalization context
+    critical: bool = False                   # For FINALIZE_FAIL: True → FAILED, False → COMPLETED
+
     # SVS context
     svs_decision: str | None = None          # 'approved', 'blocked', 'warning'
     svs_findings: list[dict] | None = None
 ```
+
+**Timestamp usage**: `EventContext.timestamp` is the canonical time source. The `state_updated_at` column uses `context.timestamp.isoformat()`, not `now()`. This ensures audit trail ordering matches actual event sequence.
 
 ---
 
@@ -184,35 +228,49 @@ class EventContext:
 ```
 From State    | Event              | To State    | Guard                    | Notes
 --------------|--------------------| ------------|--------------------------|------------------
-PREPARING     | SVS_BLOCK          | FAILED      |                          | Preflight or pre-run blocked
 PREPARING     | BUILD_START        | BUILDING    |                          | Preparation complete
+PREPARING     | PREPARE_FAIL       | FAILED      |                          | Pipeline/version/input error
+PREPARING     | SVS_BLOCK          | FAILED      |                          | Preflight or pre-run blocked
+PREPARING     | TIMEOUT            | TERMINATED  | cause=TIMEOUT            | Stuck in preparation
 PREPARING     | USER_CANCEL        | CANCELED    |                          |
 PREPARING     | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
               |                    |             |                          |
 BUILDING      | BUILD_OK           | LAUNCHING   |                          |
 BUILDING      | BUILD_FAIL         | FAILED      |                          |
+BUILDING      | TIMEOUT            | TERMINATED  | cause=TIMEOUT            | Build took too long
 BUILDING      | USER_CANCEL        | CANCELED    |                          |
 BUILDING      | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
               |                    |             |                          |
 LAUNCHING     | LAUNCH_OK          | RUNNING     |                          | Instance confirmed running
-LAUNCHING     | INSTANCE_LOST      | TERMINATED  |                          | Preemption, timeout, etc.
+LAUNCHING     | LAUNCH_FAIL        | FAILED      |                          | Quota, capacity, config error
+LAUNCHING     | INSTANCE_LOST      | TERMINATED  |                          | Preemption during startup
+LAUNCHING     | TIMEOUT            | TERMINATED  | cause=TIMEOUT            | No capacity after timeout
 LAUNCHING     | USER_CANCEL        | CANCELED    |                          |
 LAUNCHING     | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
               |                    |             |                          |
 RUNNING       | EXIT_SUCCESS       | FINALIZING  |                          | exit_code.txt=0
 RUNNING       | EXIT_FAILURE       | FAILED      |                          | exit_code.txt!=0
-RUNNING       | EXIT_MISSING       | TERMINATED  | cause=CRASHED            | No exit code written
-RUNNING       | INSTANCE_LOST      | TERMINATED  |                          | Preemption, timeout, etc.
+RUNNING       | EXIT_MISSING       | TERMINATED  | instance_confirmed_dead  | No exit code + instance dead
+RUNNING       | INSTANCE_LOST      | TERMINATED  |                          | Preemption, crash, etc.
+RUNNING       | TIMEOUT            | TERMINATED  | cause=TIMEOUT            | Exceeded max runtime
 RUNNING       | USER_CANCEL        | CANCELED    |                          |
 RUNNING       | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
               |                    |             |                          |
 FINALIZING    | FINALIZE_OK        | COMPLETED   |                          | All finalization done
-FINALIZING    | FINALIZE_FAIL      | FAILED      | critical=True            | Critical step failed
-FINALIZING    | FINALIZE_FAIL      | COMPLETED   | critical=False           | Non-critical, still complete
+FINALIZING    | FINALIZE_FAIL      | FAILED      | ctx.critical=True        | Critical step failed
+FINALIZING    | FINALIZE_FAIL      | COMPLETED   | ctx.critical=False       | Non-critical, still complete
+FINALIZING    | TIMEOUT            | COMPLETED   | critical_phases_done     | Timeout but outputs saved
+FINALIZING    | TIMEOUT            | FAILED      | !critical_phases_done    | Timeout, outputs lost
 FINALIZING    | USER_CANCEL        | CANCELED    |                          | Partial outputs possible
 FINALIZING    | FORCE_COMPLETE     | COMPLETED   |                          | Admin override
 FINALIZING    | FORCE_TERMINATE    | TERMINATED  |                          | Admin override
+              |                    |             |                          |
+UNKNOWN       | FORCE_TERMINATE    | TERMINATED  |                          | Admin cleanup
+UNKNOWN       | FORCE_COMPLETE     | COMPLETED   |                          | Admin override (verified ok)
+UNKNOWN       | FORCE_FAIL         | FAILED      |                          | Admin override (verified bad)
 ```
+
+**UNKNOWN state**: Migration fallback only. Admin tools provide escape hatches. No automatic transitions into or out of UNKNOWN.
 
 ### Finalization Criticality
 
@@ -250,8 +308,12 @@ Without CAS:
 ### The Solution
 
 ```python
-def transition(run_id: str, event: Event, context: EventContext) -> TransitionResult:
-    """Atomically transition state using compare-and-swap."""
+def transition(run_id: str, event: StageEvent, context: EventContext) -> TransitionResult:
+    """Atomically transition state using compare-and-swap.
+
+    CRITICAL: State update AND audit insert happen in the SAME transaction.
+    This ensures we never have state changes without audit or vice versa.
+    """
 
     # 1. Read current state
     current = db.get_stage_run(run_id)
@@ -259,33 +321,50 @@ def transition(run_id: str, event: Event, context: EventContext) -> TransitionRe
         return TransitionResult(success=False, reason="not_found")
 
     # 2. Find valid transition
-    transition = find_transition(current.state, event)
-    if not transition:
-        return TransitionResult(success=False, reason="invalid_transition")
+    transition_def = find_transition(current["state"], event)
+    if not transition_def:
+        return TransitionResult(success=False, reason="invalid_transition",
+            details=f"No transition from {current['state']} on {event}")
 
     # 3. Check guard
-    if transition.guard and not transition.guard(context):
+    if transition_def.guard and not transition_def.guard(context):
         return TransitionResult(success=False, reason="guard_failed")
 
-    # 4. CAS update - only succeeds if state hasn't changed
+    # 4. ATOMIC: CAS update + audit insert in same transaction
     with db._conn() as conn:
+        # CAS update - only succeeds if state hasn't changed
         result = conn.execute(
             """UPDATE stage_runs
                SET state = ?, phase = ?, state_updated_at = ?,
                    termination_cause = ?, error = ?
                WHERE id = ? AND state = ?""",
-            (transition.to_state, context.phase, now_iso(),
+            (transition_def.to_state, context.phase,
+             context.timestamp.isoformat(),  # Use event timestamp, not now()
              context.termination_cause, context.error_message,
-             run_id, current.state)
+             run_id, current["state"])
         )
         if result.rowcount == 0:
             return TransitionResult(success=False, reason="state_changed")
 
-    # 5. Record audit trail
-    db.record_transition(run_id, current.state, event, transition.to_state, context)
+        # Audit insert - SAME transaction, guaranteed atomic
+        conn.execute(
+            """INSERT INTO stage_state_transitions
+               (stage_run_id, from_state, event, to_state, phase,
+                termination_cause, exit_code, exit_code_exists,
+                error_message, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, current["state"], event.value, transition_def.to_state,
+             context.phase, context.termination_cause,
+             context.exit_code, 1 if context.exit_code_exists else 0,
+             context.error_message, context.source,
+             context.timestamp.isoformat())
+        )
+        # Transaction commits here - both succeed or both fail
 
-    return TransitionResult(success=True, new_state=transition.to_state)
+    return TransitionResult(success=True, new_state=transition_def.to_state)
 ```
+
+**Atomicity guarantee**: If the process crashes between the UPDATE and INSERT, the transaction rolls back and neither change persists. This eliminates the "audit without state change" and "state change without audit" failure modes.
 
 ### Idempotency
 
@@ -338,20 +417,59 @@ def get_exit_code(run_id: str) -> ExitCodeResult:
 ### Usage in Event Emission
 
 ```python
-def determine_exit_event(run_id: str) -> tuple[Event, EventContext]:
+def determine_exit_event(run_id: str, backend: str) -> tuple[StageEvent, EventContext] | None:
+    """Determine exit event based on exit code AND instance status.
+
+    CRITICAL: EXIT_MISSING requires verification that instance is actually dead.
+    Otherwise we risk marking running jobs as terminated due to GCS eventual
+    consistency or delayed log sync.
+    """
     result = get_exit_code(run_id)
 
     if result.exists:
         if result.code == 0:
-            return Event.EXIT_SUCCESS, EventContext(exit_code=0, exit_code_exists=True)
+            return StageEvent.EXIT_SUCCESS, EventContext(
+                exit_code=0, exit_code_exists=True,
+                timestamp=datetime.now(UTC), source="monitor"
+            )
         else:
-            return Event.EXIT_FAILURE, EventContext(exit_code=result.code, exit_code_exists=True)
+            return StageEvent.EXIT_FAILURE, EventContext(
+                exit_code=result.code, exit_code_exists=True,
+                timestamp=datetime.now(UTC), source="monitor"
+            )
     else:
-        return Event.EXIT_MISSING, EventContext(
+        # No exit code - but is the instance actually dead?
+        instance_dead = verify_instance_stopped(run_id, backend)
+
+        if not instance_dead:
+            # Instance still running, exit code just not written yet
+            # Do NOT emit EXIT_MISSING - wait for next poll
+            return None
+
+        # Instance confirmed dead + no exit code = crash
+        return StageEvent.EXIT_MISSING, EventContext(
             exit_code_exists=False,
-            termination_cause=TerminationCause.CRASHED
+            instance_confirmed_dead=True,  # Guard requirement satisfied
+            termination_cause=TerminationCause.CRASHED,
+            timestamp=datetime.now(UTC), source="monitor"
         )
+
+
+def verify_instance_stopped(run_id: str, backend: str) -> bool:
+    """Verify instance/container is actually stopped before emitting EXIT_MISSING.
+
+    For GCE: Check instance status via API (TERMINATED, STOPPED, or not found)
+    For local: Check container status (exited or not found)
+    """
+    if backend == "gce":
+        status = gce_launcher.get_instance_status(run_id)
+        return status in (None, "TERMINATED", "STOPPED", "DELETED")
+    else:
+        status = docker_client.get_container_status(run_id)
+        return status in (None, "exited", "dead", "not_found")
 ```
+
+**Guard rationale**: The `instance_confirmed_dead` guard prevents false TERMINATED states. GCS eventual consistency means exit_code.txt might not be visible for seconds after write. Without this guard, a poll during that window would incorrectly mark a successful run as crashed.
 
 ---
 
@@ -388,15 +506,53 @@ def force_terminate_run(
 
 ### force_complete_run
 
-For runs stuck in FINALIZING where outputs are safe:
+For runs stuck in FINALIZING or UNKNOWN where outputs are safe:
 
 ```python
 @mcp.tool()
 def force_complete_run(run_id: str, reason: str) -> dict:
-    """Force a stuck FINALIZING run to COMPLETED.
+    """Force a run to COMPLETED state.
 
+    Valid from: FINALIZING (outputs recorded), UNKNOWN (verified ok)
     Use when finalization hangs but outputs are recorded.
+
+    Args:
+        run_id: Stage run ID
+        reason: Why forcing completion (required for audit)
     """
+    context = EventContext(
+        timestamp=datetime.now(UTC),
+        source="admin",
+        error_message=f"Admin force complete: {reason}"
+    )
+    result = state_machine.transition(run_id, StageEvent.FORCE_COMPLETE, context)
+    return {"success": result.success, "new_state": result.new_state}
+```
+
+### force_fail_run
+
+For UNKNOWN runs that need to be marked as failed after investigation:
+
+```python
+@mcp.tool()
+def force_fail_run(run_id: str, reason: str, error_message: str | None = None) -> dict:
+    """Force an UNKNOWN run to FAILED state.
+
+    Valid from: UNKNOWN only (use force_terminate for others)
+    Use after investigating an UNKNOWN run and determining it failed.
+
+    Args:
+        run_id: Stage run ID
+        reason: Why marking as failed (required for audit)
+        error_message: Optional error message to record
+    """
+    context = EventContext(
+        timestamp=datetime.now(UTC),
+        source="admin",
+        error_message=error_message or f"Admin force fail: {reason}"
+    )
+    result = state_machine.transition(run_id, StageEvent.FORCE_FAIL, context)
+    return {"success": result.success, "new_state": result.new_state}
 ```
 
 ---
@@ -445,6 +601,56 @@ CREATE INDEX idx_transitions_run ON stage_state_transitions(stage_run_id, create
 CREATE INDEX idx_transitions_state ON stage_state_transitions(to_state, created_at);
 ```
 
+### Initial State for New Runs
+
+When creating a new stage run, the initial state is set atomically with row creation:
+
+```python
+def create_stage_run(
+    workspace_name: str,
+    version: str,
+    stage_name: str,
+    backend_type: str,
+    ...
+) -> str:
+    """Create a new stage run with initial state.
+
+    Returns the stage_run_id.
+    """
+    run_id = f"stage-{uuid.uuid4().hex[:8]}"
+    now = datetime.now(UTC).isoformat()
+
+    with db._conn() as conn:
+        # Insert with initial state
+        conn.execute(
+            """INSERT INTO stage_runs
+               (id, workspace_name, version, stage_name, backend_type,
+                state, phase, state_updated_at, started_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, workspace_name, version, stage_name, backend_type,
+             'preparing',        # Initial state
+             'gcs_check',        # Initial phase
+             now,                # state_updated_at
+             now)                # started_at
+        )
+
+        # Record initial transition (state machine entry point)
+        conn.execute(
+            """INSERT INTO stage_state_transitions
+               (stage_run_id, from_state, event, to_state, phase, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, 'none', 'run_start', 'preparing', 'gcs_check', 'mcp_tool', now)
+        )
+
+    return run_id
+```
+
+**Invariants for new runs**:
+- `state` = 'preparing' (always start here)
+- `phase` = 'gcs_check' (first phase of PREPARING)
+- `state_updated_at` = creation timestamp
+- Initial transition recorded in audit trail with `from_state='none'`
+
 ---
 
 ## Migration Strategy
@@ -457,30 +663,133 @@ ALTER TABLE stage_runs ADD COLUMN state TEXT;
 ALTER TABLE stage_runs ADD COLUMN phase TEXT;
 ALTER TABLE stage_runs ADD COLUMN termination_cause TEXT;
 ALTER TABLE stage_runs ADD COLUMN state_updated_at TEXT;
-
--- Populate from existing data
-UPDATE stage_runs SET state = CASE
-    WHEN status = 'pending' THEN 'preparing'
-    WHEN status = 'running' AND progress = 'building' THEN 'building'
-    WHEN status = 'running' AND progress = 'launching' THEN 'launching'
-    WHEN status = 'running' AND progress = 'running' THEN 'running'
-    WHEN status = 'running' AND progress = 'finalizing' THEN 'finalizing'
-    WHEN status = 'running' AND started_at < datetime('now', '-7 days') THEN 'terminated'
-    WHEN status = 'running' THEN 'running'
-    WHEN status = 'completed' THEN 'completed'
-    WHEN status = 'failed' AND error LIKE '%preempted%' THEN 'terminated'
-    WHEN status = 'failed' THEN 'failed'
-    WHEN status = 'canceled' THEN 'canceled'
-    ELSE 'unknown'
-END;
-
--- Set termination_cause for terminated runs
-UPDATE stage_runs SET termination_cause = 'preempted'
-WHERE state = 'terminated' AND error LIKE '%preempted%';
-
-UPDATE stage_runs SET termination_cause = 'orphaned'
-WHERE state = 'terminated' AND termination_cause IS NULL;
 ```
+
+### Phase 1b: Migrate Existing Data (Python Script)
+
+SQL-only migration is too brittle. Use a Python script that can:
+1. Query additional context (GCS, GCE API) for ambiguous cases
+2. Log decisions for audit
+3. Handle edge cases gracefully
+
+```python
+def migrate_stage_runs():
+    """Migrate existing stage_runs to new state model.
+
+    Run ONCE during migration. Logs all decisions for audit.
+    """
+    with db._conn() as conn:
+        rows = conn.execute(
+            "SELECT id, status, progress, error, started_at, completed_at "
+            "FROM stage_runs WHERE state IS NULL"
+        ).fetchall()
+
+    for row in rows:
+        state, phase, cause = determine_migration_state(row)
+        log_migration(row["id"], row["status"], state, cause)
+
+        with db._conn() as conn:
+            conn.execute(
+                """UPDATE stage_runs
+                   SET state = ?, phase = ?, termination_cause = ?,
+                       state_updated_at = COALESCE(completed_at, ?)
+                   WHERE id = ?""",
+                (state, phase, cause, datetime.now(UTC).isoformat(), row["id"])
+            )
+
+
+def determine_migration_state(row: dict) -> tuple[str, str | None, str | None]:
+    """Determine state from legacy columns with careful heuristics."""
+    status = row["status"]
+    progress = row["progress"]
+    error = row["error"] or ""
+    started_at = row["started_at"]
+    completed_at = row["completed_at"]
+
+    # Terminal states - straightforward
+    if status == "completed":
+        return ("completed", None, None)
+    if status == "canceled":
+        return ("canceled", None, None)
+
+    # Failed - check for infrastructure vs code failure
+    if status == "failed":
+        # Check for preemption indicators (case-insensitive, multiple patterns)
+        preemption_patterns = ["preempted", "spot instance", "preemption", "PREEMPTED"]
+        if any(p.lower() in error.lower() for p in preemption_patterns):
+            return ("terminated", None, "preempted")
+
+        # Check for timeout indicators
+        if "timeout" in error.lower() or "timed out" in error.lower():
+            return ("terminated", None, "timeout")
+
+        # Check for crash indicators (OOM, signal, etc.)
+        crash_patterns = ["killed", "oom", "signal", "segfault", "core dump"]
+        if any(p.lower() in error.lower() for p in crash_patterns):
+            return ("terminated", None, "crashed")
+
+        # Default: assume code failure (not infra)
+        return ("failed", None, None)
+
+    # Running - need to determine if actually running or orphaned
+    if status == "running":
+        # Map progress to state
+        if progress == "building":
+            state, phase = "building", "docker_build"
+        elif progress == "launching":
+            state, phase = "launching", "instance_create"
+        elif progress == "finalizing":
+            state, phase = "finalizing", "output_sync"
+        else:
+            state, phase = "running", "code_execution"
+
+        # Check if this is an orphaned run
+        # DON'T use arbitrary time threshold - check if instance actually exists
+        if is_likely_orphaned(row["id"], started_at):
+            return ("terminated", phase, "orphaned")
+
+        # Still potentially active
+        return (state, phase, None)
+
+    # Pending
+    if status == "pending":
+        return ("preparing", "gcs_check", None)
+
+    # Unknown status - flag for manual review
+    return ("unknown", None, None)
+
+
+def is_likely_orphaned(run_id: str, started_at: str) -> bool:
+    """Check if a 'running' run is actually orphaned.
+
+    More reliable than time-based heuristics.
+    """
+    # 1. Check if instance exists in GCE
+    try:
+        instance_status = gce_launcher.get_instance_status(run_id)
+        if instance_status in (None, "TERMINATED", "STOPPED", "DELETED"):
+            return True  # Instance gone but status=running = orphaned
+    except Exception:
+        pass  # Can't check GCE, fall back to time heuristic
+
+    # 2. Fallback: Use conservative time threshold (30 days, not 7)
+    # Only if we couldn't check GCE
+    if started_at:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        age = datetime.now(UTC) - started
+        if age > timedelta(days=30):
+            logger.warning(f"Run {run_id} is 30+ days old with status=running, marking orphaned")
+            return True
+
+    return False
+```
+
+**Migration improvements over SQL-only**:
+1. **No arbitrary thresholds**: Checks actual instance status instead of 7-day cutoff
+2. **Multiple pattern matching**: Catches "preempted", "PREEMPTED", "Spot instance terminated"
+3. **Audit logging**: Every decision logged for review
+4. **Conservative fallback**: 30 days instead of 7, and only if GCE check unavailable
+5. **UNKNOWN for ambiguous**: Doesn't guess - flags for manual review
 
 ### Phase 2: Backwards Compatibility Layer
 
@@ -610,18 +919,34 @@ This overlaps with `stage_runs.state` + `termination_cause`.
 - `run_results.infra_outcome` is the **finalized** outcome (set once at end)
 - `run_results.infra_outcome` should be derived from `stage_runs.state` at finalization
 
+**Key insight**: `infra_outcome` tracks *infrastructure* outcomes, not code outcomes. FAILED state (code/validation errors) means infra worked fine - it's `completed` from infra perspective.
+
 ```python
 def derive_infra_outcome(state: str, termination_cause: str | None) -> str:
+    """Derive infra_outcome from state machine state.
+
+    infra_outcome answers: "Did the infrastructure successfully run the code?"
+    NOT: "Did the code succeed?"
+    """
     if state == 'completed':
         return 'completed'
+    if state == 'failed':
+        # FAILED = code/validation error, but infra worked correctly
+        # The container ran, the code executed, it just returned non-zero
+        return 'completed'  # Infra did its job
     if state == 'canceled':
         return 'canceled'
     if state == 'terminated':
+        # Terminated = infra died (preemption, crash, timeout, etc.)
         return termination_cause or 'unknown'
-    if state == 'failed':
-        return 'crashed'  # Code failure, not infra
+    if state == 'unknown':
+        return 'unknown'
     return 'unknown'
 ```
+
+**ML outcome tracking**: The *code* success/failure is tracked separately in `run_results.ml_outcome` (success, partial, miss, unknown). This separation is intentional:
+- `infra_outcome=completed, ml_outcome=miss` → Infra worked, model underperformed
+- `infra_outcome=preempted, ml_outcome=unknown` → Infra died, can't assess model
 
 ---
 
@@ -722,7 +1047,17 @@ class TestCAS:
 
 ## Open Questions
 
+### Resolved in v3
+
+- ✅ **Phase-only updates**: Use CAS with `expected_state` guard, atomic with audit (see "Phase Updates" section)
+- ✅ **Initial state for new runs**: PREPARING with phase=gcs_check, set atomically on creation (see "Initial State" section)
+- ✅ **EXIT_MISSING guard**: Requires `instance_confirmed_dead=True` via `verify_instance_stopped()` (see "Exit Code Detection" section)
+- ✅ **infra_outcome mapping**: FAILED → completed (infra worked), TERMINATED → termination_cause (see "Relationship to run_results" section)
+
+### Still Open
+
 1. **Daemon deployment model**: Separate process vs. integrated?
 2. **Metrics sync during polling**: Every poll or only on transitions?
 3. **Partial finalization outputs**: What to do with them on CANCELED?
 4. **UNKNOWN state cleanup**: Periodic job to investigate and resolve?
+5. **AI_STOPPED trigger mechanism**: How does AI/SVS signal that a run should stop?
