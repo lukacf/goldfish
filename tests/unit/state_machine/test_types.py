@@ -54,8 +54,8 @@ class TestStageEvent:
     """Tests for StageEvent enum."""
 
     def test_event_count(self) -> None:
-        """Verify we have exactly 18 events as specified."""
-        assert len(StageEvent) == 18
+        """Verify we have exactly 15 events (FORCE_* admin events removed)."""
+        assert len(StageEvent) == 15
 
     def test_build_events(self) -> None:
         """Verify build-related events."""
@@ -92,12 +92,6 @@ class TestStageEvent:
         """Verify preparation events."""
         assert StageEvent.PREPARE_FAIL.value == "prepare_fail"
         assert StageEvent.SVS_BLOCK.value == "svs_block"
-
-    def test_admin_events(self) -> None:
-        """Verify admin override events."""
-        assert StageEvent.FORCE_TERMINATE.value == "force_terminate"
-        assert StageEvent.FORCE_COMPLETE.value == "force_complete"
-        assert StageEvent.FORCE_FAIL.value == "force_fail"
 
 
 class TestTerminationCause:
