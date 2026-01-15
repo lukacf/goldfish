@@ -107,7 +107,7 @@ STATE_ENTRY_PHASES: dict[StageState, ProgressPhase | None] = {
 
 TRANSITIONS: list[TransitionDef] = [
     # =========================================================================
-    # PREPARING (7 transitions)
+    # PREPARING (6 transitions)
     # =========================================================================
     TransitionDef(StageState.PREPARING, StageEvent.BUILD_START, StageState.BUILDING),
     TransitionDef(StageState.PREPARING, StageEvent.PREPARE_FAIL, StageState.FAILED),
@@ -115,27 +115,24 @@ TRANSITIONS: list[TransitionDef] = [
     TransitionDef(StageState.PREPARING, StageEvent.INSTANCE_LOST, StageState.TERMINATED),
     TransitionDef(StageState.PREPARING, StageEvent.TIMEOUT, StageState.TERMINATED),
     TransitionDef(StageState.PREPARING, StageEvent.USER_CANCEL, StageState.CANCELED),
-    TransitionDef(StageState.PREPARING, StageEvent.FORCE_TERMINATE, StageState.TERMINATED),
     # =========================================================================
-    # BUILDING (6 transitions)
+    # BUILDING (5 transitions)
     # =========================================================================
     TransitionDef(StageState.BUILDING, StageEvent.BUILD_OK, StageState.LAUNCHING),
     TransitionDef(StageState.BUILDING, StageEvent.BUILD_FAIL, StageState.FAILED),
     TransitionDef(StageState.BUILDING, StageEvent.INSTANCE_LOST, StageState.TERMINATED),
     TransitionDef(StageState.BUILDING, StageEvent.TIMEOUT, StageState.TERMINATED),
     TransitionDef(StageState.BUILDING, StageEvent.USER_CANCEL, StageState.CANCELED),
-    TransitionDef(StageState.BUILDING, StageEvent.FORCE_TERMINATE, StageState.TERMINATED),
     # =========================================================================
-    # LAUNCHING (6 transitions)
+    # LAUNCHING (5 transitions)
     # =========================================================================
     TransitionDef(StageState.LAUNCHING, StageEvent.LAUNCH_OK, StageState.RUNNING),
     TransitionDef(StageState.LAUNCHING, StageEvent.LAUNCH_FAIL, StageState.FAILED),
     TransitionDef(StageState.LAUNCHING, StageEvent.INSTANCE_LOST, StageState.TERMINATED),
     TransitionDef(StageState.LAUNCHING, StageEvent.TIMEOUT, StageState.TERMINATED),
     TransitionDef(StageState.LAUNCHING, StageEvent.USER_CANCEL, StageState.CANCELED),
-    TransitionDef(StageState.LAUNCHING, StageEvent.FORCE_TERMINATE, StageState.TERMINATED),
     # =========================================================================
-    # RUNNING (7 transitions)
+    # RUNNING (6 transitions)
     # =========================================================================
     TransitionDef(StageState.RUNNING, StageEvent.EXIT_SUCCESS, StageState.FINALIZING),
     TransitionDef(StageState.RUNNING, StageEvent.EXIT_FAILURE, StageState.FAILED),
@@ -149,9 +146,8 @@ TRANSITIONS: list[TransitionDef] = [
     TransitionDef(StageState.RUNNING, StageEvent.INSTANCE_LOST, StageState.TERMINATED),
     TransitionDef(StageState.RUNNING, StageEvent.TIMEOUT, StageState.TERMINATED),
     TransitionDef(StageState.RUNNING, StageEvent.USER_CANCEL, StageState.CANCELED),
-    TransitionDef(StageState.RUNNING, StageEvent.FORCE_TERMINATE, StageState.TERMINATED),
     # =========================================================================
-    # FINALIZING (9 transitions)
+    # FINALIZING (7 transitions)
     # =========================================================================
     TransitionDef(StageState.FINALIZING, StageEvent.FINALIZE_OK, StageState.COMPLETED),
     TransitionDef(
@@ -184,15 +180,10 @@ TRANSITIONS: list[TransitionDef] = [
         guard_name="critical_phases_done=False",
     ),
     TransitionDef(StageState.FINALIZING, StageEvent.USER_CANCEL, StageState.CANCELED),
-    TransitionDef(StageState.FINALIZING, StageEvent.FORCE_COMPLETE, StageState.COMPLETED),
-    TransitionDef(StageState.FINALIZING, StageEvent.FORCE_TERMINATE, StageState.TERMINATED),
     # =========================================================================
-    # UNKNOWN (4 transitions) - requires manual resolution
+    # UNKNOWN (1 transition) - requires manual resolution
     # =========================================================================
     TransitionDef(StageState.UNKNOWN, StageEvent.TIMEOUT, StageState.TERMINATED),
-    TransitionDef(StageState.UNKNOWN, StageEvent.FORCE_TERMINATE, StageState.TERMINATED),
-    TransitionDef(StageState.UNKNOWN, StageEvent.FORCE_COMPLETE, StageState.COMPLETED),
-    TransitionDef(StageState.UNKNOWN, StageEvent.FORCE_FAIL, StageState.FAILED),
 ]
 
 

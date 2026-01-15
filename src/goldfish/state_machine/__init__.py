@@ -16,6 +16,17 @@ Key components:
 See docs/state-machine-spec.md for the full specification.
 """
 
+from goldfish.state_machine.admin_tools import (
+    AdminTransitionError,
+    force_complete_run,
+    force_fail_run,
+    force_terminate_run,
+)
+from goldfish.state_machine.backwards_compat import (
+    get_legacy_status,
+    state_from_legacy,
+)
+from goldfish.state_machine.cancel import cancel_run
 from goldfish.state_machine.core import transition, update_phase
 from goldfish.state_machine.event_emission import (
     clear_gcs_outage_started,
@@ -30,6 +41,10 @@ from goldfish.state_machine.exit_code import (
     ExitCodeResult,
     get_exit_code_docker,
     get_exit_code_gce,
+)
+from goldfish.state_machine.finalization import (
+    FinalizationTracker,
+    get_critical_phases_done,
 )
 from goldfish.state_machine.leader_election import DaemonLeaderElection
 from goldfish.state_machine.stage_daemon import StageDaemon
@@ -53,6 +68,7 @@ from goldfish.state_machine.types import (
     TransitionDef,
     TransitionResult,
 )
+from goldfish.state_machine.utils import format_transition_result
 
 __all__ = [
     # Types
@@ -91,4 +107,19 @@ __all__ = [
     # Classes - daemon
     "DaemonLeaderElection",
     "StageDaemon",
+    # Functions - cancel
+    "cancel_run",
+    # Finalization tracking
+    "FinalizationTracker",
+    "get_critical_phases_done",
+    # Utility functions
+    "format_transition_result",
+    # Admin tools
+    "AdminTransitionError",
+    "force_terminate_run",
+    "force_complete_run",
+    "force_fail_run",
+    # Backwards compatibility (deprecated)
+    "get_legacy_status",
+    "state_from_legacy",
 ]

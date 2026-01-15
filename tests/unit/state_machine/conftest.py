@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from goldfish.db.database import Database
 from goldfish.state_machine import (
     EventContext,
     ProgressPhase,
@@ -166,33 +167,44 @@ def svs_block_context(now: datetime) -> EventContext:
     )
 
 
-@pytest.fixture
-def force_terminate_context(now: datetime) -> EventContext:
-    """Context for FORCE_TERMINATE admin event."""
-    return EventContext(
-        timestamp=now,
-        source="admin",
-        termination_cause=TerminationCause.MANUAL,
-    )
+# Helper for creating runs in specific states
+def create_run_in_state(
+    db: Database,
+    state: str,
+    run_id: str = "stage-test123",
+    workspace_name: str = "test-workspace",
+    version: str = "v1",
+    stage_name: str = "train",
+    backend_type: str | None = None,
+    backend_handle: str | None = None,
+) -> str:
+    """Create a stage run in the specified state for testing.
 
+    Args:
+        db: Database instance.
+        state: The state to set the run to.
+        run_id: Stage run ID (default: stage-test123).
+        workspace_name: Workspace name (default: test-workspace).
+        version: Version string (default: v1).
+        stage_name: Stage name (default: train).
+        backend_type: Optional backend type ("local" or "gce").
+        backend_handle: Optional backend handle (container ID or instance name).
 
-@pytest.fixture
-def force_complete_context(now: datetime) -> EventContext:
-    """Context for FORCE_COMPLETE admin event."""
-    return EventContext(
-        timestamp=now,
-        source="admin",
-    )
-
-
-@pytest.fixture
-def force_fail_context(now: datetime) -> EventContext:
-    """Context for FORCE_FAIL admin event."""
-    return EventContext(
-        timestamp=now,
-        source="admin",
-        error_message="Admin marked as failed",
-    )
+    Returns:
+        The run_id of the created run.
+    """
+    with db._conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO stage_runs (
+                id, workspace_name, version, stage_name, state, status,
+                backend_type, backend_handle, started_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            """,
+            (run_id, workspace_name, version, stage_name, state, "running", backend_type, backend_handle),
+        )
+    return run_id
 
 
 # Helpers for creating contexts with specific states
@@ -225,4 +237,21 @@ def make_context(
         svs_finding_id=svs_finding_id,
         gcs_error=gcs_error,
         gcs_outage_started=gcs_outage_started,
+    )
+
+
+@pytest.fixture
+def sample_run(test_db: Database) -> str:
+    """Create a sample run in PREPARING state for testing.
+
+    Returns:
+        The run_id of the created run.
+    """
+    return create_run_in_state(
+        db=test_db,
+        state="preparing",
+        run_id="stage-abc123456",
+        workspace_name="test-workspace",
+        version="v1",
+        stage_name="train",
     )
