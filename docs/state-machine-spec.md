@@ -841,39 +841,88 @@ ALTER TABLE stage_runs DROP COLUMN progress;
 
 ---
 
-## Daemon Interface (Spec Only)
+## Daemon Integration (Leveraging Existing Infrastructure)
 
-The daemon is **not implemented in Phase 1**. This section specs the interface for future implementation.
+**The daemon already exists and is sophisticated.** This section describes how the state machine integrates with existing infrastructure, not a new daemon.
 
-### Responsibilities
+### Existing Daemon Capabilities (`daemon.py`)
 
-1. Poll active runs for infrastructure state changes
-2. Emit events to state machine (via `transition()`)
-3. Detect orphaned runs (no progress for extended period)
-4. Coordinate with MCP tools (don't double-finalize)
+Already implemented:
+- **Worker thread**: Polls every 2s for pipeline queue processing
+- **Instance monitor**: Checks every 60s for orphaned/preempted instances
+- **Preemption detection**: `gcloud compute operations list` for spot terminations
+- **Exit code retrieval**: `gsutil cat .../exit_code.txt` (has the same bug - returns 1 for missing)
+- **CAS-like updates**: `WHERE status NOT IN (terminal_statuses)`
+- **Refresh lock**: `_refresh_lock` + `_refreshing_runs` prevents concurrent refresh
 
-### Coordination with MCP Tools
+### Existing Cancel MCP Tool (`server_tools/execution_tools.py:842-902`)
 
-When daemon is implemented:
-- Daemon is the **primary** status checker for active runs
-- MCP tools read from database (daemon keeps it fresh)
-- `refresh_status_once()` becomes a no-op or removes entirely
-- CAS semantics prevent race conditions
-
-### Timeout Configuration (Sensible Defaults)
-
-Timeouts are a **state detection problem**, not a state machine problem. For now, use sensible defaults:
-
+Already implemented:
 ```python
-DEFAULT_TIMEOUTS = {
-    "build": 1800,      # 30 min (covers GPU image with cuda)
-    "launch": 900,      # 15 min (covers H100 provisioning)
-    "not_found": 300,   # 5 min grace period
-    "finalizing": 1800, # 30 min (covers slow GCS sync)
-}
+# Atomic state change - only if still running
+with db._conn() as conn:
+    updated = conn.execute(
+        "UPDATE stage_runs SET status=?, progress=NULL, completed_at=?, error=? "
+        "WHERE id=? AND status=?",
+        (StageRunStatus.CANCELED, now, f"Canceled: {reason}", run_id, StageRunStatus.RUNNING)
+    ).rowcount
+```
+- Best-effort backend cleanup (Docker stop / GCE delete)
+- Returns structured `CancelRunResponse`
+
+### Existing Metadata Event System (`infra/metadata/`)
+
+Already implemented:
+- `MetadataSignal`: command, request_id, payload, timestamp
+- `MetadataBus`: Protocol with GCP and Local implementations
+- ACK handshake: Container acknowledges signal receipt
+- Current command: `"sync"` (triggers metrics/SVS upload)
+
+**AI_STOPPED extension**: Add new signal command:
+```python
+MetadataSignal(
+    command="stop",
+    request_id=uuid4().hex,
+    payload={"reason": "ai_stopped", "svs_finding_id": "..."}
+)
+```
+Container polls, receives stop signal, writes exit_code.txt, shuts down gracefully.
+
+### State Machine Integration Points
+
+The state machine **wraps** existing infrastructure, not replaces it:
+
+| Existing Code | State Machine Integration |
+|---------------|--------------------------|
+| `daemon._check_orphaned_runs()` | Emits `INSTANCE_LOST` or `EXIT_*` events |
+| `cancel()` MCP tool | Emits `USER_CANCEL` event |
+| `refresh_status_once()` | Emits appropriate event based on backend status |
+| `_finalize_stage_run()` | Called by state machine on terminal transitions |
+| `MetadataBus.set_signal("stop")` | Emits `AI_STOPPED` event after ACK |
+
+### Exit Code Bug (Exists in TWO places)
+
+**daemon.py:844**:
+```python
+return 1  # Default to failure if not found  ← BUG
 ```
 
-Future: Intelligent timeout detection via SVS-like agent that monitors build/startup progress.
+**gce_launcher.py:738**:
+```python
+return 1  # Returns 1 when file doesn't exist  ← SAME BUG
+```
+
+Both need the `ExitCodeResult` fix.
+
+### Timeout Configuration (Existing Defaults)
+
+From `stage_executor.py`:
+```python
+GOLDFISH_GCE_NOT_FOUND_TIMEOUT = 300   # 5 min for RUNNING phase
+GOLDFISH_GCE_LAUNCH_TIMEOUT = 1200     # 20 min for BUILD/LAUNCH phases
+```
+
+The daemon instance monitor uses 20-minute grace period before checking orphaned runs.
 
 ---
 
@@ -1019,17 +1068,22 @@ class TestCAS:
 
 ### Phase 1: Foundation (Current)
 - [x] Write spec (this document)
-- [ ] Fix `_get_exit_code()` to return `ExitCodeResult`
+- [ ] Fix `_get_exit_code()` in BOTH `daemon.py:844` and `gce_launcher.py:738`
 - [ ] Write comprehensive test suite (TDD)
 - [ ] Implement state machine core (transitions, CAS, audit)
 - [ ] Write migration script
 - [ ] Add backwards compatibility layer
-- [ ] Add `force_terminate_run` admin tool
+- [ ] Add `force_terminate_run`, `force_complete_run`, `force_fail_run` admin tools
+- [ ] Add `completed_with_warnings` column for non-critical finalization failures
 
-### Phase 2: Integration
+### Phase 2: Integration + UNKNOWN Cleanup
 - [ ] Wire state machine into `stage_executor.py`
+- [ ] Wire state machine into `daemon.py` (instance monitor emits events)
+- [ ] Update `cancel()` MCP tool to emit `USER_CANCEL` event
 - [ ] Update all status readers to use new columns
 - [ ] Add transition logging/monitoring
+- [ ] **Add UNKNOWN cleanup job** (periodic investigation + admin tool resolution)
+- [ ] Add audit retention policy (90 days / 1000 per run)
 - [ ] Test with real workloads
 
 ### Phase 3: Cleanup
@@ -1037,11 +1091,85 @@ class TestCAS:
 - [ ] Drop old `status`/`progress` columns
 - [ ] Update documentation
 
-### Phase 4: Daemon (Future)
-- [ ] Implement daemon polling
+### Phase 4: Enhancements (Future)
+- [ ] Add `"stop"` signal to metadata bus for AI_STOPPED
 - [ ] Add intelligent timeout detection
-- [ ] Add AI-initiated stop (STOPPED state)
 - [ ] Add auto-recovery from TERMINATED
+
+---
+
+## Feedback Responses (v3 Review)
+
+### Q1: FINALIZE_FAIL with critical=False → COMPLETED visibility?
+
+**Answer**: Yes, this needs surfacing. Add `completed_with_warnings: bool` column:
+
+```sql
+ALTER TABLE stage_runs ADD COLUMN completed_with_warnings INTEGER DEFAULT 0;
+```
+
+Set to 1 when `FINALIZE_FAIL(critical=False)` → COMPLETED. Dashboard shows warning icon.
+
+The audit trail (`stage_state_transitions`) already captures the `FINALIZE_FAIL` event with details, so the full history is preserved.
+
+### Q2: Audit table growth with phase updates?
+
+**Answer**: Phase updates are lower frequency than implied:
+- Phases change ~7 times per run (not per poll)
+- Polling doesn't emit events unless state/phase actually changes
+- Still, add retention policy:
+
+```sql
+-- Keep last 90 days of transitions, or last 1000 per run
+DELETE FROM stage_state_transitions
+WHERE created_at < datetime('now', '-90 days')
+  AND stage_run_id NOT IN (
+    SELECT DISTINCT stage_run_id FROM stage_state_transitions
+    ORDER BY created_at DESC LIMIT 1000
+  );
+```
+
+Run weekly via daemon or cron.
+
+### Q3: Phase update retry on rejection?
+
+**Answer**: **Drop, don't retry.** If state changed, the phase info is stale. The new state transition will set appropriate phase anyway.
+
+```python
+def update_phase(run_id: str, expected_state: str, new_phase: ProgressPhase) -> bool:
+    success = _do_cas_update(...)
+    if not success:
+        # State changed underneath us - our phase info is stale
+        # Don't retry, don't log error - this is expected behavior
+        logger.debug(f"Phase update rejected for {run_id} (state changed)")
+    return success
+```
+
+### Q4: Migration edge case - 25-day orphaned run?
+
+**Answer**: Good catch. Migration script should mark these as UNKNOWN (not keep as running):
+
+```python
+def is_likely_orphaned(run_id: str, started_at: str) -> bool:
+    # ... existing GCE check ...
+
+    # For migration: any 'running' > 7 days old gets marked
+    # Daemon will clean up UNKNOWN runs in Phase 2
+    if started_at:
+        age = datetime.now(UTC) - parse_iso(started_at)
+        if age > timedelta(days=7):  # More aggressive during migration
+            return True
+
+    return False
+```
+
+And move UNKNOWN cleanup to Phase 2 (not "future"):
+
+### Suggestions Incorporated
+
+1. **completed_at on terminal transitions**: Already set by existing `_finalize_stage_run()`. The state machine preserves this - `completed_at` is set when transitioning to any terminal state.
+
+2. **UNKNOWN cleanup job**: Moved to Phase 2. Periodic job investigates UNKNOWN runs and resolves via admin tools.
 
 ---
 
