@@ -1,13 +1,13 @@
 # Stage Execution State Machine Specification
 
-> **Status**: Draft v3 (Post-Critical-Review)
+> **Status**: Draft v3.2 (Daemon Rewrite Strategy)
 > **Author**: Claude + Luka
 > **Created**: 2025-01-15
 > **Updated**: 2025-01-15
 
 ## Overview
 
-This document specifies a state machine to replace the ad-hoc state management in Goldfish stage execution. The design incorporates feedback from critical review identifying race conditions, migration risks, and over-engineering concerns.
+This document specifies a state machine to **replace** the ad-hoc if/then/else state management scattered across Goldfish stage execution. The current daemon, stage executor, and MCP tools all have their own logic for deciding and updating state - this creates race conditions, silent failures, and untraceable state corruption. The state machine becomes the **single source of truth**, with all existing state-mutation code rewritten to emit events instead.
 
 ### Problems Being Solved
 
@@ -841,66 +841,149 @@ ALTER TABLE stage_runs DROP COLUMN progress;
 
 ---
 
-## Daemon Integration (Leveraging Existing Infrastructure)
+## Daemon Rewrite Strategy
 
-**The daemon already exists and is sophisticated.** This section describes how the state machine integrates with existing infrastructure, not a new daemon.
+**The current daemon (`daemon.py`) is an if/then/else mess that needs to be replaced with proper state machine logic.** While infrastructure components exist (metadata bus, GCE APIs), the control flow must be rewritten around the state machine as the single source of truth.
 
-### Existing Daemon Capabilities (`daemon.py`)
+### Current Problems with Daemon
 
-Already implemented:
-- **Worker thread**: Polls every 2s for pipeline queue processing
-- **Instance monitor**: Checks every 60s for orphaned/preempted instances
-- **Preemption detection**: `gcloud compute operations list` for spot terminations
-- **Exit code retrieval**: `gsutil cat .../exit_code.txt` (has the same bug - returns 1 for missing)
-- **CAS-like updates**: `WHERE status NOT IN (terminal_statuses)`
-- **Refresh lock**: `_refresh_lock` + `_refreshing_runs` prevents concurrent refresh
+The existing daemon suffers from:
+- **Scattered state logic**: Multiple code paths check status with subtly different conditions
+- **If/then/else chains**: Nested conditionals like "if running and progress == X and elapsed > Y..."
+- **No central authority**: Status updates happen in 70+ places with no coordination
+- **Silent failures**: Edge cases fall through without proper handling
+- **Exit code bug**: Returns `1` when file doesn't exist (conflates "missing" with "failed")
 
-### Existing Cancel MCP Tool (`server_tools/execution_tools.py:842-902`)
+### The Rewrite Approach
 
-Already implemented:
+**The state machine becomes the ONLY way to change stage run state.** All existing code paths that update `status`/`progress` columns must be converted to emit events instead.
+
 ```python
-# Atomic state change - only if still running
-with db._conn() as conn:
-    updated = conn.execute(
-        "UPDATE stage_runs SET status=?, progress=NULL, completed_at=?, error=? "
-        "WHERE id=? AND status=?",
-        (StageRunStatus.CANCELED, now, f"Canceled: {reason}", run_id, StageRunStatus.RUNNING)
-    ).rowcount
+# BEFORE (scattered if/then/else mess)
+def _check_orphaned_runs(self):
+    for run in running_runs:
+        if run.progress == "building" and elapsed > build_timeout:
+            self._mark_failed(run, "build timeout")
+        elif run.progress == "launching" and elapsed > launch_timeout:
+            self._mark_failed(run, "launch timeout")
+        elif run.status == "running" and not instance_exists:
+            exit_code = self._get_exit_code(run)
+            if exit_code == 0:
+                self._finalize(run, "completed")
+            else:
+                self._mark_failed(run, "crashed")
+        # ... 50 more lines of conditionals
+
+# AFTER (state machine is single source of truth)
+def _check_runs(self):
+    for run in active_runs:
+        event, context = self._determine_event(run)
+        if event:
+            state_machine.transition(run.id, event, context)
 ```
-- Best-effort backend cleanup (Docker stop / GCE delete)
-- Returns structured `CancelRunResponse`
 
-### Existing Metadata Event System (`infra/metadata/`)
+### What Gets Rewritten
 
-Already implemented:
-- `MetadataSignal`: command, request_id, payload, timestamp
-- `MetadataBus`: Protocol with GCP and Local implementations
-- ACK handshake: Container acknowledges signal receipt
-- Current command: `"sync"` (triggers metrics/SVS upload)
+| Component | Current State | Rewrite |
+|-----------|--------------|---------|
+| `daemon._check_orphaned_runs()` | If/then/else on status/progress | Emit events to state machine |
+| `daemon._process_run()` | Direct status updates | Emit events to state machine |
+| `stage_executor.refresh_status_once()` | Complex conditionals | Return event + context, let caller transition |
+| `cancel()` MCP tool | Direct SQL update | `state_machine.transition(run_id, USER_CANCEL, ctx)` |
+| `_finalize_stage_run()` | Called directly | Called by state machine on FINALIZING→terminal |
 
-**AI_STOPPED extension**: Add new signal command:
+### What Gets Preserved
+
+Some infrastructure is well-designed and should be kept:
+
+- **Metadata Event System** (`infra/metadata/`): Clean protocol-based design
+  - `MetadataSignal`, `MetadataBus`, GCP/Local implementations
+  - ACK handshake pattern for container communication
+  - Extend with `"stop"` command for AI_STOPPED
+
+- **GCE APIs**: Instance lifecycle management
+  - `get_instance_status()`, `delete_instance()`
+  - Preemption detection via operations API
+
+- **Docker APIs**: Container management
+  - `docker stop`, status queries
+
+- **Exit code retrieval** (after bug fix): GCS `exit_code.txt` pattern
+
+### New Daemon Structure
+
 ```python
-MetadataSignal(
-    command="stop",
-    request_id=uuid4().hex,
-    payload={"reason": "ai_stopped", "svs_finding_id": "..."}
-)
+class StageDaemon:
+    """Daemon that emits events to state machine.
+
+    The daemon's job is to OBSERVE infrastructure state and EMIT events.
+    The state machine's job is to DECIDE what those events mean.
+    """
+
+    def __init__(self, state_machine: StageStateMachine, ...):
+        self.state_machine = state_machine
+
+    def poll_active_runs(self):
+        """Main polling loop - determine and emit events."""
+        for run in self.db.get_active_runs():
+            event, context = self._determine_event(run)
+            if event:
+                result = self.state_machine.transition(run["id"], event, context)
+                if not result.success:
+                    logger.warning(f"Transition failed: {result.reason}")
+
+    def _determine_event(self, run: dict) -> tuple[StageEvent | None, EventContext | None]:
+        """Determine what event (if any) should be emitted for this run.
+
+        This is pure logic - no state mutations.
+        """
+        state = run["state"]
+        backend = run["backend_type"]
+
+        # Check timeouts first (state-specific)
+        if timeout_event := self._check_timeout(run):
+            return timeout_event
+
+        # Check backend status
+        if backend == "gce":
+            return self._determine_gce_event(run)
+        else:
+            return self._determine_local_event(run)
+
+    def _determine_gce_event(self, run: dict) -> tuple[StageEvent | None, EventContext | None]:
+        """Determine event for GCE-backed run."""
+        instance_status = self.gce.get_instance_status(run["backend_handle"])
+
+        # Instance still running
+        if instance_status in ("RUNNING", "STAGING", "PROVISIONING"):
+            return None, None
+
+        # Instance gone - check exit code
+        exit_result = self._get_exit_code(run["id"])
+
+        if exit_result.exists:
+            if exit_result.code == 0:
+                return StageEvent.EXIT_SUCCESS, EventContext(
+                    exit_code=0, exit_code_exists=True,
+                    timestamp=datetime.now(UTC), source="daemon"
+                )
+            else:
+                return StageEvent.EXIT_FAILURE, EventContext(
+                    exit_code=exit_result.code, exit_code_exists=True,
+                    timestamp=datetime.now(UTC), source="daemon"
+                )
+        else:
+            # No exit code + instance gone = crash/preemption
+            cause = self._detect_termination_cause(run)
+            return StageEvent.EXIT_MISSING, EventContext(
+                exit_code_exists=False,
+                instance_confirmed_dead=True,
+                termination_cause=cause,
+                timestamp=datetime.now(UTC), source="daemon"
+            )
 ```
-Container polls, receives stop signal, writes exit_code.txt, shuts down gracefully.
 
-### State Machine Integration Points
-
-The state machine **wraps** existing infrastructure, not replaces it:
-
-| Existing Code | State Machine Integration |
-|---------------|--------------------------|
-| `daemon._check_orphaned_runs()` | Emits `INSTANCE_LOST` or `EXIT_*` events |
-| `cancel()` MCP tool | Emits `USER_CANCEL` event |
-| `refresh_status_once()` | Emits appropriate event based on backend status |
-| `_finalize_stage_run()` | Called by state machine on terminal transitions |
-| `MetadataBus.set_signal("stop")` | Emits `AI_STOPPED` event after ACK |
-
-### Exit Code Bug (Exists in TWO places)
+### Exit Code Bug (Must Fix)
 
 **daemon.py:844**:
 ```python
@@ -912,17 +995,61 @@ return 1  # Default to failure if not found  ← BUG
 return 1  # Returns 1 when file doesn't exist  ← SAME BUG
 ```
 
-Both need the `ExitCodeResult` fix.
+Both must be fixed to use `ExitCodeResult` pattern (see "Exit Code Detection" section).
 
-### Timeout Configuration (Existing Defaults)
+### Timeout Configuration
 
-From `stage_executor.py`:
+Keep existing timeout defaults:
 ```python
 GOLDFISH_GCE_NOT_FOUND_TIMEOUT = 300   # 5 min for RUNNING phase
 GOLDFISH_GCE_LAUNCH_TIMEOUT = 1200     # 20 min for BUILD/LAUNCH phases
 ```
 
-The daemon instance monitor uses 20-minute grace period before checking orphaned runs.
+### Cancel Flow (Rewritten)
+
+```python
+# server_tools/execution_tools.py
+@mcp.tool()
+def cancel(run_id: str, reason: str) -> CancelRunResponse:
+    """Cancel a running stage.
+
+    Uses state machine for atomic state change.
+    """
+    context = EventContext(
+        timestamp=datetime.now(UTC),
+        source="mcp_tool",
+        error_message=f"Canceled: {reason}"
+    )
+
+    result = state_machine.transition(run_id, StageEvent.USER_CANCEL, context)
+
+    if result.success:
+        # Best-effort backend cleanup (non-blocking)
+        _cleanup_backend(run_id)
+        return CancelRunResponse(success=True, new_state="canceled")
+    else:
+        return CancelRunResponse(success=False, error=result.reason)
+```
+
+### AI_STOPPED via Metadata Bus
+
+The existing metadata bus supports this cleanly:
+
+```python
+# Emit stop signal via metadata bus
+signal = MetadataSignal(
+    command="stop",
+    request_id=uuid4().hex,
+    payload={"reason": "ai_stopped", "svs_finding_id": "..."}
+)
+metadata_bus.set_signal(run_id, signal)
+
+# Container receives, writes exit code, shuts down
+# Daemon sees EXIT_SUCCESS/FAILURE, emits event
+# State machine handles normally
+```
+
+The container-side polling is already implemented - just need to add "stop" command handler.
 
 ---
 
@@ -1076,11 +1203,12 @@ class TestCAS:
 - [ ] Add `force_terminate_run`, `force_complete_run`, `force_fail_run` admin tools
 - [ ] Add `completed_with_warnings` column for non-critical finalization failures
 
-### Phase 2: Integration + UNKNOWN Cleanup
-- [ ] Wire state machine into `stage_executor.py`
-- [ ] Wire state machine into `daemon.py` (instance monitor emits events)
+### Phase 2: Daemon Rewrite + Integration
+- [ ] **Rewrite `daemon.py`** around state machine (not wrap - replace if/then/else mess)
+- [ ] Rewrite `stage_executor.refresh_status_once()` to return events instead of mutating
+- [ ] Wire state machine into `stage_executor.run_stage()`
 - [ ] Update `cancel()` MCP tool to emit `USER_CANCEL` event
-- [ ] Update all status readers to use new columns
+- [ ] Update all status readers to use new columns (70+ call sites)
 - [ ] Add transition logging/monitoring
 - [ ] **Add UNKNOWN cleanup job** (periodic investigation + admin tool resolution)
 - [ ] Add audit retention policy (90 days / 1000 per run)
@@ -1184,8 +1312,7 @@ And move UNKNOWN cleanup to Phase 2 (not "future"):
 
 ### Still Open
 
-1. **Daemon deployment model**: Separate process vs. integrated?
+1. **Daemon deployment model**: Keep as separate process (current) or integrate into MCP server?
 2. **Metrics sync during polling**: Every poll or only on transitions?
 3. **Partial finalization outputs**: What to do with them on CANCELED?
-4. **UNKNOWN state cleanup**: Periodic job to investigate and resolve?
-5. **AI_STOPPED trigger mechanism**: How does AI/SVS signal that a run should stop?
+4. **AI_STOPPED container handling**: Container-side handler for "stop" metadata signal (write exit code, cleanup, shut down gracefully)
