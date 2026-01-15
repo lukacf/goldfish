@@ -460,6 +460,14 @@ CMD ["/bin/bash"]
         sanitized_ver = re.sub(r"[^a-z0-9._-]", "_", version.lower())
         registry_tag = f"{artifact_registry}/goldfish-{sanitized_ws}-{sanitized_ver}"
 
+        # Check if image already exists - skip build if so
+        if self._image_exists_in_registry(registry_tag, project_id):
+            logger.info(
+                "Image %s already exists in registry, skipping build",
+                registry_tag,
+            )
+            return registry_tag
+
         # Get Cloud Build configuration
         docker_config = getattr(self.config, "docker", None)
         cloud_config = getattr(docker_config, "cloud_build", None) if docker_config else None
@@ -794,6 +802,41 @@ CMD ["/bin/bash"]
         if base_image and "gpu" in base_image.lower():
             return "gpu"
         return "cpu"
+
+    def _image_exists_in_registry(self, registry_tag: str, project_id: str) -> bool:
+        """Check if an image already exists in Artifact Registry.
+
+        Args:
+            registry_tag: Full registry tag (e.g., "us-docker.pkg.dev/proj/repo/image:tag")
+            project_id: GCP project ID
+
+        Returns:
+            True if image exists, False otherwise
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "gcloud",
+                    "artifacts",
+                    "docker",
+                    "images",
+                    "describe",
+                    registry_tag,
+                    "--project",
+                    project_id,
+                    "--format=json",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,  # Quick timeout for describe
+            )
+            # returncode 0 means image exists
+            return result.returncode == 0
+        except Exception as e:
+            # On any error (timeout, gcloud not found, etc.), assume image doesn't exist
+            logger.debug("Image existence check failed: %s", e)
+            return False
 
     def _generate_image_tag(self, workspace_name: str, version: str) -> str:
         """Generate Docker image tag.
