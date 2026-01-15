@@ -484,10 +484,13 @@ def transition(db: Database, run_id: str, event: StageEvent, context: EventConte
         )
     )
 
-    # 5. Default termination_cause for TIMEOUT events
-    # TIMEOUT transitions always need cause=TIMEOUT for proper infra_outcome mapping
+    # 5. Default termination_cause for TIMEOUT → TERMINATED only
+    # termination_cause is ONLY for TERMINATED state (see "Termination Cause" section)
+    # TIMEOUT → COMPLETED/FAILED should NOT set termination_cause
     termination_cause = context.termination_cause
-    if event == StageEvent.TIMEOUT and termination_cause is None:
+    if (event == StageEvent.TIMEOUT
+        and transition_def.to_state == 'terminated'
+        and termination_cause is None):
         termination_cause = TerminationCause.TIMEOUT
 
     # 6. Determine phase for the new state
@@ -690,7 +693,7 @@ def detect_termination_cause(run_id: str, backend: str) -> TerminationCause:
     """Detect why an instance terminated without writing exit code.
 
     For GCE: Check operations API for preemption, check instance deletion reason
-    For local: Generally assume crash (local doesn't have preemption)
+    For local: Check Docker exit reason; return ORPHANED if container vanished without trace
 
     Returns: PREEMPTED, CRASHED, or ORPHANED
     """
@@ -741,7 +744,7 @@ def verify_instance_stopped(run_id: str, backend: str) -> bool:
 
 **Guard rationale**: The `instance_confirmed_dead` guard prevents false TERMINATED states. GCS eventual consistency means exit_code.txt might not be visible for seconds after write. Without this guard, a poll during that window would incorrectly mark a successful run as crashed.
 
-**Cause detection**: EXIT_MISSING must always detect the termination cause (PREEMPTED, CRASHED, or ORPHANED). For GCE, we check the operations API for preemption events. For local Docker, we assume crash since local doesn't have preemption.
+**Cause detection**: EXIT_MISSING must always detect the termination cause (PREEMPTED, CRASHED, or ORPHANED). For GCE, we check the operations API for preemption events. For local Docker, we check the container exit reason and return ORPHANED if the container vanished without trace, CRASHED for known failure modes (OOMKilled, Error).
 
 ---
 
@@ -845,8 +848,12 @@ ALTER TABLE stage_runs ADD COLUMN termination_cause TEXT
           ('preempted', 'crashed', 'orphaned', 'timeout', 'ai_stopped', 'manual'));
 ALTER TABLE stage_runs ADD COLUMN state_entered_at TEXT;    -- When state was entered (for timeouts)
 ALTER TABLE stage_runs ADD COLUMN phase_updated_at TEXT;    -- When phase last changed (observability)
-ALTER TABLE stage_runs ADD COLUMN completed_with_warnings INTEGER DEFAULT 0;  -- Non-critical finalization failures
+ALTER TABLE stage_runs ADD COLUMN completed_with_warnings INTEGER DEFAULT 0;  -- Non-critical finalization failures OR finalization timeout with outputs saved
 ALTER TABLE stage_runs ADD COLUMN error TEXT;               -- Error message for failed/terminated states
+
+-- Index for daemon polling (get_active_runs query)
+CREATE INDEX idx_stage_runs_state ON stage_runs(state)
+    WHERE state IN ('preparing', 'building', 'launching', 'running', 'finalizing');
 
 -- Keep old columns during migration (remove after verified)
 -- status TEXT (keep for backwards compat)
@@ -875,7 +882,8 @@ CREATE TABLE stage_state_transitions (
     exit_code INTEGER,
     exit_code_exists INTEGER,  -- 0 or 1
     error_message TEXT,
-    source TEXT,               -- See SOURCE_VALUES: mcp_tool, executor, daemon, container, admin, migration
+    source TEXT NOT NULL
+        CHECK(source IN ('mcp_tool', 'executor', 'daemon', 'container', 'admin', 'migration')),
 
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
 
@@ -1521,6 +1529,170 @@ metadata_bus.set_signal(run_id, signal)
 
 The container-side polling is already implemented - just need to add "stop" command handler.
 
+### Active Runs Query
+
+The daemon polls `get_active_runs()` to find runs that need monitoring:
+
+```python
+def get_active_runs() -> list[dict]:
+    """Get all runs in active (non-terminal) states for daemon polling.
+
+    Uses the partial index on state column for efficient filtering.
+    """
+    with db._conn() as conn:
+        rows = conn.execute("""
+            SELECT id, workspace_name, version, stage_name, backend_type, backend_handle,
+                   state, phase, state_entered_at, started_at
+            FROM stage_runs
+            WHERE state IN ('preparing', 'building', 'launching', 'running', 'finalizing')
+            ORDER BY started_at ASC
+        """).fetchall()
+    return [dict(row) for row in rows]
+```
+
+**Performance note**: The partial index `idx_stage_runs_state` ensures this query remains fast even with millions of historical runs - it only indexes active states.
+
+### Daemon Leader Election
+
+**Problem**: Multiple daemon instances polling simultaneously could emit duplicate events, causing CAS failures and wasted work.
+
+**Solution**: Use SQLite advisory locking with a lease-based leader election:
+
+```python
+class DaemonLeaderElection:
+    """Simple leader election using SQLite row locking.
+
+    Only one daemon can hold the lease at a time. Other daemons
+    wait until the lease expires or is released.
+    """
+
+    LEASE_DURATION_SECONDS = 60
+    LEASE_KEY = "daemon_leader"
+
+    def __init__(self, db: Database):
+        self.db = db
+        self._ensure_table()
+
+    def _ensure_table(self):
+        with self.db._conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS daemon_leases (
+                    key TEXT PRIMARY KEY,
+                    holder_id TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                )
+            """)
+
+    def try_acquire_lease(self, holder_id: str) -> bool:
+        """Try to acquire or renew the daemon lease.
+
+        Returns True if this daemon is the leader.
+        """
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(seconds=self.LEASE_DURATION_SECONDS)
+
+        with self.db._conn() as conn:
+            # Try to acquire expired or non-existent lease
+            result = conn.execute("""
+                INSERT INTO daemon_leases (key, holder_id, acquired_at, expires_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    holder_id = excluded.holder_id,
+                    acquired_at = excluded.acquired_at,
+                    expires_at = excluded.expires_at
+                WHERE daemon_leases.holder_id = excluded.holder_id
+                   OR daemon_leases.expires_at < ?
+            """, (self.LEASE_KEY, holder_id, now.isoformat(),
+                  expires_at.isoformat(), now.isoformat()))
+
+            # Check if we hold the lease
+            row = conn.execute("""
+                SELECT holder_id FROM daemon_leases WHERE key = ?
+            """, (self.LEASE_KEY,)).fetchone()
+
+            return row and row["holder_id"] == holder_id
+
+    def release_lease(self, holder_id: str):
+        """Release the lease on shutdown."""
+        with self.db._conn() as conn:
+            conn.execute("""
+                DELETE FROM daemon_leases
+                WHERE key = ? AND holder_id = ?
+            """, (self.LEASE_KEY, holder_id))
+
+
+class StageDaemon:
+    """Daemon with leader election."""
+
+    def __init__(self, ...):
+        self.holder_id = f"daemon-{uuid.uuid4().hex[:8]}"
+        self.leader_election = DaemonLeaderElection(self.db)
+
+    def run(self):
+        """Main loop with leader election."""
+        try:
+            while not self._shutdown:
+                if self.leader_election.try_acquire_lease(self.holder_id):
+                    self.poll_active_runs()
+                else:
+                    logger.debug(f"Not leader, waiting...")
+                time.sleep(self.poll_interval)
+        finally:
+            self.leader_election.release_lease(self.holder_id)
+```
+
+**Key properties**:
+1. **Exactly-once delivery**: Only one daemon processes events at a time
+2. **Automatic failover**: If leader dies, lease expires and another daemon takes over
+3. **No external dependencies**: Uses SQLite, no need for Redis/etcd
+4. **Graceful handoff**: Leader releases lease on shutdown
+
+### Clock Skew Handling
+
+**Problem**: Distributed timestamps (daemon, executor, container) could have different clock values, causing:
+- Timeout calculations to be incorrect
+- Audit trail ordering to be wrong
+- CAS operations to behave unexpectedly
+
+**Solution**: Use relative timestamps for timeouts, tolerate skew in audit trail:
+
+```python
+# 1. Timeout calculations use state_entered_at stored in DB
+#    NOT "now() - run.started_at" which crosses clock domains
+def check_timeout(run: dict) -> bool:
+    """Check if run has timed out using stored timestamp."""
+    state_entered = datetime.fromisoformat(run["state_entered_at"])
+    timeout = get_timeout_for_state(run["state"])
+    # Both timestamps from same source (daemon's clock)
+    return datetime.now(UTC) - state_entered > timeout
+
+# 2. EventContext.timestamp is set by the emitter
+#    This means audit trail reflects emitter's clock, which is acceptable
+#    for debugging/observability
+context = EventContext(
+    timestamp=datetime.now(UTC),  # Daemon's clock
+    source="daemon"
+)
+
+# 3. CAS semantics don't depend on timestamps
+#    We compare state values, not timestamps
+result = conn.execute(
+    "UPDATE stage_runs SET state = ? WHERE id = ? AND state = ?",
+    (new_state, run_id, expected_state)  # No timestamp comparison
+)
+```
+
+**Acceptable skew**: Up to 30 seconds of clock skew is tolerable:
+- Timeouts have minutes of margin (300s, 1200s)
+- Audit trail ordering is "best effort" - small inversions are fine for debugging
+- CAS operations are timestamp-independent
+
+**Mitigation for larger skew**:
+- Ensure all Goldfish components use NTP-synced clocks
+- GCE instances auto-sync via Google NTP
+- Log warnings when container timestamps differ significantly from daemon timestamps
+
 ---
 
 ## Container ↔ Outside Communication
@@ -1709,7 +1881,7 @@ class TestCAS:
 - [ ] Write migration script
 - [ ] Add backwards compatibility layer
 - [ ] Add `force_terminate_run`, `force_complete_run`, `force_fail_run` admin tools
-- [ ] Add `completed_with_warnings` column for non-critical finalization failures
+- [ ] Add `completed_with_warnings` column for non-critical finalization failures and finalization timeouts with outputs saved
 
 ### Phase 2: Daemon Rewrite + Integration
 - [ ] **Rewrite `daemon.py`** around state machine (not wrap - replace if/then/else mess)
