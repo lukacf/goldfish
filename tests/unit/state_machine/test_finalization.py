@@ -9,10 +9,13 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
+import pytest
+
 from goldfish.db.database import Database
 from goldfish.state_machine.core import transition
 from goldfish.state_machine.finalization import FinalizationTracker, get_critical_phases_done
 from goldfish.state_machine.types import EventContext, StageEvent, StageState
+from goldfish.validation import InvalidStageRunIdError
 
 
 def _create_run_in_state(db: Database, state: StageState) -> str:
@@ -92,6 +95,17 @@ def _create_run_with_flags(
 
 class TestFinalizationTracker:
     """Tests for FinalizationTracker class."""
+
+    def test_validates_run_id_format(self, test_db: Database) -> None:
+        """Test that invalid run_id format raises InvalidStageRunIdError."""
+        with pytest.raises(InvalidStageRunIdError):
+            FinalizationTracker(test_db, "invalid-run-id")
+
+    def test_accepts_valid_run_id(self, test_db: Database) -> None:
+        """Test that valid run_id format is accepted."""
+        # Should not raise - even if run doesn't exist in DB
+        tracker = FinalizationTracker(test_db, "stage-abc123456")
+        assert tracker._run_id == "stage-abc123456"
 
     def test_mark_output_sync_done_persists_to_database(self, test_db: Database) -> None:
         """mark_output_sync_done() sets the flag in database."""
@@ -285,3 +299,38 @@ class TestFinalizationTrackerIdempotency:
         with test_db._conn() as conn:
             row = conn.execute("SELECT output_recording_done FROM stage_runs WHERE id = ?", (run_id,)).fetchone()
             assert row["output_recording_done"] == 1
+
+
+class TestGetCriticalPhasesDone:
+    """Tests for get_critical_phases_done function."""
+
+    def test_validates_run_id_format(self, test_db: Database) -> None:
+        """Test that invalid run_id format raises InvalidStageRunIdError."""
+        with pytest.raises(InvalidStageRunIdError):
+            get_critical_phases_done(test_db, "invalid-run-id")
+
+    def test_returns_none_for_nonexistent_run(self, test_db: Database) -> None:
+        """Test that non-existent run returns None."""
+        # Use valid hex format but run doesn't exist in DB
+        result = get_critical_phases_done(test_db, "stage-abc123456789")
+        assert result is None
+
+    def test_returns_false_when_not_done(self, test_db: Database) -> None:
+        """Test that returns False when phases not done."""
+        run_id = _create_run_with_flags(
+            test_db,
+            output_sync_done=0,
+            output_recording_done=0,
+        )
+        result = get_critical_phases_done(test_db, run_id)
+        assert result is False
+
+    def test_returns_true_when_both_done(self, test_db: Database) -> None:
+        """Test that returns True when both phases done."""
+        run_id = _create_run_with_flags(
+            test_db,
+            output_sync_done=1,
+            output_recording_done=1,
+        )
+        result = get_critical_phases_done(test_db, run_id)
+        assert result is True

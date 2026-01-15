@@ -193,7 +193,20 @@ def create_run_in_state(
     Returns:
         The run_id of the created run.
     """
+    now = datetime.now(UTC).isoformat()
     with db._conn() as conn:
+        # Create workspace and version first to satisfy foreign key constraints
+        conn.execute(
+            """INSERT OR IGNORE INTO workspace_lineage
+            (workspace_name, created_at) VALUES (?, ?)""",
+            (workspace_name, now),
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO workspace_versions
+            (workspace_name, version, git_tag, git_sha, created_at, created_by)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (workspace_name, version, f"{workspace_name}-{version}", "abc123", now, "test"),
+        )
         conn.execute(
             """
             INSERT INTO stage_runs (

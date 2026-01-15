@@ -35,6 +35,19 @@ UUID_SUFFIX_LENGTH = 8
 _VALID_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
 
+def validate_holder_id(holder_id: str) -> None:
+    """Validate a holder ID.
+
+    Args:
+        holder_id: The holder ID to validate.
+
+    Raises:
+        ValueError: If holder_id doesn't match the required pattern.
+    """
+    if not _VALID_ID_PATTERN.match(holder_id):
+        raise ValueError(f"Invalid holder_id: must match {_VALID_ID_PATTERN.pattern}")
+
+
 class DaemonLeaderElection:
     """Leader election for stage daemon.
 

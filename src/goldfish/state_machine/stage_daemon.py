@@ -16,8 +16,8 @@ from goldfish.state_machine.event_emission import (
     verify_instance_stopped,
 )
 from goldfish.state_machine.leader_election import (
-    _VALID_ID_PATTERN,
     DaemonLeaderElection,
+    validate_holder_id,
 )
 from goldfish.state_machine.transitions import TERMINAL_STATES
 from goldfish.state_machine.types import (
@@ -90,8 +90,7 @@ class StageDaemon:
 
         # Validate holder_id if provided, otherwise auto-generate
         if holder_id is not None:
-            if not _VALID_ID_PATTERN.match(holder_id):
-                raise ValueError(f"Invalid holder_id: must match {_VALID_ID_PATTERN.pattern}")
+            validate_holder_id(holder_id)  # Raises ValueError if invalid
             self._holder_id = holder_id
         else:
             self._holder_id = DaemonLeaderElection.generate_holder_id()
