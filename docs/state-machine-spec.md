@@ -118,32 +118,46 @@ class ProgressPhase(str, Enum):
 Phase is observability metadata that changes **within** a state without triggering state transitions. To avoid the status/progress desync problem, phase updates use the same CAS pattern:
 
 ```python
-def update_phase(run_id: str, expected_state: str, new_phase: ProgressPhase) -> bool:
+def update_phase(run_id: str, expected_state: str, new_phase: ProgressPhase, timestamp: datetime) -> bool:
     """Update phase within a state using CAS.
+
+    IMPORTANT: Updates phase_updated_at, NOT state_entered_at.
+    state_entered_at is only updated on state transitions (for timeout calculations).
+
+    Args:
+        run_id: Stage run ID
+        expected_state: State we expect the run to be in (CAS guard)
+        new_phase: New phase to set
+        timestamp: Canonical timestamp for this update
 
     Returns True if update succeeded, False if state changed underneath us.
     """
     with db._conn() as conn:
         result = conn.execute(
             """UPDATE stage_runs
-               SET phase = ?, state_updated_at = ?
+               SET phase = ?, phase_updated_at = ?
                WHERE id = ? AND state = ?""",
-            (new_phase.value, now_iso(), run_id, expected_state)
+            (new_phase.value, timestamp.isoformat(), run_id, expected_state)
         )
         if result.rowcount == 0:
             return False  # State changed, phase update rejected
 
         # Record phase change in audit (same transaction)
+        # Note: 'phase_update' is a pseudo-event for audit, not in StageEvent enum
         conn.execute(
             """INSERT INTO stage_state_transitions
                (stage_run_id, from_state, event, to_state, phase, source, created_at)
                VALUES (?, ?, 'phase_update', ?, ?, ?, ?)""",
-            (run_id, expected_state, expected_state, new_phase.value, 'internal', now_iso())
+            (run_id, expected_state, expected_state, new_phase.value, 'executor', timestamp.isoformat())
         )
         return True
 ```
 
-**Key principle**: Phase updates are rejected if the state has changed. This prevents stale phase writes from overwriting meaningful state transitions.
+**Key principles**:
+- Phase updates are rejected if state changed (CAS guard prevents desync)
+- `phase_updated_at` is updated, NOT `state_entered_at` (preserves timeout calculations)
+- Timestamp is passed in (canonical time source, not `now()`)
+- `'phase_update'` is a pseudo-event for audit trail, not a real state machine event
 
 ---
 
@@ -193,7 +207,7 @@ class StageEvent(str, Enum):
 class EventContext:
     """Context attached to each event for audit and decision-making."""
     timestamp: datetime                      # Canonical time for this event (used in audit)
-    source: str                              # 'mcp_tool', 'daemon', 'container', 'admin'
+    source: str                              # See SOURCE_VALUES below
 
     # Exit context
     exit_code: int | None = None
@@ -211,13 +225,27 @@ class EventContext:
 
     # Finalization context
     critical: bool = False                   # For FINALIZE_FAIL: True → FAILED, False → COMPLETED
+    critical_phases_done: bool = False       # For TIMEOUT in FINALIZING: True → COMPLETED, False → FAILED
 
     # SVS context
     svs_decision: str | None = None          # 'approved', 'blocked', 'warning'
     svs_findings: list[dict] | None = None
+
+
+# Allowed source values for EventContext.source
+SOURCE_VALUES = {
+    'mcp_tool',   # MCP tool invocation (cancel, force_* admin tools)
+    'executor',   # StageExecutor during run orchestration
+    'daemon',     # Background daemon polling
+    'container',  # Container-side events (via metadata/GCS)
+    'admin',      # Administrative operations
+    'migration',  # Migration script
+}
 ```
 
-**Timestamp usage**: `EventContext.timestamp` is the canonical time source. The `state_updated_at` column uses `context.timestamp.isoformat()`, not `now()`. This ensures audit trail ordering matches actual event sequence.
+**Timestamp usage**: `EventContext.timestamp` is the canonical time source. The `state_entered_at` column uses `context.timestamp.isoformat()`, not `now()`. This ensures audit trail ordering matches actual event sequence.
+
+**critical_phases_done**: For TIMEOUT events in FINALIZING state, this field determines whether we transition to COMPLETED (outputs were saved) or FAILED (outputs may be lost). Set to True if OUTPUT_SYNC and OUTPUT_RECORDING phases completed successfully before the timeout.
 
 ---
 
@@ -330,17 +358,32 @@ def transition(run_id: str, event: StageEvent, context: EventContext) -> Transit
     if transition_def.guard and not transition_def.guard(context):
         return TransitionResult(success=False, reason="guard_failed")
 
-    # 4. ATOMIC: CAS update + audit insert in same transaction
+    # 4. Determine if this is a "completed with warnings" case
+    completed_with_warnings = (
+        event == StageEvent.FINALIZE_FAIL
+        and not context.critical
+        and transition_def.to_state == 'completed'
+    )
+
+    # 5. ATOMIC: CAS update + audit insert in same transaction
     with db._conn() as conn:
         # CAS update - only succeeds if state hasn't changed
+        # COALESCE preserves existing phase if context.phase is None
         result = conn.execute(
             """UPDATE stage_runs
-               SET state = ?, phase = ?, state_updated_at = ?,
-                   termination_cause = ?, error = ?
+               SET state = ?,
+                   phase = COALESCE(?, phase),
+                   state_entered_at = ?,
+                   termination_cause = ?,
+                   error = ?,
+                   completed_with_warnings = ?
                WHERE id = ? AND state = ?""",
-            (transition_def.to_state, context.phase,
-             context.timestamp.isoformat(),  # Use event timestamp, not now()
-             context.termination_cause, context.error_message,
+            (transition_def.to_state,
+             context.phase.value if context.phase else None,
+             context.timestamp.isoformat(),  # state_entered_at: only on state change
+             context.termination_cause.value if context.termination_cause else None,
+             context.error_message,
+             1 if completed_with_warnings else 0,
              run_id, current["state"])
         )
         if result.rowcount == 0:
@@ -354,7 +397,8 @@ def transition(run_id: str, event: StageEvent, context: EventContext) -> Transit
                 error_message, source, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (run_id, current["state"], event.value, transition_def.to_state,
-             context.phase, context.termination_cause,
+             context.phase.value if context.phase else current.get("phase"),
+             context.termination_cause.value if context.termination_cause else None,
              context.exit_code, 1 if context.exit_code_exists else 0,
              context.error_message, context.source,
              context.timestamp.isoformat())
@@ -425,17 +469,18 @@ def determine_exit_event(run_id: str, backend: str) -> tuple[StageEvent, EventCo
     consistency or delayed log sync.
     """
     result = get_exit_code(run_id)
+    now = datetime.now(UTC)
 
     if result.exists:
         if result.code == 0:
             return StageEvent.EXIT_SUCCESS, EventContext(
                 exit_code=0, exit_code_exists=True,
-                timestamp=datetime.now(UTC), source="monitor"
+                timestamp=now, source="daemon"
             )
         else:
             return StageEvent.EXIT_FAILURE, EventContext(
                 exit_code=result.code, exit_code_exists=True,
-                timestamp=datetime.now(UTC), source="monitor"
+                timestamp=now, source="daemon"
             )
     else:
         # No exit code - but is the instance actually dead?
@@ -446,13 +491,33 @@ def determine_exit_event(run_id: str, backend: str) -> tuple[StageEvent, EventCo
             # Do NOT emit EXIT_MISSING - wait for next poll
             return None
 
-        # Instance confirmed dead + no exit code = crash
+        # Instance confirmed dead + no exit code = need to detect WHY
+        cause = detect_termination_cause(run_id, backend)
         return StageEvent.EXIT_MISSING, EventContext(
             exit_code_exists=False,
             instance_confirmed_dead=True,  # Guard requirement satisfied
-            termination_cause=TerminationCause.CRASHED,
-            timestamp=datetime.now(UTC), source="monitor"
+            termination_cause=cause,
+            timestamp=now, source="daemon"
         )
+
+
+def detect_termination_cause(run_id: str, backend: str) -> TerminationCause:
+    """Detect why an instance terminated without writing exit code.
+
+    For GCE: Check operations API for preemption, check instance deletion reason
+    For local: Generally assume crash (local doesn't have preemption)
+
+    Returns: PREEMPTED, CRASHED, or ORPHANED
+    """
+    if backend == "gce":
+        # Check GCE operations for preemption
+        if gce_launcher.was_preempted(run_id):
+            return TerminationCause.PREEMPTED
+        # No preemption detected, assume crash
+        return TerminationCause.CRASHED
+    else:
+        # Local Docker doesn't have preemption concept
+        return TerminationCause.CRASHED
 
 
 def verify_instance_stopped(run_id: str, backend: str) -> bool:
@@ -471,6 +536,8 @@ def verify_instance_stopped(run_id: str, backend: str) -> bool:
 
 **Guard rationale**: The `instance_confirmed_dead` guard prevents false TERMINATED states. GCS eventual consistency means exit_code.txt might not be visible for seconds after write. Without this guard, a poll during that window would incorrectly mark a successful run as crashed.
 
+**Cause detection**: EXIT_MISSING must always detect the termination cause (PREEMPTED, CRASHED, or ORPHANED). For GCE, we check the operations API for preemption events. For local Docker, we assume crash since local doesn't have preemption.
+
 ---
 
 ## Admin Tools
@@ -484,7 +551,7 @@ For stuck runs that can't be cleaned up normally:
 def force_terminate_run(
     run_id: str,
     reason: str,
-    termination_cause: str = "orphaned"
+    termination_cause: str = "manual"
 ) -> dict:
     """Force a stuck run to TERMINATED state.
 
@@ -496,11 +563,12 @@ def force_terminate_run(
         termination_cause: One of 'orphaned', 'crashed', 'timeout', 'manual'
     """
     context = EventContext(
+        timestamp=datetime.now(UTC),
         source="admin",
         termination_cause=TerminationCause(termination_cause),
         error_message=f"Admin force terminate: {reason}"
     )
-    result = state_machine.transition(run_id, Event.FORCE_TERMINATE, context)
+    result = state_machine.transition(run_id, StageEvent.FORCE_TERMINATE, context)
     return {"success": result.success, "new_state": result.new_state}
 ```
 
@@ -566,12 +634,19 @@ def force_fail_run(run_id: str, reason: str, error_message: str | None = None) -
 ALTER TABLE stage_runs ADD COLUMN state TEXT;
 ALTER TABLE stage_runs ADD COLUMN phase TEXT;
 ALTER TABLE stage_runs ADD COLUMN termination_cause TEXT;
-ALTER TABLE stage_runs ADD COLUMN state_updated_at TEXT;
+ALTER TABLE stage_runs ADD COLUMN state_entered_at TEXT;    -- When state was entered (for timeouts)
+ALTER TABLE stage_runs ADD COLUMN phase_updated_at TEXT;    -- When phase last changed (observability)
+ALTER TABLE stage_runs ADD COLUMN completed_with_warnings INTEGER DEFAULT 0;  -- Non-critical finalization failures
 
 -- Keep old columns during migration (remove after verified)
 -- status TEXT (keep for backwards compat)
 -- progress TEXT (keep for backwards compat)
 ```
+
+**Timestamp semantics**:
+- `state_entered_at`: Updated ONLY on state transitions. Used for timeout calculations.
+- `phase_updated_at`: Updated on phase changes within a state. Observability only.
+- `started_at`: When run was created (existing column). Used for total runtime limits.
 
 ### New Table: `stage_state_transitions`
 
@@ -662,7 +737,9 @@ def create_stage_run(
 ALTER TABLE stage_runs ADD COLUMN state TEXT;
 ALTER TABLE stage_runs ADD COLUMN phase TEXT;
 ALTER TABLE stage_runs ADD COLUMN termination_cause TEXT;
-ALTER TABLE stage_runs ADD COLUMN state_updated_at TEXT;
+ALTER TABLE stage_runs ADD COLUMN state_entered_at TEXT;
+ALTER TABLE stage_runs ADD COLUMN phase_updated_at TEXT;
+ALTER TABLE stage_runs ADD COLUMN completed_with_warnings INTEGER DEFAULT 0;
 ```
 
 ### Phase 1b: Migrate Existing Data (Python Script)
@@ -680,7 +757,7 @@ def migrate_stage_runs():
     """
     with db._conn() as conn:
         rows = conn.execute(
-            "SELECT id, status, progress, error, started_at, completed_at "
+            "SELECT id, status, progress, error, started_at, completed_at, backend_type "
             "FROM stage_runs WHERE state IS NULL"
         ).fetchall()
 
@@ -692,7 +769,7 @@ def migrate_stage_runs():
             conn.execute(
                 """UPDATE stage_runs
                    SET state = ?, phase = ?, termination_cause = ?,
-                       state_updated_at = COALESCE(completed_at, ?)
+                       state_entered_at = COALESCE(completed_at, ?)
                    WHERE id = ?""",
                 (state, phase, cause, datetime.now(UTC).isoformat(), row["id"])
             )
@@ -704,7 +781,7 @@ def determine_migration_state(row: dict) -> tuple[str, str | None, str | None]:
     progress = row["progress"]
     error = row["error"] or ""
     started_at = row["started_at"]
-    completed_at = row["completed_at"]
+    backend_type = row.get("backend_type", "gce")  # Default to GCE for old runs
 
     # Terminal states - straightforward
     if status == "completed":
@@ -744,9 +821,12 @@ def determine_migration_state(row: dict) -> tuple[str, str | None, str | None]:
             state, phase = "running", "code_execution"
 
         # Check if this is an orphaned run
-        # DON'T use arbitrary time threshold - check if instance actually exists
-        if is_likely_orphaned(row["id"], started_at):
+        orphan_status = check_orphan_status(row["id"], started_at, backend_type)
+        if orphan_status == "confirmed_orphaned":
             return ("terminated", phase, "orphaned")
+        elif orphan_status == "possibly_orphaned":
+            # Can't confirm - mark UNKNOWN for manual review
+            return ("unknown", phase, None)
 
         # Still potentially active
         return (state, phase, None)
@@ -759,37 +839,48 @@ def determine_migration_state(row: dict) -> tuple[str, str | None, str | None]:
     return ("unknown", None, None)
 
 
-def is_likely_orphaned(run_id: str, started_at: str) -> bool:
+def check_orphan_status(run_id: str, started_at: str, backend_type: str) -> str:
     """Check if a 'running' run is actually orphaned.
 
-    More reliable than time-based heuristics.
+    Returns:
+        'not_orphaned': Instance still exists
+        'confirmed_orphaned': Instance confirmed gone
+        'possibly_orphaned': Can't check, but old enough to suspect
     """
-    # 1. Check if instance exists in GCE
+    # 1. Check backend for instance status
     try:
-        instance_status = gce_launcher.get_instance_status(run_id)
-        if instance_status in (None, "TERMINATED", "STOPPED", "DELETED"):
-            return True  # Instance gone but status=running = orphaned
-    except Exception:
-        pass  # Can't check GCE, fall back to time heuristic
+        if backend_type == "gce":
+            instance_status = gce_launcher.get_instance_status(run_id)
+            if instance_status in (None, "TERMINATED", "STOPPED", "DELETED"):
+                return "confirmed_orphaned"
+            return "not_orphaned"
+        else:
+            # Local Docker
+            container_status = docker_client.get_container_status(run_id)
+            if container_status in (None, "exited", "dead", "not_found"):
+                return "confirmed_orphaned"
+            return "not_orphaned"
+    except Exception as e:
+        logger.warning(f"Can't check {backend_type} status for {run_id}: {e}")
 
-    # 2. Fallback: Use conservative time threshold (30 days, not 7)
-    # Only if we couldn't check GCE
+    # 2. Fallback: Use time threshold (30 days)
+    # But mark as POSSIBLY orphaned - we can't confirm
     if started_at:
         started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
         age = datetime.now(UTC) - started
         if age > timedelta(days=30):
-            logger.warning(f"Run {run_id} is 30+ days old with status=running, marking orphaned")
-            return True
+            logger.warning(f"Run {run_id} is 30+ days old, can't verify status - marking for review")
+            return "possibly_orphaned"
 
-    return False
+    return "not_orphaned"
 ```
 
 **Migration improvements over SQL-only**:
-1. **No arbitrary thresholds**: Checks actual instance status instead of 7-day cutoff
-2. **Multiple pattern matching**: Catches "preempted", "PREEMPTED", "Spot instance terminated"
-3. **Audit logging**: Every decision logged for review
-4. **Conservative fallback**: 30 days instead of 7, and only if GCE check unavailable
-5. **UNKNOWN for ambiguous**: Doesn't guess - flags for manual review
+1. **Backend-aware**: Checks GCE or Docker based on `backend_type` column
+2. **Three-way status**: Distinguishes "confirmed orphaned" from "possibly orphaned"
+3. **UNKNOWN for ambiguous**: Can't confirm status → mark UNKNOWN for manual review
+4. **Audit logging**: Every decision logged for review
+5. **Conservative fallback**: 30 days threshold only when backend check fails
 
 ### Phase 2: Backwards Compatibility Layer
 
@@ -1122,11 +1213,25 @@ This overlaps with `stage_runs.state` + `termination_cause`.
 **Key insight**: `infra_outcome` tracks *infrastructure* outcomes, not code outcomes. FAILED state (code/validation errors) means infra worked fine - it's `completed` from infra perspective.
 
 ```python
+# Mapping from termination_cause to valid infra_outcome values
+# infra_outcome CHECK constraint: 'completed', 'preempted', 'crashed', 'canceled', 'unknown'
+TERMINATION_CAUSE_TO_INFRA_OUTCOME = {
+    'preempted': 'preempted',   # Direct mapping
+    'crashed': 'crashed',       # Direct mapping
+    'timeout': 'crashed',       # Timeout is an infra failure (didn't complete)
+    'orphaned': 'unknown',      # We don't know what happened
+    'ai_stopped': 'canceled',   # Intentional stop requested by AI
+    'manual': 'canceled',       # Admin intervention counts as cancellation
+}
+
 def derive_infra_outcome(state: str, termination_cause: str | None) -> str:
     """Derive infra_outcome from state machine state.
 
     infra_outcome answers: "Did the infrastructure successfully run the code?"
     NOT: "Did the code succeed?"
+
+    IMPORTANT: Must return value that satisfies CHECK constraint:
+    ('completed', 'preempted', 'crashed', 'canceled', 'unknown')
     """
     if state == 'completed':
         return 'completed'
@@ -1137,8 +1242,8 @@ def derive_infra_outcome(state: str, termination_cause: str | None) -> str:
     if state == 'canceled':
         return 'canceled'
     if state == 'terminated':
-        # Terminated = infra died (preemption, crash, timeout, etc.)
-        return termination_cause or 'unknown'
+        # Map termination_cause to valid infra_outcome
+        return TERMINATION_CAUSE_TO_INFRA_OUTCOME.get(termination_cause, 'unknown')
     if state == 'unknown':
         return 'unknown'
     return 'unknown'
@@ -1272,16 +1377,25 @@ The audit trail (`stage_state_transitions`) already captures the `FINALIZE_FAIL`
 - Still, add retention policy:
 
 ```sql
--- Keep last 90 days of transitions, or last 1000 per run
+-- Retention: Keep all from last 90 days, plus last 100 per run for older runs
+-- This ensures recent history is complete and old runs still have audit trail
+
+-- Delete old transitions, keeping most recent 100 per run
 DELETE FROM stage_state_transitions
-WHERE created_at < datetime('now', '-90 days')
-  AND stage_run_id NOT IN (
-    SELECT DISTINCT stage_run_id FROM stage_state_transitions
-    ORDER BY created_at DESC LIMIT 1000
-  );
+WHERE id IN (
+    SELECT t.id
+    FROM stage_state_transitions t
+    WHERE t.created_at < datetime('now', '-90 days')
+      AND (
+          SELECT COUNT(*)
+          FROM stage_state_transitions t2
+          WHERE t2.stage_run_id = t.stage_run_id
+            AND t2.created_at > t.created_at
+      ) >= 100  -- Keep 100 most recent per run
+);
 ```
 
-Run weekly via daemon or cron.
+Run weekly via daemon or cron. The 100-per-run limit is conservative (most runs have <20 transitions).
 
 ### Q3: Phase update retry on rejection?
 
