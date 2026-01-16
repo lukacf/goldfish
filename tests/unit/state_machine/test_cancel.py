@@ -6,7 +6,6 @@ to emit USER_CANCEL events and trigger backend cleanup.
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import UTC, datetime
 from unittest.mock import patch
@@ -185,12 +184,11 @@ class TestCancelRecordsAudit:
         # Check audit trail
         with test_db._conn() as conn:
             row = conn.execute(
-                "SELECT context_json FROM stage_state_transitions WHERE stage_run_id = ? ORDER BY id DESC LIMIT 1",
+                "SELECT source FROM stage_state_transitions WHERE stage_run_id = ? ORDER BY id DESC LIMIT 1",
                 (run_id,),
             ).fetchone()
             assert row is not None
-            context = json.loads(row["context_json"])
-            assert context["source"] == "mcp_tool"
+            assert row["source"] == "mcp_tool"
 
     def test_cancel_records_event_as_user_cancel(self, test_db: Database) -> None:
         """Cancel records the event as USER_CANCEL."""

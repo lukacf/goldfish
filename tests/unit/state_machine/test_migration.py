@@ -361,8 +361,13 @@ class TestStageStateTransitionsTable:
                 "from_state",
                 "to_state",
                 "event",
-                "context_json",
-                "timestamp",
+                "phase",
+                "termination_cause",
+                "exit_code",
+                "exit_code_exists",
+                "error_message",
+                "source",
+                "created_at",
             }
             assert required_columns.issubset(columns)
 
@@ -383,10 +388,10 @@ class TestStageStateTransitionsTable:
             conn.execute(
                 """
                 INSERT INTO stage_state_transitions
-                (stage_run_id, from_state, to_state, event, context_json, timestamp)
+                (stage_run_id, from_state, to_state, event, source, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                ("stage-test", "preparing", "building", "build_start", "{}", now),
+                ("stage-test", "preparing", "building", "build_start", "executor", now),
             )
             row = conn.execute(
                 "SELECT * FROM stage_state_transitions WHERE stage_run_id = ?",
@@ -396,6 +401,7 @@ class TestStageStateTransitionsTable:
             assert row["from_state"] == "preparing"
             assert row["to_state"] == "building"
             assert row["event"] == "build_start"
+            assert row["source"] == "executor"
 
 
 class TestPartialIndex:
@@ -780,6 +786,45 @@ class TestMigratePendingRunningCanceledUnknown:
         with test_db._conn() as conn:
             row = conn.execute("SELECT state FROM stage_runs WHERE id = ?", ("stage-unknown",)).fetchone()
             assert row["state"] == "unknown"
+
+    def test_backfill_unknown_missing_state_entered_at(self, test_db) -> None:
+        """Already-migrated UNKNOWN runs should still get state_entered_at backfilled.
+
+        This prevents UNKNOWN runs from getting stuck forever due to daemon timeout checks
+        requiring state_entered_at to be populated.
+        """
+        from goldfish.state_machine.migration import migrate_stage_runs
+
+        started_at = "2026-01-01T00:00:00+00:00"
+        with test_db._conn() as conn:
+            _setup_workspace(conn)
+            conn.execute(
+                """
+                INSERT INTO stage_runs
+                    (id, workspace_name, version, stage_name, status, started_at, state, state_entered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "stage-unknown-backfill",
+                    "ws",
+                    "v1",
+                    "train",
+                    "failed",
+                    started_at,
+                    StageState.UNKNOWN.value,
+                    None,
+                ),
+            )
+
+        result = migrate_stage_runs(test_db)
+        assert result["success"] is True
+
+        with test_db._conn() as conn:
+            row = conn.execute(
+                "SELECT state_entered_at FROM stage_runs WHERE id = ?",
+                ("stage-unknown-backfill",),
+            ).fetchone()
+            assert row["state_entered_at"] == started_at
 
 
 class TestMigrateTerminationCausePaths:

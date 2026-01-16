@@ -39,6 +39,10 @@ GCS_OUTAGE_THRESHOLD = timedelta(hours=1)
 def determine_exit_event(
     run: dict[str, Any],
     exit_result: ExitCodeResult | None,
+    *,
+    db: Database | None = None,
+    project_id: str | None = None,
+    zone: str | None = None,
 ) -> tuple[StageEvent, EventContext] | None:
     """Determine what exit event to emit based on exit code result.
 
@@ -64,7 +68,18 @@ def determine_exit_event(
 
     # Handle GCS errors specially
     if exit_result.gcs_error:
-        return _handle_gcs_error(run, exit_result, now)
+        return _handle_gcs_error(
+            run,
+            exit_result,
+            now,
+            db=db,
+            project_id=project_id,
+            zone=zone,
+        )
+
+    # If GCS was previously erroring but is now reachable, clear outage marker.
+    if db is not None and get_gcs_outage_started(run) is not None:
+        clear_gcs_outage_started(db, run_id=run.get("id", ""))
 
     # Create base context
     context = EventContext(
@@ -80,6 +95,33 @@ def determine_exit_event(
     elif exit_result.exists and exit_result.code is not None:
         return (StageEvent.EXIT_FAILURE, context)
     elif not exit_result.exists:
+        # Spec: Only emit EXIT_MISSING once we've verified the instance/container is stopped.
+        backend_handle = run.get("backend_handle")
+        if not backend_handle:
+            return None
+
+        backend_type = run.get("backend_type", "local")
+        is_stopped = verify_instance_stopped(
+            run_id=run.get("id", ""),
+            backend_type=backend_type,
+            backend_handle=backend_handle,
+            project_id=project_id,
+            zone=zone,
+        )
+        if not is_stopped:
+            return None
+
+        cause = detect_termination_cause(
+            run_id=run.get("id", ""),
+            backend_type=backend_type,
+            backend_handle=backend_handle,
+            project_id=project_id,
+            zone=zone,
+        )
+        context.instance_confirmed_dead = True
+        context.termination_cause = cause
+        context.exit_code = None
+        context.exit_code_exists = False
         return (StageEvent.EXIT_MISSING, context)
 
     return None
@@ -89,6 +131,10 @@ def _handle_gcs_error(
     run: dict[str, Any],
     exit_result: ExitCodeResult,
     now: datetime,
+    *,
+    db: Database | None,
+    project_id: str | None,
+    zone: str | None,
 ) -> tuple[StageEvent, EventContext] | None:
     """Handle GCS error during exit code retrieval.
 
@@ -108,8 +154,9 @@ def _handle_gcs_error(
     outage_started = get_gcs_outage_started(run)
 
     if outage_started is None:
-        # First GCS error - don't emit event yet
-        # Caller should call set_gcs_outage_started()
+        # First GCS error - start outage clock and don't emit yet.
+        if db is not None:
+            set_gcs_outage_started(db, run_id=run.get("id", ""), timestamp=now)
         return None
 
     # Check if we've exceeded the threshold
@@ -117,6 +164,30 @@ def _handle_gcs_error(
     if elapsed < GCS_OUTAGE_THRESHOLD:
         # Keep waiting
         return None
+
+    # Exceeded threshold - only emit EXIT_MISSING once instance is confirmed dead.
+    backend_handle = run.get("backend_handle")
+    if not backend_handle:
+        return None
+
+    backend_type = run.get("backend_type", "local")
+    is_stopped = verify_instance_stopped(
+        run_id=run.get("id", ""),
+        backend_type=backend_type,
+        backend_handle=backend_handle,
+        project_id=project_id,
+        zone=zone,
+    )
+    if not is_stopped:
+        return None
+
+    cause = detect_termination_cause(
+        run_id=run.get("id", ""),
+        backend_type=backend_type,
+        backend_handle=backend_handle,
+        project_id=project_id,
+        zone=zone,
+    )
 
     # Exceeded threshold - give up and emit EXIT_MISSING
     context = EventContext(
@@ -127,6 +198,8 @@ def _handle_gcs_error(
         gcs_error=True,
         gcs_outage_started=outage_started,
         error_message=exit_result.error,
+        instance_confirmed_dead=True,
+        termination_cause=cause,
     )
     return (StageEvent.EXIT_MISSING, context)
 

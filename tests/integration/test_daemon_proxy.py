@@ -984,11 +984,13 @@ class TestOrphanCleanupWithPreemption:
 
         # Mock gcloud to return no instances (instance gone)
         # Mock preemption check to return True
-        # Mock _get_exit_code to return 1 (not found in GCS)
+        # Mock _get_exit_code to return ExitCodeResult (not found in GCS)
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
         with (
             patch("subprocess.run") as mock_run,
             patch.object(daemon, "_check_if_preempted", return_value=True),
-            patch.object(daemon, "_get_exit_code", return_value=1),
+            patch.object(daemon, "_get_exit_code", return_value=ExitCodeResult.from_not_found()),
         ):
             # First call: list instances - returns empty (instance gone)
             mock_run.return_value = MagicMock(stdout="", returncode=0)
@@ -1034,11 +1036,13 @@ class TestOrphanCleanupWithPreemption:
 
         # Mock gcloud to return no instances (instance gone)
         # Mock preemption check to return False (not preempted)
-        # Mock _get_exit_code to return 1 (not found in GCS)
+        # Mock _get_exit_code to return ExitCodeResult (not found in GCS)
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
         with (
             patch("subprocess.run") as mock_run,
             patch.object(daemon, "_check_if_preempted", return_value=False),
-            patch.object(daemon, "_get_exit_code", return_value=1),
+            patch.object(daemon, "_get_exit_code", return_value=ExitCodeResult.from_not_found()),
         ):
             mock_run.return_value = MagicMock(stdout="", returncode=0)
 

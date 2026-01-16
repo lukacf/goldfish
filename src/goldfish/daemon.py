@@ -44,6 +44,7 @@ from goldfish.logging import setup_logging
 from goldfish.models import PipelineStatus, StageRunStatus
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.state.state_md import StateManager
+from goldfish.state_machine.exit_code import ExitCodeResult
 from goldfish.workspace.manager import WorkspaceManager
 
 logger = logging.getLogger("goldfish.daemon")
@@ -533,9 +534,15 @@ class GoldfishDaemon:
             # Wait a bit before first check to let things settle
             self.shutdown_event.wait(timeout=30)
 
+            # State-machine poller (single source of truth for stage run lifecycle)
+            from goldfish.state_machine.stage_daemon import StageDaemon
+
+            stage_daemon = StageDaemon(db=self._db, config=self.config)
+
             while not self.shutdown_event.is_set():
                 try:
-                    self._check_orphaned_instances()
+                    # NOTE: Legacy orphan checker is deprecated; state machine daemon drives state.
+                    stage_daemon.poll_active_runs()
                     self._cleanup_stalled_pipelines()
                 except Exception as e:
                     logger.exception("Instance monitor error: %s", e)
@@ -754,9 +761,9 @@ class GoldfishDaemon:
             if instance_name not in alive_instances:
                 # Check for exit_code.txt in GCS first to handle race conditions
                 # where the instance self-deletes before final status update.
-                exit_code = self._get_exit_code(stage_run_id)
+                exit_result = self._get_exit_code(stage_run_id)
 
-                if exit_code == 0:
+                if exit_result.exists and exit_result.code == 0 and not exit_result.gcs_error:
                     status = StageRunStatus.COMPLETED
                     error_msg = None
                     logger.info(
@@ -768,6 +775,7 @@ class GoldfishDaemon:
                     was_preempted = self._check_if_preempted(instance_name, project_id)
                     status = StageRunStatus.FAILED
 
+                    exit_code_val = exit_result.code if exit_result.exists else None
                     if was_preempted:
                         error_msg = "Instance preempted by GCE (spot/preemptible)"
                         logger.warning(
@@ -776,7 +784,7 @@ class GoldfishDaemon:
                             instance_name,
                         )
                     else:
-                        error_msg = f"Instance disappeared (orphan cleanup, exit_code={exit_code})"
+                        error_msg = f"Instance disappeared (orphan cleanup, exit_code={exit_code_val})"
                         logger.warning(
                             "Orphaned stage run detected: %s (instance %s not running)",
                             stage_run_id,
@@ -806,7 +814,7 @@ class GoldfishDaemon:
                 except Exception as e:
                     logger.exception("Failed to update stage run %s: %s", stage_run_id, e)
 
-    def _get_exit_code(self, stage_run_id: str, max_attempts: int = 2, retry_delay: float = 1.0) -> int:
+    def _get_exit_code(self, stage_run_id: str, max_attempts: int = 2, retry_delay: float = 1.0) -> ExitCodeResult:
         """Get exit code from GCS for a stage run.
 
         Args:
@@ -815,33 +823,29 @@ class GoldfishDaemon:
             retry_delay: Seconds between retries
 
         Returns:
-            Exit code (0 for success), or 1 if not found or failed.
+            ExitCodeResult with proper categorization (exists, code, gcs_error).
         """
-        import subprocess
-        import time
+        from goldfish.state_machine.exit_code import get_exit_code_gce
 
         if not self.config or not self.config.gce or not self.config.gcs or not self.config.gcs.bucket:
-            return 1
+            # No bucket configured - assume success for local-like behavior
+            return ExitCodeResult.from_code(0)
 
         bucket = self.config.gcs.bucket
         bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
-        gcs_path = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/exit_code.txt"
 
-        for attempt in range(1, max_attempts + 1):
-            try:
-                result = subprocess.run(
-                    ["gsutil", "cat", gcs_path],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=20,
-                )
-                return int(result.stdout.strip() or "0")
-            except Exception:
-                if attempt < max_attempts:
-                    time.sleep(retry_delay)
-
-        return 1  # Default to failure if not found
+        try:
+            project_id = self.config.gce.effective_project_id if self.config.gce else None
+            return get_exit_code_gce(
+                bucket_uri=bucket_uri,
+                stage_run_id=stage_run_id,
+                project_id=project_id,
+                max_attempts=max_attempts,
+                retry_delay=retry_delay,
+            )
+        except Exception as e:
+            # Defensive: treat unexpected errors as GCS errors
+            return ExitCodeResult.from_gcs_error(str(e))
 
     def start_http_server(self) -> None:
         """Start the HTTP server on Unix socket."""

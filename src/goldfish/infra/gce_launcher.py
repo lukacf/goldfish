@@ -21,6 +21,7 @@ from goldfish.errors import GoldfishError
 from goldfish.infra.resource_launcher import ResourceLauncher, cleanup_disk, run_gcloud
 from goldfish.infra.startup_builder import build_startup_script
 from goldfish.models import StageRunStatus
+from goldfish.state_machine.exit_code import ExitCodeResult, get_exit_code_gce
 
 logger = logging.getLogger(__name__)
 
@@ -658,8 +659,12 @@ class GCELauncher:
         elif status == "TERMINATED":
             # Check exit code in GCS if available
             if self.bucket:
-                exit_code = self._get_exit_code(instance_name)
-                return StageRunStatus.COMPLETED if exit_code == 0 else StageRunStatus.FAILED
+                exit_result = self._get_exit_code(instance_name)
+                return (
+                    StageRunStatus.COMPLETED
+                    if (exit_result.exists and exit_result.code == 0 and not exit_result.gcs_error)
+                    else StageRunStatus.FAILED
+                )
             return StageRunStatus.COMPLETED
         elif status in ("STOPPING", "SUSPENDING", "SUSPENDED"):
             return StageRunStatus.RUNNING
@@ -722,112 +727,32 @@ class GCELauncher:
                 return zone
         return None
 
-    def _get_exit_code(self, instance_name: str, max_attempts: int = 5, retry_delay: float = 2.0) -> int:
-        """Get exit code from GCS with retry logic.
+    def _get_exit_code(self, instance_name: str, max_attempts: int = 5, retry_delay: float = 2.0) -> ExitCodeResult:
+        """Get exit code from GCS with explicit, non-ambiguous semantics.
 
-        Uses retries to handle GCS eventual consistency and temporary failures.
-        The instance uploads exit_code.txt before self-deleting, but there can be
-        a race condition where the daemon checks before GCS is synced.
-
-        Args:
-            instance_name: Instance identifier
-            max_attempts: Number of retry attempts (default 5)
-            retry_delay: Seconds between retries (default 2.0)
-
-        Returns:
-            Exit code, or 1 if not found after all retries (missing file = crash)
+        This returns an ExitCodeResult to distinguish:
+        - File exists with code → exists=True, code=N
+        - File missing → exists=False, code=None (crash/preemption possible)
+        - GCS error → gcs_error=True (transient/outage/auth issue)
         """
-        import time
+        bucket_uri = self.bucket_uri
+        if not bucket_uri:
+            # No bucket configured - assume success for local-like behavior.
+            return ExitCodeResult.from_code(0)
 
-        if not self.bucket_uri:
-            # No bucket configured - assume success for local-like behavior
-            return 0
-
-        gcs_path = f"{self.bucket_uri}/runs/{instance_name}/logs/exit_code.txt"
-        last_error: Exception | None = None
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                cmd = ["gsutil"]
-                if self.project_id:
-                    cmd.extend(["-o", f"GSUtil:project_id={self.project_id}"])
-                cmd.extend(["cat", gcs_path])
-
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=30,  # Prevent hanging
-                )
-                exit_code = int(result.stdout.strip() or "0")
-                if attempt > 1:
-                    logger.info(
-                        "exit_code.txt retrieved for %s on attempt %d (exit_code=%d)",
-                        instance_name,
-                        attempt,
-                        exit_code,
-                    )
-                return exit_code
-            except subprocess.TimeoutExpired as e:
-                last_error = e
-                logger.warning(
-                    "gsutil timeout for %s (attempt %d/%d)",
-                    instance_name,
-                    attempt,
-                    max_attempts,
-                )
-            except subprocess.CalledProcessError as e:
-                last_error = e
-                # Check if it's a "not found" error vs other errors
-                stderr = (e.stderr or "").lower()
-                if "no urls matched" in stderr or "commandexception" in stderr:
-                    logger.debug(
-                        "exit_code.txt not found for %s (attempt %d/%d, may be uploading)",
-                        instance_name,
-                        attempt,
-                        max_attempts,
-                    )
-                else:
-                    logger.warning(
-                        "gsutil error for %s (attempt %d/%d): %s",
-                        instance_name,
-                        attempt,
-                        max_attempts,
-                        e.stderr,
-                    )
-            except ValueError as e:
-                # Invalid content in exit_code.txt (not an integer)
-                last_error = e
-                logger.error(
-                    "Invalid exit_code.txt content for %s: %s",
-                    instance_name,
-                    e,
-                )
-                return 1  # Treat invalid content as failure, no retry
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    "Unexpected error reading exit_code.txt for %s (attempt %d/%d): %s",
-                    instance_name,
-                    attempt,
-                    max_attempts,
-                    e,
-                )
-
-            # Wait before retry (except on last attempt)
-            if attempt < max_attempts:
-                time.sleep(retry_delay)
-
-        # All retries exhausted - file genuinely missing (script crashed before writing)
-        logger.warning(
-            "exit_code.txt not found for %s after %d attempts - treating as failure "
-            "(script may have crashed before writing exit code). Last error: %s",
-            instance_name,
-            max_attempts,
-            last_error,
-        )
-        return 1
+        stage_run_id = self._sanitize_name(instance_name)
+        try:
+            return get_exit_code_gce(
+                bucket_uri=bucket_uri,
+                stage_run_id=stage_run_id,
+                project_id=self.project_id,
+                max_attempts=max_attempts,
+                retry_delay=retry_delay,
+            )
+        except Exception as e:
+            # Defensive: treat unexpected errors as GCS errors so callers don't
+            # conflate them with a real non-zero exit code.
+            return ExitCodeResult.from_gcs_error(str(e))
 
     def get_instance_logs(
         self,

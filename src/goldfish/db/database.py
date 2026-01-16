@@ -324,14 +324,19 @@ class Database:
                     from_state TEXT NOT NULL,
                     to_state TEXT NOT NULL,
                     event TEXT NOT NULL,
-                    context_json TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
+                    phase TEXT,
+                    termination_cause TEXT CHECK(termination_cause IS NULL OR termination_cause IN ('preempted', 'crashed', 'orphaned', 'timeout', 'ai_stopped', 'manual')),
+                    exit_code INTEGER,
+                    exit_code_exists INTEGER,
+                    error_message TEXT,
+                    source TEXT NOT NULL CHECK(source IN ('mcp_tool', 'executor', 'daemon', 'container', 'migration', 'admin')),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_state_transitions_stage_run
-                    ON stage_state_transitions(stage_run_id);
-                CREATE INDEX IF NOT EXISTS idx_state_transitions_timestamp
-                    ON stage_state_transitions(timestamp);
+                    ON stage_state_transitions(stage_run_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_state_transitions_created_at
+                    ON stage_state_transitions(created_at);
 
                 -- Partial index for active states (used by daemon polling)
                 CREATE INDEX IF NOT EXISTS idx_stage_runs_active_state
@@ -546,6 +551,109 @@ class Database:
                     )
 
                 new_version = 5
+
+            # Version 6: Normalize stage_state_transitions schema (remove context_json)
+            if current_version < 6:
+                # stage_state_transitions may exist in older DBs with:
+                #   (stage_run_id, from_state, to_state, event, context_json, timestamp)
+                # New schema stores normalized columns (phase, termination_cause, exit_code, etc.)
+                table_exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='stage_state_transitions'"
+                ).fetchone()
+                if table_exists is not None:
+                    transition_cols: set[str] = {
+                        row["name"] for row in conn.execute("PRAGMA table_info(stage_state_transitions)")
+                    }
+                    if "context_json" in transition_cols:
+                        legacy_rows = conn.execute(
+                            """
+                            SELECT id, stage_run_id, from_state, to_state, event, context_json, timestamp
+                            FROM stage_state_transitions
+                            ORDER BY id
+                            """
+                        ).fetchall()
+
+                        # Rebuild via table recreation (portable across SQLite versions)
+                        # NOTE: PRAGMA foreign_keys is per-connection; restore it after.
+                        conn.execute("PRAGMA foreign_keys = OFF")
+                        conn.execute("DROP TABLE IF EXISTS stage_state_transitions_new")
+                        conn.execute(
+                            """
+                            CREATE TABLE stage_state_transitions_new (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                stage_run_id TEXT NOT NULL,
+                                from_state TEXT NOT NULL,
+                                to_state TEXT NOT NULL,
+                                event TEXT NOT NULL,
+                                phase TEXT,
+                                termination_cause TEXT CHECK(
+                                    termination_cause IS NULL OR termination_cause IN
+                                    ('preempted', 'crashed', 'orphaned', 'timeout', 'ai_stopped', 'manual')
+                                ),
+                                exit_code INTEGER,
+                                exit_code_exists INTEGER,
+                                error_message TEXT,
+                                source TEXT NOT NULL CHECK(
+                                    source IN ('mcp_tool', 'executor', 'daemon', 'container', 'migration', 'admin')
+                                ),
+                                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                                FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+                            )
+                            """
+                        )
+
+                        for r in legacy_rows:
+                            raw = r["context_json"] or "{}"
+                            try:
+                                ctx = json.loads(raw)
+                            except Exception:
+                                ctx = {}
+
+                            phase = ctx.get("phase")
+                            termination_cause = ctx.get("termination_cause")
+                            exit_code = ctx.get("exit_code")
+                            exit_code_exists = 1 if ctx.get("exit_code_exists") else 0
+                            error_message = ctx.get("error_message")
+                            source = ctx.get("source") or "migration"
+                            created_at = r["timestamp"] or datetime.now(UTC).isoformat()
+
+                            conn.execute(
+                                """
+                                INSERT INTO stage_state_transitions_new
+                                (id, stage_run_id, from_state, to_state, event,
+                                 phase, termination_cause, exit_code, exit_code_exists,
+                                 error_message, source, created_at)
+                                VALUES (?, ?, ?, ?, ?,
+                                        ?, ?, ?, ?,
+                                        ?, ?, ?)
+                                """,
+                                (
+                                    r["id"],
+                                    r["stage_run_id"],
+                                    r["from_state"],
+                                    r["to_state"],
+                                    r["event"],
+                                    phase,
+                                    termination_cause,
+                                    exit_code,
+                                    exit_code_exists,
+                                    error_message,
+                                    source,
+                                    created_at,
+                                ),
+                            )
+
+                        conn.execute("DROP TABLE stage_state_transitions")
+                        conn.execute("ALTER TABLE stage_state_transitions_new RENAME TO stage_state_transitions")
+                        conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_state_transitions_stage_run ON stage_state_transitions(stage_run_id, created_at)"
+                        )
+                        conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_state_transitions_created_at ON stage_state_transitions(created_at)"
+                        )
+                        conn.execute("PRAGMA foreign_keys = ON")
+
+                new_version = 6
 
             # Bump schema version if needed
             if new_version != current_version:
@@ -2188,8 +2296,8 @@ class Database:
                  started_at, profile, hints_json, config_json, inputs_json, reason_json,
                  preflight_errors_json, preflight_warnings_json,
                  backend_type, backend_handle, attempt_num,
-                 state, phase, state_entered_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 state, phase, state_entered_at, phase_updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stage_run_id,
@@ -2214,6 +2322,34 @@ class Database:
                     initial_state,
                     initial_phase,
                     timestamp,  # state_entered_at = same as started_at initially
+                    timestamp,  # phase_updated_at = same as state_entered_at initially
+                ),
+            )
+
+            # Record initial run_start pseudo-event for audit/provenance.
+            # This makes the audit trail complete even before the first explicit transition.
+            conn.execute(
+                """
+                INSERT INTO stage_state_transitions
+                (stage_run_id, from_state, to_state, event,
+                 phase, termination_cause, exit_code, exit_code_exists, error_message,
+                 source, created_at)
+                VALUES (?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?)
+                """,
+                (
+                    stage_run_id,
+                    "none",
+                    initial_state,
+                    "run_start",
+                    initial_phase,
+                    None,
+                    None,
+                    0,
+                    None,
+                    "executor",
+                    timestamp,
                 ),
             )
 
