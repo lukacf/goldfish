@@ -843,6 +843,9 @@ def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = 
 def cancel(run_id: str, reason: str) -> dict:
     """Cancel a running stage.
 
+    Uses the state machine to emit USER_CANCEL event and transition to CANCELED state.
+    This ensures atomic state transitions with CAS semantics and proper audit trail.
+
     Args:
         run_id: The run ID to cancel
         reason: Why cancelling (min 15 chars)
@@ -850,53 +853,34 @@ def cancel(run_id: str, reason: str) -> dict:
     Returns:
         Dict with success status and previous_status
     """
+    from goldfish.state_machine.cancel import cancel_run
+
     config = _get_config()
     validate_reason(reason, config.audit.min_reason_length)
 
     db = _get_db()
-    row = db.get_stage_run(run_id)
-    if not row:
-        raise GoldfishError(f"Run not found: {run_id}")
 
-    backend = row.get("backend_type") or "local"
-    handle = row.get("backend_handle") or run_id
+    # Use state machine cancel_run which:
+    # 1. Validates run exists
+    # 2. Emits USER_CANCEL event via transition()
+    # 3. Handles backend cleanup
+    # 4. Returns properly formatted result
+    sm_result = cancel_run(db, run_id, reason)
 
-    # Attempt state change atomically: only if still running
-    # Clear progress field to avoid stale "canceled:running" display
-    updated = 0
-    with db._conn() as conn:
-        updated = conn.execute(
-            "UPDATE stage_runs SET status=?, progress=NULL, completed_at=?, error=? WHERE id=? AND status=?",
-            (
-                StageRunStatus.CANCELED,
-                datetime.now(UTC).isoformat(),
-                f"Canceled: {reason}",
-                run_id,
-                StageRunStatus.RUNNING,
-            ),
-        ).rowcount
-
-    if updated == 0:
+    # Map state machine result to CancelRunResponse format for backwards compatibility
+    if not sm_result.get("success"):
+        error_msg = "Run is not running (already completed/failed/canceled)"
+        if sm_result.get("reason") == "not_found":
+            raise GoldfishError(f"Run not found: {run_id}")
         fail_result: dict[str, Any] = CancelRunResponse(
             success=False,
-            error="Run is not running (already completed/failed/canceled)",
-            previous_status=row.get("status"),
+            error=error_msg,
+            previous_status=sm_result.get("previous_state"),
         ).model_dump(mode="json")
         return fail_result
 
-    # Best-effort backend cleanup
-    # For GCE: use delete_instance() to fully terminate (stop just pauses)
-    # For local: stop_container() is correct since containers auto-remove (--rm)
-    try:
-        if backend == "local":
-            _get_stage_executor().local_executor.stop_container(handle)
-        elif backend == "gce":
-            _get_stage_executor().gce_launcher.delete_instance(handle)
-    except Exception as e:
-        # Log error but don't fail the cancel - DB state is already updated
-        logger.warning(f"Failed to cleanup backend for {run_id} ({backend}:{handle}): {e}")
-
-    success_result: dict[str, Any] = CancelRunResponse(success=True, previous_status=row.get("status")).model_dump(
-        mode="json"
-    )
+    success_result: dict[str, Any] = CancelRunResponse(
+        success=True,
+        previous_status=sm_result.get("previous_state"),
+    ).model_dump(mode="json")
     return success_result

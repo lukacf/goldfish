@@ -58,9 +58,6 @@ class Event(Enum):
     USER_CANCEL = auto()
     PREPARE_FAIL = auto()
     SVS_BLOCK = auto()
-    FORCE_TERMINATE = auto()
-    FORCE_COMPLETE = auto()
-    FORCE_FAIL = auto()
 
 
 # Terminal states have no outgoing transitions (except UNKNOWN which has admin escapes)
@@ -138,21 +135,18 @@ TRANSITIONS: list[Transition] = [
     Transition(State.PREPARING, Event.INSTANCE_LOST, State.TERMINATED),
     Transition(State.PREPARING, Event.TIMEOUT, State.TERMINATED),
     Transition(State.PREPARING, Event.USER_CANCEL, State.CANCELED),
-    Transition(State.PREPARING, Event.FORCE_TERMINATE, State.TERMINATED),
     # BUILDING
     Transition(State.BUILDING, Event.BUILD_OK, State.LAUNCHING),
     Transition(State.BUILDING, Event.BUILD_FAIL, State.FAILED),
     Transition(State.BUILDING, Event.INSTANCE_LOST, State.TERMINATED),
     Transition(State.BUILDING, Event.TIMEOUT, State.TERMINATED),
     Transition(State.BUILDING, Event.USER_CANCEL, State.CANCELED),
-    Transition(State.BUILDING, Event.FORCE_TERMINATE, State.TERMINATED),
     # LAUNCHING
     Transition(State.LAUNCHING, Event.LAUNCH_OK, State.RUNNING),
     Transition(State.LAUNCHING, Event.LAUNCH_FAIL, State.FAILED),
     Transition(State.LAUNCHING, Event.INSTANCE_LOST, State.TERMINATED),
     Transition(State.LAUNCHING, Event.TIMEOUT, State.TERMINATED),
     Transition(State.LAUNCHING, Event.USER_CANCEL, State.CANCELED),
-    Transition(State.LAUNCHING, Event.FORCE_TERMINATE, State.TERMINATED),
     # RUNNING
     Transition(State.RUNNING, Event.EXIT_SUCCESS, State.FINALIZING),
     Transition(State.RUNNING, Event.EXIT_FAILURE, State.FAILED),
@@ -160,7 +154,6 @@ TRANSITIONS: list[Transition] = [
     Transition(State.RUNNING, Event.INSTANCE_LOST, State.TERMINATED),
     Transition(State.RUNNING, Event.TIMEOUT, State.TERMINATED),
     Transition(State.RUNNING, Event.USER_CANCEL, State.CANCELED),
-    Transition(State.RUNNING, Event.FORCE_TERMINATE, State.TERMINATED),
     # FINALIZING
     Transition(State.FINALIZING, Event.FINALIZE_OK, State.COMPLETED),
     Transition(State.FINALIZING, Event.FINALIZE_FAIL, State.FAILED, GUARD_CRITICAL_TRUE),
@@ -169,13 +162,8 @@ TRANSITIONS: list[Transition] = [
     Transition(State.FINALIZING, Event.TIMEOUT, State.COMPLETED, GUARD_PHASES_DONE),
     Transition(State.FINALIZING, Event.TIMEOUT, State.FAILED, GUARD_PHASES_NOT_DONE),
     Transition(State.FINALIZING, Event.USER_CANCEL, State.CANCELED),
-    Transition(State.FINALIZING, Event.FORCE_COMPLETE, State.COMPLETED),
-    Transition(State.FINALIZING, Event.FORCE_TERMINATE, State.TERMINATED),
     # UNKNOWN (limbo state - needs resolution)
     Transition(State.UNKNOWN, Event.TIMEOUT, State.TERMINATED),
-    Transition(State.UNKNOWN, Event.FORCE_TERMINATE, State.TERMINATED),
-    Transition(State.UNKNOWN, Event.FORCE_COMPLETE, State.COMPLETED),
-    Transition(State.UNKNOWN, Event.FORCE_FAIL, State.FAILED),
 ]
 
 
@@ -352,7 +340,7 @@ def validate_event_coverage() -> tuple[bool, list[str]]:
     warnings = []
 
     # Events that should be handled in all active states
-    universal_events = {Event.USER_CANCEL, Event.FORCE_TERMINATE, Event.TIMEOUT}
+    universal_events = {Event.USER_CANCEL, Event.TIMEOUT}
 
     # Group transitions by state
     by_state: dict[State, set[Event]] = defaultdict(set)

@@ -15,6 +15,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from goldfish.state_machine.backwards_compat import get_legacy_progress, get_legacy_status
 from goldfish.state_machine.transitions import (
     STATE_ENTRY_PHASES,
     TRANSITIONS,
@@ -25,6 +26,7 @@ from goldfish.state_machine.types import (
     ProgressPhase,
     StageEvent,
     StageState,
+    TerminationCause,
     TransitionResult,
 )
 
@@ -95,20 +97,18 @@ def transition(
         # 2. Find valid transition
         trans_def = find_transition(current_state, event, context)
 
-        # 3. Handle idempotency for terminal states
+        # 3. Handle idempotency (guard-aware)
         if trans_def is None:
-            # Check if we're already in the target state (idempotency)
-            # For events that always lead to the same state (like FINALIZE_OK → COMPLETED),
-            # if we're already in that state, it's idempotent
-            potential_target = _find_potential_target_state(event)
-
-            if potential_target is not None and potential_target == current_state:
-                # Already in target state - idempotent success
-                return TransitionResult(
-                    success=True,
-                    new_state=current_state,
-                    reason="already_in_target_state",
-                )
+            # Spec: If current state is a valid target for this event AND the guard
+            # passes for THIS context, treat as idempotent success.
+            for t in TRANSITIONS:
+                if t.event == event and t.to_state == current_state:
+                    if t.guard is None or t.guard(context):
+                        return TransitionResult(
+                            success=True,
+                            new_state=current_state,
+                            reason="already_in_target_state",
+                        )
 
             # No valid transition
             return TransitionResult(
@@ -130,57 +130,55 @@ def transition(
         # 6. Build the UPDATE query with CAS
         timestamp_str = context.timestamp.isoformat()
         phase_str = new_phase.value if new_phase else None
-        termination_cause_str = context.termination_cause.value if context.termination_cause else None
         error_str = context.error_message
+        completed_at_str = (
+            timestamp_str
+            if to_state in (StageState.COMPLETED, StageState.FAILED, StageState.TERMINATED, StageState.CANCELED)
+            else None
+        )
+
+        # Spec: termination_cause is ONLY for TERMINATED state
+        termination_cause_str: str | None = None
+        if to_state == StageState.TERMINATED:
+            if context.termination_cause is not None:
+                termination_cause_str = context.termination_cause.value
+            elif event == StageEvent.TIMEOUT:
+                termination_cause_str = TerminationCause.TIMEOUT.value
+
+        legacy_status = get_legacy_status(to_state, context.termination_cause)
+        legacy_progress = get_legacy_progress(to_state, new_phase)
 
         # CAS UPDATE: only update if state matches expected
-        if completed_with_warnings:
-            result = conn.execute(
-                """
-                UPDATE stage_runs
-                SET state = ?,
-                    phase = ?,
-                    state_entered_at = ?,
-                    phase_updated_at = ?,
-                    termination_cause = COALESCE(?, termination_cause),
-                    error = COALESCE(?, error),
-                    completed_with_warnings = 1
-                WHERE id = ? AND state = ?
-                """,
-                (
-                    to_state.value,
-                    phase_str,
-                    timestamp_str,
-                    timestamp_str,
-                    termination_cause_str,
-                    error_str,
-                    run_id,
-                    current_state.value,
-                ),
-            )
-        else:
-            result = conn.execute(
-                """
-                UPDATE stage_runs
-                SET state = ?,
-                    phase = ?,
-                    state_entered_at = ?,
-                    phase_updated_at = ?,
-                    termination_cause = COALESCE(?, termination_cause),
-                    error = COALESCE(?, error)
-                WHERE id = ? AND state = ?
-                """,
-                (
-                    to_state.value,
-                    phase_str,
-                    timestamp_str,
-                    timestamp_str,
-                    termination_cause_str,
-                    error_str,
-                    run_id,
-                    current_state.value,
-                ),
-            )
+        result = conn.execute(
+            """
+            UPDATE stage_runs
+            SET state = ?,
+                phase = ?,
+                status = ?,
+                progress = ?,
+                state_entered_at = ?,
+                phase_updated_at = ?,
+                termination_cause = ?,
+                error = ?,
+                completed_with_warnings = ?,
+                completed_at = ?
+            WHERE id = ? AND state = ?
+            """,
+            (
+                to_state.value,
+                phase_str,
+                legacy_status,
+                legacy_progress,
+                timestamp_str,
+                timestamp_str,
+                termination_cause_str,
+                error_str,
+                1 if completed_with_warnings else 0,
+                completed_at_str,
+                run_id,
+                current_state.value,
+            ),
+        )
 
         # 7. Check CAS result
         if result.rowcount == 0:
@@ -191,20 +189,28 @@ def transition(
                 details=f"State changed from {current_state} before update completed",
             )
 
-        # 8. Insert audit record
-        context_json = _serialize_context(context)
+        # 8. Insert audit record (normalized columns; no context_json)
         conn.execute(
             """
             INSERT INTO stage_state_transitions
-            (stage_run_id, from_state, to_state, event, context_json, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (stage_run_id, from_state, to_state, event,
+             phase, termination_cause, exit_code, exit_code_exists, error_message,
+             source, created_at)
+            VALUES (?, ?, ?, ?,
+                    ?, ?, ?, ?, ?,
+                    ?, ?)
             """,
             (
                 run_id,
                 current_state.value,
                 to_state.value,
                 event.value,
-                context_json,
+                phase_str,
+                termination_cause_str,
+                context.exit_code,
+                1 if context.exit_code_exists else 0,
+                error_str,
+                context.source,
                 timestamp_str,
             ),
         )
@@ -222,6 +228,8 @@ def update_phase(
     expected_state: StageState,
     new_phase: ProgressPhase,
     timestamp: datetime,
+    *,
+    source: str = "executor",
 ) -> bool:
     """Update phase within a state with CAS guard.
 
@@ -252,32 +260,47 @@ def update_phase(
             UPDATE stage_runs
             SET phase = ?, phase_updated_at = ?
             WHERE id = ? AND state = ?
+              AND (phase_updated_at IS NULL OR phase_updated_at <= ?)
             """,
-            (new_phase.value, timestamp.isoformat(), run_id, expected_state.value),
+            (
+                new_phase.value,
+                timestamp.isoformat(),
+                run_id,
+                expected_state.value,
+                timestamp.isoformat(),
+            ),
         )
 
-        return result.rowcount > 0
+        if result.rowcount == 0:
+            return False
 
+        # Record phase_update pseudo-event for audit/provenance.
+        conn.execute(
+            """
+            INSERT INTO stage_state_transitions
+            (stage_run_id, from_state, to_state, event,
+             phase, termination_cause, exit_code, exit_code_exists, error_message,
+             source, created_at)
+            VALUES (?, ?, ?, ?,
+                    ?, ?, ?, ?, ?,
+                    ?, ?)
+            """,
+            (
+                run_id,
+                expected_state.value,
+                expected_state.value,
+                "phase_update",
+                new_phase.value,
+                None,
+                None,
+                None,
+                None,
+                source,
+                timestamp.isoformat(),
+            ),
+        )
 
-def _find_potential_target_state(event: StageEvent) -> StageState | None:
-    """Find the most common target state for an event, ignoring guards.
-
-    Used for idempotency checking - to see what state an event
-    would normally lead to, regardless of which state we're in.
-
-    For events that can lead to multiple states (like FINALIZE_FAIL),
-    this returns None since idempotency is guard-dependent.
-    """
-    target_states: set[StageState] = set()
-    for t in TRANSITIONS:
-        if t.event == event:
-            target_states.add(t.to_state)
-
-    # If event leads to exactly one state, return it
-    # Otherwise, idempotency depends on guards, return None
-    if len(target_states) == 1:
-        return target_states.pop()
-    return None
+        return True
 
 
 def _should_set_completed_with_warnings(event: StageEvent, context: EventContext, to_state: StageState) -> bool:

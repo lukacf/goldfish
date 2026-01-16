@@ -133,7 +133,7 @@ class ProgressPhase(str, Enum):
 
 
 # Source types for audit trail
-SourceType = Literal["mcp_tool", "executor", "daemon", "container", "admin", "migration"]
+SourceType = Literal["mcp_tool", "executor", "daemon", "container", "migration"]
 
 
 @dataclass

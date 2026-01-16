@@ -13,9 +13,8 @@ the e2e test suite.
 
 from __future__ import annotations
 
-import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -54,10 +53,11 @@ def _create_workspace_and_version(db: Database, workspace: str = "test-ws", vers
 
 
 def _get_state_transitions(db: Database, run_id: str) -> list[dict]:
-    """Get all state transitions for a run including context_json."""
+    """Get all state transitions for a run (normalized columns)."""
     with db._conn() as conn:
         rows = conn.execute(
-            """SELECT from_state, to_state, event, timestamp, context_json
+            """SELECT from_state, to_state, event, created_at, phase, termination_cause,
+                      exit_code, exit_code_exists, error_message, source
             FROM stage_state_transitions
             WHERE stage_run_id = ?
             ORDER BY id""",
@@ -81,6 +81,17 @@ def _get_run_extras(db: Database, run_id: str) -> dict:
     with db._conn() as conn:
         row = conn.execute(
             """SELECT completed_with_warnings, termination_cause
+            FROM stage_runs WHERE id = ?""",
+            (run_id,),
+        ).fetchone()
+        return dict(row) if row else {}
+
+
+def _get_run_timestamps(db: Database, run_id: str) -> dict:
+    """Get timestamp columns from stage_runs for verification."""
+    with db._conn() as conn:
+        row = conn.execute(
+            """SELECT started_at, state_entered_at, phase_updated_at, completed_at
             FROM stage_runs WHERE id = ?""",
             (run_id,),
         ).fetchone()
@@ -156,13 +167,8 @@ class TestCreateStageRunInitialState:
         state_info = _get_run_state(test_db, run_id)
         assert state_info["phase"] == ProgressPhase.GCS_CHECK.value
 
-    def test_new_run_does_not_auto_record_transition(self, test_db: Database) -> None:
-        """create_stage_run() does not record an initial transition.
-
-        The initial state is set directly in the INSERT statement, not via
-        the transition() function. Transition audit trail starts with the
-        first explicit transition (e.g., BUILD_START).
-        """
+    def test_new_run_records_run_start_transition(self, test_db: Database) -> None:
+        """create_stage_run() records a run_start pseudo-event for audit."""
         _create_workspace_and_version(test_db)
         run_id = f"stage-{uuid.uuid4().hex[:8]}"
 
@@ -174,8 +180,33 @@ class TestCreateStageRunInitialState:
         )
 
         transitions = _get_state_transitions(test_db, run_id)
-        # No transitions recorded by create_stage_run itself
-        assert len(transitions) == 0
+        assert len(transitions) == 1
+        t0 = transitions[0]
+        assert t0["from_state"] == "none"
+        assert t0["to_state"] == StageState.PREPARING.value
+        assert t0["event"] == "run_start"
+        assert t0["phase"] == ProgressPhase.GCS_CHECK.value
+        assert t0["termination_cause"] is None
+        assert t0["exit_code"] is None
+        assert t0["exit_code_exists"] in (0, None)
+        assert t0["error_message"] is None
+        assert t0["source"] == "executor"
+
+    def test_new_run_sets_phase_updated_at(self, test_db: Database) -> None:
+        """create_stage_run() should set phase_updated_at at creation."""
+        _create_workspace_and_version(test_db)
+        run_id = f"stage-{uuid.uuid4().hex[:8]}"
+
+        test_db.create_stage_run(
+            stage_run_id=run_id,
+            workspace_name="test-ws",
+            version="v1",
+            stage_name="train",
+        )
+
+        ts = _get_run_timestamps(test_db, run_id)
+        assert ts["phase_updated_at"] is not None
+        assert ts["phase_updated_at"] == ts["state_entered_at"]
 
 
 class TestBuildEventEmission:
@@ -310,6 +341,14 @@ class TestPhaseUpdates:
         assert state_info["state"] == StageState.PREPARING.value
         assert state_info["phase"] == ProgressPhase.VERSIONING.value
 
+        transitions = _get_state_transitions(test_db, run_id)
+        assert len(transitions) == 2
+        assert transitions[-1]["event"] == "phase_update"
+        assert transitions[-1]["from_state"] == StageState.PREPARING.value
+        assert transitions[-1]["to_state"] == StageState.PREPARING.value
+        assert transitions[-1]["phase"] == ProgressPhase.VERSIONING.value
+        assert transitions[-1]["source"] == "executor"
+
     def test_phase_updates_to_pipeline_load(self, test_db: Database) -> None:
         """Phase should update to PIPELINE_LOAD during preparation."""
         _create_workspace_and_version(test_db)
@@ -327,6 +366,37 @@ class TestPhaseUpdates:
 
         state_info = _get_run_state(test_db, run_id)
         assert state_info["phase"] == ProgressPhase.PIPELINE_LOAD.value
+
+        transitions = _get_state_transitions(test_db, run_id)
+        assert len(transitions) == 2
+        assert transitions[-1]["event"] == "phase_update"
+        assert transitions[-1]["phase"] == ProgressPhase.PIPELINE_LOAD.value
+
+    def test_phase_update_rejects_older_timestamp(self, test_db: Database) -> None:
+        """update_phase() rejects out-of-order timestamps (prevents phase regression)."""
+        _create_workspace_and_version(test_db)
+        run_id = f"stage-{uuid.uuid4().hex[:8]}"
+
+        test_db.create_stage_run(
+            stage_run_id=run_id,
+            workspace_name="test-ws",
+            version="v1",
+            stage_name="train",
+        )
+
+        newer = datetime.now(UTC)
+        assert update_phase(test_db, run_id, StageState.PREPARING, ProgressPhase.VERSIONING, newer) is True
+
+        older = newer - timedelta(microseconds=1)
+        assert update_phase(test_db, run_id, StageState.PREPARING, ProgressPhase.GCS_CHECK, older) is False
+
+        # Phase should remain at VERSIONING
+        state_info = _get_run_state(test_db, run_id)
+        assert state_info["phase"] == ProgressPhase.VERSIONING.value
+
+        # Only run_start + the successful phase_update should be recorded
+        transitions = _get_state_transitions(test_db, run_id)
+        assert [t["event"] for t in transitions] == ["run_start", "phase_update"]
 
 
 class TestPrepareFailEventEmission:
@@ -496,24 +566,31 @@ class TestFullLifecycle:
 
         # Verify audit trail - comprehensive check of all columns
         transitions = _get_state_transitions(test_db, run_id)
-        assert len(transitions) == 5  # 5 transitions total
+        # run_start + 5 state transitions
+        assert len(transitions) == 6
 
-        # Verify first transition (PREPARING → BUILDING via BUILD_START)
-        assert transitions[0]["from_state"] == StageState.PREPARING.value
-        assert transitions[0]["to_state"] == StageState.BUILDING.value
-        assert transitions[0]["event"] == StageEvent.BUILD_START.value
-        assert transitions[0]["timestamp"] is not None
+        # Verify run_start pseudo-event
+        assert transitions[0]["from_state"] == "none"
+        assert transitions[0]["to_state"] == StageState.PREPARING.value
+        assert transitions[0]["event"] == "run_start"
+        assert transitions[0]["created_at"] is not None
+
+        # Verify first state transition (PREPARING → BUILDING via BUILD_START)
+        assert transitions[1]["from_state"] == StageState.PREPARING.value
+        assert transitions[1]["to_state"] == StageState.BUILDING.value
+        assert transitions[1]["event"] == StageEvent.BUILD_START.value
+        assert transitions[1]["created_at"] is not None
 
         # Verify last transition (FINALIZING → COMPLETED via FINALIZE_OK)
         assert transitions[-1]["from_state"] == StageState.FINALIZING.value
         assert transitions[-1]["to_state"] == StageState.COMPLETED.value
         assert transitions[-1]["event"] == StageEvent.FINALIZE_OK.value
-        assert transitions[-1]["timestamp"] is not None
+        assert transitions[-1]["created_at"] is not None
 
         # Verify middle transitions have correct from_state chain
-        assert transitions[1]["from_state"] == StageState.BUILDING.value
-        assert transitions[2]["from_state"] == StageState.LAUNCHING.value
-        assert transitions[3]["from_state"] == StageState.RUNNING.value
+        assert transitions[2]["from_state"] == StageState.BUILDING.value
+        assert transitions[3]["from_state"] == StageState.LAUNCHING.value
+        assert transitions[4]["from_state"] == StageState.RUNNING.value
 
 
 class TestTransitionErrorCases:
@@ -1029,11 +1106,11 @@ class TestTerminalStateImmutability:
         assert result.new_state == terminal_state
 
 
-class TestAuditTrailContextJson:
-    """Tests verifying context_json is properly recorded in audit trail."""
+class TestAuditTrailNormalizedColumns:
+    """Tests verifying audit trail records normalized columns (no context_json)."""
 
-    def test_transition_records_context_json(self, test_db: Database) -> None:
-        """Transition should record full EventContext as context_json."""
+    def test_transition_records_source_and_error_message(self, test_db: Database) -> None:
+        """Transition should record source and error_message in dedicated columns."""
         _create_workspace_and_version(test_db)
         run_id = f"stage-{uuid.uuid4().hex[:8]}"
         test_db.create_stage_run(
@@ -1051,16 +1128,15 @@ class TestAuditTrailContextJson:
         transition(test_db, run_id, StageEvent.BUILD_START, ctx)
 
         transitions = _get_state_transitions(test_db, run_id)
-        assert len(transitions) == 1
+        # run_start + build_start
+        assert len(transitions) == 2
 
-        # Parse and verify context_json
-        context_json = json.loads(transitions[0]["context_json"])
-        assert context_json["source"] == "executor"
-        assert context_json["error_message"] == "Test error"
-        assert "timestamp" in context_json
+        assert transitions[1]["source"] == "executor"
+        assert transitions[1]["error_message"] == "Test error"
+        assert transitions[1]["created_at"] is not None
 
-    def test_exit_failure_context_json_includes_exit_code(self, test_db: Database) -> None:
-        """EXIT_FAILURE should record exit_code in context_json."""
+    def test_exit_failure_records_exit_code_fields(self, test_db: Database) -> None:
+        """EXIT_FAILURE should record exit_code + exit_code_exists in dedicated columns."""
         run_id = _setup_test_run(test_db, StageState.RUNNING)
 
         ctx = EventContext(
@@ -1072,12 +1148,11 @@ class TestAuditTrailContextJson:
         transition(test_db, run_id, StageEvent.EXIT_FAILURE, ctx)
 
         transitions = _get_state_transitions(test_db, run_id)
-        context_json = json.loads(transitions[0]["context_json"])
-        assert context_json["exit_code"] == 42
-        assert context_json["exit_code_exists"] is True
+        assert transitions[0]["exit_code"] == 42
+        assert transitions[0]["exit_code_exists"] == 1
 
-    def test_terminated_context_json_includes_termination_cause(self, test_db: Database) -> None:
-        """INSTANCE_LOST should record termination_cause in context_json."""
+    def test_terminated_records_termination_cause(self, test_db: Database) -> None:
+        """INSTANCE_LOST should record termination_cause in dedicated column."""
         run_id = _setup_test_run(test_db, StageState.RUNNING)
 
         ctx = EventContext(
@@ -1088,8 +1163,7 @@ class TestAuditTrailContextJson:
         transition(test_db, run_id, StageEvent.INSTANCE_LOST, ctx)
 
         transitions = _get_state_transitions(test_db, run_id)
-        context_json = json.loads(transitions[0]["context_json"])
-        assert context_json["termination_cause"] == "preempted"
+        assert transitions[0]["termination_cause"] == "preempted"
 
 
 class TestNegativeGuardCases:
@@ -1190,8 +1264,9 @@ class TestFailedAndTerminatedLifecycles:
 
         # Verify audit trail
         transitions = _get_state_transitions(test_db, run_id)
-        assert len(transitions) == 2
-        assert transitions[1]["to_state"] == StageState.FAILED.value
+        # run_start + build_start + build_fail
+        assert len(transitions) == 3
+        assert transitions[2]["to_state"] == StageState.FAILED.value
 
     def test_terminated_lifecycle_via_instance_lost(self, test_db: Database) -> None:
         """Test PREPARING→BUILDING→LAUNCHING→RUNNING→TERMINATED via INSTANCE_LOST."""
@@ -1217,8 +1292,9 @@ class TestFailedAndTerminatedLifecycles:
 
         # Verify audit trail
         transitions = _get_state_transitions(test_db, run_id)
-        assert len(transitions) == 4
-        assert transitions[3]["to_state"] == StageState.TERMINATED.value
+        # run_start + build_start + build_ok + launch_ok + instance_lost
+        assert len(transitions) == 5
+        assert transitions[4]["to_state"] == StageState.TERMINATED.value
 
     def test_canceled_lifecycle_via_user_cancel(self, test_db: Database) -> None:
         """Test mid-flight cancellation: PREPARING→BUILDING→CANCELED."""
@@ -1242,5 +1318,6 @@ class TestFailedAndTerminatedLifecycles:
 
         # Verify audit trail
         transitions = _get_state_transitions(test_db, run_id)
-        assert len(transitions) == 2
-        assert transitions[1]["to_state"] == StageState.CANCELED.value
+        # run_start + build_start + user_cancel
+        assert len(transitions) == 3
+        assert transitions[2]["to_state"] == StageState.CANCELED.value

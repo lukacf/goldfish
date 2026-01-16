@@ -143,16 +143,15 @@ class TestFullLifecycleScenarios:
         assert _get_run_state(test_db, run_id) == StageState.PREPARING.value
 
         # Update phase during PREPARING
-        now = datetime.now(UTC)
-        update_phase(test_db, run_id, StageState.PREPARING, ProgressPhase.VERSIONING, now)
-        update_phase(test_db, run_id, StageState.PREPARING, ProgressPhase.PIPELINE_LOAD, now)
+        update_phase(test_db, run_id, StageState.PREPARING, ProgressPhase.VERSIONING, datetime.now(UTC))
+        update_phase(test_db, run_id, StageState.PREPARING, ProgressPhase.PIPELINE_LOAD, datetime.now(UTC))
 
         # PREPARING → BUILDING
         result = transition(test_db, run_id, StageEvent.BUILD_START, _event_ctx())
         assert result.success and result.new_state == StageState.BUILDING
 
         # Update phase during BUILDING
-        update_phase(test_db, run_id, StageState.BUILDING, ProgressPhase.DOCKER_BUILD, now)
+        update_phase(test_db, run_id, StageState.BUILDING, ProgressPhase.DOCKER_BUILD, datetime.now(UTC))
 
         # BUILDING → LAUNCHING
         result = transition(test_db, run_id, StageEvent.BUILD_OK, _event_ctx())
@@ -163,7 +162,7 @@ class TestFullLifecycleScenarios:
         assert result.success and result.new_state == StageState.RUNNING
 
         # Update phase during RUNNING
-        update_phase(test_db, run_id, StageState.RUNNING, ProgressPhase.CODE_EXECUTION, now)
+        update_phase(test_db, run_id, StageState.RUNNING, ProgressPhase.CODE_EXECUTION, datetime.now(UTC))
 
         # RUNNING → FINALIZING (via EXIT_SUCCESS)
         ctx = _event_ctx(source="daemon", exit_code=0, exit_code_exists=True)
@@ -176,8 +175,8 @@ class TestFullLifecycleScenarios:
 
         # Verify final state and transition count
         assert _get_run_state(test_db, run_id) == StageState.COMPLETED.value
-        # 5 transitions: PREPARING→BUILDING→LAUNCHING→RUNNING→FINALIZING→COMPLETED
-        assert _get_transition_count(test_db, run_id) == 5
+        # 10 audit rows: run_start + 4 phase_update + 5 state transitions
+        assert _get_transition_count(test_db, run_id) == 10
 
     def test_early_failure_during_build(self, test_db: Database) -> None:
         """Test run that fails during build phase.
@@ -202,8 +201,8 @@ class TestFullLifecycleScenarios:
         result = transition(test_db, run_id, StageEvent.BUILD_FAIL, ctx)
 
         assert result.success and result.new_state == StageState.FAILED
-        # 2 transitions: PREPARING→BUILDING→FAILED
-        assert _get_transition_count(test_db, run_id) == 2
+        # 3 transitions: run_start + PREPARING→BUILDING→FAILED
+        assert _get_transition_count(test_db, run_id) == 3
 
 
 # =============================================================================
@@ -579,7 +578,7 @@ class TestCancelFromAllActiveStates:
 
         ctx = EventContext(
             timestamp=datetime.now(UTC),
-            source="user",
+            source="mcp_tool",
         )
         result = transition(test_db, run_id, StageEvent.USER_CANCEL, ctx)
 
@@ -698,13 +697,15 @@ class TestTerminalStateImmutability:
         """
         run_id = _setup_test_run(test_db, terminal_state)
 
-        ctx = _event_ctx(source="test")
+        ctx = _event_ctx(source="executor")
         result = transition(test_db, run_id, event, ctx)
 
         # Idempotent transition cases: USER_CANCEL → CANCELED, INSTANCE_LOST → TERMINATED
         is_idempotent = (event == StageEvent.USER_CANCEL and terminal_state == StageState.CANCELED) or (
             event == StageEvent.INSTANCE_LOST and terminal_state == StageState.TERMINATED
         )
+        # TIMEOUT can also lead to TERMINATED from multiple active states, so it is idempotent in TERMINATED.
+        is_idempotent = is_idempotent or (event == StageEvent.TIMEOUT and terminal_state == StageState.TERMINATED)
 
         if is_idempotent:
             # Idempotent transitions succeed but state doesn't change

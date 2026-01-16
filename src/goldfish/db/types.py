@@ -317,7 +317,7 @@ class StageStateTransitionRow(TypedDict):
     """Row from the stage_state_transitions table.
 
     Audit trail for all state transitions in stage runs.
-    Records from_state → to_state with the triggering event and full context.
+    Records from_state → to_state with the triggering event and normalized context.
     """
 
     id: int
@@ -325,8 +325,13 @@ class StageStateTransitionRow(TypedDict):
     from_state: str
     to_state: str
     event: str
-    context_json: str  # JSON: full EventContext
-    timestamp: str
+    phase: str | None
+    termination_cause: str | None
+    exit_code: int | None
+    exit_code_exists: int | None
+    error_message: str | None
+    source: str
+    created_at: str
 
 
 class MigrationProgressRow(TypedDict):

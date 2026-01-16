@@ -460,21 +460,30 @@ class ExperimentRecordManager:
         Args:
             stage_run_id: The stage run ID
             auto_results: The auto-extracted results
-            run_status: The run status for deriving infra_outcome
+            run_status: The run status for deriving infra_outcome (legacy, used if state is NULL)
         """
         results_auto_json = json.dumps(auto_results)
 
-        # Fetch error text from stage_runs for preemption detection
+        # Fetch state machine columns and error text from stage_runs
+        state: str | None = None
+        termination_cause: str | None = None
         error_text: str | None = None
         with self.db._conn() as conn:
             row = conn.execute(
-                "SELECT error FROM stage_runs WHERE id = ?",
+                "SELECT state, termination_cause, error FROM stage_runs WHERE id = ?",
                 (stage_run_id,),
             ).fetchone()
             if row:
+                state = row["state"]
+                termination_cause = row["termination_cause"]
                 error_text = row["error"]
 
-        infra_outcome = self.derive_infra_outcome(run_status, error_text)
+        # Prefer state machine columns when available (post-migration)
+        if state is not None:
+            infra_outcome = self.derive_infra_outcome_from_state(state, termination_cause)
+        else:
+            # Fall back to legacy status-based derivation (during migration)
+            infra_outcome = self.derive_infra_outcome(run_status, error_text)
 
         with self.db._conn() as conn:
             # Only update results_status if not already finalized
@@ -490,22 +499,69 @@ class ExperimentRecordManager:
                 (results_auto_json, "auto", infra_outcome, stage_run_id),
             )
 
-    def derive_infra_outcome(self, run_status: str, error_text: str | None = None) -> str:
-        """Derive infra_outcome from run status and error text.
+    def derive_infra_outcome_from_state(self, state: str, termination_cause: str | None = None) -> str:
+        """Derive infra_outcome from state machine state and termination_cause.
 
-        Preemptions are stored as "failed" with error text containing
-        preemption-related keywords, so we check the error text to detect them.
+        This is the canonical method per the state machine spec. infra_outcome answers:
+        "Did the infrastructure successfully run the code?" (NOT "Did the code succeed?")
 
         Args:
-            run_status: The run status string
-            error_text: Optional error message to check for preemption keywords
+            state: The state machine state (e.g., 'completed', 'failed', 'terminated')
+            termination_cause: For TERMINATED state, the cause (e.g., 'preempted', 'crashed')
+
+        Returns:
+            The infra_outcome value: 'completed', 'preempted', 'crashed', 'canceled', or 'unknown'
+        """
+        # Mapping from termination_cause to valid infra_outcome values
+        # Per spec: infra_outcome CHECK constraint allows 'completed', 'preempted', 'crashed', 'canceled', 'unknown'
+        termination_cause_to_infra_outcome = {
+            "preempted": "preempted",  # Direct mapping
+            "crashed": "crashed",  # Direct mapping
+            "timeout": "crashed",  # Timeout is an infra failure (didn't complete)
+            "orphaned": "unknown",  # We don't know what happened
+            "ai_stopped": "canceled",  # Intentional stop requested by AI
+            "manual": "canceled",  # Admin intervention counts as cancellation
+        }
+
+        if state == "completed":
+            return "completed"
+        if state == "failed":
+            # FAILED = code/validation error, but infra worked correctly
+            # The container ran, the code executed, it just returned non-zero
+            return "completed"  # Infra did its job
+        if state == "canceled":
+            return "canceled"
+        if state == "terminated":
+            # Map termination_cause to valid infra_outcome
+            return termination_cause_to_infra_outcome.get(termination_cause or "", "unknown")
+        if state == "unknown":
+            return "unknown"
+        return "unknown"
+
+    def derive_infra_outcome(self, run_status: str, error_text: str | None = None) -> str:
+        """Derive infra_outcome from legacy run status and error text.
+
+        This is a backwards-compatible method for use during migration.
+        Prefers derive_infra_outcome_from_state() when state machine columns are available.
+
+        Note: This method maps 'failed' → 'completed' because code failure means
+        infrastructure worked correctly (it ran the code successfully, the code just failed).
+        Infrastructure failures (preemptions, crashes) go to 'terminated' state with
+        appropriate termination_cause.
+
+        Args:
+            run_status: The run status string (legacy 'status' column)
+            error_text: Optional error message to check for preemption/crash keywords
 
         Returns:
             The infra_outcome value
         """
-        # Check for preemption keywords in error text (GCE spot preemption messages)
+        # Check for infrastructure failure keywords in error text
+        # These indicate TERMINATED-equivalent scenarios stored with legacy 'failed' status
         if run_status == "failed" and error_text:
             error_lower = error_text.lower()
+
+            # Preemption keywords (GCE spot preemption messages)
             preemption_keywords = [
                 "preempted",
                 "preemption",
@@ -517,11 +573,33 @@ class ExperimentRecordManager:
             if any(keyword in error_lower for keyword in preemption_keywords):
                 return "preempted"
 
+            # Crash keywords (infrastructure failures, not code failures)
+            crash_keywords = [
+                "oom",
+                "killed",
+                "signal",
+                "segfault",
+                "core dump",
+                "instance lost",
+                "instance gone",
+                "container crashed",
+            ]
+            if any(keyword in error_lower for keyword in crash_keywords):
+                return "crashed"
+
+            # Timeout keywords
+            timeout_keywords = ["timeout", "timed out", "exceeded maximum"]
+            if any(keyword in error_lower for keyword in timeout_keywords):
+                return "crashed"  # Timeout is an infra failure
+
+        # Status mapping per spec:
+        # 'failed' → 'completed' because code failure means infra worked correctly
         status_mapping = {
             "completed": "completed",
-            "failed": "crashed",
+            "failed": "completed",  # Code failed, but infra worked correctly
             "preempted": "preempted",
             "canceled": "canceled",
+            "terminated": "unknown",  # Legacy terminated without cause
         }
         return status_mapping.get(run_status, "unknown")
 

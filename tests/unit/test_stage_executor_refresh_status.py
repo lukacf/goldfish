@@ -4,15 +4,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.models import StageRunProgress, StageRunStatus
+from goldfish.state_machine.exit_code import ExitCodeResult
 
 
 def _create_running_stage_run(test_db) -> str:
     test_db.create_workspace_lineage("ws", description="test")
     test_db.create_version("ws", "v1", "tag-v1", "sha123", "manual")
-    run_id = "stage-refresh123"
+    run_id = f"stage-{uuid4().hex[:8]}"
     test_db.create_stage_run(
         stage_run_id=run_id,
         workspace_name="ws",
@@ -50,7 +52,7 @@ def test_refresh_status_once_not_found_completed(test_db, test_config, tmp_path,
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=0)
+    executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_code(0))
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -79,7 +81,7 @@ def test_refresh_status_once_not_found_failed(test_db, test_config, tmp_path, mo
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=1)
+    executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_code(1))
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -117,7 +119,9 @@ def test_refresh_status_once_not_found_during_build_phase(test_db, test_config, 
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=None)  # No exit code = never ran
+    executor.gce_launcher._get_exit_code = MagicMock(
+        return_value=ExitCodeResult.from_not_found()
+    )  # No exit code = never ran
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -156,7 +160,9 @@ def test_refresh_status_once_not_found_during_launch_phase(test_db, test_config,
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=None)  # No exit code = never ran
+    executor.gce_launcher._get_exit_code = MagicMock(
+        return_value=ExitCodeResult.from_not_found()
+    )  # No exit code = never ran
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -194,7 +200,9 @@ def test_refresh_status_once_not_found_during_launch_but_exit_code_exists(test_d
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=1)  # Exit code exists = ran and failed
+    executor.gce_launcher._get_exit_code = MagicMock(
+        return_value=ExitCodeResult.from_code(1)
+    )  # Exit code exists = ran and failed
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -242,7 +250,9 @@ def test_wait_for_completion_preemption_with_running_progress(test_db, test_conf
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=1)  # Failed with exit code 1
+    executor.gce_launcher._get_exit_code = MagicMock(
+        return_value=ExitCodeResult.from_code(1)
+    )  # Failed with exit code 1
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -284,7 +294,7 @@ def test_wait_for_completion_preemption_with_launch_progress_and_exit_code(test_
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=0)  # Completed successfully
+    executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_code(0))  # Completed successfully
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -321,7 +331,7 @@ def test_wait_for_completion_launch_failure_no_exit_code(test_db, test_config, t
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=None)  # No exit code
+    executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_not_found())  # No exit code
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
     monkeypatch.setenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "0")  # Also set launch timeout for LAUNCH phase

@@ -11,10 +11,8 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from goldfish.state_machine.core import transition
-from goldfish.state_machine.event_emission import (
-    detect_termination_cause,
-    verify_instance_stopped,
-)
+from goldfish.state_machine.event_emission import determine_exit_event, determine_instance_event
+from goldfish.state_machine.exit_code import get_exit_code_docker, get_exit_code_gce
 from goldfish.state_machine.leader_election import (
     DaemonLeaderElection,
     validate_holder_id,
@@ -25,7 +23,6 @@ from goldfish.state_machine.types import (
     SourceType,
     StageEvent,
     StageState,
-    TerminationCause,
 )
 
 if TYPE_CHECKING:
@@ -128,6 +125,10 @@ class StageDaemon:
         run_id = run.get("id", UNKNOWN_RUN_ID)
 
         try:
+            # Backfill missing state_entered_at for robustness (most commonly affects UNKNOWN
+            # rows created/modified during migrations).
+            self._ensure_state_entered_at(run)
+
             result = self._determine_event(run)
             if result is not None:
                 event, context = result
@@ -141,6 +142,53 @@ class StageDaemon:
 
         except Exception as e:
             logger.exception("Error processing run %s: %s", run_id, e)
+
+    def _ensure_state_entered_at(self, run: dict[str, Any]) -> None:
+        """Ensure state_entered_at is populated for active/limbo runs.
+
+        Some legacy/migrated rows may have `state` set but `state_entered_at` missing.
+        The daemon's timeout logic relies on `state_entered_at`, so we backfill it
+        using the run's `started_at` when available.
+        """
+        state_str = run.get("state")
+        if not state_str:
+            return
+
+        # If already present, nothing to do.
+        if run.get("state_entered_at"):
+            return
+
+        try:
+            state = StageState(state_str)
+        except ValueError:
+            return
+
+        if state in TERMINAL_STATES:
+            return
+
+        run_id = run.get("id", UNKNOWN_RUN_ID)
+        started_at = run.get("started_at")
+        if not started_at:
+            started_at = datetime.now(UTC).isoformat()
+
+        try:
+            with self._db._conn() as conn:
+                result = conn.execute(
+                    """
+                    UPDATE stage_runs
+                    SET state_entered_at = ?
+                    WHERE id = ? AND state = ?
+                      AND (state_entered_at IS NULL OR state_entered_at = '')
+                    """,
+                    (started_at, run_id, state.value),
+                )
+        except Exception:
+            # Best-effort only: a failure to backfill should not block event processing.
+            return
+
+        rowcount = getattr(result, "rowcount", 0)
+        if isinstance(rowcount, int) and rowcount > 0:
+            run["state_entered_at"] = started_at
 
     def _transition(
         self,
@@ -206,78 +254,47 @@ class StageDaemon:
         # Backend-specific event detection
         backend_type = run.get("backend_type", BACKEND_LOCAL)
         project_id = None
+        zone = None
         if backend_type == BACKEND_GCE and self._config and self._config.gce:
             try:
                 project_id = self._config.gce.effective_project_id
             except ValueError:
                 pass
-        return self._determine_backend_event(run, backend_type, project_id)
+            zone = getattr(self._config.gce, "zone", None)
 
-    def _determine_backend_event(
-        self,
-        run: dict[str, Any],
-        backend_type: str,
-        project_id: str | None = None,
-    ) -> tuple[StageEvent, EventContext] | None:
-        """Determine event for a backend (GCE or local Docker).
-
-        Checks if the instance/container is still running and determines
-        the appropriate event if not.
-
-        Args:
-            run: Stage run dictionary.
-            backend_type: Either "gce" or "local".
-            project_id: GCP project ID (only for GCE backend).
-
-        Returns:
-            Tuple of (event, context) or None.
-        """
-        backend_handle = run.get("backend_handle")
-        if not backend_handle:
-            return None
-
-        run_id = run.get("id", UNKNOWN_RUN_ID)
-        backend_label = "GCE instance" if backend_type == BACKEND_GCE else "Docker container"
-
-        # Check if instance/container is stopped
-        try:
-            is_stopped = verify_instance_stopped(
-                run_id=run_id,
-                backend_type=backend_type,
-                backend_handle=backend_handle,
-                project_id=project_id,
-            )
-        except Exception as e:
-            logger.warning("Error checking %s %s: %s", backend_label, backend_handle, e)
-            return None
-
-        if is_stopped:
-            # Detect termination cause
+        # 1) RUNNING: check for exit code (success/failure/missing) first
+        if state == StageState.RUNNING:
+            exit_result = None
             try:
-                cause = detect_termination_cause(
-                    run_id=run_id,
-                    backend_type=backend_type,
-                    backend_handle=backend_handle,
-                    project_id=project_id,
-                )
+                if backend_type == BACKEND_LOCAL:
+                    backend_handle = run.get("backend_handle")
+                    if backend_handle:
+                        exit_result = get_exit_code_docker(backend_handle)
+                elif backend_type == BACKEND_GCE and self._config and self._config.gcs and self._config.gcs.bucket:
+                    bucket = self._config.gcs.bucket
+                    bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+                    exit_result = get_exit_code_gce(bucket_uri, run.get("id", ""), project_id=project_id)
             except Exception as e:
-                logger.warning(
-                    "Error detecting termination cause for %s %s: %s, " "defaulting to ORPHANED",
-                    backend_label,
-                    backend_handle,
-                    e,
-                )
-                cause = TerminationCause.ORPHANED
-
-            context = EventContext(
-                timestamp=datetime.now(UTC),
-                source=SOURCE_DAEMON,
-                termination_cause=cause,
-                instance_confirmed_dead=True,
+                logger.warning("Error retrieving exit code for run %s: %s", run.get("id", UNKNOWN_RUN_ID), e)
+                exit_result = None
+            event_ctx = determine_exit_event(
+                run,
+                exit_result,
+                db=self._db,
+                project_id=project_id,
+                zone=zone,
             )
-            return (StageEvent.INSTANCE_LOST, context)
+            if event_ctx is not None:
+                return event_ctx
+
+        # 2) Any active state: instance/container lost
+        instance_event = determine_instance_event(run, project_id=project_id)
+        if instance_event is not None:
+            return instance_event
 
         return None
+
+    # (backend event detection moved to determine_exit_event/determine_instance_event)
 
     def _check_timeout(self, run: dict[str, Any]) -> bool:
         """Check if a run has timed out in its current state.
@@ -340,8 +357,8 @@ class StageDaemon:
         with self._db._conn() as conn:
             rows = conn.execute(
                 f"""
-                SELECT id, state, state_entered_at, backend_type, backend_handle,
-                       output_sync_done, output_recording_done
+                SELECT id, state, state_entered_at, started_at, backend_type, backend_handle,
+                       output_sync_done, output_recording_done, gcs_outage_started
                 FROM stage_runs
                 WHERE state IN ({','.join('?' * len(active_states))})
                 ORDER BY started_at ASC

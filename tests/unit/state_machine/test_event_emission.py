@@ -29,7 +29,7 @@ class TestDetermineExitEvent:
         run = {"id": "stage-123", "state": StageState.RUNNING.value}
         exit_result = ExitCodeResult.from_code(0)
 
-        result = determine_exit_event(run, exit_result)
+        result = determine_exit_event(run, exit_result, db=MagicMock())
 
         assert result is not None
         event, context = result
@@ -46,7 +46,7 @@ class TestDetermineExitEvent:
         run = {"id": "stage-123", "state": StageState.RUNNING.value}
         exit_result = ExitCodeResult.from_code(1)
 
-        result = determine_exit_event(run, exit_result)
+        result = determine_exit_event(run, exit_result, db=MagicMock())
 
         assert result is not None
         event, context = result
@@ -54,25 +54,58 @@ class TestDetermineExitEvent:
         assert context.exit_code == 1
         assert context.exit_code_exists is True
 
-    def test_exit_missing_returns_exit_missing_event(self) -> None:
-        """Missing exit code must return EXIT_MISSING event."""
+    def test_exit_missing_without_instance_verification_returns_none(self) -> None:
+        """Missing exit code must return None unless instance is confirmed dead."""
         from goldfish.state_machine.event_emission import determine_exit_event
         from goldfish.state_machine.exit_code import ExitCodeResult
-        from goldfish.state_machine.types import StageEvent, StageState
+        from goldfish.state_machine.types import StageState
 
-        run = {"id": "stage-123", "state": StageState.RUNNING.value}
+        run = {
+            "id": "stage-123",
+            "state": StageState.RUNNING.value,
+            "backend_type": "local",
+            "backend_handle": "container-123",
+        }
         exit_result = ExitCodeResult.from_not_found()
 
-        result = determine_exit_event(run, exit_result)
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            mock_verify.return_value = False
+            result = determine_exit_event(run, exit_result, db=MagicMock())
+
+        assert result is None
+
+    def test_exit_missing_with_instance_confirmed_dead_returns_exit_missing_event(self) -> None:
+        """Missing exit code with confirmed dead instance emits EXIT_MISSING with termination_cause."""
+        from goldfish.state_machine.event_emission import determine_exit_event
+        from goldfish.state_machine.exit_code import ExitCodeResult
+        from goldfish.state_machine.types import StageEvent, StageState, TerminationCause
+
+        run = {
+            "id": "stage-123",
+            "state": StageState.RUNNING.value,
+            "backend_type": "local",
+            "backend_handle": "container-123",
+        }
+        exit_result = ExitCodeResult.from_not_found()
+
+        with (
+            patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify,
+            patch("goldfish.state_machine.event_emission.detect_termination_cause") as mock_cause,
+        ):
+            mock_verify.return_value = True
+            mock_cause.return_value = TerminationCause.PREEMPTED
+            result = determine_exit_event(run, exit_result, db=MagicMock())
 
         assert result is not None
         event, context = result
         assert event == StageEvent.EXIT_MISSING
         assert context.exit_code is None
         assert context.exit_code_exists is False
+        assert context.instance_confirmed_dead is True
+        assert context.termination_cause == TerminationCause.PREEMPTED
 
     def test_gcs_error_first_time_returns_none(self) -> None:
-        """First GCS error must return None (wait and retry)."""
+        """First GCS error must start outage clock and return None (wait and retry)."""
         from goldfish.state_machine.event_emission import determine_exit_event
         from goldfish.state_machine.exit_code import ExitCodeResult
         from goldfish.state_machine.types import StageState
@@ -80,28 +113,66 @@ class TestDetermineExitEvent:
         run = {"id": "stage-123", "state": StageState.RUNNING.value, "gcs_outage_started": None}
         exit_result = ExitCodeResult.from_gcs_error("ServiceUnavailable")
 
-        result = determine_exit_event(run, exit_result)
+        db = MagicMock()
+        result = determine_exit_event(run, exit_result, db=db)
 
         # First GCS error: don't emit event, just record outage start
         assert result is None
+        db.update_stage_run_gcs_outage.assert_called_once()
 
     def test_gcs_error_over_1h_returns_exit_missing(self) -> None:
-        """GCS error >1h must return EXIT_MISSING with gcs_error flag."""
+        """GCS error >1h emits EXIT_MISSING only when instance is confirmed dead."""
         from goldfish.state_machine.event_emission import determine_exit_event
         from goldfish.state_machine.exit_code import ExitCodeResult
-        from goldfish.state_machine.types import StageEvent, StageState
+        from goldfish.state_machine.types import StageEvent, StageState, TerminationCause
 
         # GCS outage started 2 hours ago
         outage_start = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
-        run = {"id": "stage-123", "state": StageState.RUNNING.value, "gcs_outage_started": outage_start}
+        run = {
+            "id": "stage-123",
+            "state": StageState.RUNNING.value,
+            "gcs_outage_started": outage_start,
+            "backend_type": "local",
+            "backend_handle": "container-123",
+        }
         exit_result = ExitCodeResult.from_gcs_error("ServiceUnavailable")
 
-        result = determine_exit_event(run, exit_result)
+        with (
+            patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify,
+            patch("goldfish.state_machine.event_emission.detect_termination_cause") as mock_cause,
+        ):
+            mock_verify.return_value = True
+            mock_cause.return_value = TerminationCause.CRASHED
+            result = determine_exit_event(run, exit_result, db=MagicMock())
 
         assert result is not None
         event, context = result
         assert event == StageEvent.EXIT_MISSING
         assert context.gcs_error is True
+        assert context.instance_confirmed_dead is True
+        assert context.termination_cause == TerminationCause.CRASHED
+
+    def test_gcs_error_over_1h_without_instance_confirmed_dead_returns_none(self) -> None:
+        """GCS error >1h does NOT emit EXIT_MISSING if instance is still running."""
+        from goldfish.state_machine.event_emission import determine_exit_event
+        from goldfish.state_machine.exit_code import ExitCodeResult
+        from goldfish.state_machine.types import StageState
+
+        outage_start = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+        run = {
+            "id": "stage-123",
+            "state": StageState.RUNNING.value,
+            "gcs_outage_started": outage_start,
+            "backend_type": "local",
+            "backend_handle": "container-123",
+        }
+        exit_result = ExitCodeResult.from_gcs_error("ServiceUnavailable")
+
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            mock_verify.return_value = False
+            result = determine_exit_event(run, exit_result, db=MagicMock())
+
+        assert result is None
 
     def test_gcs_error_under_1h_returns_none(self) -> None:
         """GCS error <1h must return None (keep waiting)."""
@@ -114,7 +185,7 @@ class TestDetermineExitEvent:
         run = {"id": "stage-123", "state": StageState.RUNNING.value, "gcs_outage_started": outage_start}
         exit_result = ExitCodeResult.from_gcs_error("ServiceUnavailable")
 
-        result = determine_exit_event(run, exit_result)
+        result = determine_exit_event(run, exit_result, db=MagicMock())
 
         assert result is None  # Keep waiting
 
@@ -127,7 +198,7 @@ class TestDetermineExitEvent:
         run = {"id": "stage-123", "state": StageState.RUNNING.value}
         exit_result = ExitCodeResult.from_code(137)
 
-        result = determine_exit_event(run, exit_result)
+        result = determine_exit_event(run, exit_result, db=MagicMock())
 
         assert result is not None
         event, context = result
