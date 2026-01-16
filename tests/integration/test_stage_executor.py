@@ -3,12 +3,14 @@
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 
 from goldfish.errors import GoldfishError
 from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.models import PipelineDef, SignalDef, StageDef, StageRunStatus
+from goldfish.state_machine.exit_code import ExitCodeResult
 
 
 def _tensor_dataset_metadata(array_name: str, shape: list[int], dtype: str) -> dict:
@@ -1633,7 +1635,7 @@ class TestGCEPreemptionHandling:
         test_db.create_workspace_lineage("test_workspace", description="Test")
         test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
 
-        run_id = "stage-preempt001"
+        run_id = f"stage-{uuid4().hex[:8]}"
         test_db.create_stage_run(
             stage_run_id=run_id,
             workspace_name="test_workspace",
@@ -1671,7 +1673,7 @@ class TestGCEPreemptionHandling:
 
         # Mock GCE launcher to simulate preemption
         executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-        executor.gce_launcher._get_exit_code = MagicMock(return_value=137)  # Killed by signal
+        executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_code(137))  # Killed by signal
         executor._finalize_stage_run = MagicMock()
         monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -1704,7 +1706,7 @@ class TestGCEPreemptionHandling:
         test_db.create_workspace_lineage("test_workspace", description="Test")
         test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
 
-        run_id = "stage-preempt002"
+        run_id = f"stage-{uuid4().hex[:8]}"
         test_db.create_stage_run(
             stage_run_id=run_id,
             workspace_name="test_workspace",
@@ -1740,7 +1742,9 @@ class TestGCEPreemptionHandling:
         )
 
         executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-        executor.gce_launcher._get_exit_code = MagicMock(return_value=0)  # Completed OK before preempt
+        executor.gce_launcher._get_exit_code = MagicMock(
+            return_value=ExitCodeResult.from_code(0)
+        )  # Completed OK before preempt
         executor._finalize_stage_run = MagicMock()
         monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -1763,7 +1767,7 @@ class TestGCEPreemptionHandling:
         test_db.create_workspace_lineage("test_workspace", description="Test")
         test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
 
-        run_id = "stage-preempt003"
+        run_id = f"stage-{uuid4().hex[:8]}"
         test_db.create_stage_run(
             stage_run_id=run_id,
             workspace_name="test_workspace",
@@ -1798,7 +1802,9 @@ class TestGCEPreemptionHandling:
         )
 
         executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-        executor.gce_launcher._get_exit_code = MagicMock(return_value=None)  # No exit code = never ran
+        executor.gce_launcher._get_exit_code = MagicMock(
+            return_value=ExitCodeResult.from_not_found()
+        )  # No exit code = never ran
         executor._finalize_stage_run = MagicMock()
         monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -1830,7 +1836,7 @@ class TestGCEPreemptionHandling:
         test_db.create_workspace_lineage("test_workspace", description="Test")
         test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
 
-        run_id = "stage-preempt004"
+        run_id = f"stage-{uuid4().hex[:8]}"
         test_db.create_stage_run(
             stage_run_id=run_id,
             workspace_name="test_workspace",
@@ -1865,7 +1871,9 @@ class TestGCEPreemptionHandling:
         )
 
         executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-        executor.gce_launcher._get_exit_code = MagicMock(return_value=1)  # Exit code proves it ran
+        executor.gce_launcher._get_exit_code = MagicMock(
+            return_value=ExitCodeResult.from_code(1)
+        )  # Exit code proves it ran
         executor._finalize_stage_run = MagicMock()
         monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -1890,7 +1898,7 @@ class TestGCEPreemptionHandling:
         test_db.create_workspace_lineage("test_workspace", description="Test")
         test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
 
-        run_id = "stage-preempt005"
+        run_id = f"stage-{uuid4().hex[:8]}"
         test_db.create_stage_run(
             stage_run_id=run_id,
             workspace_name="test_workspace",
@@ -1925,7 +1933,7 @@ class TestGCEPreemptionHandling:
         )
 
         executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-        executor.gce_launcher._get_exit_code = MagicMock(return_value=137)
+        executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_code(137))
         executor._finalize_stage_run = MagicMock()
         monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 

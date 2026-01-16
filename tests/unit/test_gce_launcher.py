@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from goldfish.infra.gce_launcher import GCELauncher
+from goldfish.state_machine.exit_code import ExitCodeResult
 
 
 class TestBucketUri:
@@ -68,7 +69,10 @@ class TestGetExitCode:
                 stderr="",
             )
             result = launcher._get_exit_code("stage-abc123")
-            assert result == 0
+            assert isinstance(result, ExitCodeResult)
+            assert result.exists is True
+            assert result.code == 0
+            assert result.gcs_error is False
             assert mock_run.call_count == 1
 
     def test_get_exit_code_non_zero_exit(self, launcher):
@@ -80,7 +84,9 @@ class TestGetExitCode:
                 stderr="",
             )
             result = launcher._get_exit_code("stage-abc123")
-            assert result == 42
+            assert result.exists is True
+            assert result.code == 42
+            assert result.gcs_error is False
 
     def test_get_exit_code_retry_on_failure(self, launcher):
         """Should retry on gsutil failure and succeed eventually."""
@@ -92,18 +98,22 @@ class TestGetExitCode:
                 MagicMock(returncode=0, stdout="0\n", stderr=""),
             ]
             result = launcher._get_exit_code("stage-abc123", max_attempts=5, retry_delay=0.1)
-            assert result == 0
+            assert result.exists is True
+            assert result.code == 0
+            assert result.gcs_error is False
             assert mock_run.call_count == 3
 
     def test_get_exit_code_all_retries_exhausted(self, launcher):
-        """Should return 1 after all retries exhausted."""
+        """Should return exists=False (missing file) after all retries exhausted."""
         with patch("subprocess.run") as mock_run, patch("time.sleep"):
             # All attempts fail
             mock_run.side_effect = subprocess.CalledProcessError(
                 1, "gsutil", stderr="CommandException: No URLs matched"
             )
             result = launcher._get_exit_code("stage-abc123", max_attempts=3, retry_delay=0.1)
-            assert result == 1
+            assert result.exists is False
+            assert result.code is None
+            assert result.gcs_error is False
             assert mock_run.call_count == 3
 
     def test_get_exit_code_timeout_retry(self, launcher):
@@ -115,7 +125,9 @@ class TestGetExitCode:
                 MagicMock(returncode=0, stdout="0\n", stderr=""),
             ]
             result = launcher._get_exit_code("stage-abc123", max_attempts=3, retry_delay=0.1)
-            assert result == 0
+            assert result.exists is True
+            assert result.code == 0
+            assert result.gcs_error is False
             assert mock_run.call_count == 2
 
     def test_get_exit_code_invalid_content_no_retry(self, launcher):
@@ -127,7 +139,10 @@ class TestGetExitCode:
                 stderr="",
             )
             result = launcher._get_exit_code("stage-abc123", max_attempts=3, retry_delay=0.1)
-            assert result == 1
+            assert result.exists is True
+            assert result.code is None
+            assert result.gcs_error is False
+            assert result.error is not None
             # Should only try once - invalid content means file exists but is corrupt
             assert mock_run.call_count == 1
             # No retries means no sleep calls
@@ -137,7 +152,8 @@ class TestGetExitCode:
         """Should return 0 if no bucket configured."""
         launcher.bucket = None
         result = launcher._get_exit_code("stage-abc123")
-        assert result == 0
+        assert result.exists is True
+        assert result.code == 0
 
     def test_get_exit_code_correct_gcs_path(self, launcher):
         """Should construct correct GCS path with gs:// prefix and project_id."""

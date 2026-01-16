@@ -331,10 +331,13 @@ class TestTransitionTerminations:
     def test_timeout_from_non_finalizing_active_states(
         self, mock_db: MagicMock, now: datetime, from_state: StageState
     ) -> None:
-        """TIMEOUT from PREPARING/BUILDING/LAUNCHING/RUNNING → TERMINATED (no guard)."""
+        """TIMEOUT from PREPARING/BUILDING/LAUNCHING/RUNNING → TERMINATED (no guard).
+
+        Spec requirement: TIMEOUT→TERMINATED defaults termination_cause=timeout if not provided.
+        """
         from goldfish.state_machine.core import transition
 
-        ctx = EventContext(timestamp=now, source="daemon", termination_cause=TerminationCause.TIMEOUT)
+        ctx = EventContext(timestamp=now, source="daemon")  # termination_cause intentionally omitted
 
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
             "state": from_state.value
@@ -345,6 +348,14 @@ class TestTransitionTerminations:
 
         assert result.success is True, f"TIMEOUT should work from {from_state}"
         assert result.new_state == StageState.TERMINATED
+
+        # Verify UPDATE used default termination_cause='timeout'
+        calls = mock_db._conn.return_value.__enter__.return_value.execute.call_args_list
+        update_calls = [c for c in calls if "UPDATE stage_runs" in str(c)]
+        assert len(update_calls) >= 1
+        update_params = update_calls[0][0][1]
+        # termination_cause is set in the UPDATE tuple (after state/phase/status/progress + timestamps)
+        assert update_params[6] == TerminationCause.TIMEOUT.value
 
     def test_exit_missing_with_confirmed_dead_goes_to_terminated(self, mock_db: MagicMock, now: datetime) -> None:
         """RUNNING + EXIT_MISSING [guard: instance_confirmed_dead] → TERMINATED."""
@@ -492,7 +503,6 @@ class TestTransitionGuardedFinalization:
         ctx = EventContext(
             timestamp=now,
             source="daemon",
-            termination_cause=TerminationCause.TIMEOUT,
             critical_phases_done=True,
         )
 
@@ -515,7 +525,6 @@ class TestTransitionGuardedFinalization:
         ctx = EventContext(
             timestamp=now,
             source="daemon",
-            termination_cause=TerminationCause.TIMEOUT,
             critical_phases_done=False,
         )
 
@@ -538,7 +547,6 @@ class TestTransitionGuardedFinalization:
         ctx = EventContext(
             timestamp=now,
             source="daemon",
-            termination_cause=TerminationCause.TIMEOUT,
             critical_phases_done=None,  # Neither guard passes
         )
 
@@ -693,6 +701,48 @@ class TestTransitionIdempotency:
         assert result.success is False
         assert result.reason == "no_transition"
 
+    def test_guard_aware_idempotency_finalize_fail_critical_false_is_idempotent_in_completed(
+        self, mock_db: MagicMock, now: datetime
+    ) -> None:
+        """FINALIZE_FAIL with critical=False IS idempotent in COMPLETED.
+
+        Spec: if current state is a valid target for this event and the guard passes
+        for THIS context, return already_in_target_state.
+        """
+        from goldfish.state_machine.core import transition
+
+        ctx = EventContext(timestamp=now, source="executor", critical=False)
+
+        # Already in COMPLETED
+        mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
+            "state": "completed"
+        }
+
+        result = transition(mock_db, "stage-abc", StageEvent.FINALIZE_FAIL, ctx)
+
+        assert result.success is True
+        assert result.new_state == StageState.COMPLETED
+        assert result.reason == "already_in_target_state"
+
+    def test_guard_aware_idempotency_timeout_finalizing_outputs_saved_is_idempotent_in_completed(
+        self, mock_db: MagicMock, now: datetime
+    ) -> None:
+        """TIMEOUT(finalizing, critical_phases_done=True) IS idempotent in COMPLETED."""
+        from goldfish.state_machine.core import transition
+
+        ctx = EventContext(timestamp=now, source="daemon", critical_phases_done=True)
+
+        # Already in COMPLETED
+        mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
+            "state": "completed"
+        }
+
+        result = transition(mock_db, "stage-abc", StageEvent.TIMEOUT, ctx)
+
+        assert result.success is True
+        assert result.new_state == StageState.COMPLETED
+        assert result.reason == "already_in_target_state"
+
 
 class TestTransitionAudit:
     """Test audit trail recording."""
@@ -748,8 +798,7 @@ class TestTransitionAudit:
         assert len(audit_calls) >= 1, "Audit record should be created"
 
     def test_audit_record_contains_context_fields(self, mock_db: MagicMock, now: datetime) -> None:
-        """Audit record captures all EventContext fields."""
-        import json
+        """Audit record captures key EventContext fields in normalized columns."""
 
         from goldfish.state_machine.core import transition
 
@@ -777,28 +826,25 @@ class TestTransitionAudit:
         result = transition(mock_db, "stage-abc", StageEvent.EXIT_SUCCESS, ctx)
         assert result.success is True
 
-        # Find the audit INSERT call and verify context_json content
+        # Find the audit INSERT call and verify normalized column values
         calls = mock_db._conn.return_value.__enter__.return_value.execute.call_args_list
         audit_calls = [c for c in calls if "stage_state_transitions" in str(c)]
         assert len(audit_calls) >= 1, "Audit record should be created"
 
-        # Parse the INSERT arguments to verify context fields
+        # Parse the INSERT arguments to verify column values
         audit_call = audit_calls[0]
-        # The INSERT uses positional params: (run_id, from_state, to_state, event, context_json, timestamp)
+        # The INSERT uses positional params:
+        # (stage_run_id, from_state, to_state, event, phase, termination_cause,
+        #  exit_code, exit_code_exists, error_message, source, created_at)
         call_args = audit_call[0][1]  # Second element is the tuple of values
-        context_json_str = call_args[4]  # context_json is the 5th parameter (index 4)
-        context_data = json.loads(context_json_str)
 
-        # Verify all EventContext fields are present
-        assert context_data["source"] == "daemon"
-        assert context_data["exit_code"] == 0
-        assert context_data["exit_code_exists"] is True
-        assert context_data["instance_confirmed_dead"] is False
-        assert context_data["error_message"] == "Test error message"
-        assert context_data["phase"] == "code_execution"  # Serialized as value
-        assert context_data["gcs_error"] is False
-        assert context_data["svs_finding_id"] == "finding-123"
-        assert "timestamp" in context_data  # Timestamp should be serialized
+        assert call_args[0] == "stage-abc"
+        assert call_args[6] == 0
+        assert call_args[7] == 1
+        assert call_args[8] == "Test error message"
+        assert call_args[9] == "daemon"
+        assert call_args[4] == "code_execution"
+        assert call_args[5] is None
 
 
 class TestTransitionCompletedWithWarnings:
@@ -832,7 +878,6 @@ class TestTransitionCompletedWithWarnings:
         ctx = EventContext(
             timestamp=now,
             source="daemon",
-            termination_cause=TerminationCause.TIMEOUT,
             critical_phases_done=True,
         )
 
@@ -1030,37 +1075,24 @@ class TestUpdatePhaseEdgeCases:
 
 
 class TestTerminalStateIdempotency:
-    """Tests documenting intentional terminal state idempotency behavior.
+    """Tests for idempotency when current state is already a valid target.
 
-    Terminal states "absorb" events that could lead to them, even if the
-    original transition's guards wouldn't have passed. This is intentional:
-    - Terminal states are final - no further transitions are needed
-    - Retrying events in terminal states should be safe (idempotent)
-    - This prevents errors when events are delivered multiple times
-
-    This behavior is guard-UNAWARE for single-target events because:
-    1. We're already in a terminal state (the final destination)
-    2. The original transition has already been recorded in the audit trail
-    3. No state change or audit record is needed for repeated events
+    Spec requirement: idempotency is guard-aware. We only treat an event as idempotent
+    if the current state is a valid target for the event AND the guard for that target
+    passes for THIS context.
     """
 
-    def test_exit_missing_in_terminated_is_idempotent_regardless_of_guard(
+    def test_exit_missing_in_terminated_is_idempotent_when_guard_passes(
         self, mock_db: MagicMock, now: datetime
     ) -> None:
-        """EXIT_MISSING in TERMINATED is idempotent even without instance_confirmed_dead.
-
-        This is intentional behavior: once in TERMINATED state, repeated
-        EXIT_MISSING events are absorbed without checking guards. The original
-        transition that got us to TERMINATED has already been recorded.
-        """
+        """EXIT_MISSING in TERMINATED is idempotent only when instance_confirmed_dead=True."""
         from goldfish.state_machine.core import transition
 
-        # Context that would FAIL the guard (instance_confirmed_dead=False)
         ctx = EventContext(
             timestamp=now,
             source="daemon",
             exit_code_exists=False,
-            instance_confirmed_dead=False,  # Guard would fail for RUNNING→TERMINATED
+            instance_confirmed_dead=True,
         )
 
         # Already in TERMINATED
@@ -1070,7 +1102,6 @@ class TestTerminalStateIdempotency:
 
         result = transition(mock_db, "stage-abc", StageEvent.EXIT_MISSING, ctx)
 
-        # Idempotent success - we're already in the target state
         assert result.success is True
         assert result.new_state == StageState.TERMINATED
         assert result.reason == "already_in_target_state"
@@ -1079,6 +1110,28 @@ class TestTerminalStateIdempotency:
         calls = mock_db._conn.return_value.__enter__.return_value.execute.call_args_list
         audit_calls = [c for c in calls if "stage_state_transitions" in str(c)]
         assert len(audit_calls) == 0, "No audit for idempotent transition"
+
+    def test_exit_missing_in_terminated_is_not_idempotent_when_guard_fails(
+        self, mock_db: MagicMock, now: datetime
+    ) -> None:
+        """EXIT_MISSING in TERMINATED is NOT idempotent when instance_confirmed_dead=False."""
+        from goldfish.state_machine.core import transition
+
+        ctx = EventContext(
+            timestamp=now,
+            source="daemon",
+            exit_code_exists=False,
+            instance_confirmed_dead=False,  # Guard fails
+        )
+
+        mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
+            "state": "terminated"
+        }
+
+        result = transition(mock_db, "stage-abc", StageEvent.EXIT_MISSING, ctx)
+
+        assert result.success is False
+        assert result.reason == "no_transition"
 
     def test_user_cancel_in_canceled_is_idempotent(self, mock_db: MagicMock, now: datetime) -> None:
         """USER_CANCEL in CANCELED is idempotent."""

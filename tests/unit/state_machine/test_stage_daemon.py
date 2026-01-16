@@ -15,7 +15,6 @@ from goldfish.state_machine.stage_daemon import StageDaemon
 from goldfish.state_machine.types import (
     StageEvent,
     StageState,
-    TerminationCause,
 )
 
 
@@ -232,6 +231,7 @@ class TestDetermineEvent:
             lambda self: (_ for _ in ()).throw(ValueError("No project configured"))
         )
         mock_config.gce = mock_gce
+        mock_config.gcs = None
 
         daemon = StageDaemon(db=MagicMock(), config=mock_config)
 
@@ -244,8 +244,8 @@ class TestDetermineEvent:
         }
 
         # Should not raise - ValueError should be caught
-        with patch("goldfish.state_machine.stage_daemon.verify_instance_stopped") as mock_verify:
-            mock_verify.return_value = False
+        with patch("goldfish.state_machine.stage_daemon.determine_instance_event") as mock_instance:
+            mock_instance.return_value = None
             result = daemon._determine_event(run)
 
         # No event expected since instance is running
@@ -255,6 +255,7 @@ class TestDetermineEvent:
         """GCE backend with config.gce=None should not get project_id."""
         mock_config = MagicMock()
         mock_config.gce = None
+        mock_config.gcs = None
 
         daemon = StageDaemon(db=MagicMock(), config=mock_config)
 
@@ -266,16 +267,15 @@ class TestDetermineEvent:
             "backend_handle": "instance-123",
         }
 
-        with patch("goldfish.state_machine.stage_daemon.verify_instance_stopped") as mock_verify:
-            mock_verify.return_value = False
+        with patch("goldfish.state_machine.stage_daemon.determine_instance_event") as mock_instance:
+            mock_instance.return_value = None
             result = daemon._determine_event(run)
 
         # No event expected since instance is running
         assert result is None
-        # Verify verify_instance_stopped was called with project_id=None
-        mock_verify.assert_called_once()
-        call_kwargs = mock_verify.call_args.kwargs
-        assert call_kwargs.get("project_id") is None
+        # Verify determine_instance_event was called with project_id=None
+        mock_instance.assert_called_once()
+        assert mock_instance.call_args.kwargs.get("project_id") is None
 
     def test_determine_event_finalizing_instance_lost(self, daemon: StageDaemon) -> None:
         """FINALIZING state with instance lost should emit INSTANCE_LOST (not timeout).
@@ -293,9 +293,13 @@ class TestDetermineEvent:
             "output_recording_done": 0,
         }
 
-        with patch("goldfish.state_machine.stage_daemon.verify_instance_stopped") as mock_verify:
-            mock_verify.return_value = True  # Instance is stopped
+        from goldfish.state_machine.types import EventContext as EC
 
+        with patch("goldfish.state_machine.stage_daemon.determine_instance_event") as mock_instance:
+            mock_instance.return_value = (
+                StageEvent.INSTANCE_LOST,
+                EC(timestamp=datetime.now(UTC), source="daemon", instance_confirmed_dead=True),
+            )
             event, ctx = daemon._determine_event(run)
 
         assert event == StageEvent.INSTANCE_LOST
@@ -314,9 +318,13 @@ class TestDetermineEvent:
             "backend_handle": "container-abc123",
         }
 
-        with patch("goldfish.state_machine.stage_daemon.verify_instance_stopped") as mock_verify:
-            mock_verify.return_value = True  # Instance is stopped
+        from goldfish.state_machine.types import EventContext as EC
 
+        with patch("goldfish.state_machine.stage_daemon.determine_instance_event") as mock_instance:
+            mock_instance.return_value = (
+                StageEvent.INSTANCE_LOST,
+                EC(timestamp=datetime.now(UTC), source="daemon", instance_confirmed_dead=True),
+            )
             event, ctx = daemon._determine_event(run)
 
         assert event == StageEvent.INSTANCE_LOST
@@ -335,88 +343,98 @@ class TestDetermineEvent:
             "backend_handle": "instance-123",
         }
 
-        with patch("goldfish.state_machine.stage_daemon.verify_instance_stopped") as mock_verify:
-            mock_verify.return_value = False
+        with patch("goldfish.state_machine.stage_daemon.determine_instance_event") as mock_instance:
+            mock_instance.return_value = None
             result = daemon._determine_event(run)
 
         # No event expected since instance is running
         assert result is None
-        # Verify verify_instance_stopped was called with project_id=None
-        mock_verify.assert_called_once()
-        call_kwargs = mock_verify.call_args.kwargs
-        assert call_kwargs.get("project_id") is None
+        # Verify determine_instance_event was called with project_id=None
+        mock_instance.assert_called_once()
+        assert mock_instance.call_args.kwargs.get("project_id") is None
 
 
-class TestDetermineBackendEvent:
-    """Tests for _determine_backend_event() method (unified GCE/local)."""
+class TestDetermineExitEvents:
+    """Tests for RUNNING-state exit code polling in _determine_event()."""
 
-    @patch("goldfish.state_machine.stage_daemon.verify_instance_stopped")
-    def test_gce_instance_lost_when_stopped(self, mock_verify, daemon: StageDaemon) -> None:
-        """INSTANCE_LOST event when GCE instance is confirmed stopped."""
-        mock_verify.return_value = True
+    def test_running_local_exit_success_emits_exit_success(self, daemon: StageDaemon) -> None:
+        """RUNNING local with exit code 0 should emit EXIT_SUCCESS."""
+        from goldfish.state_machine.exit_code import ExitCodeResult
 
         run = {
             "id": "stage-123",
             "state": StageState.RUNNING.value,
-            "backend_type": "gce",
-            "backend_handle": "instance-123",
-        }
-
-        event, ctx = daemon._determine_backend_event(run, "gce", project_id="my-project")
-
-        assert event == StageEvent.INSTANCE_LOST
-        assert ctx.instance_confirmed_dead is True
-        assert ctx.source == "daemon"
-
-    @patch("goldfish.state_machine.stage_daemon.verify_instance_stopped")
-    def test_gce_no_event_when_running(self, mock_verify, daemon: StageDaemon) -> None:
-        """No event when GCE instance is still running."""
-        mock_verify.return_value = False
-
-        run = {
-            "id": "stage-123",
-            "state": StageState.RUNNING.value,
-            "backend_type": "gce",
-            "backend_handle": "instance-123",
-        }
-
-        result = daemon._determine_backend_event(run, "gce", project_id="my-project")
-
-        assert result is None
-
-    @patch("goldfish.state_machine.stage_daemon.verify_instance_stopped")
-    def test_local_container_lost_when_stopped(self, mock_verify, daemon: StageDaemon) -> None:
-        """INSTANCE_LOST event when Docker container is confirmed stopped."""
-        mock_verify.return_value = True
-
-        run = {
-            "id": "stage-123",
-            "state": StageState.RUNNING.value,
+            "state_entered_at": datetime.now(UTC).isoformat(),
             "backend_type": "local",
             "backend_handle": "container-abc123",
         }
 
-        event, ctx = daemon._determine_backend_event(run, "local")
+        with (
+            patch("goldfish.state_machine.stage_daemon.get_exit_code_docker", return_value=ExitCodeResult.from_code(0)),
+            patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
+        ):
+            event, ctx = daemon._determine_event(run)
 
-        assert event == StageEvent.INSTANCE_LOST
-        assert ctx.instance_confirmed_dead is True
+        assert event == StageEvent.EXIT_SUCCESS
+        assert ctx.exit_code == 0
+        assert ctx.exit_code_exists is True
         assert ctx.source == "daemon"
 
-    @patch("goldfish.state_machine.stage_daemon.verify_instance_stopped")
-    def test_local_container_no_event_when_running(self, mock_verify, daemon: StageDaemon) -> None:
-        """No event when Docker container is still running."""
-        mock_verify.return_value = False
+    def test_running_local_exit_failure_emits_exit_failure(self, daemon: StageDaemon) -> None:
+        """RUNNING local with non-zero exit code should emit EXIT_FAILURE."""
+        from goldfish.state_machine.exit_code import ExitCodeResult
 
         run = {
             "id": "stage-123",
             "state": StageState.RUNNING.value,
+            "state_entered_at": datetime.now(UTC).isoformat(),
             "backend_type": "local",
             "backend_handle": "container-abc123",
         }
 
-        result = daemon._determine_backend_event(run, "local")
+        with (
+            patch("goldfish.state_machine.stage_daemon.get_exit_code_docker", return_value=ExitCodeResult.from_code(2)),
+            patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
+        ):
+            event, ctx = daemon._determine_event(run)
 
-        assert result is None
+        assert event == StageEvent.EXIT_FAILURE
+        assert ctx.exit_code == 2
+        assert ctx.exit_code_exists is True
+
+    def test_running_gce_exit_success_uses_bucket_and_project_id(self, test_db) -> None:
+        """RUNNING GCE should call get_exit_code_gce with bucket_uri and project_id."""
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
+        mock_config = MagicMock()
+        mock_config.gcs = MagicMock(bucket="my-bucket")
+        mock_gce = MagicMock()
+        type(mock_gce).effective_project_id = property(lambda self: "my-project")
+        mock_config.gce = mock_gce
+        daemon = StageDaemon(db=test_db, config=mock_config)
+
+        run = {
+            "id": "stage-123",
+            "state": StageState.RUNNING.value,
+            "state_entered_at": datetime.now(UTC).isoformat(),
+            "backend_type": "gce",
+            "backend_handle": "instance-123",
+        }
+
+        with (
+            patch(
+                "goldfish.state_machine.stage_daemon.get_exit_code_gce",
+                return_value=ExitCodeResult.from_code(0),
+            ) as mock_get,
+            patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
+        ):
+            event, _ctx = daemon._determine_event(run)
+
+        assert event == StageEvent.EXIT_SUCCESS
+        mock_get.assert_called_once()
+        assert mock_get.call_args.args[0] == "gs://my-bucket"
+        assert mock_get.call_args.args[1] == "stage-123"
+        assert mock_get.call_args.kwargs["project_id"] == "my-project"
 
 
 class TestCheckTimeout:
@@ -850,6 +868,8 @@ class TestDetermineEventEdgeCases:
 
     def test_determine_event_missing_backend_type_defaults_to_local(self, daemon: StageDaemon) -> None:
         """_determine_event with missing backend_type should default to 'local'."""
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
         run = {
             "id": "stage-123",
             "state": StageState.RUNNING.value,
@@ -858,174 +878,16 @@ class TestDetermineEventEdgeCases:
             # backend_type is missing - should default to "local"
         }
 
-        with patch("goldfish.state_machine.stage_daemon.verify_instance_stopped") as mock_verify:
-            mock_verify.return_value = True  # Instance is stopped
+        with (
+            patch(
+                "goldfish.state_machine.stage_daemon.get_exit_code_docker", return_value=ExitCodeResult.from_code(0)
+            ) as mock_get,
+            patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
+        ):
+            event, _ctx = daemon._determine_event(run)
 
-            event, ctx = daemon._determine_event(run)
-
-        assert event == StageEvent.INSTANCE_LOST
-        # Verify local backend was used (verify_instance_stopped called with "local")
-        mock_verify.assert_called_once()
-        call_kwargs = mock_verify.call_args.kwargs
-        assert call_kwargs.get("backend_type") == "local"
-
-
-class TestDetermineBackendEventEdgeCases:
-    """Tests for _determine_backend_event() edge cases."""
-
-    def test_gce_event_missing_backend_handle_returns_none(self, daemon: StageDaemon) -> None:
-        """_determine_backend_event should return None when backend_handle is missing."""
-        run = {
-            "id": "stage-123",
-            "state": StageState.RUNNING.value,
-            "backend_type": "gce",
-            "backend_handle": None,
-        }
-
-        result = daemon._determine_backend_event(run, "gce", project_id="my-project")
-        assert result is None
-
-    def test_local_event_missing_backend_handle_returns_none(self, daemon: StageDaemon) -> None:
-        """_determine_backend_event should return None when backend_handle is missing."""
-        run = {
-            "id": "stage-123",
-            "state": StageState.RUNNING.value,
-            "backend_type": "local",
-            "backend_handle": None,
-        }
-
-        result = daemon._determine_backend_event(run, "local")
-        assert result is None
-
-    def test_gce_event_empty_string_backend_handle_returns_none(self, daemon: StageDaemon) -> None:
-        """_determine_backend_event should return None when backend_handle is empty string."""
-        run = {
-            "id": "stage-123",
-            "state": StageState.RUNNING.value,
-            "backend_type": "gce",
-            "backend_handle": "",
-        }
-
-        result = daemon._determine_backend_event(run, "gce", project_id="my-project")
-        assert result is None
-
-    def test_local_event_empty_string_backend_handle_returns_none(self, daemon: StageDaemon) -> None:
-        """_determine_backend_event should return None when backend_handle is empty string."""
-        run = {
-            "id": "stage-123",
-            "state": StageState.RUNNING.value,
-            "backend_type": "local",
-            "backend_handle": "",
-        }
-
-        result = daemon._determine_backend_event(run, "local")
-        assert result is None
-
-    @patch("goldfish.state_machine.stage_daemon.verify_instance_stopped")
-    def test_gce_event_verify_instance_error_returns_none(self, mock_verify, daemon: StageDaemon) -> None:
-        """_determine_backend_event should return None on verify_instance_stopped error."""
-        mock_verify.side_effect = RuntimeError("GCE API error")
-
-        run = {
-            "id": "stage-123",
-            "state": StageState.RUNNING.value,
-            "backend_type": "gce",
-            "backend_handle": "instance-123",
-        }
-
-        result = daemon._determine_backend_event(run, "gce", project_id="my-project")
-        assert result is None
-
-    @patch("goldfish.state_machine.stage_daemon.verify_instance_stopped")
-    def test_local_event_verify_instance_error_returns_none(self, mock_verify, daemon: StageDaemon) -> None:
-        """_determine_backend_event should return None on verify_instance_stopped error."""
-        mock_verify.side_effect = RuntimeError("Docker API error")
-
-        run = {
-            "id": "stage-123",
-            "state": StageState.RUNNING.value,
-            "backend_type": "local",
-            "backend_handle": "container-123",
-        }
-
-        result = daemon._determine_backend_event(run, "local")
-        assert result is None
-
-    @patch("goldfish.state_machine.stage_daemon.detect_termination_cause")
-    @patch("goldfish.state_machine.stage_daemon.verify_instance_stopped")
-    def test_gce_event_detect_termination_error_defaults_orphaned(
-        self, mock_verify, mock_detect, daemon: StageDaemon
-    ) -> None:
-        """_determine_backend_event should default to ORPHANED on termination cause error."""
-        mock_verify.return_value = True
-        mock_detect.side_effect = RuntimeError("API error")
-
-        run = {
-            "id": "stage-123",
-            "state": StageState.RUNNING.value,
-            "backend_type": "gce",
-            "backend_handle": "instance-123",
-        }
-
-        event, ctx = daemon._determine_backend_event(run, "gce", project_id="my-project")
-        assert event == StageEvent.INSTANCE_LOST
-        assert ctx.termination_cause == TerminationCause.ORPHANED
-
-    @patch("goldfish.state_machine.stage_daemon.detect_termination_cause")
-    @patch("goldfish.state_machine.stage_daemon.verify_instance_stopped")
-    def test_local_event_detect_termination_error_defaults_orphaned(
-        self, mock_verify, mock_detect, daemon: StageDaemon
-    ) -> None:
-        """_determine_backend_event should default to ORPHANED on termination cause error."""
-        mock_verify.return_value = True
-        mock_detect.side_effect = RuntimeError("Docker API error")
-
-        run = {
-            "id": "stage-123",
-            "state": StageState.RUNNING.value,
-            "backend_type": "local",
-            "backend_handle": "container-123",
-        }
-
-        event, ctx = daemon._determine_backend_event(run, "local")
-        assert event == StageEvent.INSTANCE_LOST
-        assert ctx.termination_cause == TerminationCause.ORPHANED
-
-    @patch("goldfish.state_machine.stage_daemon.detect_termination_cause")
-    @patch("goldfish.state_machine.stage_daemon.verify_instance_stopped")
-    def test_gce_event_termination_cause_in_context(self, mock_verify, mock_detect, daemon: StageDaemon) -> None:
-        """_determine_backend_event should include termination cause in context."""
-        mock_verify.return_value = True
-        mock_detect.return_value = TerminationCause.PREEMPTED
-
-        run = {
-            "id": "stage-123",
-            "state": StageState.RUNNING.value,
-            "backend_type": "gce",
-            "backend_handle": "instance-123",
-        }
-
-        event, ctx = daemon._determine_backend_event(run, "gce", project_id="my-project")
-        assert event == StageEvent.INSTANCE_LOST
-        assert ctx.termination_cause == TerminationCause.PREEMPTED
-
-    @patch("goldfish.state_machine.stage_daemon.detect_termination_cause")
-    @patch("goldfish.state_machine.stage_daemon.verify_instance_stopped")
-    def test_local_event_termination_cause_in_context(self, mock_verify, mock_detect, daemon: StageDaemon) -> None:
-        """_determine_backend_event should include termination cause in context."""
-        mock_verify.return_value = True
-        mock_detect.return_value = TerminationCause.CRASHED
-
-        run = {
-            "id": "stage-123",
-            "state": StageState.RUNNING.value,
-            "backend_type": "local",
-            "backend_handle": "container-123",
-        }
-
-        event, ctx = daemon._determine_backend_event(run, "local")
-        assert event == StageEvent.INSTANCE_LOST
-        assert ctx.termination_cause == TerminationCause.CRASHED
+        assert event == StageEvent.EXIT_SUCCESS
+        mock_get.assert_called_once_with("container-abc123")
 
 
 class TestCheckTimeoutEdgeCases:
@@ -1130,6 +992,56 @@ class TestProcessRunErrorHandling:
         daemon._process_run(run)
 
 
+class TestProcessRunBackfill:
+    """Tests for daemon backfills that prevent limbo runs."""
+
+    def test_process_run_backfills_missing_state_entered_at(self, test_db) -> None:
+        """Daemon should backfill missing state_entered_at for active/UNKNOWN runs.
+
+        Without this, UNKNOWN runs missing state_entered_at will never timeout and
+        will remain stuck forever.
+        """
+        daemon = StageDaemon(db=test_db, config=MagicMock())
+
+        test_db.create_workspace_lineage("test_ws", description="Test")
+        test_db.create_version("test_ws", "v1", "tag-1", "abc123", "run")
+        test_db.create_stage_run(
+            stage_run_id="stage-unknown",
+            workspace_name="test_ws",
+            version="v1",
+            stage_name="train",
+        )
+
+        with test_db._conn() as conn:
+            started_at = conn.execute(
+                "SELECT started_at FROM stage_runs WHERE id = ?",
+                ("stage-unknown",),
+            ).fetchone()["started_at"]
+            conn.execute(
+                "UPDATE stage_runs SET state = ?, state_entered_at = NULL WHERE id = ?",
+                (StageState.UNKNOWN.value, "stage-unknown"),
+            )
+
+        # Provide the minimum run dict the daemon needs; state_entered_at intentionally missing.
+        run = {
+            "id": "stage-unknown",
+            "state": StageState.UNKNOWN.value,
+            "state_entered_at": None,
+            "started_at": started_at,
+            "backend_type": "local",
+        }
+
+        daemon._determine_event = MagicMock(return_value=None)
+        daemon._process_run(run)
+
+        with test_db._conn() as conn:
+            row = conn.execute(
+                "SELECT state_entered_at FROM stage_runs WHERE id = ?",
+                ("stage-unknown",),
+            ).fetchone()
+            assert row["state_entered_at"] == started_at
+
+
 class TestPollActiveRunsErrorHandling:
     """Tests for poll_active_runs() error handling."""
 
@@ -1229,35 +1141,43 @@ class TestEventContextProperties:
         # Should be recent (within last minute)
         assert (datetime.now(UTC) - ctx.timestamp).total_seconds() < 60
 
-    @patch("goldfish.state_machine.stage_daemon.verify_instance_stopped")
-    def test_instance_lost_event_has_correct_source(self, mock_verify, daemon: StageDaemon) -> None:
-        """EventContext should have source='daemon' for instance lost events."""
-        mock_verify.return_value = True
+    def test_exit_event_has_correct_source(self, daemon: StageDaemon) -> None:
+        """EventContext should have source='daemon' for daemon-emitted exit events."""
+        from goldfish.state_machine.exit_code import ExitCodeResult
 
         run = {
             "id": "stage-123",
             "state": StageState.RUNNING.value,
+            "state_entered_at": datetime.now(UTC).isoformat(),
             "backend_type": "local",
             "backend_handle": "container-123",
         }
 
-        event, ctx = daemon._determine_backend_event(run, "local")
+        with (
+            patch("goldfish.state_machine.stage_daemon.get_exit_code_docker", return_value=ExitCodeResult.from_code(0)),
+            patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
+        ):
+            _event, ctx = daemon._determine_event(run)
 
         assert ctx.source == "daemon"
 
-    @patch("goldfish.state_machine.stage_daemon.verify_instance_stopped")
-    def test_instance_lost_event_has_timestamp(self, mock_verify, daemon: StageDaemon) -> None:
-        """EventContext should have a timestamp set for instance lost events."""
-        mock_verify.return_value = True
+    def test_exit_event_has_timestamp(self, daemon: StageDaemon) -> None:
+        """EventContext should have a timestamp set for exit events."""
+        from goldfish.state_machine.exit_code import ExitCodeResult
 
         run = {
             "id": "stage-123",
             "state": StageState.RUNNING.value,
+            "state_entered_at": datetime.now(UTC).isoformat(),
             "backend_type": "local",
             "backend_handle": "container-123",
         }
 
-        event, ctx = daemon._determine_backend_event(run, "local")
+        with (
+            patch("goldfish.state_machine.stage_daemon.get_exit_code_docker", return_value=ExitCodeResult.from_code(0)),
+            patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
+        ):
+            _event, ctx = daemon._determine_event(run)
 
         assert ctx.timestamp is not None
         assert isinstance(ctx.timestamp, datetime)

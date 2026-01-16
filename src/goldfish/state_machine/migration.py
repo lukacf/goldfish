@@ -561,6 +561,20 @@ def migrate_stage_runs(
             conn.execute("BEGIN IMMEDIATE")
 
             try:
+                # Backfill missing state_entered_at for already-migrated UNKNOWN runs.
+                # This prevents UNKNOWN runs from getting stuck forever because the daemon's
+                # timeout logic requires state_entered_at to be populated.
+                now = datetime.now(UTC).isoformat()
+                conn.execute(
+                    """
+                    UPDATE stage_runs
+                    SET state_entered_at = COALESCE(started_at, ?)
+                    WHERE state = ?
+                      AND (state_entered_at IS NULL OR state_entered_at = '')
+                    """,
+                    (now, StageState.UNKNOWN.value),
+                )
+
                 # 1. Count total rows needing migration
                 total_count = conn.execute("SELECT COUNT(*) as cnt FROM stage_runs WHERE state IS NULL").fetchone()
                 total_rows = total_count["cnt"] if total_count else 0
@@ -596,7 +610,6 @@ def migrate_stage_runs(
                     )
 
                 # 2. Record migration start in progress table
-                now = datetime.now(UTC).isoformat()
                 cursor = conn.execute(
                     """
                     INSERT INTO migration_progress
@@ -607,15 +620,14 @@ def migrate_stage_runs(
                 )
                 progress_id = cursor.lastrowid
 
-                # 3. Create backup table with all relevant columns
+                # 3. Create backup table with ALL columns for safe rollback
+                # This enables table recreation rollback that works on all SQLite versions
                 # Note: Using string format for table name is necessary as SQLite
                 # doesn't support parameterized table names. We validated the name above.
                 conn.execute(
                     f"""
                     CREATE TABLE IF NOT EXISTS {backup_table} AS
-                    SELECT id, status, state, termination_cause, state_entered_at,
-                           error, started_at, backend_type, backend_handle
-                    FROM stage_runs
+                    SELECT * FROM stage_runs
                     """
                 )
 
@@ -796,17 +808,17 @@ def migrate_stage_runs(
 
 
 def rollback_migration(db: Database, backup_table: str | None = None) -> RollbackResult:
-    """Rollback migration by resetting state columns to NULL.
+    """Rollback migration using table recreation.
 
-    This function resets state, termination_cause, and state_entered_at to NULL
-    for all rows in the backup table's scope. This returns the database to the
-    pre-migration state where those columns were unpopulated, allowing the
-    migration to be re-run.
+    This function performs a destructive rollback that recreates the stage_runs
+    table from the backup. This approach works on ALL SQLite versions, including
+    versions before 3.35.0 where DROP COLUMN was not yet available.
 
-    Design note: The backup table preserves a snapshot of all column values
-    at migration start for audit purposes. The rollback intentionally resets
-    to NULL (the pre-migration state) rather than restoring from backup,
-    because the migration is designed to be idempotent and re-runnable.
+    The approach:
+    1. Verify backup table exists and has data
+    2. Drop the partially-migrated stage_runs table
+    3. Rename backup to stage_runs
+    4. Recreate indexes
 
     Args:
         db: Database instance
@@ -873,18 +885,57 @@ def rollback_migration(db: Database, backup_table: str | None = None) -> Rollbac
                     },
                 )
 
-            # Reset state columns for rows in backup
+            # Step 1: Verify backup table has data
+            backup_count = conn.execute(
+                f"SELECT COUNT(*) as cnt FROM {backup_table}"  # noqa: S608 - validated above
+            ).fetchone()["cnt"]
+
+            if backup_count == 0:
+                conn.execute("ROLLBACK")
+                return cast(
+                    RollbackResult,
+                    {
+                        "success": False,
+                        "restored": 0,
+                        "error": f"Backup table '{backup_table}' is empty.",
+                    },
+                )
+
+            # Step 2: Drop the partially-migrated table
+            conn.execute("DROP TABLE IF EXISTS stage_runs")
+
+            # Step 3: Rename backup to original name
             # Note: Using string format for table name is necessary as SQLite
             # doesn't support parameterized table names. We validated the name above.
-            result = conn.execute(
-                f"""
-                UPDATE stage_runs
-                SET state = NULL,
-                    termination_cause = NULL,
-                    state_entered_at = NULL
-                WHERE id IN (SELECT id FROM {backup_table})
-                """
+            conn.execute(
+                f"ALTER TABLE {backup_table} RENAME TO stage_runs"  # noqa: S608
             )
+
+            # Step 4: Recreate indexes (backup table won't have them)
+            # Use try/except since backup tables may have different schemas
+            # depending on when the backup was created (pre vs post schema migration)
+            try:
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_stage_runs_workspace
+                    ON stage_runs(workspace_name, version)
+                    """
+                )
+            except Exception:
+                # Column may not exist in backup table - skip index
+                pass
+
+            try:
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_stage_runs_status
+                    ON stage_runs(status)
+                    """
+                )
+            except Exception:
+                # Column may not exist in backup table - skip index
+                pass
+            # Note: Don't create idx_stage_runs_state since we rolled back
 
             # Update migration progress if exists
             conn.execute(
@@ -899,11 +950,17 @@ def rollback_migration(db: Database, backup_table: str | None = None) -> Rollbac
 
             conn.execute("COMMIT")
 
+            logger.info(
+                "Rollback complete: restored %d rows from %s via table recreation",
+                backup_count,
+                backup_table,
+            )
+
             return cast(
                 RollbackResult,
                 {
                     "success": True,
-                    "restored": result.rowcount,
+                    "restored": backup_count,
                     "error": None,
                 },
             )

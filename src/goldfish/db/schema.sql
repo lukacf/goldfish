@@ -218,13 +218,18 @@ CREATE TABLE IF NOT EXISTS stage_state_transitions (
     from_state TEXT NOT NULL,
     to_state TEXT NOT NULL,
     event TEXT NOT NULL,
-    context_json TEXT NOT NULL,       -- JSON: full EventContext
-    timestamp TEXT NOT NULL,
+    phase TEXT,
+    termination_cause TEXT CHECK(termination_cause IS NULL OR termination_cause IN ('preempted', 'crashed', 'orphaned', 'timeout', 'ai_stopped', 'manual')),
+    exit_code INTEGER,
+    exit_code_exists INTEGER,         -- 0 or 1
+    error_message TEXT,
+    source TEXT NOT NULL CHECK(source IN ('mcp_tool', 'executor', 'daemon', 'container', 'migration')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_state_transitions_stage_run ON stage_state_transitions(stage_run_id);
-CREATE INDEX IF NOT EXISTS idx_state_transitions_timestamp ON stage_state_transitions(timestamp);
+CREATE INDEX IF NOT EXISTS idx_state_transitions_stage_run ON stage_state_transitions(stage_run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_state_transitions_created_at ON stage_state_transitions(created_at);
 
 
 -- Migration progress tracking (for safe batch migrations)

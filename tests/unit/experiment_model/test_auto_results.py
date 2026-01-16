@@ -212,11 +212,15 @@ class TestDeriveInfraOutcome:
         assert manager.derive_infra_outcome("completed") == "completed"
 
     def test_derive_infra_outcome_failed(self) -> None:
-        """Status 'failed' maps to infra_outcome 'crashed'."""
+        """Status 'failed' maps to infra_outcome 'completed'.
+
+        The infrastructure worked correctly (ran the code), but the code/validation
+        failed. From an infrastructure perspective, this is a successful execution.
+        """
         mock_db = MagicMock()
         manager = ExperimentRecordManager(mock_db)
 
-        assert manager.derive_infra_outcome("failed") == "crashed"
+        assert manager.derive_infra_outcome("failed") == "completed"
 
     def test_derive_infra_outcome_preempted(self) -> None:
         """Status 'preempted' maps to infra_outcome 'preempted'."""

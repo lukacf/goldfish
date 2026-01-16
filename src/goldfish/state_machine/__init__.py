@@ -16,12 +16,6 @@ Key components:
 See docs/state-machine-spec.md for the full specification.
 """
 
-from goldfish.state_machine.admin_tools import (
-    AdminTransitionError,
-    force_complete_run,
-    force_fail_run,
-    force_terminate_run,
-)
 from goldfish.state_machine.backwards_compat import (
     get_legacy_status,
     state_from_legacy,
@@ -114,11 +108,6 @@ __all__ = [
     "get_critical_phases_done",
     # Utility functions
     "format_transition_result",
-    # Admin tools
-    "AdminTransitionError",
-    "force_terminate_run",
-    "force_complete_run",
-    "force_fail_run",
     # Backwards compatibility (deprecated)
     "get_legacy_status",
     "state_from_legacy",
