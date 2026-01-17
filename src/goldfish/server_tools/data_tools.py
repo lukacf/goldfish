@@ -21,7 +21,6 @@ from goldfish.models import (
     RegisterSourceResponse,
     SourceInfo,
     SourceLineage,
-    StageRunStatus,
 )
 from goldfish.server_core import (
     _get_config,
@@ -312,8 +311,9 @@ def promote_artifact(
         if stage_run is None:
             raise JobNotFoundError(f"Stage run not found: {job_id}")
 
-        if stage_run["status"] != StageRunStatus.COMPLETED:
-            raise GoldfishError(f"Stage run {job_id} has not completed (status: {stage_run['status']})")
+        # Check state (source of truth), not legacy status column
+        if stage_run.get("state") != "completed":
+            raise GoldfishError(f"Stage run {job_id} has not completed (state: {stage_run.get('state')})")
         artifact_uri = stage_run.get("artifact_uri")
     else:
         job = db.get_job(job_id)

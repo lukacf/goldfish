@@ -433,14 +433,16 @@ def test_get_instance_status_running(mock_run_gcloud, launcher):
 
 
 @patch("goldfish.infra.gce_launcher.run_gcloud")
-@patch("goldfish.infra.gce_launcher.subprocess.run")
-def test_get_instance_status_completed(mock_subprocess, mock_run_gcloud, launcher):
+@patch("goldfish.infra.gce_launcher.get_exit_code_gce")
+def test_get_instance_status_completed(mock_get_exit_code, mock_run_gcloud, launcher):
     """Test get_instance_status for completed instance."""
+    from goldfish.state_machine.exit_code import ExitCodeResult
+
     # gcloud describe returns TERMINATED
     mock_run_gcloud.return_value = Mock(returncode=0, stdout="TERMINATED\n", stderr="")
 
-    # gsutil cat returns exit code 0
-    mock_subprocess.return_value = Mock(returncode=0, stdout="0\n", stderr="")
+    # Exit code is 0 (success)
+    mock_get_exit_code.return_value = ExitCodeResult.from_code(0)
 
     status = launcher.get_instance_status("test-instance")
 
@@ -448,14 +450,16 @@ def test_get_instance_status_completed(mock_subprocess, mock_run_gcloud, launche
 
 
 @patch("goldfish.infra.gce_launcher.run_gcloud")
-@patch("goldfish.infra.gce_launcher.subprocess.run")
-def test_get_instance_status_failed(mock_subprocess, mock_run_gcloud, launcher):
+@patch("goldfish.infra.gce_launcher.get_exit_code_gce")
+def test_get_instance_status_failed(mock_get_exit_code, mock_run_gcloud, launcher):
     """Test get_instance_status for failed instance."""
+    from goldfish.state_machine.exit_code import ExitCodeResult
+
     # gcloud describe returns TERMINATED
     mock_run_gcloud.return_value = Mock(returncode=0, stdout="TERMINATED\n", stderr="")
 
-    # gsutil cat returns exit code 1
-    mock_subprocess.return_value = Mock(returncode=0, stdout="1\n", stderr="")
+    # Exit code is 1 (failure)
+    mock_get_exit_code.return_value = ExitCodeResult.from_code(1)
 
     status = launcher.get_instance_status("test-instance")
 
@@ -558,11 +562,13 @@ def test_delete_instance(mock_run_gcloud, launcher):
 
 
 @patch("goldfish.infra.gce_launcher.run_gcloud")
-@patch("goldfish.infra.gce_launcher.subprocess.run")
+@patch("goldfish.infra.gce_launcher.get_exit_code_gce")
 @patch("goldfish.infra.gce_launcher.time.time")
 @patch("goldfish.infra.gce_launcher.time.sleep")
-def test_wait_for_termination_success(mock_sleep, mock_time, mock_subprocess, mock_run_gcloud, launcher):
+def test_wait_for_termination_success(mock_sleep, mock_time, mock_get_exit_code, mock_run_gcloud, launcher):
     """Test wait_for_termination succeeds."""
+    from goldfish.state_machine.exit_code import ExitCodeResult
+
     # Mock time progression
     mock_time.side_effect = [0, 5, 10, 15]
 
@@ -573,8 +579,8 @@ def test_wait_for_termination_success(mock_sleep, mock_time, mock_subprocess, mo
         Mock(returncode=0, stdout="TERMINATED\n", stderr=""),
     ]
 
-    # Exit code is 0
-    mock_subprocess.return_value = Mock(returncode=0, stdout="0\n", stderr="")
+    # Exit code is 0 (success)
+    mock_get_exit_code.return_value = ExitCodeResult.from_code(0)
 
     status = launcher.wait_for_termination("test-instance", timeout_sec=3600)
 

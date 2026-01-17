@@ -42,12 +42,12 @@ def test_inspect_run_basic():
         "workspace_name": "w1",
         "stage_name": "train",
         "status": "completed",
+        "state": "completed",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": "2025-12-27T11:00:00Z",
         "config_json": "{}",
         "inputs_json": "{}",
         "outputs_json": "[]",
-        "progress": "100%",
         "reason_json": None,
     }
     mock_db.get_metrics_trends.return_value = {}
@@ -57,8 +57,8 @@ def test_inspect_run_basic():
         result = inspect_run(run_id)
 
     assert result["run_id"] == run_id
-    assert result["status"] == "completed"
-    assert result["dashboard"]["progress"] == "100%"
+    assert result["state"] == "completed"  # State machine state (source of truth)
+    assert result["dashboard"]["state"] == "completed"
 
 
 def test_inspect_run_triggers_sync_when_running():
@@ -73,6 +73,7 @@ def test_inspect_run_triggers_sync_when_running():
         "workspace_name": "w1",
         "stage_name": "train",
         "status": "running",
+        "state": "running",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": None,
         "config_json": "{}",
@@ -120,6 +121,7 @@ def test_inspect_run_pending_when_ack_missing():
         "workspace_name": "w1",
         "stage_name": "train",
         "status": "running",
+        "state": "running",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": None,
         "config_json": "{}",
@@ -151,7 +153,6 @@ def test_inspect_run_pending_when_ack_missing():
 
 def test_inspect_run_skips_sync_when_launching():
     """GCE runs in launch/build should not report timeout sync."""
-    from goldfish.models import StageRunProgress
     from goldfish.server_tools.execution_tools import inspect_run
 
     run_id = "stage-abcd1234"
@@ -161,12 +162,12 @@ def test_inspect_run_skips_sync_when_launching():
         "workspace_name": "w1",
         "stage_name": "train",
         "status": "running",
+        "state": "launching",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": None,
         "config_json": "{}",
         "inputs_json": "{}",
         "outputs_json": "[]",
-        "progress": StageRunProgress.LAUNCH,
         "reason_json": None,
         "backend_type": "gce",
         "backend_handle": "instance-1",
@@ -201,6 +202,7 @@ def test_inspect_run_includes_thoughts():
         "workspace_name": "w1",
         "stage_name": "train",
         "status": "completed",
+        "state": "completed",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": "2025-12-27T11:00:00Z",
         "config_json": "{}",
@@ -239,6 +241,7 @@ def test_inspect_run_includes_attempt_info():
         "workspace_name": "baseline",
         "stage_name": "train",
         "status": "completed",
+        "state": "completed",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": "2025-12-27T11:00:00Z",
         "config_json": "{}",
@@ -286,6 +289,7 @@ def test_inspect_run_refetches_row_after_sync():
         "workspace_name": "w1",
         "stage_name": "train",
         "status": "running",
+        "state": "running",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": None,
         "config_json": "{}",

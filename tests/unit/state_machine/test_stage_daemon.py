@@ -115,11 +115,11 @@ class TestDetermineEvent:
 
         assert event == StageEvent.TIMEOUT
 
-    def test_determine_event_finalizing_timeout_critical_phases_done(self, daemon: StageDaemon) -> None:
-        """FINALIZING timeout with both phases done should set critical_phases_done=True."""
+    def test_determine_event_post_run_timeout_critical_phases_done(self, daemon: StageDaemon) -> None:
+        """POST_RUN timeout with both phases done should set critical_phases_done=True."""
         run = {
             "id": "stage-123",
-            "state": StageState.FINALIZING.value,
+            "state": StageState.POST_RUN.value,
             "state_entered_at": (datetime.now(UTC) - timedelta(minutes=35)).isoformat(),
             "backend_type": "local",
             "output_sync_done": 1,
@@ -131,11 +131,11 @@ class TestDetermineEvent:
         assert event == StageEvent.TIMEOUT
         assert ctx.critical_phases_done is True
 
-    def test_determine_event_finalizing_timeout_critical_phases_not_done(self, daemon: StageDaemon) -> None:
-        """FINALIZING timeout with phases not done should set critical_phases_done=False."""
+    def test_determine_event_post_run_timeout_critical_phases_not_done(self, daemon: StageDaemon) -> None:
+        """POST_RUN timeout with phases not done should set critical_phases_done=False."""
         run = {
             "id": "stage-123",
-            "state": StageState.FINALIZING.value,
+            "state": StageState.POST_RUN.value,
             "state_entered_at": (datetime.now(UTC) - timedelta(minutes=35)).isoformat(),
             "backend_type": "local",
             "output_sync_done": 0,
@@ -147,11 +147,11 @@ class TestDetermineEvent:
         assert event == StageEvent.TIMEOUT
         assert ctx.critical_phases_done is False
 
-    def test_determine_event_finalizing_timeout_sync_done_but_recording_not(self, daemon: StageDaemon) -> None:
-        """FINALIZING timeout with sync done but recording not should set critical_phases_done=False."""
+    def test_determine_event_post_run_timeout_sync_done_but_recording_not(self, daemon: StageDaemon) -> None:
+        """POST_RUN timeout with sync done but recording not should set critical_phases_done=False."""
         run = {
             "id": "stage-123",
-            "state": StageState.FINALIZING.value,
+            "state": StageState.POST_RUN.value,
             "state_entered_at": (datetime.now(UTC) - timedelta(minutes=35)).isoformat(),
             "backend_type": "local",
             "output_sync_done": 1,
@@ -163,11 +163,11 @@ class TestDetermineEvent:
         assert event == StageEvent.TIMEOUT
         assert ctx.critical_phases_done is False
 
-    def test_determine_event_finalizing_timeout_missing_phase_fields(self, daemon: StageDaemon) -> None:
-        """FINALIZING timeout with missing phase fields should set critical_phases_done=False."""
+    def test_determine_event_post_run_timeout_missing_phase_fields(self, daemon: StageDaemon) -> None:
+        """POST_RUN timeout with missing phase fields should set critical_phases_done=False."""
         run = {
             "id": "stage-123",
-            "state": StageState.FINALIZING.value,
+            "state": StageState.POST_RUN.value,
             "state_entered_at": (datetime.now(UTC) - timedelta(minutes=35)).isoformat(),
             "backend_type": "local",
             # No output_sync_done or output_recording_done
@@ -277,15 +277,15 @@ class TestDetermineEvent:
         mock_instance.assert_called_once()
         assert mock_instance.call_args.kwargs.get("project_id") is None
 
-    def test_determine_event_finalizing_instance_lost(self, daemon: StageDaemon) -> None:
-        """FINALIZING state with instance lost should emit INSTANCE_LOST (not timeout).
+    def test_determine_event_post_run_instance_lost(self, daemon: StageDaemon) -> None:
+        """POST_RUN state with instance lost should emit INSTANCE_LOST (not timeout).
 
         critical_phases_done should be None (not set) for INSTANCE_LOST events.
-        Only TIMEOUT events on FINALIZING set critical_phases_done.
+        Only TIMEOUT events on POST_RUN set critical_phases_done.
         """
         run = {
             "id": "stage-123",
-            "state": StageState.FINALIZING.value,
+            "state": StageState.POST_RUN.value,
             "state_entered_at": datetime.now(UTC).isoformat(),  # Not timed out
             "backend_type": "local",
             "backend_handle": "container-abc123",
@@ -479,10 +479,10 @@ class TestCheckTimeout:
 
         assert daemon._check_timeout(run) is True
 
-    def test_finalizing_timeout_30min(self, daemon: StageDaemon) -> None:
-        """FINALIZING should timeout after 30 minutes."""
+    def test_post_run_timeout_30min(self, daemon: StageDaemon) -> None:
+        """POST_RUN should timeout after 30 minutes."""
         run = {
-            "state": StageState.FINALIZING.value,
+            "state": StageState.POST_RUN.value,
             "state_entered_at": (datetime.now(UTC) - timedelta(minutes=31)).isoformat(),
         }
 
@@ -661,7 +661,7 @@ class TestGetActiveRuns:
             StageState.BUILDING,
             StageState.LAUNCHING,
             StageState.RUNNING,
-            StageState.FINALIZING,
+            StageState.POST_RUN,
         ]
 
         for i, state in enumerate(active_states):
@@ -1195,7 +1195,7 @@ class TestStateTimeoutsConstant:
             StageState.BUILDING,
             StageState.LAUNCHING,
             StageState.RUNNING,
-            StageState.FINALIZING,
+            StageState.POST_RUN,
             StageState.UNKNOWN,
         ]
 
@@ -1211,7 +1211,7 @@ class TestStateTimeoutsConstant:
         assert STATE_TIMEOUTS[StageState.BUILDING] == timedelta(minutes=30)
         assert STATE_TIMEOUTS[StageState.LAUNCHING] == timedelta(minutes=20)
         assert STATE_TIMEOUTS[StageState.RUNNING] == timedelta(hours=24)
-        assert STATE_TIMEOUTS[StageState.FINALIZING] == timedelta(minutes=30)
+        assert STATE_TIMEOUTS[StageState.POST_RUN] == timedelta(minutes=30)
         assert STATE_TIMEOUTS[StageState.UNKNOWN] == timedelta(hours=24)
 
     def test_state_timeouts_has_no_terminal_states(self) -> None:

@@ -300,7 +300,7 @@ class TestMapGceStatusIntegration:
         as FAILED because the bucket path was constructed without gs:// prefix,
         causing gsutil to fail and _get_exit_code to return 1 (failure).
         """
-        from goldfish.models import StageRunStatus
+        from goldfish.state_machine.types import StageState
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
@@ -312,7 +312,7 @@ class TestMapGceStatusIntegration:
             status = launcher._map_gce_status("TERMINATED", "stage-68043eed")
 
             # Must return COMPLETED, not FAILED
-            assert status == StageRunStatus.COMPLETED, f"TERMINATED with exit_code=0 should be COMPLETED, got {status}"
+            assert status == StageState.COMPLETED, f"TERMINATED with exit_code=0 should be COMPLETED, got {status}"
 
             # Verify correct GCS path was used (includes project_id option)
             call_args = mock_run.call_args[0][0]
@@ -326,7 +326,7 @@ class TestMapGceStatusIntegration:
 
     def test_terminated_with_exit_code_nonzero_returns_failed(self, launcher):
         """TERMINATED instance with non-zero exit code should return FAILED."""
-        from goldfish.models import StageRunStatus
+        from goldfish.state_machine.types import StageState
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
@@ -336,7 +336,7 @@ class TestMapGceStatusIntegration:
             )
 
             status = launcher._map_gce_status("TERMINATED", "stage-xyz")
-            assert status == StageRunStatus.FAILED
+            assert status == StageState.FAILED
 
 
 class TestGetInstanceLogsRetry:

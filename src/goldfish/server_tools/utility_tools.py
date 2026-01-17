@@ -293,8 +293,7 @@ def dashboard() -> dict:
             "run_id": row["id"],
             "workspace": row["workspace_name"],
             "stage": row["stage_name"],
-            "status": row["status"],
-            "progress": row.get("progress"),
+            "state": row.get("state"),
             "started_at": row.get("started_at"),
         }
         for row in active_rows

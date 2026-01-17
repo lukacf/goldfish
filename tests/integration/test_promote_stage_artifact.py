@@ -3,7 +3,6 @@ from unittest.mock import MagicMock
 from goldfish import server
 from goldfish.config import AuditConfig, GoldfishConfig, JobsConfig, StateMdConfig
 from goldfish.db.database import Database
-from goldfish.models import StageRunStatus
 from goldfish.state.state_md import StateManager
 
 
@@ -75,7 +74,7 @@ class TestPromoteStageArtifact:
                     """
                     INSERT INTO stage_runs (
                         id, workspace_name, stage_name, stage_version_id, version,
-                        status, started_at, completed_at, artifact_uri
+                        state, started_at, completed_at, artifact_uri
                     ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?)
                     """,
                     (
@@ -84,7 +83,7 @@ class TestPromoteStageArtifact:
                         "preprocess",
                         stage_version_id,
                         "v1",
-                        StageRunStatus.COMPLETED,
+                        "completed",
                         f"gs://bucket/{stage_run_id}",
                     ),
                 )

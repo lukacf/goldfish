@@ -118,14 +118,24 @@ class TestCancelRunStateMachine:
         assert result["previous_state"] == "running"
         assert result["new_state"] == "canceled"
 
-    def test_cancel_from_finalizing_succeeds(self, test_db: Database) -> None:
-        """Cancel from FINALIZING state transitions to CANCELED."""
-        run_id = _create_run_in_state(test_db, StageState.FINALIZING)
+    def test_cancel_from_post_run_succeeds(self, test_db: Database) -> None:
+        """Cancel from POST_RUN state transitions to CANCELED."""
+        run_id = _create_run_in_state(test_db, StageState.POST_RUN)
 
         result = cancel_run(test_db, run_id, "User requested cancellation")
 
         assert result["success"] is True
-        assert result["previous_state"] == "finalizing"
+        assert result["previous_state"] == "post_run"
+        assert result["new_state"] == "canceled"
+
+    def test_cancel_from_awaiting_user_finalization_succeeds(self, test_db: Database) -> None:
+        """Cancel from AWAITING_USER_FINALIZATION state transitions to CANCELED."""
+        run_id = _create_run_in_state(test_db, StageState.AWAITING_USER_FINALIZATION)
+
+        result = cancel_run(test_db, run_id, "User requested cancellation")
+
+        assert result["success"] is True
+        assert result["previous_state"] == "awaiting_user_finalization"
         assert result["new_state"] == "canceled"
 
     def test_cancel_from_completed_fails(self, test_db: Database) -> None:

@@ -23,6 +23,7 @@ from goldfish.experiment_model.schemas import (
     validate_finalize_results,
     validate_results_spec,
 )
+from goldfish.state_machine import EventContext, StageEvent, StageState, transition
 
 # Crockford's Base32 alphabet (excludes I, L, O, U to avoid confusion)
 _CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -526,9 +527,11 @@ class ExperimentRecordManager:
         if state == "completed":
             return "completed"
         if state == "failed":
-            # FAILED = code/validation error, but infra worked correctly
-            # The container ran, the code executed, it just returned non-zero
-            return "completed"  # Infra did its job
+            # Per spec section 9.1: failed -> crashed
+            # The 'failed' state covers build failures, launch failures, execution
+            # failures (EXIT_FAILURE), and critical post-run failures. All are
+            # treated as infrastructure failures for outcome derivation.
+            return "crashed"
         if state == "canceled":
             return "canceled"
         if state == "terminated":
@@ -677,6 +680,15 @@ class ExperimentRecordManager:
                 """,
                 (results_json, "finalized", ml_outcome, finalized_by, finalized_at, comparison_json, stage_run_id),
             )
+
+        # Emit USER_FINALIZE state transition if in AWAITING_USER_FINALIZATION state
+        stage_run = self.db.get_stage_run(stage_run_id)
+        if stage_run and stage_run.get("state") == StageState.AWAITING_USER_FINALIZATION.value:
+            ctx = EventContext(
+                timestamp=datetime.now(UTC),
+                source="mcp_tool",
+            )
+            transition(self.db, stage_run_id, StageEvent.USER_FINALIZE, ctx)
 
         return {
             "record_id": record_id,
@@ -1638,7 +1650,8 @@ class ExperimentRecordManager:
         return self.get_record_by_stage_run(ref)
 
     # Terminal infra outcomes that require finalization before new runs
-    _TERMINAL_INFRA_OUTCOMES = {"completed", "preempted", "crashed", "canceled"}
+    # NOTE: canceled is excluded because cancel() already captures the reason
+    _TERMINAL_INFRA_OUTCOMES = {"completed", "preempted", "crashed"}
 
     def is_terminal_infra_outcome(self, infra_outcome: str) -> bool:
         """Check if an infra_outcome is terminal.

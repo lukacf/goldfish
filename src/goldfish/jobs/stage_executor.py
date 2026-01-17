@@ -36,8 +36,6 @@ from goldfish.models import (
     RunReview,
     StageDef,
     StageRunInfo,
-    StageRunProgress,
-    StageRunStatus,
 )
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.pipeline.validator import validate_pipeline_run
@@ -47,10 +45,13 @@ from goldfish.state_machine import (
 from goldfish.state_machine import (
     FinalizationTracker,
     StageEvent,
+    StageState,
+    TerminationCause,
 )
 from goldfish.state_machine import (
     transition as sm_transition,
 )
+from goldfish.state_machine.transitions import TERMINAL_STATES
 from goldfish.svs.contract import resolve_config_params
 from goldfish.svs.manifest import read_svs_manifests
 from goldfish.svs.post_run import run_post_run_review
@@ -370,10 +371,9 @@ class StageExecutor:
                     SMEventContext(timestamp=datetime.now(UTC), source="executor", error_message=error_msg),
                 )
 
-                # Legacy compatibility (status/progress) – updated until mapping is centralized in state machine.
+                # Update non-state metadata (state machine handles state via SVS_BLOCK transition above)
                 self.db.update_stage_run_status(
                     stage_run_id,
-                    StageRunStatus.FAILED,
                     completed_at=datetime.now(UTC).isoformat(),
                     error=error_msg,
                 )
@@ -385,7 +385,8 @@ class StageExecutor:
                     pipeline=pipeline_name,
                     version=version,
                     stage=stage_name,
-                    status=StageRunStatus.FAILED,
+                    status=StageState.FAILED,
+                    state=StageState.FAILED.value,
                     started_at=datetime.now(UTC),
                     completed_at=datetime.now(UTC),
                     error=error_msg,
@@ -422,13 +423,6 @@ class StageExecutor:
                 SMEventContext(timestamp=datetime.now(UTC), source="executor"),
             )
 
-            # Legacy compatibility (status/progress) – updated until mapping is centralized in state machine.
-            self.db.update_stage_run_status(
-                stage_run_id=stage_run_id,
-                status=StageRunStatus.RUNNING,
-                progress=StageRunProgress.BUILD,
-            )
-
             # 6. Build Docker image (use profile's base image)
             profile_name = stage_config.get("compute", {}).get("profile")
             image_tag = self._build_docker_image(workspace, version, profile_name=profile_name)
@@ -439,13 +433,6 @@ class StageExecutor:
                 stage_run_id,
                 StageEvent.BUILD_OK,
                 SMEventContext(timestamp=datetime.now(UTC), source="executor"),
-            )
-
-            # Legacy compatibility (status/progress) – updated until mapping is centralized in state machine.
-            self.db.update_stage_run_status(
-                stage_run_id=stage_run_id,
-                status=StageRunStatus.RUNNING,
-                progress=StageRunProgress.LAUNCH,
             )
 
             # 7. Launch container
@@ -498,10 +485,9 @@ class StageExecutor:
             if not result.success:
                 sm_transition(self.db, stage_run_id, StageEvent.LAUNCH_FAIL, ctx)
 
-            # Legacy compatibility
+            # Update non-state metadata (state machine handles state via BUILD_FAIL/LAUNCH_FAIL above)
             self.db.update_stage_run_status(
                 stage_run_id=stage_run_id,
-                status=StageRunStatus.FAILED,
                 completed_at=datetime.now(UTC).isoformat(),
                 error=error_msg,
             )
@@ -517,10 +503,10 @@ class StageExecutor:
             stage=stage_name,
             stage_version=stage_version_id,
             stage_version_num=stage_version_num,
-            status=StageRunStatus.RUNNING,
+            status=StageState.RUNNING,
             started_at=datetime.now(UTC),
             log_uri=str(self.dev_repo / ".goldfish" / "runs" / stage_run_id / "logs" / "output.log"),
-            progress=StageRunProgress.LAUNCH,
+            state=StageState.LAUNCHING.value,
             profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
             hints=stage_config.get("hints"),
             config=stage_config,
@@ -533,7 +519,7 @@ class StageExecutor:
             if refreshed:
                 # Exclude fields we're overriding to avoid duplicate keyword args
                 base_fields = info.model_dump(
-                    exclude={"status", "completed_at", "log_uri", "artifact_uri", "progress", "outputs", "error"}
+                    exclude={"status", "completed_at", "log_uri", "artifact_uri", "state", "outputs", "error"}
                 )
                 return StageRunInfo(
                     **base_fields,
@@ -541,7 +527,7 @@ class StageExecutor:
                     completed_at=parse_optional_datetime(refreshed.get("completed_at")),
                     log_uri=refreshed.get("log_uri"),
                     artifact_uri=refreshed.get("artifact_uri"),
-                    progress=refreshed.get("progress"),
+                    state=refreshed.get("state"),
                     outputs=json.loads(refreshed["outputs_json"]) if refreshed.get("outputs_json") else None,
                     error=refreshed.get("error"),
                 )
@@ -676,7 +662,7 @@ class StageExecutor:
                     p_runs = self.db.list_stage_runs(
                         pipeline_run_id=pipeline_run_id,
                         stage_name=input_def.from_stage,
-                        status=StageRunStatus.COMPLETED,
+                        state=StageState.COMPLETED.value,
                     )
                     if p_runs:
                         source_run = p_runs[0]  # Most recent in this pipeline
@@ -686,7 +672,7 @@ class StageExecutor:
                     # Find output from previous stage
                     # Priority: Most recent COMPLETED run that is NOT 'bad_results'
                     stage_runs = self.db.list_stage_runs(
-                        workspace_name=workspace, stage_name=input_def.from_stage, status=StageRunStatus.COMPLETED
+                        workspace_name=workspace, stage_name=input_def.from_stage, state=StageState.COMPLETED.value
                     )
 
                     for run in stage_runs:
@@ -716,8 +702,7 @@ class StageExecutor:
                 ctx.update(
                     {
                         "selected_run_id": source_run_id,
-                        "selected_run_status": source_run.get("status"),
-                        "selected_run_progress": source_run.get("progress"),
+                        "selected_run_state": source_run.get("state"),
                         "selected_run_started_at": source_run.get("started_at"),
                         "selected_run_outcome": source_run.get("outcome"),
                     }
@@ -763,8 +748,7 @@ class StageExecutor:
                     ctx.update(
                         {
                             "latest_run_id": latest.get("id"),
-                            "latest_run_status": latest.get("status"),
-                            "latest_run_progress": latest.get("progress"),
+                            "latest_run_state": latest.get("state"),
                             "latest_run_started_at": latest.get("started_at"),
                             "latest_run_outcome": latest.get("outcome"),
                         }
@@ -1713,7 +1697,8 @@ class StageExecutor:
             return warnings
 
         row = self.db.get_stage_run(stage_run_id)
-        if not row or row.get("status") != StageRunStatus.RUNNING:
+        # Check state (source of truth), not legacy status
+        if not row or row.get("state") != StageState.RUNNING.value:
             with self._metrics_sync_lock:
                 self._metrics_sync_state.pop(stage_run_id, None)
             return warnings
@@ -1777,7 +1762,8 @@ class StageExecutor:
             return
 
         row = self.db.get_stage_run(stage_run_id)
-        if not row or row.get("status") != StageRunStatus.RUNNING:
+        # Check state (source of truth), not legacy status
+        if not row or row.get("state") != StageState.RUNNING.value:
             with self._svs_sync_lock:
                 self._svs_sync_state.pop(stage_run_id, None)
             return
@@ -2268,16 +2254,19 @@ echo "Stage completed successfully"
             raise GoldfishError(f"Backend {backend} not supported for launch")
 
     def _finalize_stage_run(self, stage_run_id: str, backend: str, status: str) -> None:
-        """Handle terminal status: record outputs, fetch logs, update status."""
+        """Handle terminal status: record outputs, fetch logs, transition state."""
         # CAS guard against double-finalize (only finalize if still in non-terminal state)
-        terminal_statuses = (StageRunStatus.COMPLETED, StageRunStatus.FAILED, StageRunStatus.CANCELED)
+        # Use state column (source of truth) for the check
+        terminal_state_values = tuple(s.value for s in TERMINAL_STATES)
+        placeholders = ", ".join("?" for _ in terminal_state_values)
         with self.db._conn() as conn:
-            updated = conn.execute(
-                "UPDATE stage_runs SET status=?, completed_at=? WHERE id=? AND status NOT IN (?, ?, ?)",
-                (status, datetime.now(UTC).isoformat(), stage_run_id, *terminal_statuses),
-            ).rowcount
-        if updated == 0:
-            return
+            # Check if already terminal - use CAS pattern on state column
+            row = conn.execute(
+                f"SELECT state FROM stage_runs WHERE id = ? AND state NOT IN ({placeholders})",
+                (stage_run_id, *terminal_state_values),
+            ).fetchone()
+        if not row:
+            return  # Already in terminal state, skip finalization
 
         # Re-read fresh row after CAS
         stage_run = self.db.get_stage_run(stage_run_id)
@@ -2287,11 +2276,11 @@ echo "Stage completed successfully"
         workspace = stage_run["workspace_name"]
         stage_name_from_db = stage_run["stage_name"]
 
-        # State machine: successful execution enters FINALIZING via EXIT_SUCCESS.
-        # (Failure paths transition to FAILED/TERMINATED and do not enter FINALIZING per spec.)
+        # State machine: successful execution enters POST_RUN via EXIT_SUCCESS (v1.2).
+        # (Failure paths transition to FAILED/TERMINATED and do not enter POST_RUN per spec.)
         warnings: list[str] = []
         tracker: FinalizationTracker | None = None
-        if status == StageRunStatus.COMPLETED:
+        if status == StageState.COMPLETED:
             # Best-effort: if we never observed the instance in RUNNING, still mark launch OK.
             sm_transition(
                 self.db,
@@ -2324,7 +2313,7 @@ echo "Stage completed successfully"
             bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
             gcs_base = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/outputs"
 
-        if status == StageRunStatus.COMPLETED:
+        if status == StageState.COMPLETED:
             try:
                 self._record_output_signals(stage_run_id, workspace, stage_name_from_db, gcs_base=gcs_base)
                 if tracker is not None:
@@ -2332,11 +2321,11 @@ echo "Stage completed successfully"
             except Exception as e:
                 # If outputs fail to record, mark run failed and surface error
                 error_msg = f"Output recording failed: {e}"
-                # State machine: FINALIZING → FAILED (FINALIZE_FAIL, critical=True)
+                # State machine: POST_RUN → FAILED (POST_RUN_FAIL, critical=True) (v1.2)
                 sm_transition(
                     self.db,
                     stage_run_id,
-                    StageEvent.FINALIZE_FAIL,
+                    StageEvent.POST_RUN_FAIL,
                     SMEventContext(
                         timestamp=datetime.now(UTC),
                         source="executor",
@@ -2345,13 +2334,11 @@ echo "Stage completed successfully"
                     ),
                 )
 
-                # Legacy compatibility: mark failed and stop finalization.
+                # Update non-state metadata (state machine handles state via POST_RUN_FAIL above)
                 self.db.update_stage_run_status(
                     stage_run_id=stage_run_id,
-                    status=StageRunStatus.FAILED,
                     completed_at=datetime.now(UTC).isoformat(),
                     error=error_msg,
-                    progress=StageRunProgress.FINALIZING,
                 )
                 return
 
@@ -2414,7 +2401,7 @@ echo "Stage completed successfully"
             logger.warning(f"Failed to collect SVS manifests for {stage_run_id}: {e}")
 
         # Extract failure pattern for self-learning (only on failure)
-        if status == StageRunStatus.FAILED and self.config.svs.enabled and self.config.svs.auto_learn_failures:
+        if status == StageState.FAILED and self.config.svs.enabled and self.config.svs.auto_learn_failures:
             import threading
 
             from goldfish.svs.agent import get_agent_provider
@@ -2450,7 +2437,7 @@ echo "Stage completed successfully"
         # Preserve meaningful error messages set before finalize (e.g., "Instance preempted")
         # Only use logs as error if no meaningful error was already set
         final_error = None
-        if status == StageRunStatus.FAILED:
+        if status == StageState.FAILED:
             # Check for existing meaningful error (set by monitor/refresh before finalize)
             existing_error = stage_run.get("error")
             if existing_error and not existing_error.startswith("[GCE logs unavailable"):
@@ -2464,22 +2451,21 @@ echo "Stage completed successfully"
                 # No meaningful error - use logs as error
                 final_error = self._redact_logs(logs[-STAGE_LOG_TAIL_FOR_FINALIZE:])
 
+        # Update non-state metadata (state machine handles state via POST_RUN_OK/POST_RUN_FAIL below)
         self.db.update_stage_run_status(
             stage_run_id=stage_run_id,
-            status=status,
             completed_at=datetime.now(UTC).isoformat(),
             log_uri=log_uri,
             error=final_error,
-            progress=StageRunProgress.FINALIZING,
         )
 
-        # State machine: finalize success path (with warnings support).
-        if status == StageRunStatus.COMPLETED:
+        # State machine: post-run success path → AWAITING_USER_FINALIZATION (v1.2).
+        if status == StageState.COMPLETED:
             if warnings:
                 sm_transition(
                     self.db,
                     stage_run_id,
-                    StageEvent.FINALIZE_FAIL,
+                    StageEvent.POST_RUN_FAIL,
                     SMEventContext(
                         timestamp=datetime.now(UTC),
                         source="executor",
@@ -2491,7 +2477,7 @@ echo "Stage completed successfully"
                 sm_transition(
                     self.db,
                     stage_run_id,
-                    StageEvent.FINALIZE_OK,
+                    StageEvent.POST_RUN_OK,
                     SMEventContext(timestamp=datetime.now(UTC), source="executor"),
                 )
 
@@ -2514,7 +2500,7 @@ echo "Stage completed successfully"
             timeout: Maximum seconds to wait (default 3600 = 1 hour)
 
         Returns:
-            Final status: StageRunStatus.COMPLETED or FAILED
+            Final state: StageState.COMPLETED or FAILED
 
         Raises:
             GoldfishError: If timeout exceeded or container not found
@@ -2533,21 +2519,14 @@ echo "Stage completed successfully"
             if backend == "local":
                 status = self.local_executor.get_container_status(stage_run_id)
 
-                if status == StageRunStatus.RUNNING:
-                    # Still running, update status in db
-                    self.db.update_stage_run_status(
-                        stage_run_id=stage_run_id, status=StageRunStatus.RUNNING, progress=StageRunProgress.RUNNING
-                    )
+                if status == StageState.RUNNING:
+                    # Still running - state machine already has state=RUNNING
                     interval = self._poll_interval(int(elapsed))
                     time.sleep(interval)
                     continue
 
-                elif status in (StageRunStatus.COMPLETED, StageRunStatus.FAILED):
-                    self.db.update_stage_run_status(
-                        stage_run_id=stage_run_id,
-                        status=StageRunStatus.RUNNING,
-                        progress=StageRunProgress.FINALIZING,
-                    )
+                elif status in (StageState.COMPLETED, StageState.FAILED):
+                    # State machine handles RUNNING → POST_RUN via EXIT_SUCCESS in _finalize_stage_run (v1.2)
                     self._finalize_stage_run(stage_run_id, backend, status)
                     return status
 
@@ -2565,21 +2544,14 @@ echo "Stage completed successfully"
             elif backend == "gce":
                 status = self.gce_launcher.get_instance_status(stage_run_id)
 
-                if status == StageRunStatus.RUNNING:
-                    # Still running, update status in db
-                    self.db.update_stage_run_status(
-                        stage_run_id=stage_run_id, status=StageRunStatus.RUNNING, progress=StageRunProgress.RUNNING
-                    )
+                if status == StageState.RUNNING:
+                    # Still running - state machine already has state=RUNNING
                     interval = self._poll_interval(int(elapsed))
                     time.sleep(interval)
                     continue
 
-                elif status in (StageRunStatus.COMPLETED, StageRunStatus.FAILED):
-                    self.db.update_stage_run_status(
-                        stage_run_id=stage_run_id,
-                        status=StageRunStatus.RUNNING,
-                        progress=StageRunProgress.FINALIZING,
-                    )
+                elif status in (StageState.COMPLETED, StageState.FAILED):
+                    # State machine handles RUNNING → POST_RUN via EXIT_SUCCESS in _finalize_stage_run (v1.2)
                     self._finalize_stage_run(stage_run_id, backend, status)
                     return status
 
@@ -2592,14 +2564,14 @@ echo "Stage completed successfully"
                         )
                         last_log = now
 
-                    # Check progress before timeout handling
+                    # Check state before timeout handling
                     row = self.db.get_stage_run(stage_run_id)
-                    progress = row.get("progress") if row else None
+                    state_val = row.get("state") if row else None
 
-                    # Check if instance ever ran by looking at progress or GCS artifacts
-                    # Exit code in GCS proves the instance ran, even if progress wasn't updated
+                    # Check if instance ever ran by looking at state or GCS artifacts
+                    # Exit code in GCS proves the instance ran, even if state wasn't updated
                     exit_result = self.gce_launcher._get_exit_code(stage_run_id)
-                    instance_ran = progress == StageRunProgress.RUNNING or exit_result.exists
+                    instance_ran = state_val == StageState.RUNNING.value or exit_result.exists
 
                     # Use longer timeout for BUILD/LAUNCH phases (GPU provisioning can take 15+ minutes)
                     launch_timeout = int(os.getenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "1200"))  # 20 min default
@@ -2607,10 +2579,10 @@ echo "Stage completed successfully"
                     if not_found_timeout <= 0:
                         effective_timeout = 0
                     else:
+                        # In BUILDING/LAUNCHING state and no evidence of running, use longer timeout
+                        in_pre_run_state = state_val in (StageState.BUILDING.value, StageState.LAUNCHING.value)
                         effective_timeout = (
-                            launch_timeout
-                            if progress in (StageRunProgress.BUILD, StageRunProgress.LAUNCH) and not instance_ran
-                            else not_found_timeout
+                            launch_timeout if in_pre_run_state and not instance_ran else not_found_timeout
                         )
 
                     if elapsed >= effective_timeout:
@@ -2622,36 +2594,48 @@ echo "Stage completed successfully"
                                 f"(likely spot preemption), finalizing with exit_code={exit_code_val}"
                             )
                             resolved = (
-                                StageRunStatus.COMPLETED
+                                StageState.COMPLETED
                                 if (exit_result.exists and exit_result.code == 0 and not exit_result.gcs_error)
-                                else StageRunStatus.FAILED
+                                else StageState.FAILED
                             )
                             error_msg = (
                                 f"Instance preempted/terminated unexpectedly (exit_code={exit_code_val})"
-                                if resolved == StageRunStatus.FAILED
+                                if resolved == StageState.FAILED
                                 else None
                             )
-                            self.db.update_stage_run_status(
-                                stage_run_id=stage_run_id,
-                                status=StageRunStatus.RUNNING,
-                                progress=StageRunProgress.FINALIZING,
-                                error=error_msg,
-                            )
+                            # Update error metadata if needed (state machine handles POST_RUN transition v1.2)
+                            if error_msg:
+                                self.db.update_stage_run_status(
+                                    stage_run_id=stage_run_id,
+                                    error=error_msg,
+                                )
                             self._finalize_stage_run(stage_run_id, backend, resolved)
                             return resolved
                         else:
-                            # Never ran - mark as failed
+                            # Never ran - mark as terminated via state machine
                             logger.error(
                                 f"GCE instance {stage_run_id} not found after {not_found_timeout}s "
-                                f"(progress={progress}), marking as failed"
+                                f"(state={state_val}), marking as terminated"
+                            )
+                            error_msg = f"Instance not found after {not_found_timeout}s (may have failed to launch)"
+                            # State machine: LAUNCHING → TERMINATED (instance never ran)
+                            sm_transition(
+                                self.db,
+                                stage_run_id,
+                                StageEvent.INSTANCE_LOST,
+                                SMEventContext(
+                                    timestamp=datetime.now(UTC),
+                                    source="executor",
+                                    termination_cause=TerminationCause.ORPHANED,
+                                    error_message=error_msg,
+                                ),
                             )
                             self.db.update_stage_run_status(
                                 stage_run_id=stage_run_id,
-                                status=StageRunStatus.FAILED,
                                 completed_at=datetime.now(UTC).isoformat(),
-                                error=f"Instance not found after {not_found_timeout}s (may have failed to launch)",
+                                error=error_msg,
                             )
-                            return StageRunStatus.FAILED
+                            return StageState.TERMINATED
                     time.sleep(poll_interval)
                     continue
 
@@ -2665,12 +2649,12 @@ echo "Stage completed successfully"
         # Should not reach here
 
     def refresh_status_once(self, stage_run_id: str) -> str | None:
-        """Single backend check to advance status/logs/outputs without blocking."""
+        """Single backend check to advance state/logs/outputs without blocking."""
         with self._refresh_lock:
             if stage_run_id in self._refreshing_runs:
                 # Already being refreshed by another thread
                 row = self.db.get_stage_run(stage_run_id)
-                return row.get("status") if row else None
+                return row.get("state") if row else None  # state is source of truth
             self._refreshing_runs.add(stage_run_id)
 
         try:
@@ -2682,52 +2666,39 @@ echo "Stage completed successfully"
     def _refresh_status_once_unlocked(self, stage_run_id: str) -> str | None:
         """Internal implementation of refresh_status_once without locking."""
         backend = self.config.jobs.backend
-        terminal_statuses = (StageRunStatus.COMPLETED, StageRunStatus.FAILED, StageRunStatus.CANCELED)
 
         if backend == "local":
             status = self.local_executor.get_container_status(stage_run_id)
-            if status == StageRunStatus.RUNNING:
-                # CAS: only update if not in terminal state
-                with self.db._conn() as conn:
-                    conn.execute(
-                        "UPDATE stage_runs SET status=?, progress=? WHERE id=? AND status NOT IN (?, ?, ?)",
-                        (StageRunStatus.RUNNING, StageRunProgress.RUNNING, stage_run_id, *terminal_statuses),
-                    )
-            elif status in (StageRunStatus.COMPLETED, StageRunStatus.FAILED):
-                # Guard against double-finalize by only doing it if not terminal
+            if status == StageState.RUNNING:
+                # State machine already has state=RUNNING, no update needed
+                pass
+            elif status in (StageState.COMPLETED, StageState.FAILED):
+                # Guard against double-finalize by checking state (source of truth)
                 current = self.db.get_stage_run(stage_run_id)
-                if current and current.get("status") not in terminal_statuses:
-                    self.db.update_stage_run_status(
-                        stage_run_id=stage_run_id,
-                        status=StageRunStatus.RUNNING,
-                        progress=StageRunProgress.FINALIZING,
-                    )
+                current_state = current.get("state") if current else None
+                if current and current_state not in {s.value for s in TERMINAL_STATES}:
+                    # State machine handles RUNNING → POST_RUN in _finalize_stage_run (v1.2)
                     self._finalize_stage_run(stage_run_id, backend, status)
             return status
 
         if backend == "gce":
             status = self.gce_launcher.get_instance_status(stage_run_id)
-            if status == StageRunStatus.RUNNING:
-                with self.db._conn() as conn:
-                    conn.execute(
-                        "UPDATE stage_runs SET status=?, progress=? WHERE id=? AND status NOT IN (?, ?, ?)",
-                        (StageRunStatus.RUNNING, StageRunProgress.RUNNING, stage_run_id, *terminal_statuses),
-                    )
-            elif status in (StageRunStatus.COMPLETED, StageRunStatus.FAILED):
+            if status == StageState.RUNNING:
+                # State machine already has state=RUNNING, no update needed
+                pass
+            elif status in (StageState.COMPLETED, StageState.FAILED):
+                # Guard against double-finalize by checking state (source of truth)
                 current = self.db.get_stage_run(stage_run_id)
-                if current and current.get("status") not in terminal_statuses:
-                    self.db.update_stage_run_status(
-                        stage_run_id=stage_run_id,
-                        status=StageRunStatus.RUNNING,
-                        progress=StageRunProgress.FINALIZING,
-                    )
+                current_state = current.get("state") if current else None
+                if current and current_state not in {s.value for s in TERMINAL_STATES}:
+                    # State machine handles RUNNING → POST_RUN in _finalize_stage_run (v1.2)
                     self._finalize_stage_run(stage_run_id, backend, status)
             elif status == "not_found":
                 row = self.db.get_stage_run(stage_run_id)
                 if not row:
                     return status
 
-                progress = row.get("progress")
+                state_val = row.get("state")
                 not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
                 started_at = row.get("started_at")
                 elapsed = float(not_found_timeout)
@@ -2738,12 +2709,13 @@ echo "Stage completed successfully"
                     except ValueError:
                         elapsed = float(not_found_timeout)
 
-                # Check for GCS artifacts - proves instance ran even if progress wasn't updated
+                # Check for GCS artifacts - proves instance ran even if state wasn't updated
                 exit_result = self.gce_launcher._get_exit_code(stage_run_id)
-                instance_ran = progress == StageRunProgress.RUNNING or exit_result.exists
+                instance_ran = state_val == StageState.RUNNING.value or exit_result.exists
 
-                # If in build/launch phase and no evidence of running, skip recovery
-                if progress in (StageRunProgress.BUILD, StageRunProgress.LAUNCH) and not instance_ran:
+                # If in build/launch state and no evidence of running, skip recovery
+                in_pre_run_state = state_val in (StageState.BUILDING.value, StageState.LAUNCHING.value)
+                if in_pre_run_state and not instance_ran:
                     return status
 
                 if elapsed < not_found_timeout:
@@ -2751,26 +2723,28 @@ echo "Stage completed successfully"
 
                 # Instance disappeared after timeout - finalize it
                 resolved = (
-                    StageRunStatus.COMPLETED
+                    StageState.COMPLETED
                     if (exit_result.exists and exit_result.code == 0 and not exit_result.gcs_error)
-                    else StageRunStatus.FAILED
+                    else StageState.FAILED
                 )
 
+                # Guard against double-finalize by checking state (source of truth)
                 current = self.db.get_stage_run(stage_run_id)
-                if current and current.get("status") not in terminal_statuses:
+                current_state = current.get("state") if current else None
+                if current and current_state not in {s.value for s in TERMINAL_STATES}:
                     error_msg = None
-                    if resolved == StageRunStatus.FAILED:
+                    if resolved == StageState.FAILED:
                         if instance_ran:
                             exit_code_val = exit_result.code if exit_result.exists else None
                             error_msg = f"Instance preempted/terminated unexpectedly (exit_code={exit_code_val})"
                         else:
                             error_msg = f"Instance not found after {not_found_timeout}s (may have failed to launch)"
-                    self.db.update_stage_run_status(
-                        stage_run_id=stage_run_id,
-                        status=StageRunStatus.RUNNING,
-                        progress=StageRunProgress.FINALIZING,
-                        error=error_msg,
-                    )
+                    # Update error metadata if needed (state machine handles state in _finalize_stage_run)
+                    if error_msg:
+                        self.db.update_stage_run_status(
+                            stage_run_id=stage_run_id,
+                            error=error_msg,
+                        )
                     self._finalize_stage_run(stage_run_id, backend, resolved)
                 return resolved
             return status
@@ -3026,10 +3000,17 @@ echo "Stage completed successfully"
             stage_run_id=stage_run_id,
         )
 
-        # Update status to FAILED with error message
+        # State machine: PREPARING → FAILED (SVS_BLOCK)
+        sm_transition(
+            self.db,
+            stage_run_id,
+            StageEvent.SVS_BLOCK,
+            SMEventContext(timestamp=datetime.now(UTC), source="executor", error_message=error_msg),
+        )
+
+        # Update non-state metadata (error message)
         self.db.update_stage_run_status(
             stage_run_id=stage_run_id,
-            status=StageRunStatus.FAILED,
             error=error_msg,
         )
 
@@ -3043,7 +3024,8 @@ echo "Stage completed successfully"
             pipeline=pipeline_name,
             version=version,
             stage=stage_name,
-            status=StageRunStatus.FAILED,
+            status=StageState.FAILED,
+            state=StageState.FAILED.value,
             started_at=parse_optional_datetime(now),
             completed_at=parse_optional_datetime(now),
             error=error_msg,
@@ -3167,10 +3149,9 @@ echo "Stage completed successfully"
             SMEventContext(timestamp=datetime.now(UTC), source="executor", error_message=error_msg),
         )
 
-        # Legacy compatibility (status/progress)
+        # Update non-state metadata (state machine handles state via PREPARE_FAIL above)
         self.db.update_stage_run_status(
             stage_run_id=stage_run_id,
-            status=StageRunStatus.FAILED,
             completed_at=now,
             error=error_msg,
         )
@@ -3185,7 +3166,8 @@ echo "Stage completed successfully"
             pipeline=pipeline_name,
             version=version,
             stage=stage_name,
-            status=StageRunStatus.FAILED,
+            status=StageState.FAILED,
+            state=StageState.FAILED.value,
             started_at=parse_optional_datetime(now),
             completed_at=parse_optional_datetime(now),
             error=error_msg,

@@ -1,14 +1,31 @@
 """Integration tests for full lineage flow improvements."""
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
 
+from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.lineage.manager import LineageManager
-from goldfish.models import PipelineDef, SignalDef, StageDef, StageRunStatus
+from goldfish.models import PipelineDef, SignalDef, StageDef
+from goldfish.state_machine import EventContext, StageEvent, transition
+
+
+def _transition_to_completed(db: Database, stage_run_id: str) -> None:
+    """Transition a stage run to COMPLETED state via state machine (v1.2 lifecycle)."""
+    ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+    transition(db, stage_run_id, StageEvent.BUILD_START, ctx)
+    transition(db, stage_run_id, StageEvent.BUILD_OK, ctx)
+    transition(db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
+    success_ctx = EventContext(timestamp=datetime.now(UTC), source="executor", exit_code=0, exit_code_exists=True)
+    transition(db, stage_run_id, StageEvent.EXIT_SUCCESS, success_ctx)
+    transition(db, stage_run_id, StageEvent.POST_RUN_OK, ctx)
+    # v1.2: Now need USER_FINALIZE to reach COMPLETED
+    finalize_ctx = EventContext(timestamp=datetime.now(UTC), source="mcp_tool")
+    transition(db, stage_run_id, StageEvent.USER_FINALIZE, finalize_ctx)
 
 
 def test_full_lineage_flow(test_db, test_config, temp_dir, mocker):
@@ -70,7 +87,7 @@ def test_full_lineage_flow(test_db, test_config, temp_dir, mocker):
     assert stats["type"] == "tensor"
 
     # Mark as completed so train stage can use it
-    test_db.update_stage_run_status(run_id_prep, status=StageRunStatus.COMPLETED)
+    _transition_to_completed(test_db, run_id_prep)
     test_db.update_stage_run_outcome(run_id_prep, outcome="success")
 
     # 2. Train Stage Definition

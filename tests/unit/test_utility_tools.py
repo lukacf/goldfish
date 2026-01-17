@@ -179,8 +179,7 @@ class TestDashboard:
                 "id": "stage-running1",
                 "workspace_name": "baseline",
                 "stage_name": "train",
-                "status": "running",
-                "progress": "50%",
+                "state": "running",  # State machine state (source of truth)
                 "started_at": "2025-01-04T10:00:00Z",
             },
         ]
@@ -198,7 +197,7 @@ class TestDashboard:
 
         assert len(result["active_runs"]) == 1
         assert result["active_runs"][0]["run_id"] == "stage-running1"
-        assert result["active_runs"][0]["progress"] == "50%"
+        assert result["active_runs"][0]["state"] == "running"
 
     def test_dashboard_returns_workspace_summary(self):
         """Test that dashboard shows workspace summary with dirty status."""

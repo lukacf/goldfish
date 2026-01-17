@@ -26,8 +26,8 @@ class TestTransitionTable:
     """Tests for the TRANSITIONS constant."""
 
     def test_transition_count(self) -> None:
-        """Verify we have exactly 30 transitions (FORCE_* admin events removed)."""
-        assert len(TRANSITIONS) == 30
+        """Verify we have exactly 34 transitions (v1.2: added AWAITING_USER_FINALIZATION)."""
+        assert len(TRANSITIONS) == 34
 
     def test_all_active_states_have_transitions(self) -> None:
         """Every active state should have at least one outgoing transition."""
@@ -77,14 +77,15 @@ class TestStateCategories:
         )
 
     def test_active_states(self) -> None:
-        """Verify active states match spec."""
+        """Verify active states match spec (v1.2: renamed FINALIZING→POST_RUN, added AWAITING_USER_FINALIZATION)."""
         assert ACTIVE_STATES == frozenset(
             {
                 StageState.PREPARING,
                 StageState.BUILDING,
                 StageState.LAUNCHING,
                 StageState.RUNNING,
-                StageState.FINALIZING,
+                StageState.POST_RUN,
+                StageState.AWAITING_USER_FINALIZATION,
             }
         )
 
@@ -154,44 +155,44 @@ class TestGuardedTransitions:
         t = find_transition(StageState.RUNNING, StageEvent.EXIT_MISSING, ctx)
         assert t is None
 
-    def test_finalize_fail_critical_true(self) -> None:
-        """FINALIZE_FAIL with critical=True → FAILED."""
+    def test_post_run_fail_critical_true(self) -> None:
+        """POST_RUN_FAIL with critical=True → FAILED (v1.2: renamed from FINALIZE_FAIL)."""
         ctx = make_context(critical=True)
-        t = find_transition(StageState.FINALIZING, StageEvent.FINALIZE_FAIL, ctx)
+        t = find_transition(StageState.POST_RUN, StageEvent.POST_RUN_FAIL, ctx)
         assert t is not None
         assert t.to_state == StageState.FAILED
 
-    def test_finalize_fail_critical_false(self) -> None:
-        """FINALIZE_FAIL with critical=False → COMPLETED."""
+    def test_post_run_fail_critical_false(self) -> None:
+        """POST_RUN_FAIL with critical=False → AWAITING_USER_FINALIZATION (v1.2)."""
         ctx = make_context(critical=False)
-        t = find_transition(StageState.FINALIZING, StageEvent.FINALIZE_FAIL, ctx)
+        t = find_transition(StageState.POST_RUN, StageEvent.POST_RUN_FAIL, ctx)
         assert t is not None
-        assert t.to_state == StageState.COMPLETED
+        assert t.to_state == StageState.AWAITING_USER_FINALIZATION
 
-    def test_finalize_fail_critical_none(self) -> None:
-        """FINALIZE_FAIL with critical=None → no transition (guard fails)."""
+    def test_post_run_fail_critical_none(self) -> None:
+        """POST_RUN_FAIL with critical=None → no transition (guard fails)."""
         ctx = make_context(critical=None)
-        t = find_transition(StageState.FINALIZING, StageEvent.FINALIZE_FAIL, ctx)
+        t = find_transition(StageState.POST_RUN, StageEvent.POST_RUN_FAIL, ctx)
         assert t is None
 
-    def test_timeout_finalizing_critical_phases_done(self) -> None:
-        """TIMEOUT in FINALIZING with critical_phases_done=True → COMPLETED."""
+    def test_timeout_post_run_critical_phases_done(self) -> None:
+        """TIMEOUT in POST_RUN with critical_phases_done=True → AWAITING_USER_FINALIZATION (v1.2)."""
         ctx = make_context(critical_phases_done=True)
-        t = find_transition(StageState.FINALIZING, StageEvent.TIMEOUT, ctx)
+        t = find_transition(StageState.POST_RUN, StageEvent.TIMEOUT, ctx)
         assert t is not None
-        assert t.to_state == StageState.COMPLETED
+        assert t.to_state == StageState.AWAITING_USER_FINALIZATION
 
-    def test_timeout_finalizing_critical_phases_not_done(self) -> None:
-        """TIMEOUT in FINALIZING with critical_phases_done=False → FAILED."""
+    def test_timeout_post_run_critical_phases_not_done(self) -> None:
+        """TIMEOUT in POST_RUN with critical_phases_done=False → FAILED."""
         ctx = make_context(critical_phases_done=False)
-        t = find_transition(StageState.FINALIZING, StageEvent.TIMEOUT, ctx)
+        t = find_transition(StageState.POST_RUN, StageEvent.TIMEOUT, ctx)
         assert t is not None
         assert t.to_state == StageState.FAILED
 
-    def test_timeout_finalizing_critical_phases_none(self) -> None:
-        """TIMEOUT in FINALIZING with critical_phases_done=None → no transition."""
+    def test_timeout_post_run_critical_phases_none(self) -> None:
+        """TIMEOUT in POST_RUN with critical_phases_done=None → no transition."""
         ctx = make_context(critical_phases_done=None)
-        t = find_transition(StageState.FINALIZING, StageEvent.TIMEOUT, ctx)
+        t = find_transition(StageState.POST_RUN, StageEvent.TIMEOUT, ctx)
         assert t is None
 
 
@@ -277,10 +278,10 @@ class TestRunningTransitions:
     """Tests for RUNNING state transitions."""
 
     def test_exit_success(self, exit_success_context: EventContext) -> None:
-        """EXIT_SUCCESS → FINALIZING."""
+        """EXIT_SUCCESS → POST_RUN (v1.2: renamed from FINALIZING)."""
         t = find_transition(StageState.RUNNING, StageEvent.EXIT_SUCCESS, exit_success_context)
         assert t is not None
-        assert t.to_state == StageState.FINALIZING
+        assert t.to_state == StageState.POST_RUN
 
     def test_exit_failure(self, exit_failure_context: EventContext) -> None:
         """EXIT_FAILURE → FAILED."""
@@ -295,24 +296,40 @@ class TestRunningTransitions:
         assert t.to_state == StageState.TERMINATED
 
 
-class TestFinalizingTransitions:
-    """Tests for FINALIZING state transitions."""
+class TestPostRunTransitions:
+    """Tests for POST_RUN state transitions (v1.2: renamed from FINALIZING)."""
 
-    def test_finalize_ok(self, finalize_ok_context: EventContext) -> None:
-        """FINALIZE_OK → COMPLETED."""
-        t = find_transition(StageState.FINALIZING, StageEvent.FINALIZE_OK, finalize_ok_context)
+    def test_post_run_ok(self, post_run_ok_context: EventContext) -> None:
+        """POST_RUN_OK → AWAITING_USER_FINALIZATION (v1.2)."""
+        t = find_transition(StageState.POST_RUN, StageEvent.POST_RUN_OK, post_run_ok_context)
         assert t is not None
-        assert t.to_state == StageState.COMPLETED
+        assert t.to_state == StageState.AWAITING_USER_FINALIZATION
 
     def test_instance_lost(self, instance_lost_context: EventContext) -> None:
         """INSTANCE_LOST → TERMINATED."""
-        t = find_transition(StageState.FINALIZING, StageEvent.INSTANCE_LOST, instance_lost_context)
+        t = find_transition(StageState.POST_RUN, StageEvent.INSTANCE_LOST, instance_lost_context)
         assert t is not None
         assert t.to_state == StageState.TERMINATED
 
     def test_user_cancel(self, user_cancel_context: EventContext) -> None:
         """USER_CANCEL → CANCELED."""
-        t = find_transition(StageState.FINALIZING, StageEvent.USER_CANCEL, user_cancel_context)
+        t = find_transition(StageState.POST_RUN, StageEvent.USER_CANCEL, user_cancel_context)
+        assert t is not None
+        assert t.to_state == StageState.CANCELED
+
+
+class TestAwaitingUserFinalizationTransitions:
+    """Tests for AWAITING_USER_FINALIZATION state transitions (v1.2: new state)."""
+
+    def test_user_finalize(self, base_context: EventContext) -> None:
+        """USER_FINALIZE → COMPLETED."""
+        t = find_transition(StageState.AWAITING_USER_FINALIZATION, StageEvent.USER_FINALIZE, base_context)
+        assert t is not None
+        assert t.to_state == StageState.COMPLETED
+
+    def test_user_cancel(self, user_cancel_context: EventContext) -> None:
+        """USER_CANCEL → CANCELED."""
+        t = find_transition(StageState.AWAITING_USER_FINALIZATION, StageEvent.USER_CANCEL, user_cancel_context)
         assert t is not None
         assert t.to_state == StageState.CANCELED
 
@@ -408,10 +425,19 @@ class TestStateEntryPhases:
             assert state in STATE_ENTRY_PHASES, f"{state} missing from STATE_ENTRY_PHASES"
 
     def test_active_states_have_phases(self) -> None:
-        """Active states should have non-None entry phases."""
-        for state in ACTIVE_STATES:
+        """Active states should have non-None entry phases (except AWAITING_USER_FINALIZATION).
+
+        v1.2: AWAITING_USER_FINALIZATION is an active state (non-terminal) but has no
+        progress phases because it's simply waiting for user action, not doing infrastructure work.
+        """
+        # States that have progress phases (infrastructure work)
+        states_with_phases = ACTIVE_STATES - {StageState.AWAITING_USER_FINALIZATION}
+        for state in states_with_phases:
             assert STATE_ENTRY_PHASES[state] is not None, f"{state} should have a phase"
             assert isinstance(STATE_ENTRY_PHASES[state], ProgressPhase)
+
+        # AWAITING_USER_FINALIZATION has no phases - just waiting for user
+        assert STATE_ENTRY_PHASES[StageState.AWAITING_USER_FINALIZATION] is None
 
     def test_terminal_states_have_none_phases(self) -> None:
         """Terminal states should have None entry phases."""
@@ -419,12 +445,14 @@ class TestStateEntryPhases:
             assert STATE_ENTRY_PHASES[state] is None, f"{state} should have None phase"
 
     def test_specific_entry_phases(self) -> None:
-        """Verify specific entry phases match spec."""
+        """Verify specific entry phases match spec (v1.2: renamed FINALIZING→POST_RUN)."""
         assert STATE_ENTRY_PHASES[StageState.PREPARING] == ProgressPhase.GCS_CHECK
         assert STATE_ENTRY_PHASES[StageState.BUILDING] == ProgressPhase.IMAGE_CHECK
         assert STATE_ENTRY_PHASES[StageState.LAUNCHING] == ProgressPhase.INSTANCE_CREATE
         assert STATE_ENTRY_PHASES[StageState.RUNNING] == ProgressPhase.CONTAINER_INIT
-        assert STATE_ENTRY_PHASES[StageState.FINALIZING] == ProgressPhase.OUTPUT_SYNC
+        assert STATE_ENTRY_PHASES[StageState.POST_RUN] == ProgressPhase.OUTPUT_SYNC
+        # AWAITING_USER_FINALIZATION has no entry phase (user-triggered state)
+        assert STATE_ENTRY_PHASES[StageState.AWAITING_USER_FINALIZATION] is None
 
 
 class TestUtilityFunctions:
@@ -436,11 +464,17 @@ class TestUtilityFunctions:
         assert len(transitions) == 6
         assert all(t.from_state == StageState.PREPARING for t in transitions)
 
-    def test_get_transitions_from_finalizing(self) -> None:
-        """get_transitions_from_state returns correct transitions for FINALIZING."""
-        transitions = get_transitions_from_state(StageState.FINALIZING)
-        assert len(transitions) == 7
-        assert all(t.from_state == StageState.FINALIZING for t in transitions)
+    def test_get_transitions_from_post_run(self) -> None:
+        """get_transitions_from_state returns correct transitions for POST_RUN (v1.2)."""
+        transitions = get_transitions_from_state(StageState.POST_RUN)
+        assert len(transitions) == 8  # Includes AI_STOP
+        assert all(t.from_state == StageState.POST_RUN for t in transitions)
+
+    def test_get_transitions_from_awaiting_user_finalization(self) -> None:
+        """get_transitions_from_state returns correct transitions for AWAITING_USER_FINALIZATION (v1.2)."""
+        transitions = get_transitions_from_state(StageState.AWAITING_USER_FINALIZATION)
+        assert len(transitions) == 2  # USER_FINALIZE, USER_CANCEL
+        assert all(t.from_state == StageState.AWAITING_USER_FINALIZATION for t in transitions)
 
     def test_get_transitions_from_terminal_state(self) -> None:
         """get_transitions_from_state returns empty list for terminal states."""
@@ -448,27 +482,34 @@ class TestUtilityFunctions:
         assert transitions == []
 
     def test_get_transitions_for_user_cancel(self) -> None:
-        """get_transitions_for_event returns all USER_CANCEL transitions."""
+        """get_transitions_for_event returns all USER_CANCEL transitions (v1.2: 6 active states)."""
         transitions = get_transitions_for_event(StageEvent.USER_CANCEL)
-        # USER_CANCEL is valid in all 5 active states (including FINALIZING)
-        assert len(transitions) == 5
+        # USER_CANCEL is valid in all 6 active states (including POST_RUN and AWAITING_USER_FINALIZATION)
+        assert len(transitions) == 6
         assert all(t.event == StageEvent.USER_CANCEL for t in transitions)
         assert all(t.to_state == StageState.CANCELED for t in transitions)
 
     def test_get_transitions_for_timeout(self) -> None:
         """get_transitions_for_event returns all TIMEOUT transitions."""
         transitions = get_transitions_for_event(StageEvent.TIMEOUT)
-        # TIMEOUT: 4 active (PREPARING, BUILDING, LAUNCHING, RUNNING) + 2 FINALIZING guards + 1 UNKNOWN = 7
+        # TIMEOUT: 4 active (PREPARING, BUILDING, LAUNCHING, RUNNING) + 2 POST_RUN guards + 1 UNKNOWN = 7
         assert len(transitions) == 7
         assert all(t.event == StageEvent.TIMEOUT for t in transitions)
 
-    def test_get_transitions_for_finalize_fail(self) -> None:
-        """get_transitions_for_event returns both guarded FINALIZE_FAIL transitions."""
-        transitions = get_transitions_for_event(StageEvent.FINALIZE_FAIL)
+    def test_get_transitions_for_post_run_fail(self) -> None:
+        """get_transitions_for_event returns both guarded POST_RUN_FAIL transitions (v1.2)."""
+        transitions = get_transitions_for_event(StageEvent.POST_RUN_FAIL)
         assert len(transitions) == 2
-        # One goes to FAILED (critical=True), one to COMPLETED (critical=False)
+        # One goes to FAILED (critical=True), one to AWAITING_USER_FINALIZATION (critical=False)
         to_states = {t.to_state for t in transitions}
-        assert to_states == {StageState.FAILED, StageState.COMPLETED}
+        assert to_states == {StageState.FAILED, StageState.AWAITING_USER_FINALIZATION}
+
+    def test_get_transitions_for_user_finalize(self) -> None:
+        """get_transitions_for_event returns USER_FINALIZE transition (v1.2: new event)."""
+        transitions = get_transitions_for_event(StageEvent.USER_FINALIZE)
+        assert len(transitions) == 1
+        assert transitions[0].from_state == StageState.AWAITING_USER_FINALIZATION
+        assert transitions[0].to_state == StageState.COMPLETED
 
 
 class TestGuardEvaluationOrder:
@@ -476,20 +517,20 @@ class TestGuardEvaluationOrder:
 
     def test_first_matching_guard_wins(self) -> None:
         """When first guard passes, subsequent guards are not checked."""
-        # For FINALIZE_FAIL, critical=True comes first in table
+        # For POST_RUN_FAIL, critical=True comes first in table (v1.2)
         ctx = make_context(critical=True)
-        t = find_transition(StageState.FINALIZING, StageEvent.FINALIZE_FAIL, ctx)
+        t = find_transition(StageState.POST_RUN, StageEvent.POST_RUN_FAIL, ctx)
         assert t is not None
         assert t.to_state == StageState.FAILED
         assert t.guard_name == "critical=True"
 
     def test_second_guard_checked_when_first_fails(self) -> None:
         """When first guard fails, second guard is checked."""
-        # For FINALIZE_FAIL, critical=False is second in table
+        # For POST_RUN_FAIL, critical=False is second in table (v1.2)
         ctx = make_context(critical=False)
-        t = find_transition(StageState.FINALIZING, StageEvent.FINALIZE_FAIL, ctx)
+        t = find_transition(StageState.POST_RUN, StageEvent.POST_RUN_FAIL, ctx)
         assert t is not None
-        assert t.to_state == StageState.COMPLETED
+        assert t.to_state == StageState.AWAITING_USER_FINALIZATION
         assert t.guard_name == "critical=False"
 
 

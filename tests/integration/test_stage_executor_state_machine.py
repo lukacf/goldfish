@@ -52,6 +52,24 @@ def _create_workspace_and_version(db: Database, workspace: str = "test-ws", vers
         )
 
 
+def _create_svs_review(
+    db: Database,
+    stage_run_id: str,
+    decision: str = "blocked",
+    review_type: str = "pre_run",
+) -> str:
+    """Create an SVS review record for testing. Returns the review ID."""
+    now = datetime.now(UTC).isoformat()
+    with db._conn() as conn:
+        cursor = conn.execute(
+            """INSERT INTO svs_reviews
+            (stage_run_id, review_type, model_used, prompt_hash, decision, reviewed_at)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (stage_run_id, review_type, "test-model", "test-hash", decision, now),
+        )
+        return str(cursor.lastrowid)
+
+
 def _get_state_transitions(db: Database, run_id: str) -> list[dict]:
     """Get all state transitions for a run (normalized columns)."""
     with db._conn() as conn:
@@ -438,11 +456,14 @@ class TestPrepareFailEventEmission:
             stage_name="train",
         )
 
+        # Create an SVS review record for the run
+        svs_review_id = _create_svs_review(test_db, run_id, decision="blocked")
+
         # Emit SVS_BLOCK
         ctx = EventContext(
             timestamp=datetime.now(UTC),
             source="executor",
-            svs_finding_id="svs-123",
+            svs_review_id=svs_review_id,
             error_message="SVS pre-run review blocked execution",
         )
         result = transition(test_db, run_id, StageEvent.SVS_BLOCK, ctx)
@@ -451,70 +472,70 @@ class TestPrepareFailEventEmission:
         assert result.new_state == StageState.FAILED
 
 
-class TestFinalizeEventEmission:
-    """Tests for FINALIZE_OK and FINALIZE_FAIL transitions.
+class TestPostRunEventEmission:
+    """Tests for POST_RUN_OK and POST_RUN_FAIL transitions (v1.2).
 
-    These transitions handle the finalization phase after execution.
-    FINALIZE_OK moves from FINALIZING to COMPLETED.
-    FINALIZE_FAIL outcome depends on the critical flag:
+    These transitions handle the post-run phase after execution.
+    POST_RUN_OK moves from POST_RUN to AWAITING_USER_FINALIZATION.
+    POST_RUN_FAIL outcome depends on the critical flag:
     - critical=True → FAILED
-    - critical=False → COMPLETED (non-critical failures don't fail the run)
+    - critical=False → AWAITING_USER_FINALIZATION (non-critical failures still need user finalization)
     """
 
-    def test_finalize_ok_transitions_to_completed(self, test_db: Database) -> None:
-        """FINALIZE_OK event should transition from FINALIZING to COMPLETED."""
+    def test_post_run_ok_transitions_to_awaiting_finalization(self, test_db: Database) -> None:
+        """POST_RUN_OK event should transition from POST_RUN to AWAITING_USER_FINALIZATION."""
         _create_workspace_and_version(test_db)
         run_id = f"stage-{uuid.uuid4().hex[:8]}"
 
-        # Create run in FINALIZING state
-        _create_run_in_state(test_db, run_id, StageState.FINALIZING)
+        # Create run in POST_RUN state
+        _create_run_in_state(test_db, run_id, StageState.POST_RUN)
 
-        # Emit FINALIZE_OK
+        # Emit POST_RUN_OK
         ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
-        result = transition(test_db, run_id, StageEvent.FINALIZE_OK, ctx)
+        result = transition(test_db, run_id, StageEvent.POST_RUN_OK, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
-    def test_finalize_fail_critical_transitions_to_failed(self, test_db: Database) -> None:
-        """FINALIZE_FAIL with critical=True should transition to FAILED."""
+    def test_post_run_fail_critical_transitions_to_failed(self, test_db: Database) -> None:
+        """POST_RUN_FAIL with critical=True should transition to FAILED."""
         _create_workspace_and_version(test_db)
         run_id = f"stage-{uuid.uuid4().hex[:8]}"
 
-        # Create run in FINALIZING state
-        _create_run_in_state(test_db, run_id, StageState.FINALIZING)
+        # Create run in POST_RUN state
+        _create_run_in_state(test_db, run_id, StageState.POST_RUN)
 
-        # Emit FINALIZE_FAIL with critical=True
+        # Emit POST_RUN_FAIL with critical=True
         ctx = EventContext(
             timestamp=datetime.now(UTC),
             source="executor",
             critical=True,
             error_message="Output recording failed",
         )
-        result = transition(test_db, run_id, StageEvent.FINALIZE_FAIL, ctx)
+        result = transition(test_db, run_id, StageEvent.POST_RUN_FAIL, ctx)
 
         assert result.success is True
         assert result.new_state == StageState.FAILED
 
-    def test_finalize_fail_non_critical_transitions_to_completed(self, test_db: Database) -> None:
-        """FINALIZE_FAIL with critical=False should transition to COMPLETED."""
+    def test_post_run_fail_non_critical_transitions_to_awaiting_finalization(self, test_db: Database) -> None:
+        """POST_RUN_FAIL with critical=False should transition to AWAITING_USER_FINALIZATION."""
         _create_workspace_and_version(test_db)
         run_id = f"stage-{uuid.uuid4().hex[:8]}"
 
-        # Create run in FINALIZING state
-        _create_run_in_state(test_db, run_id, StageState.FINALIZING)
+        # Create run in POST_RUN state
+        _create_run_in_state(test_db, run_id, StageState.POST_RUN)
 
-        # Emit FINALIZE_FAIL with critical=False
+        # Emit POST_RUN_FAIL with critical=False
         ctx = EventContext(
             timestamp=datetime.now(UTC),
             source="executor",
             critical=False,
             error_message="Post-run review failed (non-critical)",
         )
-        result = transition(test_db, run_id, StageEvent.FINALIZE_FAIL, ctx)
+        result = transition(test_db, run_id, StageEvent.POST_RUN_FAIL, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
 
 class TestFullLifecycle:
@@ -525,7 +546,10 @@ class TestFullLifecycle:
     """
 
     def test_successful_run_lifecycle(self, test_db: Database) -> None:
-        """Test complete successful run: PREPARING→BUILDING→LAUNCHING→RUNNING→FINALIZING→COMPLETED."""
+        """Test complete successful run (v1.2).
+
+        PREPARING→BUILDING→LAUNCHING→RUNNING→POST_RUN→AWAITING_USER_FINALIZATION→COMPLETED
+        """
         _create_workspace_and_version(test_db)
         run_id = f"stage-{uuid.uuid4().hex[:8]}"
 
@@ -551,14 +575,19 @@ class TestFullLifecycle:
         result = transition(test_db, run_id, StageEvent.LAUNCH_OK, ctx)
         assert result.new_state == StageState.RUNNING
 
-        # RUNNING → FINALIZING (via EXIT_SUCCESS)
+        # RUNNING → POST_RUN (via EXIT_SUCCESS)
         ctx = EventContext(timestamp=datetime.now(UTC), source="daemon", exit_code=0, exit_code_exists=True)
         result = transition(test_db, run_id, StageEvent.EXIT_SUCCESS, ctx)
-        assert result.new_state == StageState.FINALIZING
+        assert result.new_state == StageState.POST_RUN
 
-        # FINALIZING → COMPLETED
+        # POST_RUN → AWAITING_USER_FINALIZATION
         ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
-        result = transition(test_db, run_id, StageEvent.FINALIZE_OK, ctx)
+        result = transition(test_db, run_id, StageEvent.POST_RUN_OK, ctx)
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
+
+        # AWAITING_USER_FINALIZATION → COMPLETED (via USER_FINALIZE)
+        ctx = EventContext(timestamp=datetime.now(UTC), source="mcp_tool")
+        result = transition(test_db, run_id, StageEvent.USER_FINALIZE, ctx)
         assert result.new_state == StageState.COMPLETED
 
         # Verify final state
@@ -566,8 +595,8 @@ class TestFullLifecycle:
 
         # Verify audit trail - comprehensive check of all columns
         transitions = _get_state_transitions(test_db, run_id)
-        # run_start + 5 state transitions
-        assert len(transitions) == 6
+        # run_start + 6 state transitions (v1.2 adds AWAITING_USER_FINALIZATION)
+        assert len(transitions) == 7
 
         # Verify run_start pseudo-event
         assert transitions[0]["from_state"] == "none"
@@ -581,16 +610,17 @@ class TestFullLifecycle:
         assert transitions[1]["event"] == StageEvent.BUILD_START.value
         assert transitions[1]["created_at"] is not None
 
-        # Verify last transition (FINALIZING → COMPLETED via FINALIZE_OK)
-        assert transitions[-1]["from_state"] == StageState.FINALIZING.value
+        # Verify last transition (AWAITING_USER_FINALIZATION → COMPLETED via USER_FINALIZE)
+        assert transitions[-1]["from_state"] == StageState.AWAITING_USER_FINALIZATION.value
         assert transitions[-1]["to_state"] == StageState.COMPLETED.value
-        assert transitions[-1]["event"] == StageEvent.FINALIZE_OK.value
+        assert transitions[-1]["event"] == StageEvent.USER_FINALIZE.value
         assert transitions[-1]["created_at"] is not None
 
         # Verify middle transitions have correct from_state chain
         assert transitions[2]["from_state"] == StageState.BUILDING.value
         assert transitions[3]["from_state"] == StageState.LAUNCHING.value
         assert transitions[4]["from_state"] == StageState.RUNNING.value
+        assert transitions[5]["from_state"] == StageState.POST_RUN.value
 
 
 class TestTransitionErrorCases:
@@ -778,30 +808,28 @@ class TestExitMissingGuardedTransition:
         assert result.reason == "no_transition"
 
 
-class TestTimeoutInFinalizingGuardedTransitions:
-    """Tests for TIMEOUT event in FINALIZING state with critical_phases_done guards."""
+class TestTimeoutInPostRunGuardedTransitions:
+    """Tests for TIMEOUT event in POST_RUN state with critical_phases_done guards (v1.2)."""
 
-    def test_timeout_in_finalizing_with_critical_phases_done_true_transitions_to_completed(
+    def test_timeout_in_post_run_with_critical_phases_done_true_transitions_to_awaiting(
         self, test_db: Database
     ) -> None:
-        """TIMEOUT in FINALIZING with critical_phases_done=True should transition to COMPLETED."""
+        """TIMEOUT in POST_RUN with critical_phases_done=True goes to AWAITING_USER_FINALIZATION."""
         _create_workspace_and_version(test_db)
         run_id = f"stage-{uuid.uuid4().hex[:8]}"
-        _create_run_in_state(test_db, run_id, StageState.FINALIZING)
+        _create_run_in_state(test_db, run_id, StageState.POST_RUN)
 
         ctx = EventContext(timestamp=datetime.now(UTC), source="daemon", critical_phases_done=True)
         result = transition(test_db, run_id, StageEvent.TIMEOUT, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
-    def test_timeout_in_finalizing_with_critical_phases_done_false_transitions_to_failed(
-        self, test_db: Database
-    ) -> None:
-        """TIMEOUT in FINALIZING with critical_phases_done=False should transition to FAILED."""
+    def test_timeout_in_post_run_with_critical_phases_done_false_transitions_to_failed(self, test_db: Database) -> None:
+        """TIMEOUT in POST_RUN with critical_phases_done=False should transition to FAILED."""
         _create_workspace_and_version(test_db)
         run_id = f"stage-{uuid.uuid4().hex[:8]}"
-        _create_run_in_state(test_db, run_id, StageState.FINALIZING)
+        _create_run_in_state(test_db, run_id, StageState.POST_RUN)
 
         ctx = EventContext(timestamp=datetime.now(UTC), source="daemon", critical_phases_done=False)
         result = transition(test_db, run_id, StageEvent.TIMEOUT, ctx)
@@ -813,23 +841,26 @@ class TestTimeoutInFinalizingGuardedTransitions:
 class TestCompletedWithWarningsFlag:
     """Tests for completed_with_warnings flag persistence."""
 
-    def test_finalize_fail_non_critical_sets_completed_with_warnings(self, test_db: Database) -> None:
-        """FINALIZE_FAIL(critical=False) should set completed_with_warnings=1 in database."""
+    def test_post_run_fail_non_critical_sets_completed_with_warnings(self, test_db: Database) -> None:
+        """POST_RUN_FAIL(critical=False) should set completed_with_warnings=1 in database.
+
+        In v1.2, the transition goes to AWAITING_USER_FINALIZATION, not COMPLETED.
+        """
         _create_workspace_and_version(test_db)
         run_id = f"stage-{uuid.uuid4().hex[:8]}"
-        _create_run_in_state(test_db, run_id, StageState.FINALIZING)
+        _create_run_in_state(test_db, run_id, StageState.POST_RUN)
 
-        # Emit FINALIZE_FAIL with critical=False
+        # Emit POST_RUN_FAIL with critical=False
         ctx = EventContext(
             timestamp=datetime.now(UTC),
             source="executor",
             critical=False,
             error_message="Non-critical finalization error",
         )
-        result = transition(test_db, run_id, StageEvent.FINALIZE_FAIL, ctx)
+        result = transition(test_db, run_id, StageEvent.POST_RUN_FAIL, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
         # Verify completed_with_warnings flag is set in database
         with test_db._conn() as conn:
@@ -839,13 +870,16 @@ class TestCompletedWithWarningsFlag:
             ).fetchone()
             assert row["completed_with_warnings"] == 1
 
-    def test_timeout_in_finalizing_with_critical_phases_done_sets_completed_with_warnings(
+    def test_timeout_in_post_run_with_critical_phases_done_sets_completed_with_warnings(
         self, test_db: Database
     ) -> None:
-        """TIMEOUT in FINALIZING with critical_phases_done=True sets completed_with_warnings=1."""
+        """TIMEOUT in POST_RUN with critical_phases_done=True sets completed_with_warnings=1.
+
+        In v1.2, the transition goes to AWAITING_USER_FINALIZATION, not COMPLETED.
+        """
         _create_workspace_and_version(test_db)
         run_id = f"stage-{uuid.uuid4().hex[:8]}"
-        _create_run_in_state(test_db, run_id, StageState.FINALIZING)
+        _create_run_in_state(test_db, run_id, StageState.POST_RUN)
 
         # Emit TIMEOUT with critical_phases_done=True
         ctx = EventContext(
@@ -856,7 +890,7 @@ class TestCompletedWithWarningsFlag:
         result = transition(test_db, run_id, StageEvent.TIMEOUT, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
         # Verify completed_with_warnings flag is set in database
         with test_db._conn() as conn:
@@ -929,7 +963,7 @@ class TestTerminationCausePersistence:
 
 
 class TestTimeoutFromAllStates:
-    """Tests for TIMEOUT event from all active states (except FINALIZING which has guarded transitions)."""
+    """Tests for TIMEOUT event from all active states (except POST_RUN which has guarded transitions)."""
 
     @pytest.mark.parametrize(
         "from_state",
@@ -957,7 +991,7 @@ class TestUserCancelFromAllStates:
             StageState.BUILDING,
             StageState.LAUNCHING,
             StageState.RUNNING,
-            StageState.FINALIZING,
+            StageState.POST_RUN,
         ],
     )
     def test_user_cancel_from_active_state_transitions_to_canceled(
@@ -983,7 +1017,7 @@ class TestInstanceLostFromAllStates:
             StageState.BUILDING,
             StageState.LAUNCHING,
             StageState.RUNNING,
-            StageState.FINALIZING,
+            StageState.POST_RUN,
         ],
     )
     def test_instance_lost_from_active_state_transitions_to_terminated(
@@ -1050,7 +1084,7 @@ class TestTerminalStateImmutability:
     # Idempotent pairs: event has a transition that targets the same state we're already in
     # Note: TIMEOUT→TERMINATED is NOT idempotent because there's no TIMEOUT transition FROM TERMINATED
     IDEMPOTENT_PAIRS = {
-        (StageEvent.FINALIZE_OK, StageState.COMPLETED),  # targets COMPLETED
+        (StageEvent.POST_RUN_OK, StageState.COMPLETED),  # targets COMPLETED
         (StageEvent.USER_CANCEL, StageState.CANCELED),  # targets CANCELED
         (StageEvent.EXIT_FAILURE, StageState.FAILED),  # targets FAILED
         (StageEvent.INSTANCE_LOST, StageState.TERMINATED),  # targets TERMINATED
@@ -1085,11 +1119,12 @@ class TestTerminalStateImmutability:
     @pytest.mark.parametrize(
         ("event", "terminal_state"),
         [
-            (StageEvent.FINALIZE_OK, StageState.COMPLETED),
+            (StageEvent.USER_FINALIZE, StageState.COMPLETED),  # v1.2: USER_FINALIZE → COMPLETED
             (StageEvent.USER_CANCEL, StageState.CANCELED),
             (StageEvent.EXIT_FAILURE, StageState.FAILED),
             (StageEvent.INSTANCE_LOST, StageState.TERMINATED),
             # TIMEOUT is NOT idempotent from TERMINATED - no transition defined from TERMINATED
+            # POST_RUN_OK is NOT idempotent from COMPLETED (v1.2) - goes to AWAITING_USER_FINALIZATION
         ],
     )
     def test_idempotent_transitions_return_already_in_target_state(
@@ -1169,23 +1204,23 @@ class TestAuditTrailNormalizedColumns:
 class TestNegativeGuardCases:
     """Tests for guard failures with edge case values."""
 
-    def test_finalize_fail_with_critical_none_fails_guard(self, test_db: Database) -> None:
-        """FINALIZE_FAIL with critical=None should fail guard (no matching transition)."""
-        run_id = _setup_test_run(test_db, StageState.FINALIZING)
+    def test_post_run_fail_with_critical_none_fails_guard(self, test_db: Database) -> None:
+        """POST_RUN_FAIL with critical=None should fail guard (no matching transition)."""
+        run_id = _setup_test_run(test_db, StageState.POST_RUN)
 
         ctx = EventContext(
             timestamp=datetime.now(UTC),
             source="executor",
             critical=None,  # Neither True nor False
         )
-        result = transition(test_db, run_id, StageEvent.FINALIZE_FAIL, ctx)
+        result = transition(test_db, run_id, StageEvent.POST_RUN_FAIL, ctx)
 
         assert result.success is False
         assert result.reason == "no_transition"
 
-    def test_timeout_finalizing_with_critical_phases_done_none_fails_guard(self, test_db: Database) -> None:
-        """TIMEOUT in FINALIZING with critical_phases_done=None should fail guard."""
-        run_id = _setup_test_run(test_db, StageState.FINALIZING)
+    def test_timeout_post_run_with_critical_phases_done_none_fails_guard(self, test_db: Database) -> None:
+        """TIMEOUT in POST_RUN with critical_phases_done=None should fail guard."""
+        run_id = _setup_test_run(test_db, StageState.POST_RUN)
 
         ctx = EventContext(
             timestamp=datetime.now(UTC),
@@ -1194,8 +1229,8 @@ class TestNegativeGuardCases:
         )
         result = transition(test_db, run_id, StageEvent.TIMEOUT, ctx)
 
-        # Should not match the guarded FINALIZING→TIMEOUT transitions,
-        # but there's no unguarded FINALIZING→TIMEOUT→TERMINATED
+        # Should not match the guarded POST_RUN→TIMEOUT transitions,
+        # but there's no unguarded POST_RUN→TIMEOUT→TERMINATED
         assert result.success is False
         assert result.reason == "no_transition"
 
@@ -1225,14 +1260,17 @@ class TestNegativeGuardCases:
 class TestCompletedWithWarningsNormal:
     """Tests verifying completed_with_warnings is NOT set for normal completion."""
 
-    def test_finalize_ok_does_not_set_completed_with_warnings(self, test_db: Database) -> None:
-        """FINALIZE_OK should not set completed_with_warnings flag."""
-        run_id = _setup_test_run(test_db, StageState.FINALIZING)
+    def test_post_run_ok_does_not_set_completed_with_warnings(self, test_db: Database) -> None:
+        """POST_RUN_OK should not set completed_with_warnings flag.
 
-        result = transition(test_db, run_id, StageEvent.FINALIZE_OK, _event_ctx())
+        In v1.2, POST_RUN_OK goes to AWAITING_USER_FINALIZATION, not COMPLETED.
+        """
+        run_id = _setup_test_run(test_db, StageState.POST_RUN)
+
+        result = transition(test_db, run_id, StageEvent.POST_RUN_OK, _event_ctx())
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
         extras = _get_run_extras(test_db, run_id)
         # Should be NULL (falsy) or 0, not 1

@@ -5,8 +5,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from goldfish.infra.metadata.local import LocalMetadataBus
-from goldfish.models import StageRunStatus
 from goldfish.server_tools.execution_tools import inspect_run
+from goldfish.state_machine.types import StageState
 
 
 @pytest.fixture
@@ -17,7 +17,8 @@ def mock_db():
         "id": "stage-123",
         "workspace_name": "w1",
         "stage_name": "train",
-        "status": StageRunStatus.COMPLETED,
+        "status": StageState.COMPLETED,
+        "state": "completed",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": "2025-12-27T11:00:00Z",
         "config_json": '{"lr": 0.01}',
@@ -72,7 +73,8 @@ def test_inspect_run_synthesis(mock_get_wm, mock_get_config, mock_get_bus, mock_
     # Check that it triggered a sync signal (even if it's already completed,
     # inspect_run should trigger it for running runs)
     # Let's test a RUNNING run specifically for sync
-    mock_db.get_stage_run.return_value["status"] = StageRunStatus.RUNNING
+    mock_db.get_stage_run.return_value["status"] = StageState.RUNNING
+    mock_db.get_stage_run.return_value["state"] = "running"  # State machine source of truth
 
     inspect_run.fn("stage-123")
 

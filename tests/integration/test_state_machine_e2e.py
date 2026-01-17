@@ -125,9 +125,10 @@ class TestFullLifecycleScenarios:
     """E2E tests for complete run lifecycles through multiple states."""
 
     def test_successful_run_lifecycle_with_phases(self, test_db: Database) -> None:
-        """Test complete successful run with phase updates at each stage.
+        """Test complete successful run with phase updates at each stage (v1.2).
 
-        Scenario: PREPARING → BUILDING → LAUNCHING → RUNNING → FINALIZING → COMPLETED
+        Scenario: PREPARING → BUILDING → LAUNCHING → RUNNING → POST_RUN
+                  → AWAITING_USER_FINALIZATION → COMPLETED
         with proper phase progression throughout.
         """
         _create_workspace_and_version(test_db)
@@ -164,19 +165,24 @@ class TestFullLifecycleScenarios:
         # Update phase during RUNNING
         update_phase(test_db, run_id, StageState.RUNNING, ProgressPhase.CODE_EXECUTION, datetime.now(UTC))
 
-        # RUNNING → FINALIZING (via EXIT_SUCCESS)
+        # RUNNING → POST_RUN (via EXIT_SUCCESS)
         ctx = _event_ctx(source="daemon", exit_code=0, exit_code_exists=True)
         result = transition(test_db, run_id, StageEvent.EXIT_SUCCESS, ctx)
-        assert result.success and result.new_state == StageState.FINALIZING
+        assert result.success and result.new_state == StageState.POST_RUN
 
-        # FINALIZING → COMPLETED
-        result = transition(test_db, run_id, StageEvent.FINALIZE_OK, _event_ctx())
+        # POST_RUN → AWAITING_USER_FINALIZATION
+        result = transition(test_db, run_id, StageEvent.POST_RUN_OK, _event_ctx())
+        assert result.success and result.new_state == StageState.AWAITING_USER_FINALIZATION
+
+        # AWAITING_USER_FINALIZATION → COMPLETED (via USER_FINALIZE)
+        ctx = _event_ctx(source="mcp_tool")
+        result = transition(test_db, run_id, StageEvent.USER_FINALIZE, ctx)
         assert result.success and result.new_state == StageState.COMPLETED
 
         # Verify final state and transition count
         assert _get_run_state(test_db, run_id) == StageState.COMPLETED.value
-        # 10 audit rows: run_start + 4 phase_update + 5 state transitions
-        assert _get_transition_count(test_db, run_id) == 10
+        # 11 audit rows: run_start + 4 phase_update + 6 state transitions
+        assert _get_transition_count(test_db, run_id) == 11
 
     def test_early_failure_during_build(self, test_db: Database) -> None:
         """Test run that fails during build phase.
@@ -262,12 +268,12 @@ class TestPreemptionScenarios:
             row = conn.execute("SELECT termination_cause FROM stage_runs WHERE id = ?", (run_id,)).fetchone()
             assert row["termination_cause"] == TerminationCause.CRASHED.value
 
-    def test_preemption_during_finalizing(self, test_db: Database) -> None:
-        """Test preemption during finalization: FINALIZING → TERMINATED via INSTANCE_LOST.
+    def test_preemption_during_post_run(self, test_db: Database) -> None:
+        """Test preemption during post-run: POST_RUN → TERMINATED via INSTANCE_LOST.
 
-        Even during finalization, preemption can occur.
+        Even during post-run finalization, preemption can occur.
         """
-        run_id = _setup_test_run(test_db, StageState.FINALIZING)
+        run_id = _setup_test_run(test_db, StageState.POST_RUN)
 
         ctx = EventContext(
             timestamp=datetime.now(UTC),
@@ -369,12 +375,12 @@ class TestFinalizationOutcomes:
     """E2E tests for different finalization outcomes."""
 
     def test_finalization_timeout_with_critical_phases_done(self, test_db: Database) -> None:
-        """Test timeout during finalization when critical work is complete.
+        """Test timeout during post-run when critical work is complete (v1.2).
 
-        Scenario: Finalization times out, but outputs already synced and recorded.
-        Result: COMPLETED (with warnings)
+        Scenario: Post-run times out, but outputs already synced and recorded.
+        Result: AWAITING_USER_FINALIZATION (with completed_with_warnings flag set)
         """
-        run_id = _setup_test_run(test_db, StageState.FINALIZING)
+        run_id = _setup_test_run(test_db, StageState.POST_RUN)
 
         # Simulate critical phases being done
         with test_db._conn() as conn:
@@ -391,20 +397,20 @@ class TestFinalizationOutcomes:
         result = transition(test_db, run_id, StageEvent.TIMEOUT, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
-        # Verify completed_with_warnings flag
+        # Verify completed_with_warnings flag is set
         with test_db._conn() as conn:
             row = conn.execute("SELECT completed_with_warnings FROM stage_runs WHERE id = ?", (run_id,)).fetchone()
             assert row["completed_with_warnings"] == 1
 
     def test_finalization_timeout_without_critical_phases_done(self, test_db: Database) -> None:
-        """Test timeout during finalization when critical work is incomplete.
+        """Test timeout during post-run when critical work is incomplete.
 
-        Scenario: Finalization times out before outputs saved.
+        Scenario: Post-run times out before outputs saved.
         Result: FAILED (data may be lost)
         """
-        run_id = _setup_test_run(test_db, StageState.FINALIZING)
+        run_id = _setup_test_run(test_db, StageState.POST_RUN)
 
         ctx = EventContext(
             timestamp=datetime.now(UTC),
@@ -416,13 +422,13 @@ class TestFinalizationOutcomes:
         assert result.success is True
         assert result.new_state == StageState.FAILED
 
-    def test_non_critical_finalization_failure(self, test_db: Database) -> None:
-        """Test non-critical finalization failure still completes run.
+    def test_non_critical_post_run_failure(self, test_db: Database) -> None:
+        """Test non-critical post-run failure goes to AWAITING_USER_FINALIZATION (v1.2).
 
         Scenario: Post-run review or cleanup fails, but outputs are saved.
-        Result: COMPLETED (with warnings)
+        Result: AWAITING_USER_FINALIZATION (with completed_with_warnings flag set)
         """
-        run_id = _setup_test_run(test_db, StageState.FINALIZING)
+        run_id = _setup_test_run(test_db, StageState.POST_RUN)
 
         ctx = EventContext(
             timestamp=datetime.now(UTC),
@@ -430,23 +436,23 @@ class TestFinalizationOutcomes:
             critical=False,
             error_message="Post-run cleanup failed",
         )
-        result = transition(test_db, run_id, StageEvent.FINALIZE_FAIL, ctx)
+        result = transition(test_db, run_id, StageEvent.POST_RUN_FAIL, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
-        # Verify completed_with_warnings flag
+        # Verify completed_with_warnings flag is set
         with test_db._conn() as conn:
             row = conn.execute("SELECT completed_with_warnings FROM stage_runs WHERE id = ?", (run_id,)).fetchone()
             assert row["completed_with_warnings"] == 1
 
-    def test_critical_finalization_failure(self, test_db: Database) -> None:
-        """Test critical finalization failure transitions to FAILED.
+    def test_critical_post_run_failure(self, test_db: Database) -> None:
+        """Test critical post-run failure transitions to FAILED.
 
         Scenario: Output sync or recording fails (critical operation).
         Result: FAILED (data may be lost)
         """
-        run_id = _setup_test_run(test_db, StageState.FINALIZING)
+        run_id = _setup_test_run(test_db, StageState.POST_RUN)
 
         ctx = EventContext(
             timestamp=datetime.now(UTC),
@@ -454,7 +460,7 @@ class TestFinalizationOutcomes:
             critical=True,
             error_message="Output sync failed - GCS unavailable",
         )
-        result = transition(test_db, run_id, StageEvent.FINALIZE_FAIL, ctx)
+        result = transition(test_db, run_id, StageEvent.POST_RUN_FAIL, ctx)
 
         assert result.success is True
         assert result.new_state == StageState.FAILED
@@ -512,13 +518,13 @@ class TestGuardEnforcement:
         assert result.success is True
         assert result.new_state == StageState.TERMINATED
 
-    def test_finalize_fail_guard_with_critical_none_fails(self, test_db: Database) -> None:
-        """Test FINALIZE_FAIL with critical=None fails the guard.
+    def test_post_run_fail_guard_with_critical_none_fails(self, test_db: Database) -> None:
+        """Test POST_RUN_FAIL with critical=None fails the guard.
 
         The guarded transitions require explicit critical=True or critical=False.
         When critical is None, neither guard matches and no valid transition is found.
         """
-        run_id = _setup_test_run(test_db, StageState.FINALIZING)
+        run_id = _setup_test_run(test_db, StageState.POST_RUN)
 
         ctx = EventContext(
             timestamp=datetime.now(UTC),
@@ -526,18 +532,18 @@ class TestGuardEnforcement:
             critical=None,  # Neither True nor False
             error_message="Ambiguous failure",
         )
-        result = transition(test_db, run_id, StageEvent.FINALIZE_FAIL, ctx)
+        result = transition(test_db, run_id, StageEvent.POST_RUN_FAIL, ctx)
 
         assert result.success is False
         assert result.reason == "no_transition"  # Guard failure = no valid transition
 
-    def test_timeout_finalizing_guard_with_critical_phases_none_fails(self, test_db: Database) -> None:
-        """Test TIMEOUT in FINALIZING with critical_phases_done=None fails guard.
+    def test_timeout_post_run_guard_with_critical_phases_none_fails(self, test_db: Database) -> None:
+        """Test TIMEOUT in POST_RUN with critical_phases_done=None fails guard.
 
-        TIMEOUT in FINALIZING is guarded by critical_phases_done.
+        TIMEOUT in POST_RUN is guarded by critical_phases_done.
         When None, neither branch matches and no valid transition is found.
         """
-        run_id = _setup_test_run(test_db, StageState.FINALIZING)
+        run_id = _setup_test_run(test_db, StageState.POST_RUN)
 
         ctx = EventContext(
             timestamp=datetime.now(UTC),
@@ -565,7 +571,8 @@ class TestCancelFromAllActiveStates:
             StageState.BUILDING,
             StageState.LAUNCHING,
             StageState.RUNNING,
-            StageState.FINALIZING,
+            StageState.POST_RUN,
+            StageState.AWAITING_USER_FINALIZATION,
         ],
     )
     def test_user_cancel_from_active_state(self, test_db: Database, initial_state: StageState) -> None:
@@ -604,8 +611,8 @@ class TestTimeoutFromAllActiveStates:
             StageState.RUNNING,
         ],
     )
-    def test_timeout_from_non_finalizing_state(self, test_db: Database, initial_state: StageState) -> None:
-        """Test TIMEOUT transitions from non-FINALIZING active states to TERMINATED.
+    def test_timeout_from_non_post_run_state(self, test_db: Database, initial_state: StageState) -> None:
+        """Test TIMEOUT transitions from non-POST_RUN active states to TERMINATED.
 
         Scenario: Stage times out during preparation, build, launch, or execution.
         Result: Run transitions to TERMINATED (timeout is a form of termination).
@@ -622,12 +629,12 @@ class TestTimeoutFromAllActiveStates:
         assert result.new_state == StageState.TERMINATED
         assert _get_run_state(test_db, run_id) == StageState.TERMINATED.value
 
-    def test_timeout_from_finalizing_without_critical_phases(self, test_db: Database) -> None:
-        """Test TIMEOUT from FINALIZING without critical phases done goes to FAILED.
+    def test_timeout_from_post_run_without_critical_phases(self, test_db: Database) -> None:
+        """Test TIMEOUT from POST_RUN without critical phases done goes to FAILED.
 
-        Scenario: Finalization times out before outputs saved.
+        Scenario: Post-run times out before outputs saved.
         """
-        run_id = _setup_test_run(test_db, StageState.FINALIZING)
+        run_id = _setup_test_run(test_db, StageState.POST_RUN)
 
         ctx = EventContext(
             timestamp=datetime.now(UTC),
@@ -639,12 +646,12 @@ class TestTimeoutFromAllActiveStates:
         assert result.success is True
         assert result.new_state == StageState.FAILED
 
-    def test_timeout_from_finalizing_with_critical_phases_done(self, test_db: Database) -> None:
-        """Test TIMEOUT from FINALIZING with critical phases done goes to COMPLETED.
+    def test_timeout_from_post_run_with_critical_phases_done(self, test_db: Database) -> None:
+        """Test TIMEOUT from POST_RUN with critical phases done goes to AWAITING_USER_FINALIZATION (v1.2).
 
-        Scenario: Finalization times out but outputs already saved.
+        Scenario: Post-run times out but outputs already saved.
         """
-        run_id = _setup_test_run(test_db, StageState.FINALIZING)
+        run_id = _setup_test_run(test_db, StageState.POST_RUN)
 
         ctx = EventContext(
             timestamp=datetime.now(UTC),
@@ -654,7 +661,7 @@ class TestTimeoutFromAllActiveStates:
         result = transition(test_db, run_id, StageEvent.TIMEOUT, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
 
 # =============================================================================
@@ -781,7 +788,7 @@ class TestUnknownStateHandling:
             StageEvent.BUILD_OK,
             StageEvent.LAUNCH_OK,
             StageEvent.EXIT_SUCCESS,
-            StageEvent.FINALIZE_OK,
+            StageEvent.POST_RUN_OK,
         ]
 
         for event in rejected_events:
@@ -858,7 +865,7 @@ class TestIndexUsage:
                 """EXPLAIN QUERY PLAN
                 SELECT id, state, backend_type, state_entered_at
                 FROM stage_runs
-                WHERE state IN ('preparing', 'building', 'launching', 'running', 'finalizing')"""
+                WHERE state IN ('preparing', 'building', 'launching', 'running', 'post_run', 'awaiting_user_finalization')"""
             ).fetchall()
 
             # Extract the detail column from each row (SQLite returns id, parent, notused, detail)

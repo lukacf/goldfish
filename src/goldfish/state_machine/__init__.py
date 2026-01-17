@@ -16,10 +16,6 @@ Key components:
 See docs/state-machine-spec.md for the full specification.
 """
 
-from goldfish.state_machine.backwards_compat import (
-    get_legacy_status,
-    state_from_legacy,
-)
 from goldfish.state_machine.cancel import cancel_run
 from goldfish.state_machine.core import transition, update_phase
 from goldfish.state_machine.event_emission import (
@@ -108,7 +104,4 @@ __all__ = [
     "get_critical_phases_done",
     # Utility functions
     "format_transition_result",
-    # Backwards compatibility (deprecated)
-    "get_legacy_status",
-    "state_from_legacy",
 ]
