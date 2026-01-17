@@ -152,6 +152,7 @@ def transition(
                 termination_cause_str = TerminationCause.TIMEOUT.value
 
         # CAS UPDATE: only update if state matches expected
+        # NOTE: status column is deprecated - only state is updated
         result = conn.execute(
             """
             UPDATE stage_runs

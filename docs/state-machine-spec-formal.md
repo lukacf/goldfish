@@ -18,6 +18,24 @@
   - Added `USER_FINALIZE` event for user-invoked finalization
   - `completed` now requires explicit user finalization
 
+### Clean Slate Design (NO Backwards Compatibility)
+
+**IMPORTANT**: This state machine is a clean-slate redesign with ZERO backwards compatibility requirements.
+
+**Rationale**: Goldfish is an MCP server. The AI agent consuming it:
+- Only sees MCP tool names, parameters, and responses
+- Never accesses the database directly
+- Has no dependency on legacy column names or values
+
+**Implications**:
+1. **Legacy `status` column**: Deprecated. All code MUST use `state` column exclusively.
+2. **No dual-write**: `transition()` does NOT maintain legacy columns.
+3. **Migration-only**: Existing runs are migrated ONCE to the new schema.
+4. **MCP tools**: Updated to return `state` in responses (not `status`).
+5. **STATE.md**: Updated to read from `state` column.
+
+**Migration Path**: Run `migrate_stage_runs()` once to convert existing data. After migration, the `status` column is ignored and can be dropped in a future schema cleanup.
+
 ## 1. Overview
 This document defines the formal operational semantics of the Goldfish Stage Execution State Machine. It serves as the authoritative reference for state management, event processing, and audit persistence.
 
