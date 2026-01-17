@@ -38,8 +38,8 @@ def _get_transition_events(db: Database, run_id: str) -> list[str]:
         return [r["event"] for r in rows]
 
 
-def test_run_stage_emits_build_start_and_build_ok(test_db: Database, test_config, tmp_path: Path) -> None:
-    """run_stage() should advance state to LAUNCHING by emitting BUILD_START + BUILD_OK."""
+def test_run_stage_emits_build_start_build_ok_and_launch_ok(test_db: Database, test_config, tmp_path: Path) -> None:
+    """run_stage() should advance state to RUNNING by emitting BUILD_START + BUILD_OK + LAUNCH_OK."""
     _setup_workspace(test_db)
 
     pipeline_manager = MagicMock()
@@ -77,15 +77,19 @@ def test_run_stage_emits_build_start_and_build_ok(test_db: Database, test_config
     )
 
     executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
-    executor._launch_container = MagicMock()
+    # Mock the inner local_executor.launch_container, not _launch_container
+    # This allows _launch_container to execute and emit LAUNCH_OK
+    executor.local_executor.launch_container = MagicMock()
 
     info = executor.run_stage(workspace="test_workspace", stage_name="preprocess", reason="Test run", wait=False)
 
     assert info.status == StageState.RUNNING
-    assert _get_run_state(test_db, info.stage_run_id) == "launching"
+    # LAUNCH_OK is now emitted in _launch_container, so state should be RUNNING
+    assert _get_run_state(test_db, info.stage_run_id) == "running"
 
     events = _get_transition_events(test_db, info.stage_run_id)
-    assert events[:3] == ["run_start", "build_start", "build_ok"]
+    # Full lifecycle: run_start → build_start → build_ok → launch_ok
+    assert events[:4] == ["run_start", "build_start", "build_ok", "launch_ok"]
 
 
 def test_preflight_blocked_run_emits_prepare_fail(test_db: Database, test_config, tmp_path: Path) -> None:
