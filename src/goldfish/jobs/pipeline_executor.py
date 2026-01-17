@@ -220,19 +220,25 @@ class PipelineExecutor:
             )
 
             # Build dependency chain - each stage depends on the previous one in the run list
+            # Pre-generate stage_run_id for each stage so we can return it immediately
             prev = None
+            stage_run_ids: dict[str, str] = {}
             for stage in stages_to_execute:
                 deps: list[str] = []
                 if prev:
                     deps.append(prev)
 
-                # Create queue entry (stage_run created when worker picks it up)
+                # Pre-generate stage_run_id so it's available immediately
+                stage_run_id = f"stage-{uuid4().hex[:8]}"
+                stage_run_ids[stage.name] = stage_run_id
+
+                # Create queue entry with pre-generated stage_run_id
                 conn.execute(
                     """
-                    INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, deps, status)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO pipeline_stage_queue (pipeline_run_id, stage_name, deps, status, stage_run_id)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    (pipeline_run_id, stage.name, json.dumps(deps), PipelineStatus.PENDING),
+                    (pipeline_run_id, stage.name, json.dumps(deps), PipelineStatus.PENDING, stage_run_id),
                 )
 
                 prev = stage.name
@@ -256,6 +262,7 @@ class PipelineExecutor:
         queued_stages = [
             {
                 "stage": stage.name,
+                "stage_run_id": stage_run_ids[stage.name],
                 "status": "pre-run check",
                 "pipeline_run_id": pipeline_run_id,
             }
@@ -265,7 +272,7 @@ class PipelineExecutor:
         return {
             "pipeline_run_id": pipeline_run_id,
             "stages_queued": [s.name for s in stages_to_execute],
-            "status": "Pipeline started. Performing pre-run review... Use list_history(workspace) or inspect_record(record_id) to check progress.",
+            "status": "Pipeline started. Use inspect_run(stage_run_id) to check progress.",
             "queued": queued_stages,
         }
 
@@ -479,7 +486,8 @@ class PipelineExecutor:
         now_iso = now.isoformat()
 
         # First pass: update running items, handle failures, and claim new rows
-        to_launch: list[tuple[str, str, dict | None, dict | None]] = []
+        # Tuple: (queue_id, stage_name, stage_config, stage_inputs, pre_stage_run_id)
+        to_launch: list[tuple[int, str, dict | None, dict | None, str | None]] = []
         with self.db._conn() as conn:
             # Update running items that have completed/failed/canceled in stage_runs
             running = conn.execute(
@@ -629,10 +637,12 @@ class PipelineExecutor:
                 stage_inputs = None
                 if inputs_override and row["stage_name"] in inputs_override:
                     stage_inputs = inputs_override[row["stage_name"]]
-                to_launch.append((row["id"], row["stage_name"], stage_config, stage_inputs))
+                # Get pre-generated stage_run_id from queue (may be NULL for legacy entries)
+                pre_stage_run_id = row["stage_run_id"]
+                to_launch.append((row["id"], row["stage_name"], stage_config, stage_inputs, pre_stage_run_id))
 
         # Second pass: launch outside the transaction to avoid DB locks
-        for queue_id, stage_name, stage_config, stage_inputs in to_launch:
+        for queue_id, stage_name, stage_config, stage_inputs, pre_stage_run_id in to_launch:
             try:
                 stage_run = self.stage_executor.run_stage(
                     workspace=workspace,
@@ -645,14 +655,10 @@ class PipelineExecutor:
                     reason_structured=reason_structured,
                     experiment_group=experiment_group,
                     results_spec=results_spec,  # Saved immediately after experiment record creation
+                    stage_run_id=pre_stage_run_id,  # Use pre-generated ID from queue
                 )
                 launched.append(stage_run)
-                # Update queue with the stage_run_id for status tracking
-                with self.db._conn() as conn:
-                    conn.execute(
-                        "UPDATE pipeline_stage_queue SET stage_run_id = ? WHERE id = ?",
-                        (stage_run.stage_run_id, queue_id),
-                    )
+                # stage_run_id already in queue from creation, no update needed
             except Exception as e:
                 # Mark queue entry as failed with error message so it's visible to the user
                 error_msg = str(e)
