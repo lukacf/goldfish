@@ -27,6 +27,7 @@ from goldfish.db.types import (
 )
 from goldfish.errors import DatabaseError
 from goldfish.models import JobStatus, PipelineStatus
+from goldfish.state_machine.migration import migrate_stage_runs
 
 # Load schema from file
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -655,12 +656,45 @@ class Database:
 
                 new_version = 6
 
+            if current_version < 7:
+                new_version = 7
+
             # Bump schema version if needed
             if new_version != current_version:
                 if version_row:
                     conn.execute("UPDATE schema_version SET version = ?", (new_version,))
                 else:
                     conn.execute("INSERT INTO schema_version (version) VALUES (?)", (new_version,))
+
+        # State machine data migration (runs AFTER schema changes are committed)
+        # This is idempotent - always check for unmigrated rows regardless of version
+        self._run_state_machine_migration()
+
+    def _run_state_machine_migration(self) -> None:
+        """Run state machine data migration if needed.
+
+        Converts legacy status column values to new state column.
+        This is idempotent - safe to run multiple times.
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        with self._conn() as conn:
+            # Check if there are any unmigrated rows (state IS NULL)
+            unmigrated_count = conn.execute("SELECT COUNT(*) as cnt FROM stage_runs WHERE state IS NULL").fetchone()
+
+            if not unmigrated_count or unmigrated_count["cnt"] == 0:
+                return  # Nothing to migrate
+
+        # Run the state machine data migration (manages its own transactions)
+        logger.info(f"Running state machine migration for {unmigrated_count['cnt']} rows...")
+        result = migrate_stage_runs(self, check_orphans=False)
+        if result["success"]:
+            logger.info(f"State machine migration complete: {result.get('migrated_rows', 0)} rows migrated")
+        else:
+            # Log error but don't fail init - database is still usable
+            logger.error(f"State machine migration had errors: {result.get('error_details', [])}")
 
     @contextmanager
     def _conn(self) -> Generator[sqlite3.Connection, None, None]:
