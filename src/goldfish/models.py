@@ -28,10 +28,10 @@ class JobStatus(str, Enum):
 
 
 class StageRunStatus(str, Enum):
-    """Status values for stage_runs table.
+    """Legacy status values for stage_runs table.
 
-    Note: Progress is tracked separately in the 'progress' column.
-    Display format combines them as "status:progress" (e.g., "running:build").
+    DEPRECATED: The 'state' column (StageState enum) is now the source of truth
+    for run lifecycle. This enum is kept for backward compatibility only.
     """
 
     PENDING = "pending"
@@ -39,15 +39,6 @@ class StageRunStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELED = "canceled"  # American spelling (single 'l')
-
-
-class StageRunProgress(str, Enum):
-    """Progress values for stage_runs.progress column."""
-
-    BUILD = "building"  # Building Docker image
-    LAUNCH = "launching"  # Launching container/instance
-    RUNNING = "running"  # Executing stage code
-    FINALIZING = "finalizing"  # Recording outputs, fetching logs
 
 
 class PipelineStatus(str, Enum):
@@ -534,10 +525,10 @@ class StageRunInfo(BaseModel):
     stage_version_num: int | None = None  # Human-readable version number (1, 2, 3...)
     profile: str | None = None
     hints: dict | None = None
-    status: str  # pending, running, completed, failed
+    status: str  # pending, running, completed, failed (legacy - use state instead)
     started_at: datetime | None = None
     completed_at: datetime | None = None
-    progress: str | None = None
+    state: str | None = None  # State machine state (preparing, building, launching, running, etc.)
     log_uri: str | None = None
     artifact_uri: str | None = None
     outputs: list | None = None

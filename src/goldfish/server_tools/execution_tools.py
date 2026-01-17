@@ -23,8 +23,6 @@ from goldfish.models import (
     CancelRunResponse,
     RunReason,
     StageRunInfo,
-    StageRunProgress,
-    StageRunStatus,
 )
 from goldfish.server_core import (
     _get_config,
@@ -36,6 +34,8 @@ from goldfish.server_core import (
     mcp,
 )
 from goldfish.server_tools.backup_tools import trigger_backup
+from goldfish.state_machine.transitions import TERMINAL_STATES
+from goldfish.state_machine.types import StageState
 from goldfish.utils import parse_datetime
 from goldfish.validation import (
     validate_stage_run_id,
@@ -90,10 +90,10 @@ def _overdrive_ack_timeout(row: dict) -> float:
     if override:
         return override
     backend = row.get("backend_type") or "local"
-    progress = row.get("progress")
+    state = row.get("state")
     if backend == "local":
         return 1.0
-    if backend == "gce" and progress == StageRunProgress.RUNNING:
+    if backend == "gce" and state == StageState.RUNNING.value:
         return 4.0
     return 2.0
 
@@ -329,8 +329,8 @@ def run(
 def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
     """Get a comprehensive, synthesized view of a run.
 
-    This is the master tool for understanding run progress, results, and health.
-    It combines metadata, dashboard (progress/trends), manifest (config/io),
+    This is the master tool for understanding run state, results, and health.
+    It combines metadata, dashboard (state/trends), manifest (config/io),
     and provenance into a single response.
 
     Args:
@@ -356,8 +356,17 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
         raise GoldfishError(f"Run not found: {run_id}")
 
     sync_status = "not_running"
-    if row["status"] == StageRunStatus.RUNNING:
-        # Refresh status once for async runs to avoid stale launch/finalize states.
+    # Check state (source of truth) - handle all active (non-terminal) states (v1.2)
+    active_states = {
+        StageState.PREPARING.value,
+        StageState.BUILDING.value,
+        StageState.LAUNCHING.value,
+        StageState.RUNNING.value,
+        StageState.POST_RUN.value,
+        StageState.AWAITING_USER_FINALIZATION.value,
+    }
+    if row.get("state") in active_states:
+        # Refresh status once for async runs to avoid stale states.
         try:
             _get_stage_executor().refresh_status_once(run_id)
             refreshed = db.get_stage_run(run_id)
@@ -366,12 +375,15 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
         except Exception:
             pass
 
-        progress = row.get("progress")
+        state = row.get("state")
         backend_type = row.get("backend_type")
-        if backend_type == "gce" and progress in {StageRunProgress.BUILD, StageRunProgress.LAUNCH}:
+        if backend_type == "gce" and state in {StageState.BUILDING.value, StageState.LAUNCHING.value}:
             sync_status = "starting"
-        elif backend_type == "gce" and progress == StageRunProgress.FINALIZING:
+        elif backend_type == "gce" and state == StageState.POST_RUN.value:
             sync_status = "finalizing"
+        elif state not in active_states:
+            # State changed to terminal after refresh - no longer active
+            sync_status = "not_running"
         else:
             try:
                 bus = _get_metadata_bus()
@@ -443,16 +455,16 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
             {
                 "workspace": row["workspace_name"],
                 "stage": row["stage_name"],
-                "status": row["status"],
+                "state": row.get("state"),  # State machine state (source of truth)
                 "started_at": row["started_at"],
                 "completed_at": row["completed_at"],
                 "error": row.get("error"),
             }
         )
 
-    # 2. Synthesize Dashboard (Trends + Progress)
+    # 2. Synthesize Dashboard (Trends + State)
     if "dashboard" in include:
-        progress = row.get("progress")
+        dashboard_state = row.get("state")
         dashboard_metrics = ["loss", "accuracy", "val_loss", "val_accuracy", "ppl"]
         run_config: dict[str, Any] = {}
         try:
@@ -576,7 +588,8 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
             db.mark_svs_reviews_notified(review_ids_to_mark)
 
         result["dashboard"] = {
-            "progress": progress,
+            "state": dashboard_state,
+            "progress": row.get("progress"),  # User-facing training progress (e.g., "Epoch 10/10")
             "metrics": synthesized_metrics,
             "health": health,
             "sync_status": sync_status,
@@ -765,13 +778,19 @@ def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = 
                 log_content = "Logs not available"
         except Exception as e:
             # If backend lookup fails, and run failed, use error field
-            if row.get("status") == StageRunStatus.FAILED and row.get("error"):
+            # Check state (source of truth), not legacy status
+            if row.get("state") in {StageState.FAILED.value, StageState.TERMINATED.value} and row.get("error"):
                 log_content = f"Execution failed before logs were available.\n\nError:\n{row['error']}"
             else:
                 log_content = f"[Error fetching logs: {e}]"
 
     # If run failed and we still have no logs, use error message from DB
-    if not log_content and row.get("status") == StageRunStatus.FAILED and row.get("error"):
+    # Check state (source of truth), not legacy status
+    if (
+        not log_content
+        and row.get("state") in {StageState.FAILED.value, StageState.TERMINATED.value}
+        and row.get("error")
+    ):
         log_content = f"No execution logs found.\n\nError from system:\n{row['error']}"
 
     # Handle follow mode - return only new content since last cursor position
@@ -781,12 +800,8 @@ def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = 
         # Periodically clean up stale cursors to prevent memory leaks
         _cleanup_stale_cursors()
 
-        status = row.get("status")
-        terminal_states = {
-            StageRunStatus.COMPLETED,
-            StageRunStatus.FAILED,
-            StageRunStatus.CANCELED,
-        }
+        # Use state (source of truth) for terminal detection and return value
+        current_state = row.get("state")
 
         # Get current cursor position (0 if first call)
         with _log_cursor_lock:
@@ -818,13 +833,17 @@ def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = 
         with _log_cursor_lock:
             _log_cursors[run_id] = (content_len, time.time())
 
-            # Clean up cursor when run reaches terminal state
-            if status in terminal_states:
-                _log_cursors.pop(run_id, None)
+            # Clean up cursor when run reaches terminal state (check state, not status)
+            try:
+                state_enum = StageState(current_state) if current_state else None
+                if state_enum in TERMINAL_STATES:
+                    _log_cursors.pop(run_id, None)
+            except ValueError:
+                pass  # Unknown state value
 
         return {
             "run_id": run_id,
-            "status": status,
+            "state": current_state,
             "logs": new_content,
             "log_uri": log_uri,
             "cursor_position": content_len,
@@ -833,7 +852,7 @@ def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = 
 
     return {
         "run_id": run_id,
-        "status": row.get("status"),
+        "state": row.get("state"),
         "logs": log_content,
         "log_uri": log_uri,
     }

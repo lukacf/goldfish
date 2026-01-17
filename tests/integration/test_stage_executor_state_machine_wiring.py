@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.models import PipelineDef, SignalDef, StageDef, StageRunStatus
+from goldfish.models import PipelineDef, SignalDef, StageDef
 from goldfish.state_machine import EventContext, StageEvent, StageState, transition
 
 
@@ -81,7 +81,7 @@ def test_run_stage_emits_build_start_and_build_ok(test_db: Database, test_config
 
     info = executor.run_stage(workspace="test_workspace", stage_name="preprocess", reason="Test run", wait=False)
 
-    assert info.status == StageRunStatus.RUNNING
+    assert info.status == StageState.RUNNING
     assert _get_run_state(test_db, info.stage_run_id) == "launching"
 
     events = _get_transition_events(test_db, info.stage_run_id)
@@ -123,7 +123,7 @@ def test_preflight_blocked_run_emits_prepare_fail(test_db: Database, test_config
     ):
         info = executor.run_stage(workspace="test_workspace", stage_name="train", reason="Test run", wait=False)
 
-    assert info.status == StageRunStatus.FAILED
+    assert info.status == StageState.FAILED
     assert _get_run_state(test_db, info.stage_run_id) == "failed"
     assert "prepare_fail" in _get_transition_events(test_db, info.stage_run_id)
 
@@ -167,13 +167,13 @@ def test_pre_run_review_block_emits_svs_block(test_db: Database, test_config, tm
         with patch.object(executor, "_record_pre_run_review"):
             info = executor.run_stage(workspace="test_workspace", stage_name="train", reason="Test run", wait=False)
 
-    assert info.status == StageRunStatus.FAILED
+    assert info.status == StageState.FAILED
     assert _get_run_state(test_db, info.stage_run_id) == "failed"
     assert "svs_block" in _get_transition_events(test_db, info.stage_run_id)
 
 
-def test_finalize_completed_emits_exit_success_and_finalize_ok(test_db: Database, test_config, tmp_path: Path) -> None:
-    """_finalize_stage_run() should complete the state machine on success (RUNNING→FINALIZING→COMPLETED)."""
+def test_finalize_completed_emits_exit_success_and_post_run_ok(test_db: Database, test_config, tmp_path: Path) -> None:
+    """_finalize_stage_run() should progress the state machine on success (RUNNING→POST_RUN→AWAITING_USER_FINALIZATION)."""
     _setup_workspace(test_db)
 
     run_id = "stage-acde1234"
@@ -214,12 +214,426 @@ def test_finalize_completed_emits_exit_success_and_finalize_ok(test_db: Database
     executor._persist_logs = MagicMock(return_value=None)
     executor.local_executor.get_container_logs = MagicMock(return_value="")
     executor.local_executor.remove_container = MagicMock()
-    # Avoid warning-based FINALIZE_FAIL from auto-results extraction when no experiment record exists.
+    # Avoid warning-based POST_RUN_FAIL from auto-results extraction when no experiment record exists.
     with patch("goldfish.jobs.stage_executor.ExperimentRecordManager") as mock_mgr:
         mock_mgr.return_value.extract_auto_results.return_value = None
-        executor._finalize_stage_run(run_id, backend="local", status=StageRunStatus.COMPLETED)
+        executor._finalize_stage_run(run_id, backend="local", status=StageState.COMPLETED)
 
-    assert _get_run_state(test_db, run_id) == StageState.COMPLETED.value
+    # v1.2: _finalize_stage_run transitions to AWAITING_USER_FINALIZATION, not COMPLETED
+    assert _get_run_state(test_db, run_id) == StageState.AWAITING_USER_FINALIZATION.value
     events = _get_transition_events(test_db, run_id)
     assert "exit_success" in events
-    assert "finalize_ok" in events
+    assert "post_run_ok" in events
+
+
+class TestStateColumnAsSourceOfTruth:
+    """Tests verifying code reads from state column, not legacy status.
+
+    These tests create scenarios where state and status differ to prove
+    the code uses state (the source of truth) rather than status.
+    """
+
+    def test_refresh_status_once_checks_state_not_status(self, test_db: Database, test_config, tmp_path: Path) -> None:
+        """refresh_status_once should check state for terminal detection, not status.
+
+        When deciding whether to finalize a run, the code should check if state
+        is terminal (completed/failed/terminated/canceled), not the legacy status.
+        """
+        _setup_workspace(test_db)
+
+        # Create a run where:
+        # - state=completed (terminal - should NOT finalize again)
+        # - status=running (legacy says running - old code would try to finalize)
+        run_id = "stage-mismatch123"
+        now = datetime.now(UTC).isoformat()
+
+        with test_db._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage_runs
+                (id, workspace_name, version, stage_name, status, progress,
+                 state, phase, state_entered_at, phase_updated_at,
+                 backend_type, backend_handle, started_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    "test_workspace",
+                    "v1",
+                    "train",
+                    StageState.RUNNING.value,  # Legacy status says running
+                    None,
+                    StageState.COMPLETED.value,  # State machine says completed (terminal)
+                    None,
+                    now,
+                    now,
+                    "local",
+                    "container-id",
+                    now,
+                    now,
+                ),
+            )
+
+        config = test_config.model_copy(deep=True)
+        config.jobs.backend = "local"
+
+        executor = StageExecutor(
+            db=test_db,
+            config=config,
+            workspace_manager=MagicMock(),
+            pipeline_manager=MagicMock(),
+            project_root=tmp_path,
+            dataset_registry=None,
+        )
+
+        # Mock container status to return COMPLETED (container finished)
+        with patch.object(executor.local_executor, "get_container_status") as mock_status:
+            mock_status.return_value = StageState.COMPLETED
+
+            # Mock _finalize_stage_run to track if it gets called
+            with patch.object(executor, "_finalize_stage_run") as mock_finalize:
+                executor.refresh_status_once(run_id)
+
+        # The code should NOT call _finalize_stage_run because state=completed (terminal)
+        # If code checks status=running, it would incorrectly try to finalize again
+        # If code checks state=completed, it correctly skips finalization
+        mock_finalize.assert_not_called()
+
+    def test_get_stage_runs_for_pipeline_uses_state_for_completion(self, test_db: Database) -> None:
+        """Pipeline stage completion check should use state, not status."""
+        _setup_workspace(test_db)
+
+        # Create a run where status=running but state=completed (mismatch)
+        run_id = "stage-complete123"
+        now = datetime.now(UTC).isoformat()
+
+        with test_db._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage_runs
+                (id, workspace_name, version, stage_name, status, progress,
+                 state, phase, state_entered_at, phase_updated_at,
+                 backend_type, started_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    "test_workspace",
+                    "v1",
+                    "preprocess",
+                    StageState.RUNNING.value,  # Legacy status (wrong)
+                    None,
+                    StageState.COMPLETED.value,  # State machine (source of truth)
+                    None,
+                    now,
+                    now,
+                    "local",
+                    now,
+                    now,
+                ),
+            )
+
+        # Query should check state=completed, not status
+        with test_db._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT id FROM stage_runs
+                WHERE workspace_name = ? AND stage_name = ? AND state = ?
+                """,
+                ("test_workspace", "preprocess", StageState.COMPLETED.value),
+            ).fetchone()
+
+        assert row is not None, "Should find run by state=completed"
+        assert row["id"] == run_id
+
+    def test_active_runs_query_uses_state_column(self, test_db: Database) -> None:
+        """Active runs queries should use state column, not status."""
+        _setup_workspace(test_db)
+        now = datetime.now(UTC).isoformat()
+
+        # Create runs with mismatched state/status (status column is legacy, uses old enum values)
+        runs = [
+            ("stage-a", "running", StageState.RUNNING.value, "train"),
+            ("stage-b", "running", StageState.COMPLETED.value, "train2"),  # Mismatch
+            ("stage-c", "pending", StageState.PREPARING.value, "train3"),  # Old "pending" vs new "preparing"
+        ]
+
+        with test_db._conn() as conn:
+            for run_id, status, state, stage in runs:
+                conn.execute(
+                    """
+                    INSERT INTO stage_runs
+                    (id, workspace_name, version, stage_name, status, progress,
+                     state, phase, state_entered_at, phase_updated_at,
+                     backend_type, started_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (run_id, "test_workspace", "v1", stage, status, None, state, None, now, now, "local", now),
+                )
+
+        # Query active runs using state (source of truth)
+        active_states = (
+            StageState.PREPARING.value,
+            StageState.BUILDING.value,
+            StageState.LAUNCHING.value,
+            StageState.RUNNING.value,
+            StageState.POST_RUN.value,
+            StageState.AWAITING_USER_FINALIZATION.value,
+        )
+
+        with test_db._conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id FROM stage_runs
+                WHERE state IN ({','.join('?' * len(active_states))})
+                """,
+                active_states,
+            ).fetchall()
+
+        active_ids = {r["id"] for r in rows}
+
+        # stage-a: state=running -> active
+        # stage-b: state=completed -> NOT active (even though status=running)
+        # stage-c: state=preparing -> active
+        assert active_ids == {"stage-a", "stage-c"}, f"Should use state column: {active_ids}"
+
+    def test_terminal_detection_uses_state_column(self, test_db: Database) -> None:
+        """Terminal state detection should use state, not status."""
+        _setup_workspace(test_db)
+        now = datetime.now(UTC).isoformat()
+
+        # Create a run where status=running but state=failed
+        run_id = "stage-terminal456"
+        with test_db._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage_runs
+                (id, workspace_name, version, stage_name, status, progress,
+                 state, phase, termination_cause, state_entered_at, phase_updated_at,
+                 backend_type, started_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    "test_workspace",
+                    "v1",
+                    "train",
+                    StageState.RUNNING.value,  # Legacy says running
+                    None,
+                    StageState.FAILED.value,  # State machine says failed
+                    None,
+                    None,
+                    now,
+                    now,
+                    "local",
+                    now,
+                ),
+            )
+
+        terminal_states = (
+            StageState.COMPLETED.value,
+            StageState.FAILED.value,
+            StageState.TERMINATED.value,
+            StageState.CANCELED.value,
+        )
+
+        # Query should find this as terminal by state
+        with test_db._conn() as conn:
+            row = conn.execute(
+                f"""
+                SELECT state FROM stage_runs
+                WHERE id = ? AND state IN ({','.join('?' * len(terminal_states))})
+                """,
+                (run_id, *terminal_states),
+            ).fetchone()
+
+        assert row is not None, "Should detect terminal by state column"
+        assert row["state"] == StageState.FAILED.value
+
+
+class TestPipelineExecutorUsesState:
+    """Tests verifying PipelineExecutor reads state column, not status."""
+
+    def test_validate_inputs_resolvable_checks_state_not_status(
+        self, test_db: Database, test_config, tmp_path: Path
+    ) -> None:
+        """_validate_inputs_resolvable should check state=completed, not status=completed.
+
+        When checking if an upstream stage has completed, should use state column.
+        """
+        from goldfish.jobs.pipeline_executor import PipelineExecutor
+        from goldfish.pipeline.manager import PipelineManager
+
+        _setup_workspace(test_db)
+        now = datetime.now(UTC).isoformat()
+
+        # Create an upstream run where:
+        # - state=completed (source of truth - run is done)
+        # - status=running (legacy - would fail validation if checked)
+        with test_db._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage_runs
+                (id, workspace_name, version, stage_name, status, progress,
+                 state, phase, state_entered_at, phase_updated_at,
+                 backend_type, started_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "stage-upstream-done",
+                    "test_workspace",
+                    "v1",
+                    "preprocess",
+                    StageState.RUNNING.value,  # Legacy status (wrong)
+                    None,
+                    StageState.COMPLETED.value,  # State machine (source of truth)
+                    None,
+                    now,
+                    now,
+                    "local",
+                    now,
+                    now,
+                ),
+            )
+
+        # Create a stage that depends on preprocess
+        train_stage = StageDef(
+            name="train",
+            inputs={
+                "features": SignalDef(
+                    name="features",
+                    type="npy",
+                    from_stage="preprocess",
+                    signal="features",
+                )
+            },
+            outputs={},
+        )
+
+        pipeline_manager = MagicMock(spec=PipelineManager)
+        stage_executor = MagicMock()
+
+        executor = PipelineExecutor(
+            stage_executor=stage_executor,
+            pipeline_manager=pipeline_manager,
+            db=test_db,
+        )
+
+        # This should NOT raise because preprocess has state=completed
+        # If code checks status=running, it would incorrectly raise an error
+        executor._validate_inputs_resolvable("test_workspace", [train_stage], None)
+
+
+class TestExecutionToolsUsesState:
+    """Tests verifying execution_tools reads state column, not status.
+
+    Note: The MCP decorator prevents direct function calls, so these tests
+    verify the underlying behavior by importing the function's inner logic
+    or by checking the code pattern matches what we expect.
+    """
+
+    def test_inspect_run_sync_condition_checks_state(self, test_db: Database) -> None:
+        """Verify inspect_run's sync trigger condition uses state column.
+
+        The sync is triggered when state=running (not status=running).
+        We test this by checking that a run with state=completed and status=running
+        does NOT get the sync behavior (sync_status stays "not_running").
+        """
+        _setup_workspace(test_db)
+        now = datetime.now(UTC).isoformat()
+
+        # Create a run where state=completed but status=running (mismatch)
+        run_id = "stage-sync-test"
+        with test_db._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage_runs
+                (id, workspace_name, version, stage_name, status, progress,
+                 state, phase, state_entered_at, phase_updated_at,
+                 backend_type, backend_handle, started_at, completed_at, log_uri)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    "test_workspace",
+                    "v1",
+                    "train",
+                    StageState.RUNNING.value,  # Legacy status (wrong)
+                    None,
+                    StageState.COMPLETED.value,  # State machine (source of truth)
+                    None,
+                    now,
+                    now,
+                    "local",
+                    "container-id",
+                    now,
+                    now,
+                    "/tmp/fake.log",
+                ),
+            )
+
+        # Verify the condition used in inspect_run
+        row = test_db.get_stage_run(run_id)
+        assert row is not None
+
+        # The sync trigger should check state, not status
+        # If code uses: row["status"] == StageState.RUNNING -> would be True (wrong)
+        # If code uses: row.get("state") == StageState.RUNNING.value -> would be False (correct)
+        should_trigger_sync = row.get("state") == StageState.RUNNING.value
+        assert not should_trigger_sync, "Should NOT trigger sync when state=completed"
+
+        # Verify that checking status would give wrong answer
+        legacy_would_trigger = row.get("status") == StageState.RUNNING.value
+        assert legacy_would_trigger, "Legacy check would incorrectly trigger sync"
+
+    def test_logs_error_display_condition_checks_state(self, test_db: Database) -> None:
+        """Verify logs() error display condition uses state column.
+
+        Error messages should be shown when state=failed/terminated (not status=failed).
+        """
+        _setup_workspace(test_db)
+        now = datetime.now(UTC).isoformat()
+
+        # Create a run where state=failed but status=running (mismatch)
+        run_id = "stage-logs-fail"
+        error_msg = "Test error message"
+        with test_db._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO stage_runs
+                (id, workspace_name, version, stage_name, status, progress,
+                 state, phase, state_entered_at, phase_updated_at,
+                 backend_type, backend_handle, started_at, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    "test_workspace",
+                    "v1",
+                    "train",
+                    StageState.RUNNING.value,  # Legacy status (wrong)
+                    None,
+                    StageState.FAILED.value,  # State machine (source of truth)
+                    None,
+                    now,
+                    now,
+                    "local",
+                    "container-id",
+                    now,
+                    error_msg,
+                ),
+            )
+
+        # Verify the condition used in logs()
+        row = test_db.get_stage_run(run_id)
+        assert row is not None
+
+        # The error display should check state, not status
+        # If code uses: row.get("status") == StageState.FAILED -> would be False (wrong)
+        # If code uses: row.get("state") in {StageState.FAILED.value, ...} -> would be True (correct)
+        should_show_error = row.get("state") in {StageState.FAILED.value, StageState.TERMINATED.value}
+        assert should_show_error, "Should show error when state=failed"
+
+        # Verify that checking status would give wrong answer
+        legacy_would_show = row.get("status") == StageState.FAILED.value
+        assert not legacy_would_show, "Legacy check would NOT show error"

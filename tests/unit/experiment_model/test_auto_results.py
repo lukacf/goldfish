@@ -244,3 +244,83 @@ class TestDeriveInfraOutcome:
         assert manager.derive_infra_outcome("running") == "unknown"
         assert manager.derive_infra_outcome("pending") == "unknown"
         assert manager.derive_infra_outcome("foo") == "unknown"
+
+
+class TestDeriveInfraOutcomeFromState:
+    """Tests for deriving infra_outcome from state machine state.
+
+    This is the canonical method per the state machine spec (section 9.1).
+    Unlike the legacy derive_infra_outcome (status-based), this uses the
+    state machine state and termination_cause for derivation.
+    """
+
+    def test_completed_state_returns_completed(self) -> None:
+        """State 'completed' maps to infra_outcome 'completed'."""
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+        assert manager.derive_infra_outcome_from_state("completed") == "completed"
+
+    def test_failed_state_returns_crashed(self) -> None:
+        """State 'failed' maps to infra_outcome 'crashed'.
+
+        Per spec section 9.1: failed -> crashed (Infrastructure failure -
+        build, launch, execution, or critical post-run).
+        """
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+        assert manager.derive_infra_outcome_from_state("failed") == "crashed"
+
+    def test_canceled_state_returns_canceled(self) -> None:
+        """State 'canceled' maps to infra_outcome 'canceled'."""
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+        assert manager.derive_infra_outcome_from_state("canceled") == "canceled"
+
+    def test_terminated_preempted_returns_preempted(self) -> None:
+        """State 'terminated' with cause 'preempted' maps to 'preempted'."""
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+        assert manager.derive_infra_outcome_from_state("terminated", "preempted") == "preempted"
+
+    def test_terminated_crashed_returns_crashed(self) -> None:
+        """State 'terminated' with cause 'crashed' maps to 'crashed'."""
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+        assert manager.derive_infra_outcome_from_state("terminated", "crashed") == "crashed"
+
+    def test_terminated_timeout_returns_crashed(self) -> None:
+        """State 'terminated' with cause 'timeout' maps to 'crashed'."""
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+        assert manager.derive_infra_outcome_from_state("terminated", "timeout") == "crashed"
+
+    def test_terminated_orphaned_returns_unknown(self) -> None:
+        """State 'terminated' with cause 'orphaned' maps to 'unknown'."""
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+        assert manager.derive_infra_outcome_from_state("terminated", "orphaned") == "unknown"
+
+    def test_terminated_ai_stopped_returns_canceled(self) -> None:
+        """State 'terminated' with cause 'ai_stopped' maps to 'canceled'."""
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+        assert manager.derive_infra_outcome_from_state("terminated", "ai_stopped") == "canceled"
+
+    def test_terminated_manual_returns_canceled(self) -> None:
+        """State 'terminated' with cause 'manual' maps to 'canceled'."""
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+        assert manager.derive_infra_outcome_from_state("terminated", "manual") == "canceled"
+
+    def test_unknown_state_returns_unknown(self) -> None:
+        """State 'unknown' maps to infra_outcome 'unknown'."""
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+        assert manager.derive_infra_outcome_from_state("unknown") == "unknown"
+
+    def test_unrecognized_state_returns_unknown(self) -> None:
+        """Unrecognized states map to infra_outcome 'unknown'."""
+        mock_db = MagicMock()
+        manager = ExperimentRecordManager(mock_db)
+        assert manager.derive_infra_outcome_from_state("running") == "unknown"
+        assert manager.derive_infra_outcome_from_state("building") == "unknown"

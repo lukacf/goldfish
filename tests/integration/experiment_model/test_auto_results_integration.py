@@ -100,14 +100,27 @@ class TestAutoResultsIntegration:
         assert auto_results["secondary"]["f1"] == 0.70
 
     def test_derive_infra_outcome_from_status(self, test_db: Database) -> None:
-        """Infra outcome is derived from run status."""
+        """Infra outcome is derived from run status.
+
+        Note: In state machine semantics, 'failed' status means code failed but
+        infrastructure worked correctly, so infra_outcome is 'completed'.
+        Infrastructure failures (preemptions, crashes) go to 'terminated' state
+        with appropriate termination_cause. For legacy 'failed' status with
+        crash/preemption keywords in error text, derive_infra_outcome checks
+        the error text to return the appropriate outcome.
+        """
         _setup_workspace_and_version(test_db, "test_ws", "v1")
 
         manager = ExperimentRecordManager(test_db)
 
         # Test various status mappings
         assert manager.derive_infra_outcome("completed") == "completed"
-        assert manager.derive_infra_outcome("failed") == "crashed"
+        # 'failed' without error text → infra worked, code failed
+        assert manager.derive_infra_outcome("failed") == "completed"
+        # 'failed' with crash keywords → crashed
+        assert manager.derive_infra_outcome("failed", "container crashed with OOM") == "crashed"
+        # 'failed' with preemption keywords → preempted
+        assert manager.derive_infra_outcome("failed", "instance was preempted") == "preempted"
         assert manager.derive_infra_outcome("preempted") == "preempted"
         assert manager.derive_infra_outcome("canceled") == "canceled"
         assert manager.derive_infra_outcome("running") == "unknown"

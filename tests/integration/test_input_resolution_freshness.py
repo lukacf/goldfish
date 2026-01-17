@@ -1,12 +1,29 @@
 """Test that input resolution prefers freshness over 'success' status."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.models import SignalDef, StageDef, StageRunStatus
+from goldfish.models import SignalDef, StageDef
+from goldfish.state_machine import EventContext, StageEvent, transition
+
+
+def _transition_to_completed(db: Database, stage_run_id: str) -> None:
+    """Transition a stage run to COMPLETED state via state machine (v1.2 lifecycle)."""
+    ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+    transition(db, stage_run_id, StageEvent.BUILD_START, ctx)
+    transition(db, stage_run_id, StageEvent.BUILD_OK, ctx)
+    transition(db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
+    success_ctx = EventContext(timestamp=datetime.now(UTC), source="executor", exit_code=0, exit_code_exists=True)
+    transition(db, stage_run_id, StageEvent.EXIT_SUCCESS, success_ctx)
+    transition(db, stage_run_id, StageEvent.POST_RUN_OK, ctx)
+    # v1.2: Now need USER_FINALIZE to reach COMPLETED
+    finalize_ctx = EventContext(timestamp=datetime.now(UTC), source="mcp_tool")
+    transition(db, stage_run_id, StageEvent.USER_FINALIZE, finalize_ctx)
 
 
 @pytest.fixture
@@ -56,7 +73,7 @@ def test_prefers_newest_unreviewed_over_old_success(test_db, executor):
     with test_db._conn() as conn:
         conn.execute("UPDATE stage_runs SET started_at = ? WHERE id = ?", ("2025-01-01T10:00:00Z", "stage-old-success"))
 
-    test_db.update_stage_run_status("stage-old-success", StageRunStatus.COMPLETED)
+    _transition_to_completed(test_db, "stage-old-success")
     test_db.update_run_outcome("stage-old-success", "success")
     test_db.add_signal_with_source("stage-old-success", "data", "directory", "gs://old/data")
 
@@ -72,7 +89,7 @@ def test_prefers_newest_unreviewed_over_old_success(test_db, executor):
             "UPDATE stage_runs SET started_at = ? WHERE id = ?", ("2025-01-01T12:00:00Z", "stage-new-unreviewed")
         )
 
-    test_db.update_stage_run_status("stage-new-unreviewed", StageRunStatus.COMPLETED)
+    _transition_to_completed(test_db, "stage-new-unreviewed")
     # outcome is NULL by default
     test_db.add_signal_with_source("stage-new-unreviewed", "data", "directory", "gs://new/data")
 
@@ -112,7 +129,7 @@ def test_skips_bad_results(test_db, executor):
     with test_db._conn() as conn:
         conn.execute("UPDATE stage_runs SET started_at = ? WHERE id = ?", ("2025-01-01T10:00:00Z", "stage-old-success"))
 
-    test_db.update_stage_run_status("stage-old-success", StageRunStatus.COMPLETED)
+    _transition_to_completed(test_db, "stage-old-success")
     test_db.update_run_outcome("stage-old-success", "success")
     test_db.add_signal_with_source("stage-old-success", "data", "directory", "gs://old/data")
 
@@ -126,7 +143,7 @@ def test_skips_bad_results(test_db, executor):
     with test_db._conn() as conn:
         conn.execute("UPDATE stage_runs SET started_at = ? WHERE id = ?", ("2025-01-01T12:00:00Z", "stage-new-bad"))
 
-    test_db.update_stage_run_status("stage-new-bad", StageRunStatus.COMPLETED)
+    _transition_to_completed(test_db, "stage-new-bad")
     test_db.update_run_outcome("stage-new-bad", "bad_results")
     test_db.add_signal_with_source("stage-new-bad", "data", "directory", "gs://new/data")
 

@@ -157,8 +157,8 @@ class TestTransitionHappyPath:
         assert result.success is True
         assert result.new_state == StageState.RUNNING
 
-    def test_running_to_finalizing(self, mock_db: MagicMock, now: datetime) -> None:
-        """RUNNING + EXIT_SUCCESS → FINALIZING."""
+    def test_running_to_post_run(self, mock_db: MagicMock, now: datetime) -> None:
+        """RUNNING + EXIT_SUCCESS → POST_RUN (v1.2: renamed from FINALIZING)."""
         from goldfish.state_machine.core import transition
 
         run_id = "stage-abc123"
@@ -173,22 +173,40 @@ class TestTransitionHappyPath:
         result = transition(mock_db, run_id, StageEvent.EXIT_SUCCESS, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.FINALIZING
+        assert result.new_state == StageState.POST_RUN
 
-    def test_finalizing_to_completed(self, mock_db: MagicMock, now: datetime) -> None:
-        """FINALIZING + FINALIZE_OK → COMPLETED."""
+    def test_post_run_to_awaiting_user_finalization(self, mock_db: MagicMock, now: datetime) -> None:
+        """POST_RUN + POST_RUN_OK → AWAITING_USER_FINALIZATION (v1.2)."""
         from goldfish.state_machine.core import transition
 
         run_id = "stage-abc123"
         ctx = EventContext(timestamp=now, source="executor", phase=ProgressPhase.CLEANUP)
 
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "finalizing",
+            "state": "post_run",
             "phase": "cleanup",
         }
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
 
-        result = transition(mock_db, run_id, StageEvent.FINALIZE_OK, ctx)
+        result = transition(mock_db, run_id, StageEvent.POST_RUN_OK, ctx)
+
+        assert result.success is True
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
+
+    def test_awaiting_user_finalization_to_completed(self, mock_db: MagicMock, now: datetime) -> None:
+        """AWAITING_USER_FINALIZATION + USER_FINALIZE → COMPLETED (v1.2)."""
+        from goldfish.state_machine.core import transition
+
+        run_id = "stage-abc123"
+        ctx = EventContext(timestamp=now, source="mcp_tool")
+
+        mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
+            "state": "awaiting_user_finalization",
+            "completed_with_warnings": 0,
+        }
+        mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
+
+        result = transition(mock_db, run_id, StageEvent.USER_FINALIZE, ctx)
 
         assert result.success is True
         assert result.new_state == StageState.COMPLETED
@@ -268,7 +286,7 @@ class TestTransitionFailurePaths:
         ctx = EventContext(
             timestamp=now,
             source="executor",
-            svs_finding_id="finding-123",
+            svs_review_id="finding-123",
             error_message="SVS blocked execution",
         )
 
@@ -293,13 +311,13 @@ class TestTransitionTerminations:
             StageState.BUILDING,
             StageState.LAUNCHING,
             StageState.RUNNING,
-            StageState.FINALIZING,
+            StageState.POST_RUN,
         ],
     )
     def test_instance_lost_from_all_active_states(
         self, mock_db: MagicMock, now: datetime, from_state: StageState
     ) -> None:
-        """INSTANCE_LOST from any active state → TERMINATED."""
+        """INSTANCE_LOST from any active state → TERMINATED (v1.2: POST_RUN replaces FINALIZING)."""
         from goldfish.state_machine.core import transition
 
         ctx = EventContext(
@@ -328,7 +346,7 @@ class TestTransitionTerminations:
             StageState.RUNNING,
         ],
     )
-    def test_timeout_from_non_finalizing_active_states(
+    def test_timeout_from_non_post_run_active_states(
         self, mock_db: MagicMock, now: datetime, from_state: StageState
     ) -> None:
         """TIMEOUT from PREPARING/BUILDING/LAUNCHING/RUNNING → TERMINATED (no guard).
@@ -354,8 +372,8 @@ class TestTransitionTerminations:
         update_calls = [c for c in calls if "UPDATE stage_runs" in str(c)]
         assert len(update_calls) >= 1
         update_params = update_calls[0][0][1]
-        # termination_cause is set in the UPDATE tuple (after state/phase/status/progress + timestamps)
-        assert update_params[6] == TerminationCause.TIMEOUT.value
+        # termination_cause is at index 4 (after state/phase/state_entered_at/phase_updated_at)
+        assert update_params[4] == TerminationCause.TIMEOUT.value
 
     def test_exit_missing_with_confirmed_dead_goes_to_terminated(self, mock_db: MagicMock, now: datetime) -> None:
         """RUNNING + EXIT_MISSING [guard: instance_confirmed_dead] → TERMINATED."""
@@ -410,11 +428,12 @@ class TestTransitionCancellation:
             StageState.BUILDING,
             StageState.LAUNCHING,
             StageState.RUNNING,
-            StageState.FINALIZING,
+            StageState.POST_RUN,
+            StageState.AWAITING_USER_FINALIZATION,
         ],
     )
     def test_user_cancel_from_active_states(self, mock_db: MagicMock, now: datetime, from_state: StageState) -> None:
-        """USER_CANCEL from any active state → CANCELED."""
+        """USER_CANCEL from any active state → CANCELED (v1.2: includes POST_RUN and AWAITING_USER_FINALIZATION)."""
         from goldfish.state_machine.core import transition
 
         ctx = EventContext(timestamp=now, source="mcp_tool")
@@ -430,11 +449,11 @@ class TestTransitionCancellation:
         assert result.new_state == StageState.CANCELED
 
 
-class TestTransitionGuardedFinalization:
-    """Test guarded transitions in FINALIZING state."""
+class TestTransitionGuardedPostRun:
+    """Test guarded transitions in POST_RUN state (v1.2: renamed from FINALIZING)."""
 
-    def test_finalize_fail_critical_true_goes_to_failed(self, mock_db: MagicMock, now: datetime) -> None:
-        """FINALIZING + FINALIZE_FAIL [critical=True] → FAILED."""
+    def test_post_run_fail_critical_true_goes_to_failed(self, mock_db: MagicMock, now: datetime) -> None:
+        """POST_RUN + POST_RUN_FAIL [critical=True] → FAILED (v1.2)."""
         from goldfish.state_machine.core import transition
 
         ctx = EventContext(
@@ -445,17 +464,19 @@ class TestTransitionGuardedFinalization:
         )
 
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "finalizing"
+            "state": "post_run"
         }
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
 
-        result = transition(mock_db, "stage-abc", StageEvent.FINALIZE_FAIL, ctx)
+        result = transition(mock_db, "stage-abc", StageEvent.POST_RUN_FAIL, ctx)
 
         assert result.success is True
         assert result.new_state == StageState.FAILED
 
-    def test_finalize_fail_critical_false_goes_to_completed(self, mock_db: MagicMock, now: datetime) -> None:
-        """FINALIZING + FINALIZE_FAIL [critical=False] → COMPLETED."""
+    def test_post_run_fail_critical_false_goes_to_awaiting_user_finalization(
+        self, mock_db: MagicMock, now: datetime
+    ) -> None:
+        """POST_RUN + POST_RUN_FAIL [critical=False] → AWAITING_USER_FINALIZATION (v1.2)."""
         from goldfish.state_machine.core import transition
 
         ctx = EventContext(
@@ -466,17 +487,17 @@ class TestTransitionGuardedFinalization:
         )
 
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "finalizing"
+            "state": "post_run"
         }
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
 
-        result = transition(mock_db, "stage-abc", StageEvent.FINALIZE_FAIL, ctx)
+        result = transition(mock_db, "stage-abc", StageEvent.POST_RUN_FAIL, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
-    def test_finalize_fail_critical_none_no_transition(self, mock_db: MagicMock, now: datetime) -> None:
-        """FINALIZING + FINALIZE_FAIL [critical=None] → no valid transition."""
+    def test_post_run_fail_critical_none_no_transition(self, mock_db: MagicMock, now: datetime) -> None:
+        """POST_RUN + POST_RUN_FAIL [critical=None] → no valid transition."""
         from goldfish.state_machine.core import transition
 
         ctx = EventContext(
@@ -486,18 +507,18 @@ class TestTransitionGuardedFinalization:
         )
 
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "finalizing"
+            "state": "post_run"
         }
 
-        result = transition(mock_db, "stage-abc", StageEvent.FINALIZE_FAIL, ctx)
+        result = transition(mock_db, "stage-abc", StageEvent.POST_RUN_FAIL, ctx)
 
         assert result.success is False
         assert result.reason == "no_transition"
 
-    def test_timeout_in_finalizing_critical_phases_done_goes_to_completed(
+    def test_timeout_in_post_run_critical_phases_done_goes_to_awaiting_user_finalization(
         self, mock_db: MagicMock, now: datetime
     ) -> None:
-        """FINALIZING + TIMEOUT [critical_phases_done=True] → COMPLETED."""
+        """POST_RUN + TIMEOUT [critical_phases_done=True] → AWAITING_USER_FINALIZATION (v1.2)."""
         from goldfish.state_machine.core import transition
 
         ctx = EventContext(
@@ -507,19 +528,19 @@ class TestTransitionGuardedFinalization:
         )
 
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "finalizing"
+            "state": "post_run"
         }
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
 
         result = transition(mock_db, "stage-abc", StageEvent.TIMEOUT, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
-    def test_timeout_in_finalizing_critical_phases_not_done_goes_to_failed(
+    def test_timeout_in_post_run_critical_phases_not_done_goes_to_failed(
         self, mock_db: MagicMock, now: datetime
     ) -> None:
-        """FINALIZING + TIMEOUT [critical_phases_done=False] → FAILED."""
+        """POST_RUN + TIMEOUT [critical_phases_done=False] → FAILED."""
         from goldfish.state_machine.core import transition
 
         ctx = EventContext(
@@ -529,7 +550,7 @@ class TestTransitionGuardedFinalization:
         )
 
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "finalizing"
+            "state": "post_run"
         }
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
 
@@ -538,10 +559,10 @@ class TestTransitionGuardedFinalization:
         assert result.success is True
         assert result.new_state == StageState.FAILED
 
-    def test_timeout_in_finalizing_critical_phases_done_none_no_transition(
+    def test_timeout_in_post_run_critical_phases_done_none_no_transition(
         self, mock_db: MagicMock, now: datetime
     ) -> None:
-        """FINALIZING + TIMEOUT [critical_phases_done=None] → no valid transition."""
+        """POST_RUN + TIMEOUT [critical_phases_done=None] → no valid transition."""
         from goldfish.state_machine.core import transition
 
         ctx = EventContext(
@@ -551,7 +572,7 @@ class TestTransitionGuardedFinalization:
         )
 
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "finalizing"
+            "state": "post_run"
         }
 
         result = transition(mock_db, "stage-abc", StageEvent.TIMEOUT, ctx)
@@ -641,15 +662,15 @@ class TestTransitionIdempotency:
         """Transition that would go to current state is idempotent success."""
         from goldfish.state_machine.core import transition
 
-        ctx = EventContext(timestamp=now, source="executor")
+        ctx = EventContext(timestamp=now, source="mcp_tool")
 
         # Already in COMPLETED
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
             "state": "completed"
         }
 
-        # FINALIZE_OK would go to COMPLETED, but we're already there
-        result = transition(mock_db, "stage-abc", StageEvent.FINALIZE_OK, ctx)
+        # USER_FINALIZE would go to COMPLETED, but we're already there (v1.2)
+        result = transition(mock_db, "stage-abc", StageEvent.USER_FINALIZE, ctx)
 
         # This should be idempotent success
         assert result.success is True
@@ -673,14 +694,14 @@ class TestTransitionIdempotency:
         assert result.success is False
         assert result.reason == "no_transition"
 
-    def test_guard_aware_idempotency_finalize_fail_critical_true_not_idempotent_in_completed(
+    def test_guard_aware_idempotency_post_run_fail_critical_true_not_idempotent_in_awaiting(
         self, mock_db: MagicMock, now: datetime
     ) -> None:
-        """FINALIZE_FAIL with critical=True should NOT be idempotent in COMPLETED.
+        """POST_RUN_FAIL with critical=True should NOT be idempotent in AWAITING_USER_FINALIZATION.
 
-        This is guard-aware idempotency: the transition FINALIZE_FAIL(critical=True) → FAILED,
-        so if we're in COMPLETED and get FINALIZE_FAIL(critical=True), it's not idempotent
-        because the transition would have gone to FAILED, not COMPLETED.
+        This is guard-aware idempotency: the transition POST_RUN_FAIL(critical=True) → FAILED,
+        so if we're in AWAITING_USER_FINALIZATION and get POST_RUN_FAIL(critical=True), it's not idempotent
+        because the transition would have gone to FAILED, not AWAITING_USER_FINALIZATION.
         """
         from goldfish.state_machine.core import transition
 
@@ -690,21 +711,22 @@ class TestTransitionIdempotency:
             critical=True,  # Would go to FAILED
         )
 
-        # Already in COMPLETED
+        # Already in AWAITING_USER_FINALIZATION
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "completed"
+            "state": "awaiting_user_finalization",
+            "completed_with_warnings": 0,
         }
 
-        result = transition(mock_db, "stage-abc", StageEvent.FINALIZE_FAIL, ctx)
+        result = transition(mock_db, "stage-abc", StageEvent.POST_RUN_FAIL, ctx)
 
-        # Not idempotent - transition would go to FAILED, not COMPLETED
+        # Not idempotent - transition would go to FAILED, not AWAITING_USER_FINALIZATION
         assert result.success is False
         assert result.reason == "no_transition"
 
-    def test_guard_aware_idempotency_finalize_fail_critical_false_is_idempotent_in_completed(
+    def test_guard_aware_idempotency_post_run_fail_critical_false_is_idempotent_in_awaiting(
         self, mock_db: MagicMock, now: datetime
     ) -> None:
-        """FINALIZE_FAIL with critical=False IS idempotent in COMPLETED.
+        """POST_RUN_FAIL with critical=False IS idempotent in AWAITING_USER_FINALIZATION (v1.2).
 
         Spec: if current state is a valid target for this event and the guard passes
         for THIS context, return already_in_target_state.
@@ -713,34 +735,36 @@ class TestTransitionIdempotency:
 
         ctx = EventContext(timestamp=now, source="executor", critical=False)
 
-        # Already in COMPLETED
+        # Already in AWAITING_USER_FINALIZATION
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "completed"
+            "state": "awaiting_user_finalization",
+            "completed_with_warnings": 0,
         }
 
-        result = transition(mock_db, "stage-abc", StageEvent.FINALIZE_FAIL, ctx)
+        result = transition(mock_db, "stage-abc", StageEvent.POST_RUN_FAIL, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
         assert result.reason == "already_in_target_state"
 
-    def test_guard_aware_idempotency_timeout_finalizing_outputs_saved_is_idempotent_in_completed(
+    def test_guard_aware_idempotency_timeout_post_run_outputs_saved_is_idempotent_in_awaiting(
         self, mock_db: MagicMock, now: datetime
     ) -> None:
-        """TIMEOUT(finalizing, critical_phases_done=True) IS idempotent in COMPLETED."""
+        """TIMEOUT(post_run, critical_phases_done=True) IS idempotent in AWAITING_USER_FINALIZATION (v1.2)."""
         from goldfish.state_machine.core import transition
 
         ctx = EventContext(timestamp=now, source="daemon", critical_phases_done=True)
 
-        # Already in COMPLETED
+        # Already in AWAITING_USER_FINALIZATION
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "completed"
+            "state": "awaiting_user_finalization",
+            "completed_with_warnings": 0,
         }
 
         result = transition(mock_db, "stage-abc", StageEvent.TIMEOUT, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
         assert result.reason == "already_in_target_state"
 
 
@@ -755,15 +779,15 @@ class TestTransitionAudit:
         """
         from goldfish.state_machine.core import transition
 
-        ctx = EventContext(timestamp=now, source="executor")
+        ctx = EventContext(timestamp=now, source="mcp_tool")
 
         # Already in COMPLETED
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
             "state": "completed"
         }
 
-        # FINALIZE_OK would go to COMPLETED, but we're already there
-        result = transition(mock_db, "stage-abc", StageEvent.FINALIZE_OK, ctx)
+        # USER_FINALIZE would go to COMPLETED, but we're already there (v1.2)
+        result = transition(mock_db, "stage-abc", StageEvent.USER_FINALIZE, ctx)
 
         assert result.success is True
         assert result.reason == "already_in_target_state"
@@ -815,7 +839,7 @@ class TestTransitionAudit:
             gcs_outage_started=None,
             critical=None,
             critical_phases_done=None,
-            svs_finding_id="finding-123",
+            svs_review_id="finding-123",
         )
 
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
@@ -835,36 +859,37 @@ class TestTransitionAudit:
         audit_call = audit_calls[0]
         # The INSERT uses positional params:
         # (stage_run_id, from_state, to_state, event, phase, termination_cause,
-        #  exit_code, exit_code_exists, error_message, source, created_at)
+        #  exit_code, exit_code_exists, error_message, svs_review_id, source, created_at)
         call_args = audit_call[0][1]  # Second element is the tuple of values
 
         assert call_args[0] == "stage-abc"
         assert call_args[6] == 0
         assert call_args[7] == 1
         assert call_args[8] == "Test error message"
-        assert call_args[9] == "daemon"
+        assert call_args[9] == "finding-123"  # svs_review_id
+        assert call_args[10] == "daemon"  # source (shifted)
         assert call_args[4] == "code_execution"
         assert call_args[5] is None
 
 
 class TestTransitionCompletedWithWarnings:
-    """Test completed_with_warnings flag setting."""
+    """Test completed_with_warnings flag setting (v1.2: transitions now go to AWAITING_USER_FINALIZATION)."""
 
-    def test_finalize_fail_critical_false_sets_completed_with_warnings(self, mock_db: MagicMock, now: datetime) -> None:
-        """FINALIZE_FAIL with critical=False sets completed_with_warnings=True."""
+    def test_post_run_fail_critical_false_sets_completed_with_warnings(self, mock_db: MagicMock, now: datetime) -> None:
+        """POST_RUN_FAIL with critical=False sets completed_with_warnings=True (v1.2)."""
         from goldfish.state_machine.core import transition
 
         ctx = EventContext(timestamp=now, source="executor", critical=False)
 
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "finalizing"
+            "state": "post_run"
         }
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
 
-        result = transition(mock_db, "stage-abc", StageEvent.FINALIZE_FAIL, ctx)
+        result = transition(mock_db, "stage-abc", StageEvent.POST_RUN_FAIL, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
         # Verify completed_with_warnings was set in UPDATE
         calls = mock_db._conn.return_value.__enter__.return_value.execute.call_args_list
@@ -872,7 +897,7 @@ class TestTransitionCompletedWithWarnings:
         assert len(update_calls) >= 1, "completed_with_warnings should be set"
 
     def test_timeout_critical_phases_done_sets_completed_with_warnings(self, mock_db: MagicMock, now: datetime) -> None:
-        """TIMEOUT in FINALIZING with critical_phases_done=True sets completed_with_warnings=True."""
+        """TIMEOUT in POST_RUN with critical_phases_done=True sets completed_with_warnings=True (v1.2)."""
         from goldfish.state_machine.core import transition
 
         ctx = EventContext(
@@ -882,14 +907,14 @@ class TestTransitionCompletedWithWarnings:
         )
 
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "finalizing"
+            "state": "post_run"
         }
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
 
         result = transition(mock_db, "stage-abc", StageEvent.TIMEOUT, ctx)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
 
 # =============================================================================
@@ -1029,7 +1054,7 @@ class TestSerializeContext:
             timestamp=now,
             source="executor",
             error_message="Error: \"quotes\" and 'apostrophes' and \n newlines",
-            svs_finding_id="<script>alert('xss')</script>",
+            svs_review_id="<script>alert('xss')</script>",
         )
 
         result = _serialize_context(ctx)
@@ -1038,7 +1063,7 @@ class TestSerializeContext:
         # Content should be preserved exactly as-is (JSON escaping handles safety)
         assert "quotes" in data["error_message"]
         assert "apostrophes" in data["error_message"]
-        assert "<script>" in data["svs_finding_id"]
+        assert "<script>" in data["svs_review_id"]
 
 
 # =============================================================================
@@ -1153,18 +1178,45 @@ class TestTerminalStateIdempotency:
 class TestCompletedWithWarningsNotSetOnNormalCompletion:
     """Test that completed_with_warnings is NOT set for normal completions."""
 
-    def test_finalize_ok_does_not_set_completed_with_warnings(self, mock_db: MagicMock, now: datetime) -> None:
-        """Normal FINALIZE_OK → COMPLETED does NOT set completed_with_warnings."""
+    def test_post_run_ok_does_not_set_completed_with_warnings(self, mock_db: MagicMock, now: datetime) -> None:
+        """Normal POST_RUN_OK → AWAITING_USER_FINALIZATION does NOT set completed_with_warnings (v1.2)."""
         from goldfish.state_machine.core import transition
 
         ctx = EventContext(timestamp=now, source="executor")
 
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
-            "state": "finalizing"
+            "state": "post_run"
         }
         mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
 
-        result = transition(mock_db, "stage-abc", StageEvent.FINALIZE_OK, ctx)
+        result = transition(mock_db, "stage-abc", StageEvent.POST_RUN_OK, ctx)
+
+        assert result.success is True
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
+
+        # Verify completed_with_warnings was NOT in the UPDATE query
+        calls = mock_db._conn.return_value.__enter__.return_value.execute.call_args_list
+        update_calls = [c for c in calls if "UPDATE" in str(c)]
+        assert len(update_calls) >= 1
+        # The update should NOT contain completed_with_warnings = 1
+        for call in update_calls:
+            call_str = str(call)
+            if "completed_with_warnings = 1" in call_str:
+                pytest.fail("completed_with_warnings should NOT be set for normal POST_RUN_OK")
+
+    def test_user_finalize_does_not_set_completed_with_warnings(self, mock_db: MagicMock, now: datetime) -> None:
+        """Normal USER_FINALIZE → COMPLETED does NOT set completed_with_warnings (v1.2)."""
+        from goldfish.state_machine.core import transition
+
+        ctx = EventContext(timestamp=now, source="mcp_tool")
+
+        mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
+            "state": "awaiting_user_finalization",
+            "completed_with_warnings": 0,
+        }
+        mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
+
+        result = transition(mock_db, "stage-abc", StageEvent.USER_FINALIZE, ctx)
 
         assert result.success is True
         assert result.new_state == StageState.COMPLETED
@@ -1177,4 +1229,45 @@ class TestCompletedWithWarningsNotSetOnNormalCompletion:
         for call in update_calls:
             call_str = str(call)
             if "completed_with_warnings = 1" in call_str:
-                pytest.fail("completed_with_warnings should NOT be set for normal completion")
+                pytest.fail("completed_with_warnings should NOT be set for normal USER_FINALIZE")
+
+
+class TestCompletedWithWarningsPreserved:
+    """Test that completed_with_warnings is preserved when transitioning to COMPLETED."""
+
+    def test_user_finalize_preserves_completed_with_warnings(self, mock_db: MagicMock, now: datetime) -> None:
+        """USER_FINALIZE preserves completed_with_warnings=1 when transitioning to COMPLETED."""
+        from goldfish.state_machine.core import transition
+
+        ctx = EventContext(timestamp=now, source="mcp_tool")
+
+        # Set up mock with completed_with_warnings=1 (set during earlier transition)
+        mock_db._conn.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = {
+            "state": "awaiting_user_finalization",
+            "completed_with_warnings": 1,
+        }
+        mock_db._conn.return_value.__enter__.return_value.execute.return_value.rowcount = 1
+
+        result = transition(mock_db, "stage-abc", StageEvent.USER_FINALIZE, ctx)
+
+        assert result.success is True
+        assert result.new_state == StageState.COMPLETED
+
+        # Verify completed_with_warnings = 1 IS in the UPDATE query (preserved)
+        calls = mock_db._conn.return_value.__enter__.return_value.execute.call_args_list
+        update_calls = [c for c in calls if "UPDATE" in str(c)]
+        assert len(update_calls) >= 1
+
+        # The update should contain completed_with_warnings = 1 (preserved from existing value)
+        found_warning_flag = False
+        for call in update_calls:
+            args = call[0]
+            if len(args) >= 2 and isinstance(args[1], tuple):
+                # The completed_with_warnings is the 7th parameter (index 6) in the UPDATE
+                # Format: (to_state, phase, timestamp, timestamp, termination_cause, error, completed_with_warnings, ...)
+                params = args[1]
+                if len(params) >= 7 and params[6] == 1:
+                    found_warning_flag = True
+                    break
+
+        assert found_warning_flag, "completed_with_warnings=1 should be preserved in UPDATE query"

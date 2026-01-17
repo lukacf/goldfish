@@ -1,7 +1,7 @@
 """Tests for FinalizationTracker - tracking finalization progress.
 
 FinalizationTracker persists finalization progress to the database
-to support TIMEOUT handling in FINALIZING state.
+to support TIMEOUT handling in POST_RUN state.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def _create_run_with_flags(
     db: Database,
     output_sync_done: int = 0,
     output_recording_done: int = 0,
-    state: StageState = StageState.FINALIZING,
+    state: StageState = StageState.POST_RUN,
 ) -> str:
     """Create a stage run with specific flag values."""
     run_id = f"stage-{uuid.uuid4().hex[:8]}"
@@ -109,7 +109,7 @@ class TestFinalizationTracker:
 
     def test_mark_output_sync_done_persists_to_database(self, test_db: Database) -> None:
         """mark_output_sync_done() sets the flag in database."""
-        run_id = _create_run_in_state(test_db, StageState.FINALIZING)
+        run_id = _create_run_in_state(test_db, StageState.POST_RUN)
         tracker = FinalizationTracker(test_db, run_id)
 
         tracker.mark_output_sync_done()
@@ -120,7 +120,7 @@ class TestFinalizationTracker:
 
     def test_mark_output_recording_done_persists_to_database(self, test_db: Database) -> None:
         """mark_output_recording_done() sets the flag in database."""
-        run_id = _create_run_in_state(test_db, StageState.FINALIZING)
+        run_id = _create_run_in_state(test_db, StageState.POST_RUN)
         tracker = FinalizationTracker(test_db, run_id)
 
         tracker.mark_output_recording_done()
@@ -131,7 +131,7 @@ class TestFinalizationTracker:
 
     def test_both_flags_can_be_set(self, test_db: Database) -> None:
         """Both flags can be set independently."""
-        run_id = _create_run_in_state(test_db, StageState.FINALIZING)
+        run_id = _create_run_in_state(test_db, StageState.POST_RUN)
         tracker = FinalizationTracker(test_db, run_id)
 
         tracker.mark_output_sync_done()
@@ -151,7 +151,7 @@ class TestCriticalPhasesDone:
 
     def test_critical_phases_done_when_both_set(self, test_db: Database) -> None:
         """critical_phases_done is True when both flags are set."""
-        run_id = _create_run_in_state(test_db, StageState.FINALIZING)
+        run_id = _create_run_in_state(test_db, StageState.POST_RUN)
         tracker = FinalizationTracker(test_db, run_id)
 
         tracker.mark_output_sync_done()
@@ -161,7 +161,7 @@ class TestCriticalPhasesDone:
 
     def test_critical_phases_not_done_when_only_sync_set(self, test_db: Database) -> None:
         """critical_phases_done is False when only sync is done."""
-        run_id = _create_run_in_state(test_db, StageState.FINALIZING)
+        run_id = _create_run_in_state(test_db, StageState.POST_RUN)
         tracker = FinalizationTracker(test_db, run_id)
 
         tracker.mark_output_sync_done()
@@ -170,7 +170,7 @@ class TestCriticalPhasesDone:
 
     def test_critical_phases_not_done_when_only_recording_set(self, test_db: Database) -> None:
         """critical_phases_done is False when only recording is done."""
-        run_id = _create_run_in_state(test_db, StageState.FINALIZING)
+        run_id = _create_run_in_state(test_db, StageState.POST_RUN)
         tracker = FinalizationTracker(test_db, run_id)
 
         tracker.mark_output_recording_done()
@@ -179,7 +179,7 @@ class TestCriticalPhasesDone:
 
     def test_critical_phases_not_done_when_neither_set(self, test_db: Database) -> None:
         """critical_phases_done is False when neither flag is set."""
-        run_id = _create_run_in_state(test_db, StageState.FINALIZING)
+        run_id = _create_run_in_state(test_db, StageState.POST_RUN)
         tracker = FinalizationTracker(test_db, run_id)
 
         assert tracker.critical_phases_done is False
@@ -215,14 +215,15 @@ class TestCriticalPhasesDoneFunction:
         assert result is None
 
 
-class TestTimeoutInFinalizingUsesCriticalPhases:
-    """Tests for TIMEOUT in FINALIZING using critical_phases_done for outcome."""
+class TestTimeoutInPostRunUsesCriticalPhases:
+    """Tests for TIMEOUT in POST_RUN using critical_phases_done for outcome."""
 
-    def test_timeout_in_finalizing_with_critical_done_goes_to_completed(self, test_db: Database) -> None:
-        """TIMEOUT in FINALIZING with critical_phases_done=True goes to COMPLETED."""
-        run_id = _create_run_with_flags(
-            test_db, output_sync_done=1, output_recording_done=1, state=StageState.FINALIZING
-        )
+    def test_timeout_in_post_run_with_critical_done_goes_to_awaiting_finalization(self, test_db: Database) -> None:
+        """TIMEOUT in POST_RUN with critical_phases_done=True goes to AWAITING_USER_FINALIZATION.
+
+        In v1.2, even successful post-run completion requires explicit user finalization.
+        """
+        run_id = _create_run_with_flags(test_db, output_sync_done=1, output_recording_done=1, state=StageState.POST_RUN)
 
         context = EventContext(
             timestamp=datetime.now(UTC),
@@ -233,13 +234,11 @@ class TestTimeoutInFinalizingUsesCriticalPhases:
         result = transition(test_db, run_id, StageEvent.TIMEOUT, context)
 
         assert result.success is True
-        assert result.new_state == StageState.COMPLETED
+        assert result.new_state == StageState.AWAITING_USER_FINALIZATION
 
-    def test_timeout_in_finalizing_without_critical_done_goes_to_failed(self, test_db: Database) -> None:
-        """TIMEOUT in FINALIZING with critical_phases_done=False goes to FAILED."""
-        run_id = _create_run_with_flags(
-            test_db, output_sync_done=0, output_recording_done=0, state=StageState.FINALIZING
-        )
+    def test_timeout_in_post_run_without_critical_done_goes_to_failed(self, test_db: Database) -> None:
+        """TIMEOUT in POST_RUN with critical_phases_done=False goes to FAILED."""
+        run_id = _create_run_with_flags(test_db, output_sync_done=0, output_recording_done=0, state=StageState.POST_RUN)
 
         context = EventContext(
             timestamp=datetime.now(UTC),
@@ -278,7 +277,7 @@ class TestFinalizationTrackerIdempotency:
 
     def test_mark_output_sync_done_is_idempotent(self, test_db: Database) -> None:
         """Calling mark_output_sync_done() multiple times is safe."""
-        run_id = _create_run_in_state(test_db, StageState.FINALIZING)
+        run_id = _create_run_in_state(test_db, StageState.POST_RUN)
         tracker = FinalizationTracker(test_db, run_id)
 
         tracker.mark_output_sync_done()
@@ -290,7 +289,7 @@ class TestFinalizationTrackerIdempotency:
 
     def test_mark_output_recording_done_is_idempotent(self, test_db: Database) -> None:
         """Calling mark_output_recording_done() multiple times is safe."""
-        run_id = _create_run_in_state(test_db, StageState.FINALIZING)
+        run_id = _create_run_in_state(test_db, StageState.POST_RUN)
         tracker = FinalizationTracker(test_db, run_id)
 
         tracker.mark_output_recording_done()

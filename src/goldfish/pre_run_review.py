@@ -115,7 +115,7 @@ Check each stage for:
    inputs, use the Read tool to check `modules/<upstream_stage>.py` or `.rs` for actual output key names.
    Pay special attention to train/val/test split naming inconsistencies (e.g., 'valid' vs 'val').
 7. **Input freshness** - If a `from_stage` input resolves to an older run while a newer run of
-   that upstream stage is currently RUNNING or FINALIZING, this is a BLOCKING error. The run
+   that upstream stage is currently RUNNING or POST_RUN, this is a BLOCKING error. The run
    should be paused/canceled and re-run after the newer upstream run completes, or use an
    explicit inputs_override to pin the intended run.
 8. **Output format/API mismatch** - `save_output()` only supports `npy` (numpy) and `csv` (pandas)
@@ -387,14 +387,12 @@ This is a test run to verify the AI review system works. You MUST:
                 lines.append(f"  override: {ctx.get('override')}")
             if ctx.get("selected_run_id"):
                 lines.append(f"  selected_run_id: {ctx.get('selected_run_id')}")
-                lines.append(f"  selected_run_status: {ctx.get('selected_run_status')}")
-                lines.append(f"  selected_run_progress: {ctx.get('selected_run_progress')}")
+                lines.append(f"  selected_run_state: {ctx.get('selected_run_state')}")
                 lines.append(f"  selected_run_started_at: {ctx.get('selected_run_started_at')}")
                 lines.append(f"  selected_run_outcome: {ctx.get('selected_run_outcome')}")
             if ctx.get("latest_run_id"):
                 lines.append(f"  latest_run_id: {ctx.get('latest_run_id')}")
-                lines.append(f"  latest_run_status: {ctx.get('latest_run_status')}")
-                lines.append(f"  latest_run_progress: {ctx.get('latest_run_progress')}")
+                lines.append(f"  latest_run_state: {ctx.get('latest_run_state')}")
                 lines.append(f"  latest_run_started_at: {ctx.get('latest_run_started_at')}")
                 lines.append(f"  latest_run_outcome: {ctx.get('latest_run_outcome')}")
 
@@ -433,14 +431,16 @@ This is a test run to verify the AI review system works. You MUST:
             if not selected_id or not latest_id or selected_id == latest_id:
                 continue
 
-            latest_status = str(ctx.get("latest_run_status") or "").lower()
+            latest_state = str(ctx.get("latest_run_state") or "").lower()
 
-            # If the newer run is already done, it's not stale - we should use it!
-            if latest_status in ("completed", "failed", "canceled"):
+            # Terminal states - newer run is done, not stale
+            terminal_states = {"completed", "failed", "canceled", "terminated"}
+            if latest_state in terminal_states:
                 continue
 
-            latest_progress = str(ctx.get("latest_run_progress") or "").lower()
-            if latest_status != "running" and latest_progress not in {"launch", "build", "running", "finalizing"}:
+            # Active states where newer run is still in progress
+            active_states = {"preparing", "building", "launching", "running", "finalizing"}
+            if latest_state not in active_states:
                 continue
 
             selected_started = ctx.get("selected_run_started_at")
@@ -459,7 +459,7 @@ This is a test run to verify the AI review system works. You MUST:
             message = (
                 f"Input '{ctx.get('input')}' resolved to run {selected_id} from stage "
                 f"'{ctx.get('from_stage')}', but a newer run {latest_id} is still "
-                f"{ctx.get('latest_run_status') or ctx.get('latest_run_progress')}. "
+                f"{latest_state}. "
                 "Wait for the newer run to complete or use inputs_override to pin the intended run."
             )
             issues.append(

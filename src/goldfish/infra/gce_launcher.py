@@ -20,8 +20,8 @@ from typing import Any
 from goldfish.errors import GoldfishError
 from goldfish.infra.resource_launcher import ResourceLauncher, cleanup_disk, run_gcloud
 from goldfish.infra.startup_builder import build_startup_script
-from goldfish.models import StageRunStatus
 from goldfish.state_machine.exit_code import ExitCodeResult, get_exit_code_gce
+from goldfish.state_machine.types import StageState
 
 logger = logging.getLogger(__name__)
 
@@ -644,32 +644,32 @@ class GCELauncher:
         raise GoldfishError(f"Failed to query instance status: {result.stderr}")
 
     def _map_gce_status(self, status: str, instance_name: str) -> str:
-        """Map GCE instance status to Goldfish status.
+        """Map GCE instance status to Goldfish state.
 
         Args:
             status: GCE status string
             instance_name: Instance identifier
 
         Returns:
-            Goldfish status: StageRunStatus.RUNNING, COMPLETED, or FAILED
+            Goldfish state: StageState.RUNNING, COMPLETED, or FAILED
         """
-        # Map GCE status to Goldfish status
+        # Map GCE status to Goldfish state
         if status in ("PROVISIONING", "STAGING", "RUNNING"):
-            return StageRunStatus.RUNNING
+            return StageState.RUNNING
         elif status == "TERMINATED":
             # Check exit code in GCS if available
             if self.bucket:
                 exit_result = self._get_exit_code(instance_name)
                 return (
-                    StageRunStatus.COMPLETED
+                    StageState.COMPLETED
                     if (exit_result.exists and exit_result.code == 0 and not exit_result.gcs_error)
-                    else StageRunStatus.FAILED
+                    else StageState.FAILED
                 )
-            return StageRunStatus.COMPLETED
+            return StageState.COMPLETED
         elif status in ("STOPPING", "SUSPENDING", "SUSPENDED"):
-            return StageRunStatus.RUNNING
+            return StageState.RUNNING
         else:
-            return StageRunStatus.FAILED
+            return StageState.FAILED
 
     def _find_instance_zone(self, instance_name: str) -> str | None:
         """Find which zone an instance is in.
@@ -1063,7 +1063,7 @@ class GCELauncher:
             timeout_sec: Maximum seconds to wait
 
         Returns:
-            Final status: StageRunStatus.COMPLETED or FAILED
+            Final state: StageState.COMPLETED or FAILED
 
         Raises:
             GoldfishError: If timeout exceeded
@@ -1077,7 +1077,7 @@ class GCELauncher:
             if status == "not_found":
                 raise GoldfishError(f"Instance {instance_name} not found")
 
-            if status in (StageRunStatus.COMPLETED, StageRunStatus.FAILED):
+            if status in (StageState.COMPLETED, StageState.FAILED):
                 return status
 
             time.sleep(10)  # Poll every 10 seconds

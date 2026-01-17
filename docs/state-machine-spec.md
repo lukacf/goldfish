@@ -1,9 +1,19 @@
 # Stage Execution State Machine Specification
 
-> **Status**: Draft v3.5 (Minor Fixes)
+> **Status**: Draft v3.6 (Implementation Alignment)
 > **Author**: Claude + Luka
 > **Created**: 2025-01-15
-> **Updated**: 2025-01-15
+> **Updated**: 2025-01-16
+
+## v3.6 Changes (Implementation Alignment)
+
+Aligned spec with implementation design decisions after Phase 8 verification:
+
+1. **`daemon_leases.lease_name`**: Column renamed from `key` to `lease_name` for clarity
+2. **State-based CAS**: Implementation uses `WHERE state = ?` for CAS (no version counter needed)
+3. **Normalized audit columns**: `stage_state_transitions` uses individual columns (`phase`, `termination_cause`, `exit_code`, `error_message`) instead of `context_json` blob - more queryable
+4. **`exit_code` in audit only**: Exit code stored in `stage_state_transitions`, not `stage_runs` - user sees higher-level `state` + `termination_cause` + `infra_outcome`
+5. **Boolean finalization flags**: `output_sync_done` + `output_recording_done` instead of `finalization_status` enum
 
 ## v3.5 Changes (Minor Fixes)
 
@@ -243,6 +253,9 @@ class StageEvent(str, Enum):
 
     # User events
     USER_CANCEL = "user_cancel"
+
+    # AI/SVS events
+    AI_STOP = "ai_stop"                      # During-run SVS requested stop (via stop_requested file)
 ```
 
 **Removed events**: `PREPARE_COMPLETE` and `FINALIZE_START` were defined but never used in transitions. The state machine infers these from the transition itself (PREPARING→BUILDING means preparation complete).
@@ -279,8 +292,7 @@ class EventContext:
     critical_phases_done: bool = False       # For TIMEOUT in FINALIZING: True → COMPLETED, False → FAILED
 
     # SVS context
-    svs_decision: str | None = None          # 'approved', 'blocked', 'warning'
-    svs_findings: list[dict] | None = None
+    svs_review_id: str | None = None         # FK to svs_reviews.id for SVS_BLOCK and AI_STOP events
 
 
 # Allowed source values for EventContext.source
@@ -429,6 +441,7 @@ RUNNING       | EXIT_MISSING       | TERMINATED  | instance_confirmed_dead  | No
 RUNNING       | INSTANCE_LOST      | TERMINATED  |                          | Preemption, crash, etc.
 RUNNING       | TIMEOUT            | TERMINATED  | cause=TIMEOUT            | Exceeded max runtime
 RUNNING       | USER_CANCEL        | CANCELED    |                          |
+RUNNING       | AI_STOP            | TERMINATED  | cause=AI_STOPPED         | SVS requested stop during run
               |                    |             |                          |
 FINALIZING    | FINALIZE_OK        | COMPLETED   |                          | All finalization done
 FINALIZING    | FINALIZE_FAIL      | FAILED      | ctx.critical=True        | Critical step failed
@@ -437,6 +450,7 @@ FINALIZING    | INSTANCE_LOST      | TERMINATED  |                          | Pr
 FINALIZING    | TIMEOUT            | COMPLETED   | critical_phases_done     | Timeout but outputs saved
 FINALIZING    | TIMEOUT            | FAILED      | !critical_phases_done    | Timeout, outputs lost
 FINALIZING    | USER_CANCEL        | CANCELED    |                          | Partial outputs possible
+FINALIZING    | AI_STOP            | TERMINATED  | cause=AI_STOPPED         | SVS requested stop during finalization
               |                    |             |                          |
 UNKNOWN       | TIMEOUT            | TERMINATED  |                          | Auto-cleanup after 24h
 ```
@@ -1027,12 +1041,14 @@ CREATE TABLE stage_state_transitions (
     exit_code INTEGER,
     exit_code_exists INTEGER,  -- 0 or 1
     error_message TEXT,
+    svs_review_id TEXT,  -- FK to svs_reviews.id for SVS_BLOCK and AI_STOP events
     source TEXT NOT NULL
         CHECK(source IN ('mcp_tool', 'executor', 'daemon', 'container', 'migration')),
 
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
 
-    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id)
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id),
+    FOREIGN KEY (svs_review_id) REFERENCES svs_reviews(id)
 );
 
 CREATE INDEX idx_transitions_run ON stage_state_transitions(stage_run_id, created_at);
@@ -1809,7 +1825,7 @@ class DaemonLeaderElection:
         with self.db._conn() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS daemon_leases (
-                    key TEXT PRIMARY KEY,
+                    lease_name TEXT PRIMARY KEY,
                     holder_id TEXT NOT NULL,
                     acquired_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL
@@ -1840,9 +1856,9 @@ class DaemonLeaderElection:
             try:
                 # Try to acquire expired or non-existent lease
                 conn.execute("""
-                    INSERT INTO daemon_leases (key, holder_id, acquired_at, expires_at)
+                    INSERT INTO daemon_leases (lease_name, holder_id, acquired_at, expires_at)
                     VALUES (?, ?, ?, ?)
-                    ON CONFLICT(key) DO UPDATE SET
+                    ON CONFLICT(lease_name) DO UPDATE SET
                         holder_id = excluded.holder_id,
                         acquired_at = excluded.acquired_at,
                         expires_at = excluded.expires_at
@@ -1853,7 +1869,7 @@ class DaemonLeaderElection:
 
                 # Check if we hold the lease - guaranteed accurate due to write lock
                 row = conn.execute("""
-                    SELECT holder_id FROM daemon_leases WHERE key = ?
+                    SELECT holder_id FROM daemon_leases WHERE lease_name = ?
                 """, (self.LEASE_KEY,)).fetchone()
 
                 is_leader = row and row["holder_id"] == holder_id
@@ -1868,7 +1884,7 @@ class DaemonLeaderElection:
         with self.db._conn() as conn:
             conn.execute("""
                 DELETE FROM daemon_leases
-                WHERE key = ? AND holder_id = ?
+                WHERE lease_name = ? AND holder_id = ?
             """, (self.LEASE_KEY, holder_id))
 
 

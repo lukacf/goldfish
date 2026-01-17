@@ -91,6 +91,12 @@ def determine_exit_event(
 
     # Determine event based on exit result
     if exit_result.exists and exit_result.code == 0:
+        # Check if this was an AI-requested stop
+        ai_stop_info = check_ai_stop_requested(run, db=db, project_id=project_id)
+        if ai_stop_info is not None:
+            context.termination_cause = TerminationCause.AI_STOPPED
+            context.svs_review_id = ai_stop_info.get("svs_review_id")
+            return (StageEvent.AI_STOP, context)
         return (StageEvent.EXIT_SUCCESS, context)
     elif exit_result.exists and exit_result.code is not None:
         return (StageEvent.EXIT_FAILURE, context)
@@ -484,6 +490,101 @@ def _detect_docker_termination_cause(container_id: str) -> TerminationCause:
     except Exception as e:
         logger.warning("Error detecting Docker termination cause for %s: %s", container_id, e)
         return TerminationCause.ORPHANED
+
+
+def _gcs_file_exists(gcs_path: str) -> bool:
+    """Check if a GCS file exists using gsutil stat.
+
+    Args:
+        gcs_path: Full GCS path (gs://bucket/path/to/file).
+
+    Returns:
+        True if the file exists, False otherwise.
+    """
+    try:
+        result = subprocess.run(
+            ["gsutil", "stat", gcs_path],
+            capture_output=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def check_ai_stop_requested(
+    run: dict[str, Any],
+    *,
+    db: Database | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Check if AI/SVS requested a stop for this run.
+
+    Checks for the existence of a stop_requested file, which is written
+    by during-run SVS when it detects issues.
+
+    Args:
+        run: Stage run dictionary.
+        db: Database instance (to look up svs_review_id).
+        project_id: GCP project ID (for GCE).
+
+    Returns:
+        Dict with stop info including svs_review_id, or None if no stop requested.
+    """
+    run_id = run.get("id", "")
+    backend_type = run.get("backend_type", "local")
+
+    stop_requested = False
+
+    if backend_type == "gce":
+        # Check GCS for stop_requested file
+        try:
+            # Get bucket from run or config
+            # The stop_requested file is at: gs://bucket/<run_id>/.goldfish/stop_requested
+            bucket = run.get("gcs_bucket")
+            if bucket:
+                bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+                stop_file_path = f"{bucket_uri}/{run_id}/.goldfish/stop_requested"
+                stop_requested = _gcs_file_exists(stop_file_path)
+        except Exception as e:
+            logger.debug("Error checking GCS stop_requested for %s: %s", run_id, e)
+
+    else:
+        # Local: check outputs directory
+        try:
+            outputs_dir = run.get("outputs_dir")
+            if outputs_dir:
+                from pathlib import Path
+
+                stop_file = Path(outputs_dir) / ".goldfish" / "stop_requested"
+                stop_requested = stop_file.exists()
+        except Exception as e:
+            logger.debug("Error checking local stop_requested for %s: %s", run_id, e)
+
+    if not stop_requested:
+        return None
+
+    # Stop was requested - look up the svs_review_id that triggered it
+    svs_review_id = None
+    if db is not None:
+        try:
+            with db._conn() as conn:
+                # Find the most recent during_run review for this run
+                row = conn.execute(
+                    """
+                    SELECT id FROM svs_reviews
+                    WHERE stage_run_id = ? AND review_type = 'during_run'
+                    ORDER BY reviewed_at DESC
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if row:
+                    svs_review_id = str(row["id"])
+        except Exception as e:
+            logger.debug("Error looking up svs_review_id for %s: %s", run_id, e)
+
+    return {"stop_requested": True, "svs_review_id": svs_review_id}
 
 
 def determine_instance_event(

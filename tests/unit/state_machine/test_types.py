@@ -22,16 +22,17 @@ class TestStageState:
     """Tests for StageState enum."""
 
     def test_state_count(self) -> None:
-        """Verify we have exactly 10 states as specified."""
-        assert len(StageState) == 10
+        """Verify we have exactly 11 states as specified (v1.2 spec)."""
+        assert len(StageState) == 11
 
     def test_active_states_exist(self) -> None:
-        """Verify all 5 active states exist."""
+        """Verify all 6 active states exist (v1.2: added AWAITING_USER_FINALIZATION)."""
         assert StageState.PREPARING.value == "preparing"
         assert StageState.BUILDING.value == "building"
         assert StageState.LAUNCHING.value == "launching"
         assert StageState.RUNNING.value == "running"
-        assert StageState.FINALIZING.value == "finalizing"
+        assert StageState.POST_RUN.value == "post_run"
+        assert StageState.AWAITING_USER_FINALIZATION.value == "awaiting_user_finalization"
 
     def test_terminal_states_exist(self) -> None:
         """Verify all 5 terminal states exist."""
@@ -49,13 +50,20 @@ class TestStageState:
         running: str = StageState.RUNNING
         assert running == "running"
 
+    def test_finalizing_renamed_to_post_run(self) -> None:
+        """Verify FINALIZING was renamed to POST_RUN (v1.2 spec)."""
+        # FINALIZING should not exist
+        assert not hasattr(StageState, "FINALIZING")
+        # POST_RUN should exist
+        assert StageState.POST_RUN.value == "post_run"
+
 
 class TestStageEvent:
     """Tests for StageEvent enum."""
 
     def test_event_count(self) -> None:
-        """Verify we have exactly 15 events (FORCE_* admin events removed)."""
-        assert len(StageEvent) == 15
+        """Verify we have exactly 17 events (v1.2: added USER_FINALIZE)."""
+        assert len(StageEvent) == 17
 
     def test_build_events(self) -> None:
         """Verify build-related events."""
@@ -74,10 +82,10 @@ class TestStageEvent:
         assert StageEvent.EXIT_FAILURE.value == "exit_failure"
         assert StageEvent.EXIT_MISSING.value == "exit_missing"
 
-    def test_finalize_events(self) -> None:
-        """Verify finalization events."""
-        assert StageEvent.FINALIZE_OK.value == "finalize_ok"
-        assert StageEvent.FINALIZE_FAIL.value == "finalize_fail"
+    def test_post_run_events(self) -> None:
+        """Verify post-run events (v1.2: renamed from finalize)."""
+        assert StageEvent.POST_RUN_OK.value == "post_run_ok"
+        assert StageEvent.POST_RUN_FAIL.value == "post_run_fail"
 
     def test_infrastructure_events(self) -> None:
         """Verify infrastructure events."""
@@ -85,13 +93,23 @@ class TestStageEvent:
         assert StageEvent.TIMEOUT.value == "timeout"
 
     def test_user_events(self) -> None:
-        """Verify user events."""
+        """Verify user events (v1.2: added USER_FINALIZE)."""
         assert StageEvent.USER_CANCEL.value == "user_cancel"
+        assert StageEvent.USER_FINALIZE.value == "user_finalize"
 
     def test_preparation_events(self) -> None:
         """Verify preparation events."""
         assert StageEvent.PREPARE_FAIL.value == "prepare_fail"
         assert StageEvent.SVS_BLOCK.value == "svs_block"
+
+    def test_finalize_events_renamed(self) -> None:
+        """Verify FINALIZE_* events were renamed to POST_RUN_* (v1.2 spec)."""
+        # Old FINALIZE_* events should not exist
+        assert not hasattr(StageEvent, "FINALIZE_OK")
+        assert not hasattr(StageEvent, "FINALIZE_FAIL")
+        # New POST_RUN_* events should exist
+        assert StageEvent.POST_RUN_OK.value == "post_run_ok"
+        assert StageEvent.POST_RUN_FAIL.value == "post_run_fail"
 
 
 class TestTerminationCause:
@@ -202,7 +220,7 @@ class TestEventContext:
         assert ctx.critical_phases_done is None
 
         # SVS context defaults
-        assert ctx.svs_finding_id is None
+        assert ctx.svs_review_id is None
 
     def test_exit_code_handling(self) -> None:
         """exit_code and exit_code_exists should work together."""
@@ -268,14 +286,14 @@ class TestTransitionDef:
         assert t.guard_name is None
 
     def test_guarded_transition(self) -> None:
-        """Transition with guard function."""
+        """Transition with guard function (v1.2: uses POST_RUN and POST_RUN_FAIL)."""
 
         def my_guard(ctx: EventContext) -> bool:
             return ctx.critical is True
 
         t = TransitionDef(
-            from_state=StageState.FINALIZING,
-            event=StageEvent.FINALIZE_FAIL,
+            from_state=StageState.POST_RUN,
+            event=StageEvent.POST_RUN_FAIL,
             to_state=StageState.FAILED,
             guard=my_guard,
             guard_name="critical=True",
@@ -290,8 +308,8 @@ class TestTransitionDef:
             return ctx.critical is True
 
         t = TransitionDef(
-            from_state=StageState.FINALIZING,
-            event=StageEvent.FINALIZE_FAIL,
+            from_state=StageState.POST_RUN,
+            event=StageEvent.POST_RUN_FAIL,
             to_state=StageState.FAILED,
             guard=check_critical,
         )

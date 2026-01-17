@@ -262,7 +262,15 @@ def _setup_workspace_and_version(db: Database, workspace: str, version: str) -> 
             )
 
 
-def _setup_stage_run(db: Database, run_id: str, workspace: str, version: str, status: str = "completed") -> None:
+def _setup_stage_run(
+    db: Database,
+    run_id: str,
+    workspace: str,
+    version: str,
+    status: str = "completed",
+    state: str | None = None,
+    completed_with_warnings: int = 0,
+) -> None:
     """Set up a stage run for foreign key constraints."""
     with db._conn() as conn:
         existing = conn.execute(
@@ -274,10 +282,19 @@ def _setup_stage_run(db: Database, run_id: str, workspace: str, version: str, st
             conn.execute(
                 """
                 INSERT INTO stage_runs
-                (id, workspace_name, version, stage_name, status, started_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (id, workspace_name, version, stage_name, status, started_at, state, completed_with_warnings)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (run_id, workspace, version, "test_stage", status, datetime.now(UTC).isoformat()),
+                (
+                    run_id,
+                    workspace,
+                    version,
+                    "test_stage",
+                    status,
+                    datetime.now(UTC).isoformat(),
+                    state,
+                    completed_with_warnings,
+                ),
             )
 
 
@@ -292,3 +309,226 @@ def _add_metric(db: Database, stage_run_id: str, name: str, value: float) -> Non
             """,
             (stage_run_id, name, value, value, value, 1),
         )
+
+
+class TestFinalizeRunStateMachine:
+    """Tests for finalize_run state machine integration (v1.2 lifecycle)."""
+
+    def test_finalize_emits_user_finalize_transition(self, test_db: Database) -> None:
+        """finalize_run should emit USER_FINALIZE event when state is AWAITING_USER_FINALIZATION."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(
+            test_db,
+            "stage-sm-finalize",
+            "test_ws",
+            "v1",
+            status="completed",
+            state="awaiting_user_finalization",
+        )
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(
+            workspace_name="test_ws",
+            version="v1",
+            stage_run_id="stage-sm-finalize",
+        )
+
+        results = {
+            "primary_metric": "accuracy",
+            "direction": "maximize",
+            "value": 0.75,
+            "dataset_split": "val",
+            "ml_outcome": "success",
+            "notes": "Testing state machine transition.",
+        }
+        manager.finalize_run("stage-sm-finalize", results)
+
+        # Verify state transitioned to COMPLETED
+        with test_db._conn() as conn:
+            row = conn.execute(
+                "SELECT state FROM stage_runs WHERE id = ?",
+                ("stage-sm-finalize",),
+            ).fetchone()
+            assert row is not None
+            assert row["state"] == "completed"
+
+    def test_finalize_preserves_completed_with_warnings(self, test_db: Database) -> None:
+        """finalize_run should preserve completed_with_warnings flag when transitioning."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(
+            test_db,
+            "stage-warnings",
+            "test_ws",
+            "v1",
+            status="completed",
+            state="awaiting_user_finalization",
+            completed_with_warnings=1,  # Stage had warnings
+        )
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(
+            workspace_name="test_ws",
+            version="v1",
+            stage_run_id="stage-warnings",
+        )
+
+        results = {
+            "primary_metric": "accuracy",
+            "direction": "maximize",
+            "value": 0.75,
+            "dataset_split": "val",
+            "ml_outcome": "success",
+            "notes": "Testing warnings preservation.",
+        }
+        manager.finalize_run("stage-warnings", results)
+
+        # Verify completed_with_warnings is preserved
+        with test_db._conn() as conn:
+            row = conn.execute(
+                "SELECT state, completed_with_warnings FROM stage_runs WHERE id = ?",
+                ("stage-warnings",),
+            ).fetchone()
+            assert row is not None
+            assert row["state"] == "completed"
+            assert row["completed_with_warnings"] == 1  # Should be preserved
+
+
+class TestFinalizationGate:
+    """Tests for finalization gate behavior."""
+
+    def test_gate_blocks_on_failed_runs(self, test_db: Database) -> None:
+        """Gate should block when there are FAILED runs without finalization."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(
+            test_db,
+            "stage-failed",
+            "test_ws",
+            "v1",
+            status="failed",
+            state="failed",
+        )
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(
+            workspace_name="test_ws",
+            version="v1",
+            stage_run_id="stage-failed",
+        )
+
+        # Update infra_outcome to crashed (FAILED state maps to crashed infra_outcome)
+        with test_db._conn() as conn:
+            conn.execute(
+                "UPDATE run_results SET infra_outcome = 'crashed' WHERE stage_run_id = ?",
+                ("stage-failed",),
+            )
+
+        result = manager.check_finalization_gate("test_ws")
+        assert result["blocked"] is True
+        assert len(result["unfinalized"]) == 1
+
+    def test_gate_blocks_on_terminated_runs(self, test_db: Database) -> None:
+        """Gate should block when there are TERMINATED runs without finalization."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(
+            test_db,
+            "stage-terminated",
+            "test_ws",
+            "v1",
+            status="terminated",
+            state="terminated",
+        )
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(
+            workspace_name="test_ws",
+            version="v1",
+            stage_run_id="stage-terminated",
+        )
+
+        # Update infra_outcome to preempted (a common cause of TERMINATED)
+        with test_db._conn() as conn:
+            conn.execute(
+                "UPDATE run_results SET infra_outcome = 'preempted' WHERE stage_run_id = ?",
+                ("stage-terminated",),
+            )
+
+        result = manager.check_finalization_gate("test_ws")
+        assert result["blocked"] is True
+        assert len(result["unfinalized"]) == 1
+
+    def test_gate_does_not_block_on_canceled_runs(self, test_db: Database) -> None:
+        """Gate should NOT block on CANCELED runs - cancel already has reason."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(
+            test_db,
+            "stage-canceled",
+            "test_ws",
+            "v1",
+            status="canceled",
+            state="canceled",
+        )
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(
+            workspace_name="test_ws",
+            version="v1",
+            stage_run_id="stage-canceled",
+        )
+
+        # Update infra_outcome to canceled
+        with test_db._conn() as conn:
+            conn.execute(
+                "UPDATE run_results SET infra_outcome = 'canceled' WHERE stage_run_id = ?",
+                ("stage-canceled",),
+            )
+
+        result = manager.check_finalization_gate("test_ws")
+        # CANCELED should NOT require finalization
+        assert result["blocked"] is False
+        assert len(result["unfinalized"]) == 0
+
+    def test_gate_clears_after_finalization(self, test_db: Database) -> None:
+        """Gate should clear after run is finalized."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(
+            test_db,
+            "stage-gate-clear",
+            "test_ws",
+            "v1",
+            status="completed",
+            state="awaiting_user_finalization",
+        )
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(
+            workspace_name="test_ws",
+            version="v1",
+            stage_run_id="stage-gate-clear",
+        )
+
+        # Set infra_outcome to completed (simulating post-run processing)
+        with test_db._conn() as conn:
+            conn.execute(
+                "UPDATE run_results SET infra_outcome = 'completed' WHERE stage_run_id = ?",
+                ("stage-gate-clear",),
+            )
+
+        # Initially should be blocked (awaiting finalization)
+        result = manager.check_finalization_gate("test_ws")
+        assert result["blocked"] is True
+
+        # Finalize the run
+        results = {
+            "primary_metric": "accuracy",
+            "direction": "maximize",
+            "value": 0.75,
+            "dataset_split": "val",
+            "ml_outcome": "success",
+            "notes": "Finalizing to clear gate.",
+        }
+        manager.finalize_run("stage-gate-clear", results)
+
+        # Gate should now be clear
+        result = manager.check_finalization_gate("test_ws")
+        assert result["blocked"] is False
+        assert len(result["unfinalized"]) == 0

@@ -3,6 +3,35 @@
 These tests verify we can answer "which preprocessing version is my model using?"
 """
 
+from datetime import UTC, datetime
+
+from goldfish.db.database import Database
+from goldfish.state_machine import EventContext, StageEvent, transition
+
+
+def _transition_to_completed(db: Database, stage_run_id: str) -> None:
+    """Transition a stage run to COMPLETED state via state machine (v1.2 lifecycle)."""
+    ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+    transition(db, stage_run_id, StageEvent.BUILD_START, ctx)
+    transition(db, stage_run_id, StageEvent.BUILD_OK, ctx)
+    transition(db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
+    success_ctx = EventContext(timestamp=datetime.now(UTC), source="executor", exit_code=0, exit_code_exists=True)
+    transition(db, stage_run_id, StageEvent.EXIT_SUCCESS, success_ctx)
+    transition(db, stage_run_id, StageEvent.POST_RUN_OK, ctx)
+    # v1.2: Now need USER_FINALIZE to reach COMPLETED
+    finalize_ctx = EventContext(timestamp=datetime.now(UTC), source="mcp_tool")
+    transition(db, stage_run_id, StageEvent.USER_FINALIZE, finalize_ctx)
+
+
+def _transition_to_failed(db: Database, stage_run_id: str) -> None:
+    """Transition a stage run to FAILED state via state machine."""
+    ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+    transition(db, stage_run_id, StageEvent.BUILD_START, ctx)
+    transition(db, stage_run_id, StageEvent.BUILD_OK, ctx)
+    transition(db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
+    fail_ctx = EventContext(timestamp=datetime.now(UTC), source="executor", exit_code=1, exit_code_exists=True)
+    transition(db, stage_run_id, StageEvent.EXIT_FAILURE, fail_ctx)
+
 
 class TestLineageTreeQueries:
     """Tests for recursive lineage tree building."""
@@ -21,7 +50,7 @@ class TestLineageTreeQueries:
             stage_name="preprocess",
         )
         test_db.update_stage_run_version("stage-001", sv_id)
-        test_db.update_stage_run_status("stage-001", "completed")
+        _transition_to_completed(test_db, "stage-001")
 
         # Query lineage
         lineage = test_db.get_lineage_tree("stage-001")
@@ -47,7 +76,7 @@ class TestLineageTreeQueries:
             stage_name="preprocess",
         )
         test_db.update_stage_run_version("stage-preprocess", sv_preprocess)
-        test_db.update_stage_run_status("stage-preprocess", "completed")
+        _transition_to_completed(test_db, "stage-preprocess")
         test_db.add_signal(
             stage_run_id="stage-preprocess",
             signal_name="features",
@@ -64,7 +93,7 @@ class TestLineageTreeQueries:
             stage_name="train",
         )
         test_db.update_stage_run_version("stage-train", sv_train)
-        test_db.update_stage_run_status("stage-train", "completed")
+        _transition_to_completed(test_db, "stage-train")
 
         # Record that train's "features" input came from preprocess
         test_db.add_signal_with_source(
@@ -102,7 +131,7 @@ class TestLineageTreeQueries:
             stage_name="preprocess",
         )
         test_db.update_stage_run_version("stage-preprocess", sv_preprocess)
-        test_db.update_stage_run_status("stage-preprocess", "completed")
+        _transition_to_completed(test_db, "stage-preprocess")
         test_db.add_signal("stage-preprocess", "features", "npy", "gs://bucket/features.npy")
 
         # Level 2: Tokenize (depends on preprocess)
@@ -114,7 +143,7 @@ class TestLineageTreeQueries:
             stage_name="tokenize",
         )
         test_db.update_stage_run_version("stage-tokenize", sv_tokenize)
-        test_db.update_stage_run_status("stage-tokenize", "completed")
+        _transition_to_completed(test_db, "stage-tokenize")
         test_db.add_signal_with_source(
             "stage-tokenize",
             "features",
@@ -134,7 +163,7 @@ class TestLineageTreeQueries:
             stage_name="train",
         )
         test_db.update_stage_run_version("stage-train", sv_train)
-        test_db.update_stage_run_status("stage-train", "completed")
+        _transition_to_completed(test_db, "stage-train")
         test_db.add_signal_with_source(
             "stage-train", "tokens", "input", "gs://bucket/tokens.npy", "stage-tokenize", sv_tokenize
         )
@@ -178,7 +207,7 @@ class TestLineageTreeQueries:
                 stage_name=f"stage{i}",
             )
             test_db.update_stage_run_version(run_id, sv_id)
-            test_db.update_stage_run_status(run_id, "completed")
+            _transition_to_completed(test_db, run_id)
 
             if prev_run_id:
                 test_db.add_signal_with_source(
@@ -225,7 +254,7 @@ class TestDownstreamRunQueries:
         sv_preprocess, _, _ = test_db.get_or_create_stage_version("test-ws", "preprocess", "sha1", "a" * 64)
         test_db.create_stage_run("stage-pre", "test-ws", "v1", "preprocess")
         test_db.update_stage_run_version("stage-pre", sv_preprocess)
-        test_db.update_stage_run_status("stage-pre", "completed")
+        _transition_to_completed(test_db, "stage-pre")
         test_db.add_signal("stage-pre", "features", "npy", "gs://features.npy")
 
         # Create train that uses preprocess
@@ -250,7 +279,7 @@ class TestDownstreamRunQueries:
         sv_preprocess, _, _ = test_db.get_or_create_stage_version("test-ws", "preprocess", "sha1", "a" * 64)
         test_db.create_stage_run("stage-pre", "test-ws", "v1", "preprocess")
         test_db.update_stage_run_version("stage-pre", sv_preprocess)
-        test_db.update_stage_run_status("stage-pre", "completed")
+        _transition_to_completed(test_db, "stage-pre")
         test_db.add_signal("stage-pre", "features", "npy", "gs://features.npy")
 
         # Create 3 downstream stages that all use preprocess
@@ -279,7 +308,7 @@ class TestLatestCompletedRunQuery:
             sv_id, _, _ = test_db.get_or_create_stage_version("test-ws", "preprocess", f"sha{i}", "a" * 64)
             test_db.create_stage_run(f"stage-{i:03d}", "test-ws", "v1", "preprocess")
             test_db.update_stage_run_version(f"stage-{i:03d}", sv_id)
-            test_db.update_stage_run_status(f"stage-{i:03d}", "completed")
+            _transition_to_completed(test_db, f"stage-{i:03d}")
 
         latest = test_db.get_latest_completed_stage_run("test-ws", "preprocess")
         assert latest is not None
@@ -294,13 +323,13 @@ class TestLatestCompletedRunQuery:
         sv1, _, _ = test_db.get_or_create_stage_version("test-ws", "preprocess", "sha1", "a" * 64)
         test_db.create_stage_run("stage-001", "test-ws", "v1", "preprocess")
         test_db.update_stage_run_version("stage-001", sv1)
-        test_db.update_stage_run_status("stage-001", "completed")
+        _transition_to_completed(test_db, "stage-001")
 
         # Second run - failed (should be skipped)
         sv2, _, _ = test_db.get_or_create_stage_version("test-ws", "preprocess", "sha2", "b" * 64)
         test_db.create_stage_run("stage-002", "test-ws", "v1", "preprocess")
         test_db.update_stage_run_version("stage-002", sv2)
-        test_db.update_stage_run_status("stage-002", "failed")
+        _transition_to_failed(test_db, "stage-002")
 
         latest = test_db.get_latest_completed_stage_run("test-ws", "preprocess")
         assert latest is not None

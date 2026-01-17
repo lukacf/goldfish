@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     attempt_num INTEGER,              -- Groups consecutive runs; increments after outcome='success'
     svs_findings_json TEXT,           -- JSON: SVS post-run findings (stats + AI review)
     -- State machine columns (Phase 3)
-    state TEXT CHECK(state IS NULL OR state IN ('preparing', 'building', 'launching', 'running', 'finalizing', 'completed', 'failed', 'terminated', 'canceled', 'unknown')),
+    state TEXT CHECK(state IS NULL OR state IN ('preparing', 'building', 'launching', 'running', 'post_run', 'awaiting_user_finalization', 'completed', 'failed', 'terminated', 'canceled', 'unknown')),
     phase TEXT,                       -- Sub-phase within state (gcs_check, docker_build, etc.)
     termination_cause TEXT CHECK(termination_cause IS NULL OR termination_cause IN ('preempted', 'crashed', 'orphaned', 'timeout', 'ai_stopped', 'manual')),
     state_entered_at TEXT,            -- When current state was entered (for timeout calculations)
@@ -223,9 +223,11 @@ CREATE TABLE IF NOT EXISTS stage_state_transitions (
     exit_code INTEGER,
     exit_code_exists INTEGER,         -- 0 or 1
     error_message TEXT,
+    svs_review_id TEXT,               -- FK to svs_reviews.id for SVS_BLOCK and AI_STOP events
     source TEXT NOT NULL CHECK(source IN ('mcp_tool', 'executor', 'daemon', 'container', 'migration')),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE,
+    FOREIGN KEY (svs_review_id) REFERENCES svs_reviews(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_state_transitions_stage_run ON stage_state_transitions(stage_run_id, created_at);
