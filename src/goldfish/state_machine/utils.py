@@ -3,8 +3,6 @@
 Shared helpers used by cancel and other state machine modules.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from goldfish.state_machine.types import TransitionResult
