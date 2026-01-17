@@ -256,7 +256,6 @@ class StageExecutor:
         stage = self._find_stage(pipeline, stage_name)
 
         # 2a. Establish stage_run_id early for preflight tracking
-        stage_run_precreated = stage_run_id is not None
         if stage_run_id is None:
             stage_run_id = f"stage-{uuid4().hex[:8]}"
 
@@ -306,29 +305,29 @@ class StageExecutor:
         )
 
         # 2e. Create placeholder record IMMEDIATELY (to satisfy FKs for review/audit)
-        record_id: str | None = None
-        if not stage_run_precreated:
-            record_id = self._create_stage_run_record(
-                stage_run_id=stage_run_id,
-                workspace=workspace,
-                version=version,
-                stage_name=stage_name,
-                stage_version_id=stage_version_id,
-                inputs={},  # Resolved later
-                input_sources={},
-                config_override=config_override,
-                reason=reason,
-                reason_structured=reason_structured,
-                pipeline_run_id=pipeline_run_id,
-                pipeline_name=pipeline_name,
-                profile=None,
-                hints=None,
-                config=stage_config,
-                preflight_errors=preflight_errors,
-                preflight_warnings=preflight_warnings,
-                experiment_group=experiment_group,
-                results_spec=results_spec,
-            )
+        # Always create the stage_runs row, even if stage_run_id was pre-generated.
+        # The pre-generated ID is just stored in pipeline_stage_queue, not stage_runs.
+        record_id = self._create_stage_run_record(
+            stage_run_id=stage_run_id,
+            workspace=workspace,
+            version=version,
+            stage_name=stage_name,
+            stage_version_id=stage_version_id,
+            inputs={},  # Resolved later
+            input_sources={},
+            config_override=config_override,
+            reason=reason,
+            reason_structured=reason_structured,
+            pipeline_run_id=pipeline_run_id,
+            pipeline_name=pipeline_name,
+            profile=None,
+            hints=None,
+            config=stage_config,
+            preflight_errors=preflight_errors,
+            preflight_warnings=preflight_warnings,
+            experiment_group=experiment_group,
+            results_spec=results_spec,
+        )
 
         # 3. Resolve inputs
         inputs, input_sources, input_context = self._resolve_inputs(
@@ -393,9 +392,8 @@ class StageExecutor:
                 )
 
         # 5. Update record with resolved values
-        # Only create experiment record if this was a pre-queued run (from pipeline)
-        # For normal runs, we already created the experiment record in step 2e
-        queued_record_id = self._update_queued_stage_run(
+        # Note: experiment record was already created in step 2e
+        self._update_queued_stage_run(
             stage_run_id=stage_run_id,
             workspace=workspace,
             version=version,
@@ -407,12 +405,9 @@ class StageExecutor:
             hints=stage_config.get("hints"),
             preflight_warnings=preflight_warnings,
             preflight_errors=preflight_errors,
-            create_experiment_record=stage_run_precreated,  # Only for pre-queued runs
+            create_experiment_record=False,  # Already created in step 2e
             experiment_group=experiment_group,
         )
-        # Use queued record_id if we didn't create one earlier (pre-queued case)
-        if record_id is None:
-            record_id = queued_record_id
 
         try:
             # State machine: PREPARING → BUILDING (BUILD_START)
