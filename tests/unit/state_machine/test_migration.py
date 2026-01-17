@@ -2799,6 +2799,51 @@ class TestMigrateRunningJobStartedAt:
         assert row["state_entered_at"] == started_at
 
 
+class TestSvsReviewIdColumnMigration:
+    """Regression test for svs_review_id column in stage_state_transitions.
+
+    Bug: The daemon tried to emit TIMEOUT events but the stage_state_transitions
+    table was missing the svs_review_id column, causing schema errors.
+
+    Fix: Added svs_review_id to required_columns so it's added via ALTER TABLE.
+    """
+
+    def test_svs_review_id_column_added_to_existing_table(self, test_db) -> None:
+        """Existing stage_state_transitions table gets svs_review_id column added."""
+        # Verify the column exists after migration
+        with test_db._conn() as conn:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(stage_state_transitions)")}
+            assert "svs_review_id" in cols, "stage_state_transitions should have svs_review_id column"
+
+    def test_transition_insert_with_svs_review_id_succeeds(self, test_db) -> None:
+        """Can insert into stage_state_transitions with svs_review_id."""
+        with test_db._conn() as conn:
+            _setup_workspace(conn, "ws", "v1")
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, state, started_at, state_entered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("stage-test", "ws", "v1", "train", "running", "running", "2024-01-01T00:00:00", "2024-01-01T00:00:00"),
+            )
+            # This INSERT would fail if svs_review_id column is missing
+            conn.execute(
+                """
+                INSERT INTO stage_state_transitions
+                (stage_run_id, from_state, to_state, event, svs_review_id, source, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("stage-test", "running", "terminated", "TIMEOUT", None, "daemon", "2024-01-01T00:01:00"),
+            )
+            # Verify insert succeeded
+            row = conn.execute(
+                "SELECT * FROM stage_state_transitions WHERE stage_run_id = ?",
+                ("stage-test",),
+            ).fetchone()
+            assert row is not None
+            assert row["event"] == "TIMEOUT"
+
+
 class TestAutoMigrationOnStartup:
     """Tests for automatic migration triggered on database initialization.
 
