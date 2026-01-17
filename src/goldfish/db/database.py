@@ -2284,20 +2284,21 @@ class Database:
             attempt_num = self._compute_attempt_num(conn, workspace_name, stage_name)
 
             # Initial state machine state: PREPARING with GCS_CHECK phase
+            # NOTE: status column is deprecated - uses default value, only state matters
             from goldfish.state_machine.types import ProgressPhase, StageState
 
-            initial_state = StageState.PREPARING.value
+            initial_state = StageState.PREPARING
             initial_phase = ProgressPhase.GCS_CHECK.value
 
             conn.execute(
                 """
                 INSERT INTO stage_runs
-                (id, job_id, pipeline_run_id, workspace_name, pipeline_name, version, stage_name, status,
+                (id, job_id, pipeline_run_id, workspace_name, pipeline_name, version, stage_name,
                  started_at, profile, hints_json, config_json, inputs_json, reason_json,
                  preflight_errors_json, preflight_warnings_json,
                  backend_type, backend_handle, attempt_num,
                  state, phase, state_entered_at, phase_updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stage_run_id,
@@ -2307,7 +2308,6 @@ class Database:
                     pipeline_name,
                     version,
                     stage_name,
-                    StageState.PREPARING,
                     timestamp,
                     profile,
                     hints_json,
@@ -2319,7 +2319,7 @@ class Database:
                     backend_type,
                     backend_handle,
                     attempt_num,
-                    initial_state,
+                    initial_state.value,
                     initial_phase,
                     timestamp,  # state_entered_at = same as started_at initially
                     timestamp,  # phase_updated_at = same as state_entered_at initially

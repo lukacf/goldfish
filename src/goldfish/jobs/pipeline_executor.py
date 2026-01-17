@@ -437,28 +437,13 @@ class PipelineExecutor:
 
     def _list_pipeline_stage_runs(self, pipeline_run_id: str) -> list[StageRunInfo]:
         rows = self.db.list_stage_runs(pipeline_run_id=pipeline_run_id)
-        result = []
-        # Map state (source of truth) to legacy status string for API compatibility (v1.2)
-        state_to_status = {
-            StageState.PREPARING.value: "pending",
-            StageState.BUILDING.value: "running",
-            StageState.LAUNCHING.value: "running",
-            StageState.RUNNING.value: "running",
-            StageState.POST_RUN.value: "running",
-            StageState.AWAITING_USER_FINALIZATION.value: "awaiting_finalization",
-            StageState.COMPLETED.value: "completed",
-            StageState.FAILED.value: "failed",
-            StageState.TERMINATED.value: "failed",
-            StageState.CANCELED.value: "canceled",
-            StageState.UNKNOWN.value: "failed",
-        }
+        result: list[StageRunInfo] = []
         for r in rows:
-            # Use state as source of truth, fall back to status for old runs
+            # Use state as source of truth (state column is authoritative)
+            # Fall back to legacy status only for pre-migration runs
             state: str | None = r.get("state")
-            if state and state in state_to_status:
-                status = state_to_status[state]
-            else:
-                status = r.get("status", "unknown")
+            status = state if state else r.get("status", "unknown")
+
             result.append(
                 StageRunInfo(
                     stage_run_id=r["id"],
@@ -470,7 +455,7 @@ class PipelineExecutor:
                     status=status,
                     started_at=datetime.fromisoformat(r["started_at"]) if r.get("started_at") else None,
                     completed_at=datetime.fromisoformat(r["completed_at"]) if r.get("completed_at") else None,
-                    state=r.get("state"),
+                    state=state,
                     log_uri=r.get("log_uri"),
                     artifact_uri=r.get("artifact_uri"),
                 )
