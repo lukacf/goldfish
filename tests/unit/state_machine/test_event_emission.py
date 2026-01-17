@@ -536,6 +536,107 @@ class TestInstanceLostEvent:
 
             assert result is None  # No event, instance is fine
 
+    def test_preparing_state_never_emits_instance_lost(self) -> None:
+        """REGRESSION: PREPARING state must never emit INSTANCE_LOST.
+
+        PREPARING runs don't have instances yet - instances are only created
+        during LAUNCHING. Even if a PREPARING run has a backend_handle (from
+        migration or bug), we must not check instance status.
+        """
+        from goldfish.state_machine.event_emission import determine_instance_event
+        from goldfish.state_machine.types import StageState
+
+        run = {
+            "id": "stage-123",
+            "state": StageState.PREPARING.value,
+            "backend_type": "gce",
+            "backend_handle": "instance-123",  # Should be ignored
+        }
+
+        # verify_instance_stopped should NOT be called for PREPARING state
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            mock_verify.return_value = True  # Would trigger INSTANCE_LOST if called
+
+            result = determine_instance_event(run, project_id="test-project")
+
+            assert result is None  # Must not emit any event
+            mock_verify.assert_not_called()  # Must not even check instance status
+
+    def test_building_state_never_emits_instance_lost(self) -> None:
+        """REGRESSION: BUILDING state must never emit INSTANCE_LOST.
+
+        BUILDING runs don't have instances yet - instances are only created
+        during LAUNCHING. Even if a BUILDING run has a backend_handle (from
+        migration or bug), we must not check instance status.
+        """
+        from goldfish.state_machine.event_emission import determine_instance_event
+        from goldfish.state_machine.types import StageState
+
+        run = {
+            "id": "stage-123",
+            "state": StageState.BUILDING.value,
+            "backend_type": "local",
+            "backend_handle": "container-123",  # Should be ignored
+        }
+
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            mock_verify.return_value = True
+
+            result = determine_instance_event(run, project_id="test-project")
+
+            assert result is None
+            mock_verify.assert_not_called()
+
+    def test_launching_state_can_emit_instance_lost(self) -> None:
+        """LAUNCHING state CAN emit INSTANCE_LOST (instance creation in progress)."""
+        from goldfish.state_machine.event_emission import determine_instance_event
+        from goldfish.state_machine.types import StageEvent, StageState
+
+        run = {
+            "id": "stage-123",
+            "state": StageState.LAUNCHING.value,
+            "backend_type": "gce",
+            "backend_handle": "instance-123",
+        }
+
+        with patch("subprocess.run") as mock_run:
+            import subprocess
+
+            error = subprocess.CalledProcessError(1, "gcloud")
+            error.stderr = "not found"
+            mock_run.side_effect = error
+
+            result = determine_instance_event(run, project_id="test-project")
+
+            assert result is not None
+            event, _ = result
+            assert event == StageEvent.INSTANCE_LOST
+
+    def test_post_run_state_can_emit_instance_lost(self) -> None:
+        """POST_RUN state CAN emit INSTANCE_LOST (instance may still exist)."""
+        from goldfish.state_machine.event_emission import determine_instance_event
+        from goldfish.state_machine.types import StageEvent, StageState
+
+        run = {
+            "id": "stage-123",
+            "state": StageState.POST_RUN.value,
+            "backend_type": "local",
+            "backend_handle": "container-123",
+        }
+
+        with patch("subprocess.run") as mock_run:
+            import subprocess
+
+            error = subprocess.CalledProcessError(1, "docker")
+            error.stderr = "No such container"
+            mock_run.side_effect = error
+
+            result = determine_instance_event(run)
+
+            assert result is not None
+            event, _ = result
+            assert event == StageEvent.INSTANCE_LOST
+
 
 class TestEdgeCases:
     """Tests for edge cases in event emission."""
