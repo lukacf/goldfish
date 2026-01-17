@@ -596,8 +596,19 @@ def determine_instance_event(
     Checks if the backend instance/container has unexpectedly disappeared.
 
     IMPORTANT: Only checks instance status for states where an instance
-    actually exists: LAUNCHING, RUNNING, POST_RUN. PREPARING and BUILDING
-    states don't have instances yet (instance creation happens during LAUNCHING).
+    is CONFIRMED to exist: RUNNING and POST_RUN.
+
+    The following states are excluded from instance checks:
+    - PREPARING: Code syncing, no instance yet
+    - BUILDING: Docker build, no instance yet
+    - LAUNCHING: Instance is being created asynchronously - it might not be
+      visible to the API yet. The executor will emit LAUNCH_OK when confirmed.
+    - AWAITING_USER_FINALIZATION: Instance may have been cleaned up after post-run
+    - UNKNOWN: Cannot assume anything about instance existence
+
+    NOTE: The daemon polls every 2 seconds, but instance creation (especially GCE)
+    can take 5+ seconds. Checking during LAUNCHING would incorrectly report
+    INSTANCE_LOST before the instance is ready.
 
     Args:
         run: Stage run dictionary.
@@ -606,20 +617,37 @@ def determine_instance_event(
     Returns:
         Tuple of (INSTANCE_LOST, context) if instance is gone, None otherwise.
     """
-    # Only check instance status for states where an instance should exist.
-    # PREPARING: syncing code, not launched yet
-    # BUILDING: building Docker image, not launched yet
-    # LAUNCHING, RUNNING, POST_RUN: instance exists (or is being created)
+    # Only check instance status for states where an instance DEFINITELY exists.
+    # States where we should NOT check for INSTANCE_LOST:
+    # - PREPARING: syncing code, no instance yet
+    # - BUILDING: building Docker image, no instance yet
+    # - LAUNCHING: instance is being created - might not be visible yet!
+    # - AWAITING_USER_FINALIZATION: instance may have been cleaned up after post-run
+    # - UNKNOWN: can't assume anything about instance existence
+    #
+    # States where we SHOULD check for INSTANCE_LOST:
+    # - RUNNING: instance is confirmed running, should still exist
+    # - POST_RUN: instance should still exist during post-processing
+    #
+    # CRITICAL: LAUNCHING must be excluded because the instance creation is async.
+    # The executor emits LAUNCH_OK after verifying the instance is ready, but until
+    # then the daemon would incorrectly see "no instance" and emit INSTANCE_LOST.
     state_str = run.get("state")
     if state_str:
         try:
             state = StageState(state_str)
-            # States where an instance has NOT been created yet
-            states_without_instance = {StageState.PREPARING, StageState.BUILDING}
-            if state in states_without_instance:
+            # States where instance is NOT confirmed to exist
+            states_without_confirmed_instance = {
+                StageState.PREPARING,  # No instance yet
+                StageState.BUILDING,  # No instance yet
+                StageState.LAUNCHING,  # Instance creation is async
+                StageState.AWAITING_USER_FINALIZATION,  # Instance may be cleaned up
+                StageState.UNKNOWN,  # Can't assume anything
+            }
+            if state in states_without_confirmed_instance:
                 return None
         except ValueError:
-            pass  # Unknown state, proceed with check
+            pass  # Unknown state string, proceed with check
 
     backend_type = run.get("backend_type", "local")
     backend_handle = run.get("backend_handle")
