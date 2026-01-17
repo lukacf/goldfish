@@ -111,9 +111,12 @@ class DummyStageExecutor:
         skip_review: bool = False,
         experiment_group: str | None = None,
         results_spec: dict | None = None,
+        stage_run_id: str | None = None,
     ) -> StageRunInfo:
         self._ensure_workspace_version(workspace)
-        stage_run_id = f"stage-{len(self.calls) + 1}"
+        # Use pre-generated stage_run_id if provided, otherwise generate
+        if stage_run_id is None:
+            stage_run_id = f"stage-{len(self.calls) + 1}"
         self.calls.append(stage_name)
         self.db.create_stage_run(
             stage_run_id=stage_run_id,
@@ -1091,9 +1094,11 @@ class TestResultsSpecPersistence:
                 skip_review: bool = False,
                 experiment_group: str | None = None,
                 results_spec: dict | None = None,  # NEW: accept results_spec
+                stage_run_id: str | None = None,  # Use pre-generated ID if provided
             ) -> StageRunInfo:
                 self._ensure_workspace_version(workspace)
-                stage_run_id = f"stage-{len(self.calls) + 1}"
+                if stage_run_id is None:
+                    stage_run_id = f"stage-{len(self.calls) + 1}"
                 self.calls.append(stage_name)
 
                 # Create stage run
