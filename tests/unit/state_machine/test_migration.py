@@ -2797,3 +2797,134 @@ class TestMigrateRunningJobStartedAt:
 
         assert row["state"] == "running"
         assert row["state_entered_at"] == started_at
+
+
+class TestAutoMigrationOnStartup:
+    """Tests for automatic migration triggered on database initialization.
+
+    The migration should run automatically when Database is initialized
+    if there are unmigrated rows (state IS NULL).
+    """
+
+    def test_migration_runs_on_init_when_unmigrated_rows_exist(self, test_db, tmp_path) -> None:
+        """Migration runs automatically when Database detects unmigrated rows."""
+
+        from goldfish.db.database import Database
+
+        # Setup: Insert a row with state=NULL (unmigrated)
+        with test_db._conn() as conn:
+            _setup_workspace(conn, "ws", "v1")
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("stage-unmigrated", "ws", "v1", "train", "completed", "2024-01-01T00:00:00"),
+            )
+            # Verify state is NULL before re-init
+            row = conn.execute("SELECT state FROM stage_runs WHERE id = ?", ("stage-unmigrated",)).fetchone()
+            assert row["state"] is None
+
+        # Re-initialize database (simulates restart)
+        # This should trigger automatic migration
+        db2 = Database(test_db.db_path)
+
+        # Verify migration ran
+        with db2._conn() as conn:
+            row = conn.execute("SELECT state FROM stage_runs WHERE id = ?", ("stage-unmigrated",)).fetchone()
+            assert row["state"] == "completed", "Migration should have set state from status"
+
+    def test_migration_is_idempotent_on_repeated_init(self, test_db) -> None:
+        """Multiple Database initializations don't re-migrate already migrated rows."""
+        from goldfish.db.database import Database
+
+        # Setup: Insert already-migrated row (state is NOT NULL)
+        with test_db._conn() as conn:
+            _setup_workspace(conn, "ws", "v1")
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, state, started_at, state_entered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "stage-migrated",
+                    "ws",
+                    "v1",
+                    "train",
+                    "completed",
+                    "completed",
+                    "2024-01-01T00:00:00",
+                    "2024-01-01T00:00:00",
+                ),
+            )
+
+        # Re-initialize database multiple times
+        db2 = Database(test_db.db_path)
+        db3 = Database(test_db.db_path)
+
+        # Verify row is unchanged
+        with db3._conn() as conn:
+            row = conn.execute("SELECT state, status FROM stage_runs WHERE id = ?", ("stage-migrated",)).fetchone()
+            assert row["state"] == "completed"
+            assert row["status"] == "completed"
+
+    def test_migration_skips_when_no_unmigrated_rows(self, test_db) -> None:
+        """No migration runs when all rows already have state populated."""
+        from unittest.mock import patch
+
+        from goldfish.db.database import Database
+
+        # Setup: Only insert migrated rows
+        with test_db._conn() as conn:
+            _setup_workspace(conn, "ws", "v1")
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, state, started_at, state_entered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "stage-ok",
+                    "ws",
+                    "v1",
+                    "train",
+                    "completed",
+                    "completed",
+                    "2024-01-01T00:00:00",
+                    "2024-01-01T00:00:00",
+                ),
+            )
+
+        # Patch migrate_stage_runs to track if it's called
+        with patch("goldfish.db.database.migrate_stage_runs") as mock_migrate:
+            mock_migrate.return_value = {"success": True, "migrated_rows": 0}
+            Database(test_db.db_path)
+            # Should not be called since no unmigrated rows
+            mock_migrate.assert_not_called()
+
+    def test_migration_logs_on_failure_but_continues(self, test_db) -> None:
+        """Migration failure is logged but doesn't prevent database init."""
+        from unittest.mock import patch
+
+        from goldfish.db.database import Database
+
+        # Setup: Insert unmigrated row
+        with test_db._conn() as conn:
+            _setup_workspace(conn, "ws", "v1")
+            conn.execute(
+                """
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, started_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("stage-fail", "ws", "v1", "train", "running", "2024-01-01T00:00:00"),
+            )
+
+        # Patch migrate_stage_runs to simulate failure
+        with patch("goldfish.db.database.migrate_stage_runs") as mock_migrate:
+            mock_migrate.return_value = {"success": False, "error_details": [{"error": "test error"}]}
+            # Should not raise - migration failure is logged but init continues
+            db2 = Database(test_db.db_path)
+            mock_migrate.assert_called_once()
+            # Database should still be usable
+            with db2._conn() as conn:
+                count = conn.execute("SELECT COUNT(*) as cnt FROM stage_runs").fetchone()
+                assert count["cnt"] == 1
