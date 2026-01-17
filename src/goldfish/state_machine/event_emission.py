@@ -595,6 +595,10 @@ def determine_instance_event(
 
     Checks if the backend instance/container has unexpectedly disappeared.
 
+    IMPORTANT: Only checks instance status for states where an instance
+    actually exists: LAUNCHING, RUNNING, POST_RUN. PREPARING and BUILDING
+    states don't have instances yet (instance creation happens during LAUNCHING).
+
     Args:
         run: Stage run dictionary.
         project_id: GCP project ID (for GCE).
@@ -602,6 +606,21 @@ def determine_instance_event(
     Returns:
         Tuple of (INSTANCE_LOST, context) if instance is gone, None otherwise.
     """
+    # Only check instance status for states where an instance should exist.
+    # PREPARING: syncing code, not launched yet
+    # BUILDING: building Docker image, not launched yet
+    # LAUNCHING, RUNNING, POST_RUN: instance exists (or is being created)
+    state_str = run.get("state")
+    if state_str:
+        try:
+            state = StageState(state_str)
+            # States where an instance has NOT been created yet
+            states_without_instance = {StageState.PREPARING, StageState.BUILDING}
+            if state in states_without_instance:
+                return None
+        except ValueError:
+            pass  # Unknown state, proceed with check
+
     backend_type = run.get("backend_type", "local")
     backend_handle = run.get("backend_handle")
 
