@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from goldfish.state_machine import EventContext, StageEvent, transition
+
 if TYPE_CHECKING:
     from goldfish.db.database import Database
 
@@ -347,10 +349,18 @@ class TestPatternExtractionOnFailure:
             stage_name="train",
         )
 
-        # Update to failed status with error
+        # Transition through states to FAILED using state machine
+        ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+        # Transition: PREPARING -> BUILDING -> LAUNCHING -> RUNNING -> FAILED
+        transition(test_db, stage_run_id, StageEvent.BUILD_START, ctx)
+        transition(test_db, stage_run_id, StageEvent.BUILD_OK, ctx)
+        transition(test_db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
+        fail_ctx = EventContext(timestamp=datetime.now(UTC), source="executor", exit_code=1, exit_code_exists=True)
+        transition(test_db, stage_run_id, StageEvent.EXIT_FAILURE, fail_ctx)
+
+        # Update metadata separately
         test_db.update_stage_run_status(
             stage_run_id=stage_run_id,
-            status="failed",
             completed_at=datetime.now(UTC).isoformat(),
             error="OOM: CUDA out of memory",
         )
@@ -358,7 +368,7 @@ class TestPatternExtractionOnFailure:
         # Verify stage run is in failed state
         stage_run = test_db.get_stage_run(stage_run_id)
         assert stage_run is not None
-        assert stage_run["status"] == "failed"
+        assert stage_run["state"] == "failed"
         assert "OOM" in (stage_run["error"] or "")
 
     def test_no_pattern_extraction_on_success(
@@ -375,10 +385,21 @@ class TestPatternExtractionOnFailure:
             stage_name="train",
         )
 
-        # Update to completed status
+        # Transition through states to COMPLETED using state machine (v1.2 lifecycle)
+        ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+        # Transition: PREPARING -> BUILDING -> LAUNCHING -> RUNNING -> POST_RUN -> AWAITING_USER_FINALIZATION -> COMPLETED
+        transition(test_db, stage_run_id, StageEvent.BUILD_START, ctx)
+        transition(test_db, stage_run_id, StageEvent.BUILD_OK, ctx)
+        transition(test_db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
+        success_ctx = EventContext(timestamp=datetime.now(UTC), source="executor", exit_code=0, exit_code_exists=True)
+        transition(test_db, stage_run_id, StageEvent.EXIT_SUCCESS, success_ctx)
+        transition(test_db, stage_run_id, StageEvent.POST_RUN_OK, ctx)
+        finalize_ctx = EventContext(timestamp=datetime.now(UTC), source="mcp_tool")
+        transition(test_db, stage_run_id, StageEvent.USER_FINALIZE, finalize_ctx)
+
+        # Update metadata separately
         test_db.update_stage_run_status(
             stage_run_id=stage_run_id,
-            status="completed",
             completed_at=datetime.now(UTC).isoformat(),
         )
 

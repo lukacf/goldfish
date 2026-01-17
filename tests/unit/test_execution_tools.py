@@ -56,6 +56,7 @@ class TestLogsFollowMode:
             "workspace_name": "test-workspace",
             "stage_name": "train",
             "status": "running",
+            "state": "running",  # State machine column (source of truth)
             "backend_type": "local",
             "backend_handle": "stage-abc123",
             "log_uri": None,
@@ -142,7 +143,8 @@ class TestLogsFollowMode:
             logs("stage-abc123", follow=True)
             assert "stage-abc123" in _log_cursors
 
-            # Now run completes
+            # Now run completes - set both state (source of truth) and status (legacy)
+            mock_stage_run["state"] = "completed"
             mock_stage_run["status"] = "completed"
 
             # Call should clean up cursor
@@ -220,7 +222,7 @@ class TestLogsFollowMode:
 
             # Standard fields
             assert "run_id" in result
-            assert "status" in result
+            assert "state" in result  # State machine state (source of truth)
             assert "logs" in result
             assert "log_uri" in result
 
@@ -344,6 +346,7 @@ class TestCursorCleanup:
             "workspace_name": "test",
             "stage_name": "train",
             "status": "running",
+            "state": "running",  # State machine column (source of truth)
             "backend_type": "local",
             "backend_handle": "stage-test",
             "log_uri": None,
@@ -381,6 +384,7 @@ class TestCursorCleanup:
             "workspace_name": "test-workspace",
             "stage_name": "train",
             "status": "running",
+            "state": "running",  # State machine column (source of truth)
             "backend_type": "local",
             "backend_handle": "stage-abc123",
             "log_uri": None,

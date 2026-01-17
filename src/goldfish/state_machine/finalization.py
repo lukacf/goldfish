@@ -1,9 +1,10 @@
 """Finalization tracking for stage runs.
 
 This module provides FinalizationTracker to track progress through
-the FINALIZING state, specifically the critical phases (output_sync
-and output_recording) that determine whether a TIMEOUT in FINALIZING
-should result in COMPLETED or FAILED.
+the POST_RUN state (v1.2: renamed from FINALIZING), specifically the
+critical phases (output_sync and output_recording) that determine
+whether a TIMEOUT in POST_RUN should result in AWAITING_USER_FINALIZATION
+or FAILED.
 """
 
 from __future__ import annotations

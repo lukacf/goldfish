@@ -563,3 +563,132 @@ class TestEdgeCases:
 
         result = determine_exit_event(run, exit_result)
         assert result is None
+
+
+class TestAIStopDetection:
+    """Tests for AI_STOP event detection.
+
+    When user code exits with code 0 but stop_requested file exists,
+    we should emit AI_STOP instead of EXIT_SUCCESS.
+    """
+
+    def test_exit_success_with_stop_requested_returns_ai_stop(self) -> None:
+        """Exit code 0 with stop_requested file emits AI_STOP."""
+        from goldfish.state_machine.event_emission import determine_exit_event
+        from goldfish.state_machine.exit_code import ExitCodeResult
+        from goldfish.state_machine.types import StageEvent, StageState, TerminationCause
+
+        run = {
+            "id": "stage-123",
+            "state": StageState.RUNNING.value,
+            "backend_type": "local",
+            "outputs_dir": "/tmp/test-outputs",
+        }
+        exit_result = ExitCodeResult.from_code(0)
+
+        with patch("goldfish.state_machine.event_emission.check_ai_stop_requested") as mock_check:
+            mock_check.return_value = {"stop_requested": True, "svs_review_id": "42"}
+            result = determine_exit_event(run, exit_result, db=MagicMock())
+
+        assert result is not None
+        event, context = result
+        assert event == StageEvent.AI_STOP
+        assert context.termination_cause == TerminationCause.AI_STOPPED
+        assert context.svs_review_id == "42"
+
+    def test_exit_success_without_stop_requested_returns_exit_success(self) -> None:
+        """Exit code 0 without stop_requested file emits EXIT_SUCCESS."""
+        from goldfish.state_machine.event_emission import determine_exit_event
+        from goldfish.state_machine.exit_code import ExitCodeResult
+        from goldfish.state_machine.types import StageEvent, StageState
+
+        run = {"id": "stage-123", "state": StageState.RUNNING.value}
+        exit_result = ExitCodeResult.from_code(0)
+
+        with patch("goldfish.state_machine.event_emission.check_ai_stop_requested") as mock_check:
+            mock_check.return_value = None  # No stop requested
+            result = determine_exit_event(run, exit_result, db=MagicMock())
+
+        assert result is not None
+        event, context = result
+        assert event == StageEvent.EXIT_SUCCESS
+
+    def test_check_ai_stop_requested_local_with_file(self) -> None:
+        """check_ai_stop_requested detects local stop_requested file."""
+        import tempfile
+        from pathlib import Path
+
+        from goldfish.state_machine.event_emission import check_ai_stop_requested
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs_dir = Path(tmpdir)
+            goldfish_dir = outputs_dir / ".goldfish"
+            goldfish_dir.mkdir()
+            stop_file = goldfish_dir / "stop_requested"
+            stop_file.write_text("AI requested stop")
+
+            run = {
+                "id": "stage-123",
+                "backend_type": "local",
+                "outputs_dir": str(outputs_dir),
+            }
+
+            result = check_ai_stop_requested(run)
+
+            assert result is not None
+            assert result["stop_requested"] is True
+
+    def test_check_ai_stop_requested_local_without_file(self) -> None:
+        """check_ai_stop_requested returns None when no stop_requested file."""
+        import tempfile
+        from pathlib import Path
+
+        from goldfish.state_machine.event_emission import check_ai_stop_requested
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs_dir = Path(tmpdir)
+            goldfish_dir = outputs_dir / ".goldfish"
+            goldfish_dir.mkdir()
+            # No stop_requested file
+
+            run = {
+                "id": "stage-123",
+                "backend_type": "local",
+                "outputs_dir": str(outputs_dir),
+            }
+
+            result = check_ai_stop_requested(run)
+
+            assert result is None
+
+    def test_check_ai_stop_requested_looks_up_svs_review_id(self) -> None:
+        """check_ai_stop_requested looks up svs_review_id from database."""
+        import tempfile
+        from pathlib import Path
+
+        from goldfish.state_machine.event_emission import check_ai_stop_requested
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs_dir = Path(tmpdir)
+            goldfish_dir = outputs_dir / ".goldfish"
+            goldfish_dir.mkdir()
+            stop_file = goldfish_dir / "stop_requested"
+            stop_file.write_text("AI requested stop")
+
+            run = {
+                "id": "stage-123",
+                "backend_type": "local",
+                "outputs_dir": str(outputs_dir),
+            }
+
+            # Mock database lookup
+            mock_db = MagicMock()
+            mock_conn = MagicMock()
+            mock_db._conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
+            mock_db._conn.return_value.__exit__ = MagicMock(return_value=False)
+            mock_conn.execute.return_value.fetchone.return_value = {"id": 99}
+
+            result = check_ai_stop_requested(run, db=mock_db)
+
+            assert result is not None
+            assert result["svs_review_id"] == "99"

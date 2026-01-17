@@ -3,7 +3,6 @@ from unittest.mock import MagicMock, patch
 from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
 from goldfish.daemon import GoldfishDaemon
 from goldfish.db.database import Database
-from goldfish.models import StageRunStatus
 from goldfish.state_machine.exit_code import ExitCodeResult
 
 
@@ -35,11 +34,11 @@ class TestDaemonRaceCondition:
             conn.execute(
                 """
                 INSERT INTO stage_runs (
-                    id, workspace_name, stage_name, version, status,
+                    id, workspace_name, stage_name, version, state,
                     started_at, backend_type, backend_handle
                 ) VALUES (?, ?, ?, ?, ?, datetime('now', '-21 minutes'), ?, ?)
                 """,
-                (stage_run_id, "w1", "train", "v1", StageRunStatus.RUNNING, "gce", stage_run_id),
+                (stage_run_id, "w1", "train", "v1", "running", "gce", stage_run_id),
             )
 
         # 3. Mock gcloud list to show NO instances (instance disappeared)
@@ -57,8 +56,8 @@ class TestDaemonRaceCondition:
         # 5. Verify outcome
         stage_run = db.get_stage_run(stage_run_id)
 
-        # EXPECTATION: It should be COMPLETED now that we check GCS
-        assert stage_run["status"] == StageRunStatus.COMPLETED
+        # EXPECTATION: EXIT_SUCCESS transitions RUNNING → POST_RUN
+        assert stage_run["state"] == "post_run"
         assert stage_run["error"] is None
 
     @patch("subprocess.run")
@@ -85,11 +84,11 @@ class TestDaemonRaceCondition:
             conn.execute(
                 """
                 INSERT INTO stage_runs (
-                    id, workspace_name, stage_name, version, status,
+                    id, workspace_name, stage_name, version, state,
                     started_at, backend_type, backend_handle
                 ) VALUES (?, ?, ?, ?, ?, datetime('now', '-21 minutes'), ?, ?)
                 """,
-                (stage_run_id, "w1", "train", "v1", StageRunStatus.RUNNING, "gce", stage_run_id),
+                (stage_run_id, "w1", "train", "v1", "running", "gce", stage_run_id),
             )
 
         # Mock gcloud list and _get_exit_code
@@ -103,5 +102,6 @@ class TestDaemonRaceCondition:
             daemon._check_orphaned_instances()
 
         stage_run = db.get_stage_run(stage_run_id)
-        assert stage_run["status"] == StageRunStatus.FAILED
+        # INSTANCE_LOST transitions RUNNING → TERMINATED (non-zero exit means instance crashed)
+        assert stage_run["state"] == "terminated"
         assert "exit_code=1" in stage_run["error"]

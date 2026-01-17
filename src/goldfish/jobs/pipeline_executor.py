@@ -13,8 +13,9 @@ from uuid import uuid4
 
 from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.models import PipelineStatus, RunReason, StageRunInfo, StageRunStatus
+from goldfish.models import PipelineStatus, RunReason, StageRunInfo
 from goldfish.pipeline.manager import PipelineManager
+from goldfish.state_machine.types import StageState
 
 # Lease timeout for claimed stages (seconds) - if a stage is claimed but not launched
 # within this time, it can be reclaimed by another worker
@@ -293,8 +294,9 @@ class PipelineExecutor:
                 # Check if input can be resolved
                 if input_def.from_stage:
                     # Need a completed run of the upstream stage
+                    # Check state (source of truth), not legacy status
                     stage_runs = self.db.list_stage_runs(workspace_name=workspace, stage_name=input_def.from_stage)
-                    has_completed = any(r["status"] == StageRunStatus.COMPLETED for r in stage_runs)
+                    has_completed = any(r.get("state") == StageState.COMPLETED.value for r in stage_runs)
                     if not has_completed:
                         raise GoldfishError(
                             f"Stage '{stage.name}' requires input '{input_name}' from stage "
@@ -436,7 +438,27 @@ class PipelineExecutor:
     def _list_pipeline_stage_runs(self, pipeline_run_id: str) -> list[StageRunInfo]:
         rows = self.db.list_stage_runs(pipeline_run_id=pipeline_run_id)
         result = []
+        # Map state (source of truth) to legacy status string for API compatibility (v1.2)
+        state_to_status = {
+            StageState.PREPARING.value: "pending",
+            StageState.BUILDING.value: "running",
+            StageState.LAUNCHING.value: "running",
+            StageState.RUNNING.value: "running",
+            StageState.POST_RUN.value: "running",
+            StageState.AWAITING_USER_FINALIZATION.value: "awaiting_finalization",
+            StageState.COMPLETED.value: "completed",
+            StageState.FAILED.value: "failed",
+            StageState.TERMINATED.value: "failed",
+            StageState.CANCELED.value: "canceled",
+            StageState.UNKNOWN.value: "failed",
+        }
         for r in rows:
+            # Use state as source of truth, fall back to status for old runs
+            state: str | None = r.get("state")
+            if state and state in state_to_status:
+                status = state_to_status[state]
+            else:
+                status = r.get("status", "unknown")
             result.append(
                 StageRunInfo(
                     stage_run_id=r["id"],
@@ -445,10 +467,10 @@ class PipelineExecutor:
                     pipeline=r.get("pipeline_name"),
                     version=r["version"],
                     stage=r["stage_name"],
-                    status=r["status"],
+                    status=status,
                     started_at=datetime.fromisoformat(r["started_at"]) if r.get("started_at") else None,
                     completed_at=datetime.fromisoformat(r["completed_at"]) if r.get("completed_at") else None,
-                    progress=r.get("progress"),
+                    state=r.get("state"),
                     log_uri=r.get("log_uri"),
                     artifact_uri=r.get("artifact_uri"),
                 )
@@ -483,17 +505,25 @@ class PipelineExecutor:
                 ids = [r["stage_run_id"] for r in running]
                 placeholders = ",".join(["?"] * len(ids))
                 # Safe: ids come from previously stored queue rows (not user input)
+                # Read state (source of truth), not legacy status
                 stage_rows = conn.execute(
-                    f"SELECT id,status FROM stage_runs WHERE id IN ({placeholders})",
+                    f"SELECT id,state FROM stage_runs WHERE id IN ({placeholders})",
                     tuple(ids),
                 ).fetchall()
-                status_map = {r["id"]: r["status"] for r in stage_rows}
+                state_map = {r["id"]: r["state"] for r in stage_rows}
+                # Map StageState -> PipelineStatus for queue update
+                state_to_pipeline_status = {
+                    StageState.COMPLETED.value: PipelineStatus.COMPLETED,
+                    StageState.FAILED.value: PipelineStatus.FAILED,
+                    StageState.CANCELED.value: PipelineStatus.CANCELED,
+                    StageState.TERMINATED.value: PipelineStatus.FAILED,  # Infra failure -> failed
+                }
                 for row in running:
-                    sr_status = status_map.get(row["stage_run_id"])
-                    if sr_status in (PipelineStatus.COMPLETED, PipelineStatus.FAILED, PipelineStatus.CANCELED):
+                    sr_state = state_map.get(row["stage_run_id"])
+                    if sr_state in state_to_pipeline_status:
                         conn.execute(
                             "UPDATE pipeline_stage_queue SET status=? WHERE id=?",
-                            (sr_status, row["id"]),
+                            (state_to_pipeline_status[sr_state], row["id"]),
                         )
 
             # Handle stuck claimed rows (claimed but no stage_run_id after timeout)

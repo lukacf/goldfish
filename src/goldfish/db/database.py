@@ -26,7 +26,7 @@ from goldfish.db.types import (
     VersionTagRow,
 )
 from goldfish.errors import DatabaseError
-from goldfish.models import JobStatus, PipelineStatus, StageRunStatus
+from goldfish.models import JobStatus, PipelineStatus
 
 # Load schema from file
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -2307,7 +2307,7 @@ class Database:
                     pipeline_name,
                     version,
                     stage_name,
-                    StageRunStatus.PENDING,
+                    StageState.PREPARING,
                     timestamp,
                     profile,
                     hints_json,
@@ -2403,18 +2403,20 @@ class Database:
         Returns:
             True if updated, False if run not found
         """
+        from goldfish.state_machine.types import StageState
+
         if outcome not in ("success", "bad_results"):
             raise ValueError(f"Invalid outcome: {outcome}. Must be 'success' or 'bad_results'")
 
         with self._conn() as conn:
-            # Only update completed runs
+            # Only update completed runs (state machine is source of truth)
             result = conn.execute(
                 """
                 UPDATE stage_runs
                 SET outcome = ?
-                WHERE id = ? AND status = ?
+                WHERE id = ? AND state = ?
                 """,
-                (outcome, stage_run_id, StageRunStatus.COMPLETED),
+                (outcome, stage_run_id, StageState.COMPLETED.value),
             )
             return result.rowcount > 0
 
@@ -2434,14 +2436,17 @@ class Database:
         Returns:
             List of attempt summaries with run counts and status
         """
+        from goldfish.state_machine.types import StageState
+
         # Build query to group runs by attempt
+        # Use state column (source of truth) for lifecycle counts
         query = """
             SELECT
                 stage_name,
                 attempt_num,
                 COUNT(*) as run_count,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as completed_count,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as failed_count,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as completed_count,
+                SUM(CASE WHEN state IN (?, ?, ?) THEN 1 ELSE 0 END) as failed_count,
                 SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) as success_count,
                 SUM(CASE WHEN outcome = 'bad_results' THEN 1 ELSE 0 END) as bad_results_count,
                 MIN(version) as first_version,
@@ -2451,7 +2456,13 @@ class Database:
             FROM stage_runs
             WHERE workspace_name = ?
         """
-        params: list = [StageRunStatus.COMPLETED, StageRunStatus.FAILED, workspace_name]
+        params: list = [
+            StageState.COMPLETED.value,
+            StageState.FAILED.value,
+            StageState.TERMINATED.value,
+            StageState.CANCELED.value,
+            workspace_name,
+        ]
 
         if stage_name:
             query += " AND stage_name = ?"
@@ -2508,11 +2519,14 @@ class Database:
         Returns:
             Dict with attempt summary or None if not found
         """
+        from goldfish.state_machine.types import StageState
+
+        # Use state column (source of truth) for statistics
         query = """
             SELECT
                 COUNT(*) as run_count,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as completed_count,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as failed_count,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as completed_count,
+                SUM(CASE WHEN state IN (?, ?, ?) THEN 1 ELSE 0 END) as failed_count,
                 SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) as success_count,
                 SUM(CASE WHEN outcome = 'bad_results' THEN 1 ELSE 0 END) as bad_results_count
             FROM stage_runs
@@ -2520,9 +2534,11 @@ class Database:
             AND stage_name = ?
             AND attempt_num = ?
         """
-        params = [
-            StageRunStatus.COMPLETED,
-            StageRunStatus.FAILED,
+        params: list = [
+            StageState.COMPLETED.value,
+            StageState.FAILED.value,
+            StageState.TERMINATED.value,
+            StageState.CANCELED.value,
             workspace_name,
             stage_name,
             attempt_num,
@@ -2554,28 +2570,31 @@ class Database:
     def update_stage_run_status(
         self,
         stage_run_id: str,
-        status: str,
         completed_at: str | None = None,
         log_uri: str | None = None,
         artifact_uri: str | None = None,
-        progress: str | None = None,
         outputs_json: dict | None = None,
         error: str | None = None,
+        progress: str | None = None,
     ) -> None:
-        """Update stage run status.
+        """Update stage run metadata fields.
+
+        Note: The state machine is now the source of truth for run state.
+        Use transition() from goldfish.state_machine for state changes.
+        This method updates auxiliary fields like completed_at, log_uri, etc.
 
         Args:
             stage_run_id: Stage run ID
-            status: New status (pending, running, completed, failed)
             completed_at: Completion timestamp
             log_uri: Log file location
             artifact_uri: Artifact URI if produced
-            progress: Progress string
             outputs_json: Outputs map
             error: Error message if failed
+            progress: User-facing training progress string (e.g., "Epoch 10/10")
         """
-        fields = ["status = ?"]
-        params: list = [status]
+        fields: list[str] = []
+        params: list = []
+
         if completed_at is not None:
             fields.append("completed_at = ?")
             params.append(completed_at)
@@ -2585,15 +2604,18 @@ class Database:
         if artifact_uri is not None:
             fields.append("artifact_uri = ?")
             params.append(artifact_uri)
-        if progress is not None:
-            fields.append("progress = ?")
-            params.append(progress)
         if outputs_json is not None:
             fields.append("outputs_json = ?")
             params.append(json.dumps(outputs_json))
         if error is not None:
             fields.append("error = ?")
             params.append(error)
+        if progress is not None:
+            fields.append("progress = ?")
+            params.append(progress)
+
+        if not fields:
+            return  # Nothing to update
 
         params.append(stage_run_id)
         query = f"UPDATE stage_runs SET {', '.join(fields)} WHERE id = ?"
@@ -2651,7 +2673,7 @@ class Database:
         self,
         workspace_name: str | None = None,
         stage_name: str | None = None,
-        status: str | None = None,
+        state: str | None = None,
         outcome: str | None = None,
         pipeline_run_id: str | None = None,
         limit: int = 50,
@@ -2662,7 +2684,7 @@ class Database:
         Args:
             workspace_name: Filter by workspace
             stage_name: Filter by stage
-            status: Filter by status
+            state: Filter by state (source of truth for lifecycle)
             outcome: Filter by outcome (e.g., 'success', 'bad_results')
             limit: Maximum number of results
             offset: Number of results to skip
@@ -2682,9 +2704,9 @@ class Database:
         if pipeline_run_id:
             query += " AND pipeline_run_id = ?"
             params.append(pipeline_run_id)
-        if status:
-            query += " AND status = ?"
-            params.append(status)
+        if state:
+            query += " AND state = ?"
+            params.append(state)
         if outcome:
             query += " AND outcome = ?"
             params.append(outcome)
@@ -2700,7 +2722,7 @@ class Database:
         self,
         workspace_name: str | None = None,
         stage_name: str | None = None,
-        status: str | None = None,
+        state: str | None = None,
         outcome: str | None = None,
         pipeline_run_id: str | None = None,
         limit: int = 50,
@@ -2719,9 +2741,9 @@ class Database:
         if pipeline_run_id:
             query += " AND pipeline_run_id = ?"
             params.append(pipeline_run_id)
-        if status:
-            query += " AND status = ?"
-            params.append(status)
+        if state:
+            query += " AND state = ?"
+            params.append(state)
         if outcome:
             query += " AND outcome = ?"
             params.append(outcome)
@@ -2737,7 +2759,7 @@ class Database:
         self,
         workspace_name: str | None = None,
         stage_name: str | None = None,
-        status: str | None = None,
+        state: str | None = None,
         pipeline_run_id: str | None = None,
     ) -> int:
         """Count stage runs for pagination."""
@@ -2753,9 +2775,9 @@ class Database:
         if pipeline_run_id:
             query += " AND pipeline_run_id = ?"
             params.append(pipeline_run_id)
-        if status:
-            query += " AND status = ?"
-            params.append(status)
+        if state:
+            query += " AND state = ?"
+            params.append(state)
 
         with self._conn() as conn:
             row = conn.execute(query, params).fetchone()
@@ -2773,34 +2795,54 @@ class Database:
         Returns:
             List of failed runs with workspace, stage, error, and timestamp
         """
+        from goldfish.state_machine.types import StageState
+
+        # Terminal failure states (state machine is source of truth)
+        failed_states = (
+            StageState.FAILED.value,
+            StageState.TERMINATED.value,
+        )
+        placeholders = ", ".join("?" for _ in failed_states)
         with self._conn() as conn:
             rows = conn.execute(
-                """
-                SELECT id, workspace_name, stage_name, status, error, completed_at
+                f"""
+                SELECT id, workspace_name, stage_name, state, error, completed_at
                 FROM stage_runs
-                WHERE status = ?
+                WHERE state IN ({placeholders})
                 ORDER BY completed_at DESC
                 LIMIT ?
                 """,
-                (StageRunStatus.FAILED, limit),
+                (*failed_states, limit),
             ).fetchall()
             return [dict(row) for row in rows]
 
     def get_active_runs(self) -> list[dict]:
-        """Get all currently running or pending stage runs.
+        """Get all currently active (non-terminal) stage runs.
 
         Returns:
-            List of active runs with progress info
+            List of active runs with state info
         """
+        from goldfish.state_machine.types import StageState
+
+        # Active states (non-terminal) - v1.2
+        active_states = (
+            StageState.PREPARING.value,
+            StageState.BUILDING.value,
+            StageState.LAUNCHING.value,
+            StageState.RUNNING.value,
+            StageState.POST_RUN.value,
+            StageState.AWAITING_USER_FINALIZATION.value,
+        )
+        placeholders = ", ".join("?" for _ in active_states)
         with self._conn() as conn:
             rows = conn.execute(
-                """
-                SELECT id, workspace_name, stage_name, status, progress, started_at
+                f"""
+                SELECT id, workspace_name, stage_name, state, started_at
                 FROM stage_runs
-                WHERE status IN (?, ?)
+                WHERE state IN ({placeholders})
                 ORDER BY started_at DESC
                 """,
-                (StageRunStatus.RUNNING, StageRunStatus.PENDING),
+                active_states,
             ).fetchall()
             return [dict(row) for row in rows]
 
@@ -2813,30 +2855,32 @@ class Database:
         Returns:
             List of recent outcomes (success/bad_results) with metadata
         """
+        from goldfish.state_machine.types import StageState
+
         with self._conn() as conn:
             rows = conn.execute(
                 """
                 SELECT workspace_name, stage_name, outcome, completed_at
                 FROM stage_runs
                 WHERE outcome IS NOT NULL
-                AND status = ?
+                AND state = ?
                 ORDER BY completed_at DESC
                 LIMIT ?
                 """,
-                (StageRunStatus.COMPLETED, limit),
+                (StageState.COMPLETED.value, limit),
             ).fetchall()
             return [dict(row) for row in rows]
 
     def list_all_stage_runs(
         self,
-        status: str | None = None,
+        state: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
         """List stage runs across ALL workspaces (newest first).
 
         Args:
-            status: Optional status filter
+            state: Optional state filter (state machine is source of truth)
             limit: Maximum runs to return
             offset: Pagination offset
 
@@ -2846,9 +2890,9 @@ class Database:
         query = "SELECT *, COUNT(*) OVER() AS total_count FROM stage_runs WHERE 1=1"
         params: list = []
 
-        if status:
-            query += " AND status = ?"
-            params.append(status)
+        if state:
+            query += " AND state = ?"
+            params.append(state)
 
         query += " ORDER BY started_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
@@ -3360,15 +3404,17 @@ class Database:
         Returns:
             Stage run dict or None if no completed runs exist
         """
+        from goldfish.state_machine.types import StageState
+
         with self._conn() as conn:
             row = conn.execute(
                 """
                 SELECT * FROM stage_runs
-                WHERE workspace_name = ? AND stage_name = ? AND status = ?
+                WHERE workspace_name = ? AND stage_name = ? AND state = ?
                 ORDER BY started_at DESC
                 LIMIT 1
                 """,
-                (workspace, stage_name, StageRunStatus.COMPLETED),
+                (workspace, stage_name, StageState.COMPLETED.value),
             ).fetchone()
             return dict(row) if row else None
 

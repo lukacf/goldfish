@@ -197,7 +197,7 @@ class LineageManager:
                     {
                         "stage_run_id": d_run["id"],
                         "stage": d_run["stage_name"],
-                        "status": d_run["status"],
+                        "state": d_run.get("state"),  # state is source of truth
                         "started_at": d_run.get("started_at"),
                     }
                 )

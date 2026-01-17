@@ -103,8 +103,8 @@ def user_cancel_context(now: datetime) -> EventContext:
 
 
 @pytest.fixture
-def finalize_ok_context(now: datetime) -> EventContext:
-    """Context for FINALIZE_OK event."""
+def post_run_ok_context(now: datetime) -> EventContext:
+    """Context for POST_RUN_OK event (v1.2: renamed from FINALIZE_OK)."""
     return EventContext(
         timestamp=now,
         source="executor",
@@ -113,8 +113,8 @@ def finalize_ok_context(now: datetime) -> EventContext:
 
 
 @pytest.fixture
-def finalize_fail_critical_context(now: datetime) -> EventContext:
-    """Context for FINALIZE_FAIL with critical=True."""
+def post_run_fail_critical_context(now: datetime) -> EventContext:
+    """Context for POST_RUN_FAIL with critical=True (v1.2: renamed from FINALIZE_FAIL)."""
     return EventContext(
         timestamp=now,
         source="executor",
@@ -124,8 +124,8 @@ def finalize_fail_critical_context(now: datetime) -> EventContext:
 
 
 @pytest.fixture
-def finalize_fail_noncritical_context(now: datetime) -> EventContext:
-    """Context for FINALIZE_FAIL with critical=False."""
+def post_run_fail_noncritical_context(now: datetime) -> EventContext:
+    """Context for POST_RUN_FAIL with critical=False (v1.2: renamed from FINALIZE_FAIL)."""
     return EventContext(
         timestamp=now,
         source="executor",
@@ -135,8 +135,8 @@ def finalize_fail_noncritical_context(now: datetime) -> EventContext:
 
 
 @pytest.fixture
-def timeout_finalizing_done_context(now: datetime) -> EventContext:
-    """Context for TIMEOUT in FINALIZING with critical phases done."""
+def timeout_post_run_done_context(now: datetime) -> EventContext:
+    """Context for TIMEOUT in POST_RUN with critical phases done (v1.2: renamed from FINALIZING)."""
     return EventContext(
         timestamp=now,
         source="daemon",
@@ -146,8 +146,8 @@ def timeout_finalizing_done_context(now: datetime) -> EventContext:
 
 
 @pytest.fixture
-def timeout_finalizing_not_done_context(now: datetime) -> EventContext:
-    """Context for TIMEOUT in FINALIZING with critical phases NOT done."""
+def timeout_post_run_not_done_context(now: datetime) -> EventContext:
+    """Context for TIMEOUT in POST_RUN with critical phases NOT done (v1.2: renamed from FINALIZING)."""
     return EventContext(
         timestamp=now,
         source="daemon",
@@ -157,12 +157,21 @@ def timeout_finalizing_not_done_context(now: datetime) -> EventContext:
 
 
 @pytest.fixture
+def user_finalize_context(now: datetime) -> EventContext:
+    """Context for USER_FINALIZE event (v1.2: new event for user finalization)."""
+    return EventContext(
+        timestamp=now,
+        source="mcp_tool",
+    )
+
+
+@pytest.fixture
 def svs_block_context(now: datetime) -> EventContext:
     """Context for SVS_BLOCK event."""
     return EventContext(
         timestamp=now,
         source="executor",
-        svs_finding_id="finding-abc123",
+        svs_review_id="finding-abc123",
         error_message="SVS blocked: potential data leak detected",
     )
 
@@ -231,7 +240,7 @@ def make_context(
     termination_cause: TerminationCause | None = None,
     phase: ProgressPhase | None = None,
     error_message: str | None = None,
-    svs_finding_id: str | None = None,
+    svs_review_id: str | None = None,
     gcs_error: bool = False,
     gcs_outage_started: datetime | None = None,
 ) -> EventContext:
@@ -247,7 +256,7 @@ def make_context(
         termination_cause=termination_cause,
         phase=phase,
         error_message=error_message,
-        svs_finding_id=svs_finding_id,
+        svs_review_id=svs_review_id,
         gcs_error=gcs_error,
         gcs_outage_started=gcs_outage_started,
     )

@@ -16,7 +16,11 @@ from typing import Literal
 class StageState(str, Enum):
     """All possible states for a stage run.
 
-    Active states: PREPARING, BUILDING, LAUNCHING, RUNNING, FINALIZING
+    Active states (v1.2):
+    - PREPARING, BUILDING, LAUNCHING, RUNNING: Execution phases
+    - POST_RUN: Infrastructure wrap-up (was FINALIZING)
+    - AWAITING_USER_FINALIZATION: Requires explicit user finalization
+
     Terminal states: COMPLETED, FAILED, TERMINATED, CANCELED
     Limbo states: UNKNOWN (for runs in indeterminate state, auto-cleanup after 24h)
     """
@@ -26,7 +30,8 @@ class StageState(str, Enum):
     BUILDING = "building"
     LAUNCHING = "launching"
     RUNNING = "running"
-    FINALIZING = "finalizing"
+    POST_RUN = "post_run"  # v1.2: renamed from FINALIZING (infrastructure wrap-up)
+    AWAITING_USER_FINALIZATION = "awaiting_user_finalization"  # v1.2: new state
 
     # Terminal states
     COMPLETED = "completed"
@@ -44,7 +49,7 @@ class StageEvent(str, Enum):
     Events are emitted by:
     - Executor: BUILD_START, BUILD_OK, BUILD_FAIL, LAUNCH_OK, LAUNCH_FAIL, etc.
     - Daemon: EXIT_SUCCESS, EXIT_FAILURE, EXIT_MISSING, INSTANCE_LOST, TIMEOUT
-    - MCP tools: USER_CANCEL
+    - MCP tools: USER_CANCEL, USER_FINALIZE
     - SVS: SVS_BLOCK
     """
 
@@ -62,9 +67,9 @@ class StageEvent(str, Enum):
     EXIT_FAILURE = "exit_failure"
     EXIT_MISSING = "exit_missing"  # No exit code file (crash/preemption)
 
-    # Finalization events
-    FINALIZE_OK = "finalize_ok"
-    FINALIZE_FAIL = "finalize_fail"
+    # Post-run events (v1.2: renamed from finalization)
+    POST_RUN_OK = "post_run_ok"  # v1.2: renamed from FINALIZE_OK
+    POST_RUN_FAIL = "post_run_fail"  # v1.2: renamed from FINALIZE_FAIL
 
     # Infrastructure events
     INSTANCE_LOST = "instance_lost"  # Instance disappeared (preemption, crash)
@@ -72,10 +77,14 @@ class StageEvent(str, Enum):
 
     # User events
     USER_CANCEL = "user_cancel"
+    USER_FINALIZE = "user_finalize"  # v1.2: explicit finalization from finalize_run tool
 
     # Preparation events
     PREPARE_FAIL = "prepare_fail"  # Pre-execution validation failed
     SVS_BLOCK = "svs_block"  # SVS pre-run review blocked execution
+
+    # AI/SVS events
+    AI_STOP = "ai_stop"  # During-run SVS requested stop (via stop_requested file)
 
 
 class TerminationCause(str, Enum):
@@ -123,7 +132,7 @@ class ProgressPhase(str, Enum):
     CONTAINER_INIT = "container_init"
     CODE_EXECUTION = "code_execution"
 
-    # FINALIZING phases
+    # POST_RUN phases (v1.2: renamed from FINALIZING)
     OUTPUT_SYNC = "output_sync"
     OUTPUT_RECORDING = "output_recording"
     LOG_FETCH = "log_fetch"
@@ -168,12 +177,12 @@ class EventContext:
     gcs_error: bool = False  # GCS unavailable when checking exit code
     gcs_outage_started: datetime | None = None  # When GCS outage was first detected
 
-    # Finalization context
-    critical: bool | None = None  # For FINALIZE_FAIL: True → FAILED, False → COMPLETED
-    critical_phases_done: bool | None = None  # For TIMEOUT in FINALIZING: True → COMPLETED
+    # Post-run context (v1.2: renamed from finalization)
+    critical: bool | None = None  # For POST_RUN_FAIL: True → FAILED, False → AWAITING_USER_FINALIZATION
+    critical_phases_done: bool | None = None  # For TIMEOUT in POST_RUN: True → AWAITING_USER_FINALIZATION
 
     # SVS context
-    svs_finding_id: str | None = None
+    svs_review_id: str | None = None  # FK to svs_reviews.id for SVS_BLOCK and AI_STOP events
 
 
 @dataclass

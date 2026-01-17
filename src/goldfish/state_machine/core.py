@@ -15,7 +15,6 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from goldfish.state_machine.backwards_compat import get_legacy_progress, get_legacy_status
 from goldfish.state_machine.transitions import (
     STATE_ENTRY_PHASES,
     TRANSITIONS,
@@ -66,7 +65,10 @@ def transition(
     """
     with db._conn() as conn:
         # 1. Read current state INSIDE transaction (prevents TOCTOU)
-        row = conn.execute("SELECT state FROM stage_runs WHERE id = ?", (run_id,)).fetchone()
+        row = conn.execute(
+            "SELECT state, completed_with_warnings FROM stage_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
 
         if row is None:
             return TransitionResult(
@@ -124,8 +126,12 @@ def transition(
         if new_phase is None:
             new_phase = STATE_ENTRY_PHASES.get(to_state)
 
-        # 5. Determine if completed_with_warnings should be set
-        completed_with_warnings = _should_set_completed_with_warnings(event, context, to_state)
+        # 5. Determine if completed_with_warnings should be set or preserved
+        # When transitioning from AWAITING_USER_FINALIZATION to COMPLETED, preserve the flag
+        if current_state == StageState.AWAITING_USER_FINALIZATION and to_state == StageState.COMPLETED:
+            completed_with_warnings = bool(row["completed_with_warnings"])
+        else:
+            completed_with_warnings = _should_set_completed_with_warnings(event, context, to_state)
 
         # 6. Build the UPDATE query with CAS
         timestamp_str = context.timestamp.isoformat()
@@ -145,17 +151,12 @@ def transition(
             elif event == StageEvent.TIMEOUT:
                 termination_cause_str = TerminationCause.TIMEOUT.value
 
-        legacy_status = get_legacy_status(to_state, context.termination_cause)
-        legacy_progress = get_legacy_progress(to_state, new_phase)
-
         # CAS UPDATE: only update if state matches expected
         result = conn.execute(
             """
             UPDATE stage_runs
             SET state = ?,
                 phase = ?,
-                status = ?,
-                progress = ?,
                 state_entered_at = ?,
                 phase_updated_at = ?,
                 termination_cause = ?,
@@ -167,8 +168,6 @@ def transition(
             (
                 to_state.value,
                 phase_str,
-                legacy_status,
-                legacy_progress,
                 timestamp_str,
                 timestamp_str,
                 termination_cause_str,
@@ -195,10 +194,10 @@ def transition(
             INSERT INTO stage_state_transitions
             (stage_run_id, from_state, to_state, event,
              phase, termination_cause, exit_code, exit_code_exists, error_message,
-             source, created_at)
+             svs_review_id, source, created_at)
             VALUES (?, ?, ?, ?,
                     ?, ?, ?, ?, ?,
-                    ?, ?)
+                    ?, ?, ?)
             """,
             (
                 run_id,
@@ -210,6 +209,7 @@ def transition(
                 context.exit_code,
                 1 if context.exit_code_exists else 0,
                 error_str,
+                context.svs_review_id,
                 context.source,
                 timestamp_str,
             ),
@@ -280,10 +280,10 @@ def update_phase(
             INSERT INTO stage_state_transitions
             (stage_run_id, from_state, to_state, event,
              phase, termination_cause, exit_code, exit_code_exists, error_message,
-             source, created_at)
+             svs_review_id, source, created_at)
             VALUES (?, ?, ?, ?,
                     ?, ?, ?, ?, ?,
-                    ?, ?)
+                    ?, ?, ?)
             """,
             (
                 run_id,
@@ -295,6 +295,7 @@ def update_phase(
                 None,
                 None,
                 None,
+                None,  # svs_review_id (always NULL for phase updates)
                 source,
                 timestamp.isoformat(),
             ),
@@ -306,14 +307,19 @@ def update_phase(
 def _should_set_completed_with_warnings(event: StageEvent, context: EventContext, to_state: StageState) -> bool:
     """Determine if completed_with_warnings flag should be set.
 
+    v1.2: With the unified finalization model, non-critical failures and timeouts
+    with critical phases done now go to AWAITING_USER_FINALIZATION instead of COMPLETED.
+    The completed_with_warnings flag is set when transitioning to AWAITING_USER_FINALIZATION
+    for these specific events, so it persists through to COMPLETED when USER_FINALIZE is called.
+
     Set when:
-    - FINALIZE_FAIL with critical=False goes to COMPLETED
-    - TIMEOUT in FINALIZING with critical_phases_done=True goes to COMPLETED
+    - POST_RUN_FAIL with critical=False goes to AWAITING_USER_FINALIZATION
+    - TIMEOUT in POST_RUN with critical_phases_done=True goes to AWAITING_USER_FINALIZATION
     """
-    if to_state != StageState.COMPLETED:
+    if to_state != StageState.AWAITING_USER_FINALIZATION:
         return False
 
-    if event == StageEvent.FINALIZE_FAIL and context.critical is False:
+    if event == StageEvent.POST_RUN_FAIL and context.critical is False:
         return True
 
     if event == StageEvent.TIMEOUT and context.critical_phases_done is True:

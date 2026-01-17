@@ -54,7 +54,8 @@ STATE_TIMEOUTS: dict[StageState, timedelta] = {
     StageState.BUILDING: timedelta(minutes=30),
     StageState.LAUNCHING: timedelta(minutes=20),
     StageState.RUNNING: timedelta(hours=24),
-    StageState.FINALIZING: timedelta(minutes=30),
+    StageState.POST_RUN: timedelta(minutes=30),  # v1.2: renamed from FINALIZING
+    # Note: AWAITING_USER_FINALIZATION has no timeout - it requires user action
     StageState.UNKNOWN: timedelta(hours=24),
 }
 
@@ -237,9 +238,9 @@ class StageDaemon:
 
         # Check for timeout first (applies to all active states)
         if self._check_timeout(run):
-            # For FINALIZING timeout, determine critical_phases_done
+            # For POST_RUN timeout, determine critical_phases_done (v1.2: renamed from FINALIZING)
             critical_phases_done: bool | None = None
-            if state == StageState.FINALIZING:
+            if state == StageState.POST_RUN:
                 output_sync_done = run.get("output_sync_done", 0)
                 output_recording_done = run.get("output_recording_done", 0)
                 critical_phases_done = bool(output_sync_done) and bool(output_recording_done)
@@ -349,7 +350,8 @@ class StageDaemon:
             StageState.BUILDING.value,
             StageState.LAUNCHING.value,
             StageState.RUNNING.value,
-            StageState.FINALIZING.value,
+            StageState.POST_RUN.value,  # v1.2: renamed from FINALIZING
+            StageState.AWAITING_USER_FINALIZATION.value,  # v1.2: new state
             StageState.UNKNOWN.value,  # Include UNKNOWN for cleanup
         )
 

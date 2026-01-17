@@ -1,7 +1,7 @@
 """Transition table and lookup functions for the Stage Execution State Machine.
 
 This module defines:
-- TRANSITIONS: The complete list of 39 valid state transitions
+- TRANSITIONS: The complete list of 34 valid state transitions (v1.2)
 - STATE_ENTRY_PHASES: Default phases when entering each state
 - find_transition(): Lookup function for finding valid transitions
 - Guards: Predicate functions for conditional transitions
@@ -33,22 +33,22 @@ def guard_instance_confirmed_dead(ctx: EventContext) -> bool:
 
 
 def guard_critical_true(ctx: EventContext) -> bool:
-    """Guard: FINALIZE_FAIL with critical=True → FAILED."""
+    """Guard: POST_RUN_FAIL with critical=True → FAILED."""
     return ctx.critical is True
 
 
 def guard_critical_false(ctx: EventContext) -> bool:
-    """Guard: FINALIZE_FAIL with critical=False → COMPLETED (with warning)."""
+    """Guard: POST_RUN_FAIL with critical=False → AWAITING_USER_FINALIZATION (v1.2)."""
     return ctx.critical is False
 
 
 def guard_critical_phases_done_true(ctx: EventContext) -> bool:
-    """Guard: TIMEOUT in FINALIZING with outputs saved → COMPLETED."""
+    """Guard: TIMEOUT in POST_RUN with outputs saved → AWAITING_USER_FINALIZATION (v1.2)."""
     return ctx.critical_phases_done is True
 
 
 def guard_critical_phases_done_false(ctx: EventContext) -> bool:
-    """Guard: TIMEOUT in FINALIZING with outputs NOT saved → FAILED."""
+    """Guard: TIMEOUT in POST_RUN with outputs NOT saved → FAILED."""
     return ctx.critical_phases_done is False
 
 
@@ -71,7 +71,8 @@ ACTIVE_STATES = frozenset(
         StageState.BUILDING,
         StageState.LAUNCHING,
         StageState.RUNNING,
-        StageState.FINALIZING,
+        StageState.POST_RUN,  # v1.2: renamed from FINALIZING
+        StageState.AWAITING_USER_FINALIZATION,  # v1.2: new state
     }
 )
 
@@ -89,7 +90,8 @@ STATE_ENTRY_PHASES: dict[StageState, ProgressPhase | None] = {
     StageState.BUILDING: ProgressPhase.IMAGE_CHECK,
     StageState.LAUNCHING: ProgressPhase.INSTANCE_CREATE,
     StageState.RUNNING: ProgressPhase.CONTAINER_INIT,
-    StageState.FINALIZING: ProgressPhase.OUTPUT_SYNC,
+    StageState.POST_RUN: ProgressPhase.OUTPUT_SYNC,  # v1.2: renamed from FINALIZING
+    StageState.AWAITING_USER_FINALIZATION: None,  # v1.2: no phase, just waiting
     # Terminal states don't have phases
     StageState.COMPLETED: None,
     StageState.FAILED: None,
@@ -100,7 +102,7 @@ STATE_ENTRY_PHASES: dict[StageState, ProgressPhase | None] = {
 
 
 # =============================================================================
-# Transition Table (39 transitions)
+# Transition Table (34 transitions) - v1.2
 # =============================================================================
 # This is the single source of truth for all valid state changes.
 # Order matters for guarded transitions - first matching guard wins.
@@ -132,9 +134,9 @@ TRANSITIONS: list[TransitionDef] = [
     TransitionDef(StageState.LAUNCHING, StageEvent.TIMEOUT, StageState.TERMINATED),
     TransitionDef(StageState.LAUNCHING, StageEvent.USER_CANCEL, StageState.CANCELED),
     # =========================================================================
-    # RUNNING (6 transitions)
+    # RUNNING (7 transitions)
     # =========================================================================
-    TransitionDef(StageState.RUNNING, StageEvent.EXIT_SUCCESS, StageState.FINALIZING),
+    TransitionDef(StageState.RUNNING, StageEvent.EXIT_SUCCESS, StageState.POST_RUN),  # v1.2: FINALIZING → POST_RUN
     TransitionDef(StageState.RUNNING, StageEvent.EXIT_FAILURE, StageState.FAILED),
     TransitionDef(
         StageState.RUNNING,
@@ -146,40 +148,59 @@ TRANSITIONS: list[TransitionDef] = [
     TransitionDef(StageState.RUNNING, StageEvent.INSTANCE_LOST, StageState.TERMINATED),
     TransitionDef(StageState.RUNNING, StageEvent.TIMEOUT, StageState.TERMINATED),
     TransitionDef(StageState.RUNNING, StageEvent.USER_CANCEL, StageState.CANCELED),
+    TransitionDef(StageState.RUNNING, StageEvent.AI_STOP, StageState.TERMINATED),
     # =========================================================================
-    # FINALIZING (7 transitions)
+    # POST_RUN (8 transitions) - v1.2: renamed from FINALIZING
     # =========================================================================
-    TransitionDef(StageState.FINALIZING, StageEvent.FINALIZE_OK, StageState.COMPLETED),
     TransitionDef(
-        StageState.FINALIZING,
-        StageEvent.FINALIZE_FAIL,
+        StageState.POST_RUN,
+        StageEvent.POST_RUN_OK,  # v1.2: renamed from FINALIZE_OK
+        StageState.AWAITING_USER_FINALIZATION,  # v1.2: was COMPLETED
+    ),
+    TransitionDef(
+        StageState.POST_RUN,
+        StageEvent.POST_RUN_FAIL,  # v1.2: renamed from FINALIZE_FAIL
         StageState.FAILED,
         guard=guard_critical_true,
         guard_name="critical=True",
     ),
     TransitionDef(
-        StageState.FINALIZING,
-        StageEvent.FINALIZE_FAIL,
-        StageState.COMPLETED,
+        StageState.POST_RUN,
+        StageEvent.POST_RUN_FAIL,  # v1.2: renamed from FINALIZE_FAIL
+        StageState.AWAITING_USER_FINALIZATION,  # v1.2: was COMPLETED
         guard=guard_critical_false,
         guard_name="critical=False",
     ),
-    TransitionDef(StageState.FINALIZING, StageEvent.INSTANCE_LOST, StageState.TERMINATED),
+    TransitionDef(StageState.POST_RUN, StageEvent.INSTANCE_LOST, StageState.TERMINATED),
     TransitionDef(
-        StageState.FINALIZING,
+        StageState.POST_RUN,
         StageEvent.TIMEOUT,
-        StageState.COMPLETED,
+        StageState.AWAITING_USER_FINALIZATION,  # v1.2: was COMPLETED
         guard=guard_critical_phases_done_true,
         guard_name="critical_phases_done=True",
     ),
     TransitionDef(
-        StageState.FINALIZING,
+        StageState.POST_RUN,
         StageEvent.TIMEOUT,
         StageState.FAILED,
         guard=guard_critical_phases_done_false,
         guard_name="critical_phases_done=False",
     ),
-    TransitionDef(StageState.FINALIZING, StageEvent.USER_CANCEL, StageState.CANCELED),
+    TransitionDef(StageState.POST_RUN, StageEvent.USER_CANCEL, StageState.CANCELED),
+    TransitionDef(StageState.POST_RUN, StageEvent.AI_STOP, StageState.TERMINATED),
+    # =========================================================================
+    # AWAITING_USER_FINALIZATION (2 transitions) - v1.2: new state
+    # =========================================================================
+    TransitionDef(
+        StageState.AWAITING_USER_FINALIZATION,
+        StageEvent.USER_FINALIZE,  # v1.2: new event from finalize_run tool
+        StageState.COMPLETED,
+    ),
+    TransitionDef(
+        StageState.AWAITING_USER_FINALIZATION,
+        StageEvent.USER_CANCEL,
+        StageState.CANCELED,
+    ),
     # =========================================================================
     # UNKNOWN (1 transition) - requires manual resolution
     # =========================================================================
@@ -210,8 +231,8 @@ def find_transition(
     Example:
         >>> from datetime import datetime, UTC
         >>> ctx = EventContext(timestamp=datetime.now(UTC), source="executor", critical=False)
-        >>> t = find_transition(StageState.FINALIZING, StageEvent.FINALIZE_FAIL, ctx)
-        >>> t.to_state  # COMPLETED (because critical=False)
+        >>> t = find_transition(StageState.POST_RUN, StageEvent.POST_RUN_FAIL, ctx)
+        >>> t.to_state  # AWAITING_USER_FINALIZATION (because critical=False)
     """
     # Normalize to enum values if strings were passed
     if isinstance(from_state, str):
