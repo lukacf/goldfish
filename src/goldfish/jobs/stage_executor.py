@@ -506,7 +506,7 @@ class StageExecutor:
             status=StageState.RUNNING,
             started_at=datetime.now(UTC),
             log_uri=str(self.dev_repo / ".goldfish" / "runs" / stage_run_id / "logs" / "output.log"),
-            state=StageState.LAUNCHING.value,
+            state=StageState.RUNNING.value,  # LAUNCH_OK already emitted in _launch_container
             profile=stage_config.get("compute", {}).get("profile") if "compute" in stage_config else None,
             hints=stage_config.get("hints"),
             config=stage_config,
@@ -2209,6 +2209,15 @@ echo "Stage completed successfully"
                 input_paths=inputs,  # Mount inputs directly from source locations
             )
 
+            # State machine: LAUNCHING → RUNNING (LAUNCH_OK)
+            # Container launched successfully - transition to RUNNING
+            sm_transition(
+                self.db,
+                stage_run_id,
+                StageEvent.LAUNCH_OK,
+                SMEventContext(timestamp=datetime.now(UTC), source="executor"),
+            )
+
         elif backend == "gce":
             # Load stage config and resolve profile
             stage_config_yaml = self._load_stage_config(workspace, stage_name)
@@ -2249,6 +2258,15 @@ echo "Stage completed successfully"
                 zones=zones,
                 use_capacity_search=use_capacity_search,
                 goldfish_env=goldfish_env,
+            )
+
+            # State machine: LAUNCHING → RUNNING (LAUNCH_OK)
+            # Instance is confirmed in RUNNING state (wait_for_instance_ready succeeded)
+            sm_transition(
+                self.db,
+                stage_run_id,
+                StageEvent.LAUNCH_OK,
+                SMEventContext(timestamp=datetime.now(UTC), source="executor"),
             )
         else:
             raise GoldfishError(f"Backend {backend} not supported for launch")
