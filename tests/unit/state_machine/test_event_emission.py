@@ -587,10 +587,27 @@ class TestInstanceLostEvent:
             assert result is None
             mock_verify.assert_not_called()
 
-    def test_launching_state_can_emit_instance_lost(self) -> None:
-        """LAUNCHING state CAN emit INSTANCE_LOST (instance creation in progress)."""
+    def test_launching_state_never_emits_instance_lost(self) -> None:
+        """REGRESSION: LAUNCHING state must never emit INSTANCE_LOST.
+
+        This is a critical timing fix. The daemon polls every 2 seconds, but
+        instance creation (especially GCE) takes 5+ seconds. During LAUNCHING,
+        the instance might not be visible to the API yet - it's being created
+        asynchronously.
+
+        The executor emits LAUNCH_OK after verifying the instance is ready.
+        Until then, checking instance status would incorrectly report "not found"
+        and trigger a spurious INSTANCE_LOST event.
+
+        Bug scenario:
+        1. T+0s: Run enters LAUNCHING state, instance creation begins
+        2. T+2s: Daemon polls, instance not visible yet → wrongly emits INSTANCE_LOST
+        3. T+5s: Instance becomes ready, but run is already TERMINATED
+
+        Fix: Exclude LAUNCHING from instance checks (like PREPARING and BUILDING).
+        """
         from goldfish.state_machine.event_emission import determine_instance_event
-        from goldfish.state_machine.types import StageEvent, StageState
+        from goldfish.state_machine.types import StageState
 
         run = {
             "id": "stage-123",
@@ -599,18 +616,62 @@ class TestInstanceLostEvent:
             "backend_handle": "instance-123",
         }
 
-        with patch("subprocess.run") as mock_run:
-            import subprocess
-
-            error = subprocess.CalledProcessError(1, "gcloud")
-            error.stderr = "not found"
-            mock_run.side_effect = error
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            mock_verify.return_value = True  # Would trigger INSTANCE_LOST if called
 
             result = determine_instance_event(run, project_id="test-project")
 
-            assert result is not None
-            event, _ = result
-            assert event == StageEvent.INSTANCE_LOST
+            assert result is None  # Must not emit any event
+            mock_verify.assert_not_called()  # Must not even check instance status
+
+    def test_awaiting_user_finalization_state_never_emits_instance_lost(self) -> None:
+        """AWAITING_USER_FINALIZATION state must never emit INSTANCE_LOST.
+
+        After a run completes, the instance may be cleaned up while the run
+        waits for user finalization. Checking instance status would incorrectly
+        report INSTANCE_LOST for completed runs.
+        """
+        from goldfish.state_machine.event_emission import determine_instance_event
+        from goldfish.state_machine.types import StageState
+
+        run = {
+            "id": "stage-123",
+            "state": StageState.AWAITING_USER_FINALIZATION.value,
+            "backend_type": "local",
+            "backend_handle": "container-123",
+        }
+
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            mock_verify.return_value = True
+
+            result = determine_instance_event(run)
+
+            assert result is None
+            mock_verify.assert_not_called()
+
+    def test_unknown_state_never_emits_instance_lost(self) -> None:
+        """UNKNOWN state must never emit INSTANCE_LOST.
+
+        When state is UNKNOWN, we can't assume anything about whether an
+        instance should exist.
+        """
+        from goldfish.state_machine.event_emission import determine_instance_event
+        from goldfish.state_machine.types import StageState
+
+        run = {
+            "id": "stage-123",
+            "state": StageState.UNKNOWN.value,
+            "backend_type": "gce",
+            "backend_handle": "instance-123",
+        }
+
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            mock_verify.return_value = True
+
+            result = determine_instance_event(run, project_id="test-project")
+
+            assert result is None
+            mock_verify.assert_not_called()
 
     def test_post_run_state_can_emit_instance_lost(self) -> None:
         """POST_RUN state CAN emit INSTANCE_LOST (instance may still exist)."""
@@ -793,3 +854,164 @@ class TestAIStopDetection:
 
             assert result is not None
             assert result["svs_review_id"] == "99"
+
+
+class TestStateBasedInstanceChecks:
+    """Comprehensive tests for state-based instance checking.
+
+    This test class captures a general class of bugs: the daemon polls faster
+    than the executor can set up infrastructure. Without proper state filtering,
+    the daemon can incorrectly emit events for runs that haven't finished setup.
+
+    General Rule:
+    - Only check for INSTANCE_LOST in states where an instance is CONFIRMED to exist
+    - Confirmed states: RUNNING, POST_RUN
+    - Unconfirmed states: PREPARING, BUILDING, LAUNCHING, AWAITING_USER_FINALIZATION, UNKNOWN
+
+    This pattern applies whenever:
+    1. A background process (daemon) monitors state
+    2. A foreground process (executor) sets up resources asynchronously
+    3. The monitor polls faster than the setup completes
+    """
+
+    def test_all_states_instance_lost_behavior(self) -> None:
+        """Verify INSTANCE_LOST behavior is correct for ALL states.
+
+        This comprehensive test ensures we don't miss any state when adding
+        new states to the state machine.
+        """
+        from goldfish.state_machine.event_emission import determine_instance_event
+        from goldfish.state_machine.types import StageEvent, StageState
+
+        # States where instance check should be SKIPPED (no INSTANCE_LOST)
+        # These are states where an instance is not confirmed to exist
+        states_skip_instance_check = {
+            StageState.PREPARING,  # Code syncing, no instance
+            StageState.BUILDING,  # Docker build, no instance
+            StageState.LAUNCHING,  # Instance being created async
+            StageState.AWAITING_USER_FINALIZATION,  # Instance may be cleaned up
+            StageState.UNKNOWN,  # Can't assume anything
+        }
+
+        # States where instance check SHOULD happen
+        # These are states where an instance is confirmed to exist
+        states_do_instance_check = {
+            StageState.RUNNING,  # Instance must exist
+            StageState.POST_RUN,  # Instance should still exist
+        }
+
+        # Terminal states - no checks needed, run is done
+        terminal_states = {
+            StageState.COMPLETED,
+            StageState.TERMINATED,
+            StageState.CANCELED,
+        }
+
+        for state in StageState:
+            run = {
+                "id": "stage-123",
+                "state": state.value,
+                "backend_type": "gce",
+                "backend_handle": "instance-123",
+            }
+
+            with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+                # Make verify return True (instance "not found")
+                mock_verify.return_value = True
+
+                with patch("goldfish.state_machine.event_emission.detect_termination_cause"):
+                    result = determine_instance_event(run, project_id="test-project")
+
+                    if state in states_skip_instance_check:
+                        assert result is None, f"State {state.value} should NOT emit INSTANCE_LOST"
+                        mock_verify.assert_not_called()
+                    elif state in states_do_instance_check:
+                        assert result is not None, f"State {state.value} SHOULD emit INSTANCE_LOST"
+                        event, _ = result
+                        assert event == StageEvent.INSTANCE_LOST
+                    elif state in terminal_states:
+                        # Terminal states aren't polled by daemon, but if they were,
+                        # we'd check (result depends on backend_handle presence)
+                        pass  # Not relevant to this test
+
+    def test_daemon_poll_vs_executor_setup_timing(self) -> None:
+        """Document the timing invariant between daemon and executor.
+
+        The daemon polls every 2 seconds. If the executor takes longer than
+        2 seconds to set up infrastructure, the daemon must NOT emit spurious
+        events during setup phases.
+
+        This test documents the expected timing relationships.
+        """
+        # These are the approximate times for each phase:
+        # PREPARING: 1-5 seconds (git sync)
+        # BUILDING: 10-300 seconds (Docker build)
+        # LAUNCHING: 5-60 seconds (instance creation)
+        # RUNNING: indefinite (user code)
+        # POST_RUN: 5-30 seconds (cleanup)
+
+        # Daemon poll interval
+        DAEMON_POLL_INTERVAL_SECONDS = 2.0
+
+        # Minimum time for instance to be visible after LAUNCHING starts
+        MIN_INSTANCE_VISIBILITY_SECONDS = 5.0
+
+        # This inequality MUST hold to avoid spurious INSTANCE_LOST:
+        # If daemon polls during LAUNCHING before instance is visible,
+        # it would incorrectly see "instance not found".
+        assert MIN_INSTANCE_VISIBILITY_SECONDS > DAEMON_POLL_INTERVAL_SECONDS, (
+            "Instance visibility time must be > daemon poll interval. "
+            "This means LAUNCHING state MUST be excluded from instance checks."
+        )
+
+    def test_running_and_post_run_are_only_states_with_instance_checks(self) -> None:
+        """Ensure ONLY RUNNING and POST_RUN perform instance checks.
+
+        This is the inverse of the skip test - explicitly verify that
+        only the expected states perform instance checks.
+        """
+        from goldfish.state_machine.event_emission import determine_instance_event
+        from goldfish.state_machine.types import StageEvent, StageState
+
+        states_with_instance_checks = {StageState.RUNNING, StageState.POST_RUN}
+
+        for state in states_with_instance_checks:
+            run = {
+                "id": "stage-123",
+                "state": state.value,
+                "backend_type": "local",
+                "backend_handle": "container-123",
+            }
+
+            with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+                mock_verify.return_value = True
+
+                with patch("goldfish.state_machine.event_emission.detect_termination_cause"):
+                    result = determine_instance_event(run)
+
+                    assert result is not None, f"State {state.value} should emit INSTANCE_LOST"
+                    event, _ = result
+                    assert event == StageEvent.INSTANCE_LOST
+                    mock_verify.assert_called_once()
+
+    def test_no_backend_handle_never_emits_instance_lost(self) -> None:
+        """Runs without backend_handle should never emit INSTANCE_LOST.
+
+        Even in RUNNING state, if there's no backend_handle, we can't
+        check instance status.
+        """
+        from goldfish.state_machine.event_emission import determine_instance_event
+        from goldfish.state_machine.types import StageState
+
+        run = {
+            "id": "stage-123",
+            "state": StageState.RUNNING.value,
+            "backend_type": "gce",
+            "backend_handle": None,  # No handle
+        }
+
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            result = determine_instance_event(run, project_id="test-project")
+
+            assert result is None
+            mock_verify.assert_not_called()
