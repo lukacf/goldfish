@@ -148,6 +148,9 @@ class Database:
             "experiment_records": [
                 ("experiment_group", "TEXT"),  # Optional grouping for filtering
             ],
+            "stage_state_transitions": [
+                ("svs_review_id", "TEXT"),  # FK to svs_reviews.id for SVS_BLOCK and AI_STOP events
+            ],
         }
 
         with self._conn() as conn:
@@ -330,9 +333,11 @@ class Database:
                     exit_code INTEGER,
                     exit_code_exists INTEGER,
                     error_message TEXT,
+                    svs_review_id TEXT,
                     source TEXT NOT NULL CHECK(source IN ('mcp_tool', 'executor', 'daemon', 'container', 'migration', 'admin')),
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+                    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE,
+                    FOREIGN KEY (svs_review_id) REFERENCES svs_reviews(id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_state_transitions_stage_run
                     ON stage_state_transitions(stage_run_id, created_at);
@@ -594,11 +599,13 @@ class Database:
                                 exit_code INTEGER,
                                 exit_code_exists INTEGER,
                                 error_message TEXT,
+                                svs_review_id TEXT,
                                 source TEXT NOT NULL CHECK(
                                     source IN ('mcp_tool', 'executor', 'daemon', 'container', 'migration', 'admin')
                                 ),
                                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                                FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE
+                                FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE,
+                                FOREIGN KEY (svs_review_id) REFERENCES svs_reviews(id)
                             )
                             """
                         )
@@ -618,15 +625,17 @@ class Database:
                             source = ctx.get("source") or "migration"
                             created_at = r["timestamp"] or datetime.now(UTC).isoformat()
 
+                            svs_review_id = ctx.get("svs_review_id")
+
                             conn.execute(
                                 """
                                 INSERT INTO stage_state_transitions_new
                                 (id, stage_run_id, from_state, to_state, event,
                                  phase, termination_cause, exit_code, exit_code_exists,
-                                 error_message, source, created_at)
+                                 error_message, svs_review_id, source, created_at)
                                 VALUES (?, ?, ?, ?, ?,
                                         ?, ?, ?, ?,
-                                        ?, ?, ?)
+                                        ?, ?, ?, ?)
                                 """,
                                 (
                                     r["id"],
@@ -639,6 +648,7 @@ class Database:
                                     exit_code,
                                     exit_code_exists,
                                     error_message,
+                                    svs_review_id,
                                     source,
                                     created_at,
                                 ),
