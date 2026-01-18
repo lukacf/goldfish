@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -460,53 +461,80 @@ CMD ["/bin/bash"]
         sanitized_ver = re.sub(r"[^a-z0-9._-]", "_", version.lower())
         registry_tag = f"{artifact_registry}/goldfish-{sanitized_ws}-{sanitized_ver}"
 
-        # Check if image already exists - skip build if so
-        if self._image_exists_in_registry(registry_tag, project_id):
-            logger.info(
-                "Image %s already exists in registry, skipping build",
-                registry_tag,
-            )
-            return registry_tag
+        # Create build context to compute content hash FIRST
+        # This ensures goldfish source code changes are detected even when workspace version unchanged
+        with tempfile.TemporaryDirectory(prefix="goldfish-cloud-") as tmp_dir:
+            build_context = Path(tmp_dir)
 
-        # Get Cloud Build configuration
-        docker_config = getattr(self.config, "docker", None)
-        cloud_config = getattr(docker_config, "cloud_build", None) if docker_config else None
+            # Copy workspace files (same as local build)
+            self._prepare_build_context(workspace_dir, build_context)
 
-        machine_type = getattr(cloud_config, "machine_type", "E2_HIGHCPU_32") if cloud_config else "E2_HIGHCPU_32"
-        timeout_minutes = getattr(cloud_config, "timeout_minutes", 30) if cloud_config else 30
-        disk_size_gb = getattr(cloud_config, "disk_size_gb", 100) if cloud_config else 100
+            # Generate Dockerfile
+            dockerfile_content = self.generate_dockerfile(workspace_dir, base_image=base_image)
+            (build_context / "Dockerfile").write_text(dockerfile_content)
 
-        # Generate build ID
-        build_id = f"build-{uuid.uuid4().hex[:8]}"
-        started_at = datetime.now(UTC).isoformat()
+            # Compute content hash for cache detection
+            # CRITICAL: This includes goldfish library code copied into build context
+            content_hash = self._compute_content_hash(build_context, dockerfile_content, base_image)
 
-        # Record build start in database
-        if self.db:
-            self.db.insert_docker_build(
-                build_id=build_id,
-                image_type=self._get_image_type_from_base(base_image),
-                target="workspace",
-                backend="cloud",
-                started_at=started_at,
-                workspace_name=workspace_name,
-                version=version,
-                registry_tag=registry_tag,
-            )
+            # Check if we've already built this exact content before
+            # Content hash is the primary caching mechanism - it detects ALL changes
+            # including goldfish library code, workspace code, and Dockerfile
+            if self.db:
+                cached_build = self.db.get_docker_build_by_content_hash(workspace_name, content_hash)
+                if cached_build:
+                    cached_tag = cached_build.get("registry_tag")
+                    if cached_tag:
+                        logger.info(
+                            "Content unchanged (hash=%s), reusing existing image %s",
+                            content_hash[:12],
+                            cached_tag,
+                        )
+                        return cached_tag
 
-        try:
-            # Get previous version's registry tag for caching
-            prev_tag = self._get_previous_version_tag(workspace_name, version)
+            # Content hash doesn't match any cached build - need to build
+            # But first check if this version's image exists (shouldn't with new content)
+            if self._image_exists_in_registry(registry_tag, project_id):
+                # Image exists but content changed - this means goldfish library changed
+                # We need to rebuild, but can't use same tag (immutable in registry)
+                # Generate a new tag with content hash suffix
+                short_hash = content_hash[:8]
+                registry_tag = f"{artifact_registry}/goldfish-{sanitized_ws}-{sanitized_ver}-{short_hash}"
+                logger.info(
+                    "Content changed (hash=%s) but version unchanged, using tag %s",
+                    short_hash,
+                    registry_tag,
+                )
 
-            # Create build context
-            with tempfile.TemporaryDirectory(prefix="goldfish-cloud-") as tmp_dir:
-                build_context = Path(tmp_dir)
+            # Get Cloud Build configuration
+            docker_config = getattr(self.config, "docker", None)
+            cloud_config = getattr(docker_config, "cloud_build", None) if docker_config else None
 
-                # Copy workspace files (same as local build)
-                self._prepare_build_context(workspace_dir, build_context)
+            machine_type = getattr(cloud_config, "machine_type", "E2_HIGHCPU_32") if cloud_config else "E2_HIGHCPU_32"
+            timeout_minutes = getattr(cloud_config, "timeout_minutes", 30) if cloud_config else 30
+            disk_size_gb = getattr(cloud_config, "disk_size_gb", 100) if cloud_config else 100
 
-                # Generate Dockerfile
-                dockerfile_content = self.generate_dockerfile(workspace_dir, base_image=base_image)
-                (build_context / "Dockerfile").write_text(dockerfile_content)
+            # Generate build ID
+            build_id = f"build-{uuid.uuid4().hex[:8]}"
+            started_at = datetime.now(UTC).isoformat()
+
+            # Record build start in database
+            if self.db:
+                self.db.insert_docker_build(
+                    build_id=build_id,
+                    image_type=self._get_image_type_from_base(base_image),
+                    target="workspace",
+                    backend="cloud",
+                    started_at=started_at,
+                    workspace_name=workspace_name,
+                    version=version,
+                    registry_tag=registry_tag,
+                    content_hash=content_hash,
+                )
+
+            try:
+                # Get previous version's registry tag for layer caching
+                prev_tag = self._get_previous_version_tag(workspace_name, version)
 
                 # Build cloudbuild.yaml
                 steps = []
@@ -610,18 +638,18 @@ CMD ["/bin/bash"]
                 else:
                     return registry_tag
 
-        except CloudBuildError:
-            raise
-        except Exception as e:
-            error_msg = f"Cloud Build failed: {e}"
-            if self.db:
-                self.db.update_docker_build_status(
-                    build_id=build_id,
-                    status="failed",
-                    error=error_msg,
-                    completed_at=datetime.now(UTC).isoformat(),
-                )
-            raise CloudBuildError(error_msg) from e
+            except CloudBuildError:
+                raise
+            except Exception as e:
+                error_msg = f"Cloud Build failed: {e}"
+                if self.db:
+                    self.db.update_docker_build_status(
+                        build_id=build_id,
+                        status="failed",
+                        error=error_msg,
+                        completed_at=datetime.now(UTC).isoformat(),
+                    )
+                raise CloudBuildError(error_msg) from e
 
     def _wait_for_cloud_build(
         self,
@@ -769,12 +797,16 @@ CMD ["/bin/bash"]
         if GOLDFISH_ERRORS_PATH.exists():
             shutil.copy2(GOLDFISH_ERRORS_PATH, goldfish_pkg_dest / "errors.py")
 
-    def _get_previous_version_tag(self, workspace_name: str, version: str) -> str | None:
-        """Get previous version's registry tag for caching.
+    def _get_previous_version_tag(self, workspace_name: str, _version: str) -> str | None:
+        """Get any previous version's registry tag for Docker layer caching.
+
+        For effective caching, we want the most recent successful build
+        for this workspace, regardless of which version it was built for.
+        Docker layers are workspace-specific, not version-specific.
 
         Args:
             workspace_name: Workspace name
-            version: Current version (e.g., "v5")
+            _version: Current version (unused - kept for API compatibility)
 
         Returns:
             Previous version's registry tag if found, None otherwise
@@ -782,10 +814,10 @@ CMD ["/bin/bash"]
         if not self.db:
             return None
 
-        # Get the most recent completed build for this workspace
-        # (regardless of version - we want ANY recent successful build for cache)
-        prev_build = self.db.get_docker_build_by_workspace(workspace_name, version)
-        if prev_build and prev_build.get("status") == "completed":
+        # Get the most recent completed build for this workspace (any version)
+        # This enables cache-from to work across version boundaries
+        prev_build = self.db.get_latest_docker_build_for_workspace(workspace_name)
+        if prev_build:
             return prev_build.get("registry_tag")
 
         return None
@@ -802,6 +834,45 @@ CMD ["/bin/bash"]
         if base_image and "gpu" in base_image.lower():
             return "gpu"
         return "cpu"
+
+    def _compute_content_hash(self, build_context: Path, dockerfile_content: str, base_image: str | None) -> str:
+        """Compute SHA256 hash of the build context for cache detection.
+
+        The hash includes:
+        - All files in the build context (sorted for determinism)
+        - The Dockerfile content
+        - The base image tag (different base = different hash)
+
+        Args:
+            build_context: Path to the build context directory
+            dockerfile_content: Generated Dockerfile content
+            base_image: Base image tag
+
+        Returns:
+            SHA256 hex digest
+        """
+        hasher = hashlib.sha256()
+
+        # Include base image in hash (different base image = different hash)
+        hasher.update(f"base:{base_image or 'default'}\n".encode())
+
+        # Include Dockerfile content
+        hasher.update(f"dockerfile:{dockerfile_content}\n".encode())
+
+        # Include all files in build context (sorted for determinism)
+        all_files = sorted(build_context.rglob("*"))
+        for file_path in all_files:
+            if file_path.is_file():
+                # Include relative path and content
+                rel_path = file_path.relative_to(build_context)
+                hasher.update(f"file:{rel_path}\n".encode())
+                try:
+                    hasher.update(file_path.read_bytes())
+                except OSError:
+                    # Skip unreadable files
+                    pass
+
+        return hasher.hexdigest()
 
     def _image_exists_in_registry(self, registry_tag: str, project_id: str) -> bool:
         """Check if an image already exists in Artifact Registry.

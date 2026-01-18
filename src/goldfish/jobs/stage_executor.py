@@ -2180,6 +2180,10 @@ echo "Stage completed successfully"
         if "ANTHROPIC_API_KEY" in os.environ:
             goldfish_env["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
 
+        # Passthrough agent provider override for SVS (useful for testing/debugging)
+        if "GOLDFISH_SVS_AGENT_PROVIDER" in os.environ:
+            goldfish_env["GOLDFISH_SVS_AGENT_PROVIDER"] = os.environ["GOLDFISH_SVS_AGENT_PROVIDER"]
+
         if backend == "local":
             # Create work directory for this run
             run_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id

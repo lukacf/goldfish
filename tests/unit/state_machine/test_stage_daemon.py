@@ -67,6 +67,8 @@ class TestDetermineEvent:
             "state_entered_at": (datetime.now(UTC) - timedelta(minutes=20)).isoformat(),
             "backend_type": "local",
         }
+        # Mock get_stage_run to return the same run (race condition fix re-reads state)
+        daemon._db.get_stage_run.return_value = run
 
         event, ctx = daemon._determine_event(run)
 
@@ -82,6 +84,7 @@ class TestDetermineEvent:
             "state_entered_at": (datetime.now(UTC) - timedelta(minutes=35)).isoformat(),
             "backend_type": "local",
         }
+        daemon._db.get_stage_run.return_value = run
 
         event, ctx = daemon._determine_event(run)
 
@@ -96,6 +99,7 @@ class TestDetermineEvent:
             "state_entered_at": (datetime.now(UTC) - timedelta(minutes=25)).isoformat(),
             "backend_type": "gce",
         }
+        daemon._db.get_stage_run.return_value = run
 
         event, ctx = daemon._determine_event(run)
 
@@ -110,6 +114,7 @@ class TestDetermineEvent:
             "state_entered_at": (datetime.now(UTC) - timedelta(hours=25)).isoformat(),
             "backend_type": "local",
         }
+        daemon._db.get_stage_run.return_value = run
 
         event, ctx = daemon._determine_event(run)
 
@@ -125,6 +130,7 @@ class TestDetermineEvent:
             "output_sync_done": 1,
             "output_recording_done": 1,
         }
+        daemon._db.get_stage_run.return_value = run
 
         event, ctx = daemon._determine_event(run)
 
@@ -141,6 +147,7 @@ class TestDetermineEvent:
             "output_sync_done": 0,
             "output_recording_done": 1,
         }
+        daemon._db.get_stage_run.return_value = run
 
         event, ctx = daemon._determine_event(run)
 
@@ -157,6 +164,7 @@ class TestDetermineEvent:
             "output_sync_done": 1,
             "output_recording_done": 0,
         }
+        daemon._db.get_stage_run.return_value = run
 
         event, ctx = daemon._determine_event(run)
 
@@ -172,6 +180,7 @@ class TestDetermineEvent:
             "backend_type": "local",
             # No output_sync_done or output_recording_done
         }
+        daemon._db.get_stage_run.return_value = run
 
         event, ctx = daemon._determine_event(run)
 
@@ -186,6 +195,7 @@ class TestDetermineEvent:
             "state_entered_at": (datetime.now(UTC) - timedelta(hours=25)).isoformat(),
             "backend_type": "local",
         }
+        daemon._db.get_stage_run.return_value = run
 
         event, ctx = daemon._determine_event(run)
 
@@ -352,6 +362,117 @@ class TestDetermineEvent:
         # Verify determine_instance_event was called with project_id=None
         mock_instance.assert_called_once()
         assert mock_instance.call_args.kwargs.get("project_id") is None
+
+
+class TestTimeoutRaceConditionFix:
+    """Regression tests for the daemon timeout race condition fix.
+
+    Bug: The daemon could emit TIMEOUT based on stale cached data even when
+    the run had just transitioned to a new state. This caused runs to be
+    incorrectly terminated seconds after transitioning states.
+
+    Example: Run was in BUILDING for 34 minutes, transitioned to LAUNCHING,
+    but daemon's cached data still showed BUILDING, so it emitted TIMEOUT
+    based on 34 min > 30 min limit, terminating the run after only 2 seconds
+    in LAUNCHING state.
+
+    Fix: Re-read the current state from database before emitting TIMEOUT.
+    """
+
+    def test_timeout_skipped_when_state_changed_since_poll(self, daemon: StageDaemon) -> None:
+        """TIMEOUT should not be emitted if state changed since initial poll.
+
+        This is the core race condition bug: daemon reads stale data showing
+        timeout, but actual current state is different and not timed out.
+        """
+        # Initial poll data shows BUILDING for 35 minutes (past 30 min timeout)
+        stale_run = {
+            "id": "stage-123",
+            "state": StageState.BUILDING.value,
+            "state_entered_at": (datetime.now(UTC) - timedelta(minutes=35)).isoformat(),
+            "backend_type": "gce",
+        }
+
+        # Fresh DB read shows run just transitioned to LAUNCHING (2 seconds ago)
+        fresh_run = {
+            "id": "stage-123",
+            "state": StageState.LAUNCHING.value,
+            "state_entered_at": (datetime.now(UTC) - timedelta(seconds=2)).isoformat(),
+            "backend_type": "gce",
+        }
+
+        # Mock get_stage_run to return fresh state
+        daemon._db.get_stage_run.return_value = fresh_run
+
+        # Should NOT emit TIMEOUT because fresh state is not timed out
+        result = daemon._determine_event(stale_run)
+
+        assert result is None, "TIMEOUT should not be emitted when fresh state is not timed out"
+        daemon._db.get_stage_run.assert_called_once_with("stage-123")
+
+    def test_timeout_skipped_when_run_deleted(self, daemon: StageDaemon) -> None:
+        """TIMEOUT should not be emitted if run was deleted since poll."""
+        stale_run = {
+            "id": "stage-123",
+            "state": StageState.BUILDING.value,
+            "state_entered_at": (datetime.now(UTC) - timedelta(minutes=35)).isoformat(),
+            "backend_type": "local",
+        }
+
+        # Run was deleted
+        daemon._db.get_stage_run.return_value = None
+
+        result = daemon._determine_event(stale_run)
+
+        assert result is None, "TIMEOUT should not be emitted for deleted run"
+
+    def test_timeout_emitted_when_still_timed_out_after_refresh(self, daemon: StageDaemon) -> None:
+        """TIMEOUT should be emitted if state is still timed out after refresh."""
+        # Run has been in BUILDING for 35 minutes
+        run = {
+            "id": "stage-123",
+            "state": StageState.BUILDING.value,
+            "state_entered_at": (datetime.now(UTC) - timedelta(minutes=35)).isoformat(),
+            "backend_type": "local",
+        }
+
+        # Fresh read confirms still in BUILDING, still timed out
+        daemon._db.get_stage_run.return_value = run
+
+        event, ctx = daemon._determine_event(run)
+
+        assert event == StageEvent.TIMEOUT
+        assert ctx.source == "daemon"
+
+    def test_fresh_state_used_for_critical_phases_check(self, daemon: StageDaemon) -> None:
+        """Critical phases check should use fresh data, not stale data."""
+        # Stale data shows POST_RUN without critical phases done
+        stale_run = {
+            "id": "stage-123",
+            "state": StageState.POST_RUN.value,
+            "state_entered_at": (datetime.now(UTC) - timedelta(minutes=35)).isoformat(),
+            "backend_type": "local",
+            "output_sync_done": 0,
+            "output_recording_done": 0,
+        }
+
+        # Fresh data shows critical phases are now done
+        fresh_run = {
+            "id": "stage-123",
+            "state": StageState.POST_RUN.value,
+            "state_entered_at": (datetime.now(UTC) - timedelta(minutes=35)).isoformat(),
+            "backend_type": "local",
+            "output_sync_done": 1,
+            "output_recording_done": 1,
+        }
+
+        daemon._db.get_stage_run.return_value = fresh_run
+
+        event, ctx = daemon._determine_event(stale_run)
+
+        assert event == StageEvent.TIMEOUT
+        # Should use fresh data showing critical phases done
+        assert ctx.critical_phases_done is True
 
 
 class TestDetermineExitEvents:
@@ -1120,6 +1241,7 @@ class TestEventContextProperties:
             "state_entered_at": (datetime.now(UTC) - timedelta(minutes=20)).isoformat(),
             "backend_type": "local",
         }
+        daemon._db.get_stage_run.return_value = run
 
         event, ctx = daemon._determine_event(run)
 
@@ -1133,6 +1255,7 @@ class TestEventContextProperties:
             "state_entered_at": (datetime.now(UTC) - timedelta(minutes=20)).isoformat(),
             "backend_type": "local",
         }
+        daemon._db.get_stage_run.return_value = run
 
         event, ctx = daemon._determine_event(run)
 

@@ -144,6 +144,7 @@ class Database:
             "docker_builds": [
                 ("workspace_name", "TEXT"),  # Workspace name (for workspace builds)
                 ("version", "TEXT"),  # Workspace version (for workspace builds)
+                ("content_hash", "TEXT"),  # SHA256 of build context (for cache hit detection)
             ],
             "experiment_records": [
                 ("experiment_group", "TEXT"),  # Optional grouping for filtering
@@ -506,7 +507,7 @@ class Database:
                 # IMPORTANT: Only include runs where workspace_version exists (FK constraint)
                 orphaned = conn.execute(
                     """
-                    SELECT sr.id, sr.workspace_name, sr.version, sr.status
+                    SELECT sr.id, sr.workspace_name, sr.version, sr.state
                     FROM stage_runs sr
                     LEFT JOIN experiment_records er ON er.stage_run_id = sr.id
                     INNER JOIN workspace_versions wv
@@ -520,21 +521,22 @@ class Database:
                     stage_run_id = row["id"]
                     workspace_name = row["workspace_name"]
                     version = row["version"]
-                    status = row["status"]
+                    state = row["state"]
 
                     # Generate ULID for record_id
                     record_id = generate_record_id()
 
-                    # Determine infra_outcome from status
-                    # Only terminal statuses get mapped; non-terminal get "unknown"
+                    # Determine infra_outcome from state (state machine is source of truth)
+                    # Only terminal states get mapped; non-terminal get "unknown"
                     # to satisfy CHECK constraint (completed/preempted/crashed/canceled/unknown)
                     infra_outcome_map = {
                         "completed": "completed",
                         "failed": "crashed",
+                        "terminated": "crashed",
                         "canceled": "canceled",
                     }
-                    # running/pending -> unknown (valid CHECK value, will be updated later)
-                    infra_outcome = infra_outcome_map.get(status, "unknown")
+                    # Active states -> unknown (valid CHECK value, will be updated later)
+                    infra_outcome = infra_outcome_map.get(state, "unknown") if state else "unknown"
 
                     # Create experiment_record
                     conn.execute(
@@ -4769,6 +4771,7 @@ class Database:
         cloud_build_id: str | None = None,
         workspace_name: str | None = None,
         version: str | None = None,
+        content_hash: str | None = None,
     ) -> None:
         """Insert a new Docker build record.
 
@@ -4783,6 +4786,7 @@ class Database:
             cloud_build_id: GCP Cloud Build operation ID (if backend=cloud)
             workspace_name: Workspace name (for workspace builds only)
             version: Workspace version (for workspace builds only)
+            content_hash: SHA256 of build context (for cache hit detection)
         """
         with self._conn() as conn:
             conn.execute(
@@ -4790,9 +4794,9 @@ class Database:
                 INSERT INTO docker_builds (
                     id, image_type, target, backend, cloud_build_id,
                     status, image_tag, registry_tag, started_at,
-                    workspace_name, version
+                    workspace_name, version, content_hash
                 )
-                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     build_id,
@@ -4805,6 +4809,7 @@ class Database:
                     started_at,
                     workspace_name,
                     version,
+                    content_hash,
                 ),
             )
 
@@ -4825,7 +4830,7 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, created_at
+                       version, content_hash, created_at
                 FROM docker_builds
                 WHERE id = ?
                 """,
@@ -4851,13 +4856,77 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, created_at
+                       version, content_hash, created_at
                 FROM docker_builds
                 WHERE workspace_name = ? AND version = ?
                 ORDER BY started_at DESC
                 LIMIT 1
                 """,
                 (workspace_name, version),
+            ).fetchone()
+            return cast(DockerBuildRow, dict(row)) if row else None
+
+    def get_latest_docker_build_for_workspace(self, workspace_name: str) -> "DockerBuildRow | None":
+        """Get the most recent completed Docker build for a workspace (any version).
+
+        Used for Docker layer caching - we want to use any previous successful build
+        as a cache source, regardless of which version it was built for.
+
+        Args:
+            workspace_name: Workspace name
+
+        Returns:
+            DockerBuildRow if found, None otherwise
+        """
+        from goldfish.db.types import DockerBuildRow
+
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT id, image_type, target, backend, cloud_build_id,
+                       status, image_tag, registry_tag, started_at,
+                       completed_at, error, logs_uri, workspace_name,
+                       version, content_hash, created_at
+                FROM docker_builds
+                WHERE workspace_name = ? AND status = 'completed' AND registry_tag IS NOT NULL
+                ORDER BY completed_at DESC
+                LIMIT 1
+                """,
+                (workspace_name,),
+            ).fetchone()
+            return cast(DockerBuildRow, dict(row)) if row else None
+
+    def get_docker_build_by_content_hash(self, workspace_name: str, content_hash: str) -> "DockerBuildRow | None":
+        """Get a completed Docker build by content hash.
+
+        Used to detect unchanged workspace content - if we've built this exact
+        content before, we can skip the build entirely.
+
+        Args:
+            workspace_name: Workspace name (to scope the search)
+            content_hash: SHA256 of build context
+
+        Returns:
+            DockerBuildRow if a completed build with this hash exists, None otherwise
+        """
+        from goldfish.db.types import DockerBuildRow
+
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT id, image_type, target, backend, cloud_build_id,
+                       status, image_tag, registry_tag, started_at,
+                       completed_at, error, logs_uri, workspace_name,
+                       version, content_hash, created_at
+                FROM docker_builds
+                WHERE workspace_name = ?
+                  AND content_hash = ?
+                  AND status = 'completed'
+                  AND registry_tag IS NOT NULL
+                ORDER BY completed_at DESC
+                LIMIT 1
+                """,
+                (workspace_name, content_hash),
             ).fetchone()
             return cast(DockerBuildRow, dict(row)) if row else None
 
@@ -4967,7 +5036,7 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, created_at
+                       version, content_hash, created_at
                 FROM docker_builds
                 WHERE {where_clause}
                 ORDER BY started_at DESC
@@ -4991,7 +5060,7 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, created_at
+                       version, content_hash, created_at
                 FROM docker_builds
                 WHERE status IN ('pending', 'building')
                 ORDER BY started_at DESC

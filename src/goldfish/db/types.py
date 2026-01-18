@@ -224,6 +224,7 @@ class DockerBuildRow(TypedDict):
     logs_uri: str | None  # GCS path to logs (Cloud Build only)
     workspace_name: str | None  # Workspace name (for workspace builds only)
     version: str | None  # Workspace version (for workspace builds only)
+    content_hash: str | None  # SHA256 of build context (for cache hit detection)
     created_at: str
 
 

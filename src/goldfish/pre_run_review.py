@@ -315,8 +315,13 @@ This is a test run to verify the AI review system works. You MUST:
             if not raw_response:
                 raw_response = getattr(result, "raw_output", "")
             review_text = raw_response if isinstance(raw_response, str) else ""
+            logger.info(
+                "Pre-run review completed: %d chars in %dms",
+                len(review_text),
+                getattr(result, "duration_ms", 0),
+            )
         except TimeoutError:
-            logger.error(f"Pre-run review timed out after {self.config.timeout_seconds}s")
+            logger.error("Pre-run review timed out after %ds", self.config.timeout_seconds)
             return RunReview(
                 approved=True,  # Don't block on timeout
                 summary=f"Review timed out after {self.config.timeout_seconds}s",
@@ -327,7 +332,7 @@ This is a test run to verify the AI review system works. You MUST:
             # Let these propagate - user cancellation should work
             raise
         except Exception as e:
-            logger.error(f"Pre-run review failed: {e}", exc_info=True)
+            logger.exception("Pre-run review failed: %s", e)
             return RunReview(
                 approved=True,  # Don't block on review failures
                 summary=f"Review failed: {e}",
