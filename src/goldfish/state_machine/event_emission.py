@@ -298,21 +298,31 @@ def _verify_gce_instance_stopped(
 ) -> bool:
     """Verify GCE instance status.
 
+    Uses `gcloud compute instances list` to find the instance across all zones.
+    This is more robust than `instances describe` which requires a zone parameter
+    and would fail with "not found" if the wrong zone is used.
+
     Args:
         instance_name: GCE instance name.
         project_id: GCP project ID.
-        zone: GCE zone.
+        zone: GCE zone (optional, not used - kept for API compatibility).
 
     Returns:
         True if instance is stopped/terminated/not found.
     """
     try:
-        cmd = ["gcloud", "compute", "instances", "describe", instance_name]
+        # Use instances list with filter - works across all zones
+        # This avoids the bug where describe fails when zone is wrong/missing
+        cmd = [
+            "gcloud",
+            "compute",
+            "instances",
+            "list",
+            f"--filter=name={instance_name}",
+            "--format=value(status)",
+        ]
         if project_id:
             cmd.extend(["--project", project_id])
-        if zone:
-            cmd.extend(["--zone", zone])
-        cmd.extend(["--format", "value(status)"])
 
         result = subprocess.run(
             cmd,
@@ -323,14 +333,14 @@ def _verify_gce_instance_stopped(
         )
 
         status = result.stdout.strip().upper()
+        if not status:
+            # Instance not found anywhere - confirmed dead
+            return True
         # RUNNING, STAGING, PROVISIONING = still alive
         # TERMINATED, STOPPED = dead
         return status not in ("RUNNING", "STAGING", "PROVISIONING")
 
     except subprocess.CalledProcessError as e:
-        stderr = (e.stderr or "").lower()
-        if "not found" in stderr:
-            return True  # Instance doesn't exist = confirmed dead
         logger.warning("Error checking GCE instance %s: %s", instance_name, e.stderr)
         return False  # Can't confirm, assume still running
 

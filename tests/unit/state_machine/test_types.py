@@ -116,8 +116,8 @@ class TestTerminationCause:
     """Tests for TerminationCause enum."""
 
     def test_cause_count(self) -> None:
-        """Verify we have exactly 6 causes as specified."""
-        assert len(TerminationCause) == 6
+        """Verify we have exactly 8 causes as specified."""
+        assert len(TerminationCause) == 8
 
     def test_causes_exist(self) -> None:
         """Verify all termination causes."""
@@ -127,6 +127,8 @@ class TestTerminationCause:
         assert TerminationCause.TIMEOUT.value == "timeout"
         assert TerminationCause.AI_STOPPED.value == "ai_stopped"
         assert TerminationCause.MANUAL.value == "manual"
+        assert TerminationCause.NO_HEARTBEAT.value == "no_heartbeat"
+        assert TerminationCause.MAX_RUNTIME_EXCEEDED.value == "max_runtime_exceeded"
 
 
 class TestProgressPhase:

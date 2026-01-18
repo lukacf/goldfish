@@ -262,15 +262,15 @@ class TestVerifyInstanceStopped:
     """Tests for verify_instance_stopped() function."""
 
     def test_gce_instance_not_found_returns_true(self) -> None:
-        """GCE instance not found must return True (confirmed dead)."""
+        """GCE instance not found must return True (confirmed dead).
+
+        With `instances list --filter`, empty output means not found in any zone.
+        """
         from goldfish.state_machine.event_emission import verify_instance_stopped
 
         with patch("subprocess.run") as mock_run:
-            import subprocess
-
-            error = subprocess.CalledProcessError(1, "gcloud")
-            error.stderr = "not found"
-            mock_run.side_effect = error
+            # Empty output = instance doesn't exist anywhere
+            mock_run.return_value = MagicMock(stdout="", returncode=0)
 
             result = verify_instance_stopped(
                 run_id="stage-123",
@@ -493,7 +493,10 @@ class TestInstanceLostEvent:
     """Tests for INSTANCE_LOST event emission."""
 
     def test_instance_lost_when_instance_disappeared(self) -> None:
-        """INSTANCE_LOST must be emitted when instance disappears unexpectedly."""
+        """INSTANCE_LOST must be emitted when instance disappears unexpectedly.
+
+        With `instances list --filter`, empty output means not found in any zone.
+        """
         from goldfish.state_machine.event_emission import determine_instance_event
         from goldfish.state_machine.types import StageEvent, StageState
 
@@ -505,16 +508,13 @@ class TestInstanceLostEvent:
         }
 
         with patch("subprocess.run") as mock_run:
-            import subprocess
-
-            error = subprocess.CalledProcessError(1, "gcloud")
-            error.stderr = "not found"
-            mock_run.side_effect = error
+            # Empty output = instance doesn't exist anywhere
+            mock_run.return_value = MagicMock(stdout="", returncode=0)
 
             result = determine_instance_event(run, project_id="test-project")
 
             assert result is not None
-            event, context = result
+            event, _ = result
             assert event == StageEvent.INSTANCE_LOST
 
     def test_instance_still_running_returns_none(self) -> None:
@@ -1015,3 +1015,279 @@ class TestStateBasedInstanceChecks:
 
             assert result is None
             mock_verify.assert_not_called()
+
+
+class TestGCEInstanceVerificationCommand:
+    """REGRESSION TESTS for GCE instance verification gcloud command syntax.
+
+    These tests ensure we use `gcloud compute instances list --filter=name=X`
+    instead of `gcloud compute instances describe X --zone=Z`.
+
+    THE BUG (Fixed 2025-01-18):
+    - The daemon used `instances describe` which requires --zone parameter
+    - Config has `zones` (plural, a list) but code looked for `zone` (singular)
+    - When zone was None, gcloud used default zone from gcloud config
+    - If default zone (e.g., europe-west1-b) != actual zone (e.g., us-central1-a),
+      gcloud returned "not found" and we incorrectly concluded instance was dead
+    - This killed healthy GPU runs at ~6-7 minutes (after daemon's first check)
+
+    THE FIX:
+    - Use `instances list --filter=name=X` which searches across ALL zones
+    - No zone parameter needed, no zone mismatch possible
+
+    These tests MUST verify the exact command structure to prevent regression.
+    """
+
+    def test_gce_verify_uses_instances_list_not_describe(self) -> None:
+        """CRITICAL: Must use 'instances list' NOT 'instances describe'.
+
+        The bug: `instances describe` requires the correct zone. When zone was
+        wrong (e.g., default gcloud zone instead of instance's actual zone),
+        the command returned "not found" and we incorrectly concluded the
+        instance was dead.
+
+        The fix: Use `instances list --filter=name=X` which searches all zones.
+        """
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
+
+            _verify_gce_instance_stopped("stage-abc123", "my-project")
+
+            # Verify the command structure
+            call_args = mock_run.call_args
+            cmd = call_args[0][0]
+
+            # CRITICAL assertions - these prevent the bug from recurring
+            assert "gcloud" in cmd
+            assert "compute" in cmd
+            assert "instances" in cmd
+            assert "list" in cmd
+            assert "--filter=name=stage-abc123" in cmd
+
+            # MUST NOT use describe
+            assert "describe" not in cmd
+
+    def test_gce_verify_filter_syntax_correct(self) -> None:
+        """Verify the gcloud filter syntax is correct for instance lookup."""
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="", returncode=0)
+
+            _verify_gce_instance_stopped("my-instance-name", "my-project")
+
+            cmd = mock_run.call_args[0][0]
+
+            # Filter must use exact syntax: --filter=name=<instance_name>
+            assert "--filter=name=my-instance-name" in cmd
+            # Output format should extract status only
+            assert "--format=value(status)" in cmd
+
+    def test_gce_verify_zone_parameter_ignored(self) -> None:
+        """REGRESSION: Zone parameter MUST be ignored (even if passed).
+
+        This is THE fix for the bug. Even if a zone is passed, we must NOT
+        use it in the command. Instead, we search all zones with `instances list`.
+        """
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
+
+            # Pass a zone - it MUST be ignored
+            _verify_gce_instance_stopped("stage-abc123", "my-project", zone="us-central1-a")
+
+            cmd = mock_run.call_args[0][0]
+
+            # CRITICAL: zone MUST NOT appear in command
+            assert "--zone" not in cmd
+            assert "us-central1-a" not in cmd
+
+    def test_gce_verify_project_id_passed_correctly(self) -> None:
+        """Project ID should be passed to gcloud command when provided."""
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
+
+            _verify_gce_instance_stopped("stage-abc123", "my-gcp-project")
+
+            cmd = mock_run.call_args[0][0]
+            assert "--project" in cmd
+            project_idx = cmd.index("--project")
+            assert cmd[project_idx + 1] == "my-gcp-project"
+
+    def test_gce_verify_no_project_flag_when_none(self) -> None:
+        """No --project flag when project_id is None."""
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
+
+            _verify_gce_instance_stopped("stage-abc123", None)
+
+            cmd = mock_run.call_args[0][0]
+            assert "--project" not in cmd
+
+    def test_gce_verify_empty_output_means_not_found(self) -> None:
+        """Empty output (instance not found anywhere) should return True.
+
+        With `instances list`, empty output means the instance doesn't exist
+        in any zone, which means it's definitely stopped/dead.
+        """
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="", returncode=0)
+
+            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
+
+            assert result is True  # Instance not found = confirmed dead
+
+    def test_gce_verify_running_returns_false(self) -> None:
+        """Instance with RUNNING status should return False (not stopped)."""
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
+
+            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
+
+            assert result is False
+
+    def test_gce_verify_staging_returns_false(self) -> None:
+        """Instance with STAGING status should return False (still starting)."""
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="STAGING", returncode=0)
+
+            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
+
+            assert result is False
+
+    def test_gce_verify_provisioning_returns_false(self) -> None:
+        """Instance with PROVISIONING status should return False (still starting)."""
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="PROVISIONING", returncode=0)
+
+            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
+
+            assert result is False
+
+    def test_gce_verify_terminated_returns_true(self) -> None:
+        """Instance with TERMINATED status should return True (stopped)."""
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="TERMINATED", returncode=0)
+
+            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
+
+            assert result is True
+
+    def test_gce_verify_stopped_returns_true(self) -> None:
+        """Instance with STOPPED status should return True."""
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="STOPPED", returncode=0)
+
+            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
+
+            assert result is True
+
+    def test_gce_verify_case_insensitive_status(self) -> None:
+        """Status comparison should be case-insensitive."""
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            # Lower case from gcloud
+            mock_run.return_value = MagicMock(stdout="running", returncode=0)
+
+            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
+
+            # Should still recognize as running
+            assert result is False
+
+    def test_gce_verify_whitespace_trimmed(self) -> None:
+        """Output should have whitespace trimmed."""
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="  RUNNING  \n", returncode=0)
+
+            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
+
+            assert result is False
+
+    def test_gce_verify_subprocess_error_returns_false(self) -> None:
+        """Subprocess errors should return False (assume still running).
+
+        CRITICAL: On errors, we return False (not stopped) to avoid
+        false positives that would terminate healthy runs.
+        """
+        import subprocess
+
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.CalledProcessError(1, "gcloud", stderr="Permission denied")
+
+            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
+
+            # On error, assume instance is still running (fail-safe)
+            assert result is False
+
+    def test_gce_verify_timeout_returns_false(self) -> None:
+        """Timeout should return False (assume still running)."""
+        import subprocess
+
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = subprocess.TimeoutExpired("gcloud", 30)
+
+            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
+
+            assert result is False
+
+    def test_gce_verify_timeout_is_30_seconds(self) -> None:
+        """Subprocess timeout should be 30 seconds."""
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
+
+            _verify_gce_instance_stopped("stage-abc123", "my-project")
+
+            call_kwargs = mock_run.call_args[1]
+            assert call_kwargs.get("timeout") == 30
+
+    def test_gce_verify_full_command_structure(self) -> None:
+        """Verify the complete command structure matches expected format."""
+        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
+
+            _verify_gce_instance_stopped("stage-test-123", "test-project-456")
+
+            cmd = mock_run.call_args[0][0]
+
+            # Verify complete command structure
+            expected_cmd = [
+                "gcloud",
+                "compute",
+                "instances",
+                "list",
+                "--filter=name=stage-test-123",
+                "--format=value(status)",
+                "--project",
+                "test-project-456",
+            ]
+            assert cmd == expected_cmd
