@@ -805,10 +805,23 @@ class GoldfishDaemon:
                         logger.exception("Failed to transition stage run %s: %s", stage_run_id, e)
                 else:
                     # Instance disappeared - use INSTANCE_LOST event
+                    # Check for termination cause file first (supervisor/watchdog kills write this)
+                    explicit_cause = self._get_termination_cause(stage_run_id)
                     was_preempted = self._check_if_preempted(instance_name, project_id)
                     exit_code_val = exit_result.code if exit_result.exists else None
 
-                    if was_preempted:
+                    if explicit_cause is not None:
+                        # Supervisor or watchdog killed it - use that cause
+                        term_cause = explicit_cause
+                        error_msg = f"Instance terminated by {explicit_cause.value} (exit_code={exit_code_val})"
+                        logger.warning(
+                            "%s terminated stage run: %s (instance %s, cause=%s)",
+                            explicit_cause.value.title(),
+                            stage_run_id,
+                            instance_name,
+                            explicit_cause.value,
+                        )
+                    elif was_preempted:
                         error_msg = "Instance preempted by GCE (spot/preemptible)"
                         term_cause = TerminationCause.PREEMPTED
                         logger.warning(
@@ -881,6 +894,51 @@ class GoldfishDaemon:
         except Exception as e:
             # Defensive: treat unexpected errors as GCS errors
             return ExitCodeResult.from_gcs_error(str(e))
+
+    def _get_termination_cause(self, stage_run_id: str) -> TerminationCause | None:
+        """Get termination cause from GCS for a stage run.
+
+        The startup script writes termination_cause.txt when supervisor
+        or watchdog kills the job, before the instance is deleted.
+
+        Args:
+            stage_run_id: Stage run identifier
+
+        Returns:
+            TerminationCause if file exists and is valid, None otherwise.
+        """
+        import subprocess
+
+        if not self.config or not self.config.gce or not self.config.gcs or not self.config.gcs.bucket:
+            return None
+
+        bucket = self.config.gcs.bucket
+        bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+        gcs_path = f"{bucket_uri}/runs/{stage_run_id}/logs/termination_cause.txt"
+
+        try:
+            project_id = self.config.gce.effective_project_id if self.config.gce else None
+            cmd = ["gsutil"]
+            if project_id:
+                cmd.extend(["-o", f"GSUtil:project_id={project_id}"])
+            cmd.extend(["cat", gcs_path])
+
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
+            cause_str = result.stdout.strip().lower()
+
+            # Map string to enum (file contains internal names for simplicity)
+            cause_map = {
+                "supervisor": TerminationCause.NO_HEARTBEAT,
+                "watchdog": TerminationCause.MAX_RUNTIME_EXCEEDED,
+            }
+            return cause_map.get(cause_str)
+
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            # File not found or timeout - not an error, just no cause info
+            return None
+        except Exception as e:
+            logger.debug("Error reading termination cause for %s: %s", stage_run_id, e)
+            return None
 
     def start_http_server(self) -> None:
         """Start the HTTP server on Unix socket."""

@@ -210,6 +210,10 @@ def watchdog_section(max_runtime_seconds: int) -> str:
     sleep {max_runtime_seconds}
     echo "=== WATCHDOG TIMEOUT REACHED ({max_runtime_seconds}s) - FORCING DELETION ==="
     log_stage "watchdog_timeout" || true
+    # Write termination cause to GCS for daemon to detect
+    if [[ -n "${{GCS_TERMINATION_CAUSE_PATH:-}}" ]]; then
+        echo "watchdog" | gsutil cp - "$GCS_TERMINATION_CAUSE_PATH" 2>/dev/null || true
+    fi
     # CRITICAL: Delete instance FIRST, before killing processes
     # Previous bug: pkill -9 -u root killed the watchdog itself before gcloud could run!
     echo "Deleting instance $INSTANCE_NAME..."
@@ -304,6 +308,10 @@ start_supervisor() {{
                 if [[ $elapsed -gt $((grace_period + HEARTBEAT_TIMEOUT)) ]]; then
                     echo "=== SUPERVISOR: No heartbeat ever received - TERMINATING ==="
                     log_stage "supervisor_no_heartbeat" || true
+                    # Write termination cause to GCS for daemon to detect
+                    if [[ -n "${{GCS_TERMINATION_CAUSE_PATH:-}}" ]]; then
+                        echo "supervisor" | gsutil cp - "$GCS_TERMINATION_CAUSE_PATH" 2>/dev/null || true
+                    fi
                     upload_logs_before_death
                     docker kill $(docker ps -q) 2>/dev/null || true
                     sleep 5
@@ -316,6 +324,10 @@ start_supervisor() {{
             if [[ $age -gt $HEARTBEAT_TIMEOUT ]]; then
                 echo "=== SUPERVISOR: Heartbeat stale (${{age}}s > {heartbeat_timeout_seconds}s) - TERMINATING ==="
                 log_stage "supervisor_heartbeat_stale" || true
+                # Write termination cause to GCS for daemon to detect
+                if [[ -n "${{GCS_TERMINATION_CAUSE_PATH:-}}" ]]; then
+                    echo "supervisor" | gsutil cp - "$GCS_TERMINATION_CAUSE_PATH" 2>/dev/null || true
+                fi
                 upload_logs_before_death
                 docker kill $(docker ps -q) 2>/dev/null || true
                 sleep 5
@@ -774,6 +786,7 @@ def build_startup_script(
     # Always set log/metrics paths for sync_final_logs() (used by metadata syncer and EXIT trap)
     # log_syncer_section may override these, but they're needed even if periodic sync is disabled
     gcs_svs_during_path = f"gs://{bucket}/{bucket_path}/outputs/.goldfish/svs_findings_during.json"
+    gcs_termination_cause_path = f"gs://{bucket}/{bucket_path}/logs/termination_cause.txt"
     path_exports = f"""
 # Paths for sync_final_logs() - always needed for on-demand Overdrive sync
 LOCAL_STDOUT=/tmp/stdout.log
@@ -784,6 +797,7 @@ GCS_STDOUT_PATH="gs://{bucket}/{bucket_path}/logs/stdout.log"
 GCS_STDERR_PATH="gs://{bucket}/{bucket_path}/logs/stderr.log"
 GCS_METRICS_PATH="gs://{bucket}/{bucket_path}/logs/metrics.jsonl"
 GCS_SVS_DURING_PATH="{gcs_svs_during_path}"
+GCS_TERMINATION_CAUSE_PATH="{gcs_termination_cause_path}"
 """
 
     parts.extend(

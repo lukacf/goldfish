@@ -100,6 +100,8 @@ class TerminationCause(str, Enum):
     TIMEOUT = "timeout"  # Exceeded configured timeout threshold
     AI_STOPPED = "ai_stopped"  # AI/SVS requested stop
     MANUAL = "manual"  # Manual termination (reserved for future use)
+    NO_HEARTBEAT = "no_heartbeat"  # Job stopped sending heartbeats
+    MAX_RUNTIME_EXCEEDED = "max_runtime_exceeded"  # Job exceeded maximum allowed runtime
 
 
 class ProgressPhase(str, Enum):
