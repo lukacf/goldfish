@@ -53,9 +53,9 @@ def test_monitor_reads_logs(mock_outputs_dir, config):
     monitor = DuringRunMonitor(config, mock_outputs_dir)
     logs, offset = monitor._read_new_logs()
 
-    # Should only keep ERROR because of default filters
+    # Default filters match all lines - AI decides what's relevant
     assert "ERROR" in logs
-    assert "INFO" not in logs
+    assert "INFO" in logs
     assert offset > 0
 
 

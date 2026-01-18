@@ -2408,9 +2408,9 @@ class TestSafeMigrationLogging:
                 ("stage-1", "ws", "v1", "train", "running", datetime.now(UTC).isoformat()),
             )
 
-        # Run with very short timeout so it exits quickly
+        # Run with zero timeout so it skips drain loop entirely
         with caplog.at_level(logging.INFO):
-            result = safe_migration(test_db, drain_timeout_seconds=1, check_orphans=False)
+            result = safe_migration(test_db, drain_timeout_seconds=0, check_orphans=False)
 
         # Should have logged about waiting for active runs
         assert result["success"] is True

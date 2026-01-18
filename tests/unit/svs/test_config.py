@@ -178,6 +178,24 @@ class TestSVSConfigValidation:
             config = SVSConfig(agent_provider=provider)
             assert config.agent_provider == provider
 
+    def test_yaml_null_agent_provider_uses_default(self):
+        """YAML `null` (Python None) should use default provider, not NullProvider.
+
+        Regression test: In YAML, writing `agent_provider: null` is parsed as
+        Python None. This should NOT select NullProvider - instead it should
+        use the default (claude_code). To explicitly use NullProvider, users
+        must write `agent_provider: "null"` (quoted string).
+        """
+        from goldfish.svs.config import SVSConfig
+
+        # Simulates YAML: `agent_provider: null` (unquoted)
+        config = SVSConfig(agent_provider=None)
+        assert config.agent_provider == "claude_code"
+
+        # Explicit "null" string should select NullProvider
+        config_null = SVSConfig(agent_provider="null")
+        assert config_null.agent_provider == "null"
+
     def test_rejects_short_interval_without_test_mode(self):
         """Should reject interval < 60 without test_mode enabled."""
         from goldfish.svs.config import SVSConfig

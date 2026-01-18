@@ -280,6 +280,70 @@ class TestNullProviderReviewResult:
         result = provider.run(request)
         assert all(isinstance(finding, str) for finding in result.findings)
 
+    def test_during_run_returns_json_format(self):
+        """Regression: NullProvider should return JSON for during_run reviews.
+
+        Bug: DuringRunMonitor expects JSON response with 'findings' and 'request_stop'
+        fields. NullProvider was returning plain text, causing JSON parse failures.
+        """
+        import json
+
+        provider = NullProvider()
+        request = ReviewRequest(
+            review_type="during_run",
+            context={"workspace": "test", "output_format": "json"},
+        )
+        result = provider.run(request)
+
+        # Response should contain JSON in markdown fence
+        assert "```json" in result.response_text
+
+        # Extract and parse the JSON
+        json_match = result.response_text.split("```json")[1].split("```")[0].strip()
+        parsed = json.loads(json_match)
+
+        # Should have the required fields for during-run monitor
+        assert "findings" in parsed
+        assert "request_stop" in parsed
+        assert isinstance(parsed["findings"], list)
+        assert isinstance(parsed["request_stop"], bool)
+
+    def test_during_run_json_has_findings_structure(self):
+        """Regression: during_run JSON findings should have check/severity/summary."""
+        import json
+
+        provider = NullProvider()
+        request = ReviewRequest(
+            review_type="during_run",
+            context={"workspace": "test"},
+        )
+        result = provider.run(request)
+
+        # Extract and parse the JSON
+        json_match = result.response_text.split("```json")[1].split("```")[0].strip()
+        parsed = json.loads(json_match)
+
+        # Findings should have proper structure
+        assert len(parsed["findings"]) > 0
+        for finding in parsed["findings"]:
+            assert "check" in finding
+            assert "severity" in finding
+            assert "summary" in finding
+
+    def test_pre_run_still_returns_plain_text(self):
+        """Pre-run reviews should continue returning plain text format."""
+        provider = NullProvider()
+        request = ReviewRequest(
+            review_type="pre_run",
+            context={"workspace": "test"},
+        )
+        result = provider.run(request)
+
+        # Should not contain JSON fence for pre-run
+        assert "```json" not in result.response_text
+        # Should contain the plain text format
+        assert "NullProvider: approved for pre_run review" in result.response_text
+
 
 class TestAgentProviderProtocol:
     """Test AgentProvider protocol compliance."""

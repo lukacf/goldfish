@@ -903,7 +903,7 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
                     sv.created_at,
                     COUNT(sr.id) as run_count,
                     MAX(sr.started_at) as last_run_at,
-                    (SELECT status FROM stage_runs
+                    (SELECT state FROM stage_runs
                      WHERE stage_version_id = sv.id
                      ORDER BY started_at DESC LIMIT 1) as last_run_status
                 FROM stage_versions sv

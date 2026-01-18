@@ -96,6 +96,8 @@ def test_inspect_run_triggers_sync_when_running():
         patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db),
         patch("goldfish.server_tools.execution_tools._get_metadata_bus", return_value=mock_bus),
         patch("goldfish.server_tools.execution_tools._get_stage_executor", return_value=mock_stage_exec),
+        patch("goldfish.server_tools.execution_tools._overdrive_ack_timeout", return_value=0.0),
+        patch("time.sleep"),  # Avoid actual sleep delays
     ):
         inspect_run(run_id)
 
@@ -145,6 +147,8 @@ def test_inspect_run_pending_when_ack_missing():
         patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db),
         patch("goldfish.server_tools.execution_tools._get_metadata_bus", return_value=mock_bus),
         patch("goldfish.server_tools.execution_tools._get_stage_executor", return_value=mock_stage_exec),
+        patch("goldfish.server_tools.execution_tools._overdrive_ack_timeout", return_value=0.0),
+        patch("time.sleep"),  # Avoid actual sleep delays
     ):
         result = inspect_run(run_id)
 
@@ -332,6 +336,7 @@ def test_inspect_run_refetches_row_after_sync():
         patch("goldfish.server_tools.execution_tools._get_stage_executor", return_value=mock_stage_exec),
         patch("goldfish.server_tools.execution_tools._overdrive_ack_timeout", return_value=0.5),
         patch("uuid.uuid4", return_value=mock_uuid_obj),
+        patch("time.sleep"),  # Avoid actual sleep delays
     ):
         result = inspect_run(run_id)
 

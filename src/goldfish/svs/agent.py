@@ -270,9 +270,30 @@ class NullProvider:
         Returns:
             ReviewResult with configured decision and findings
         """
-        # Include findings in response_text so parsers can extract them
-        findings_text = "\n".join(self._findings) if self._findings else ""
-        response_text = f"NullProvider: {self._decision} for {request.review_type} review\n{findings_text}"
+        import json
+
+        # Check if JSON output is expected (during_run always expects JSON)
+        output_format = request.context.get("output_format", "text") if request.context else "text"
+        expects_json = request.review_type == "during_run" or output_format == "json"
+
+        if expects_json:
+            # Build JSON response for during-run and other JSON-expecting reviews
+            findings_list = (
+                [{"check": "null_provider", "severity": "NOTE", "summary": f} for f in self._findings]
+                if self._findings
+                else [{"check": "null_provider", "severity": "NOTE", "summary": "NullProvider test observation"}]
+            )
+            json_response = {
+                "findings": findings_list,
+                "request_stop": False,
+                "stop_reason": None,
+            }
+            response_text = f"```json\n{json.dumps(json_response, indent=2)}\n```"
+        else:
+            # Plain text for pre-run and post-run reviews
+            findings_text = "\n".join(self._findings) if self._findings else ""
+            response_text = f"NullProvider: {self._decision} for {request.review_type} review\n{findings_text}"
+
         return ReviewResult(
             decision=self._decision,
             findings=self._findings,
@@ -506,28 +527,38 @@ def _run_command(
     env: dict[str, str] | None = None,
 ) -> tuple[int, str, str, int]:
     """Run CLI command and capture output."""
+    logger.debug("Running command: %s (timeout=%ss, cwd=%s)", cmd[0], timeout_seconds, cwd)
+
     start = time.time()
     try:
         proc = subprocess.run(
             cmd,
             cwd=cwd,
             env=env,
+            stdin=subprocess.DEVNULL,  # Prevent stdin hang in non-interactive env
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            # CRITICAL: Start in new session to isolate signal handling from parent.
+            # Without this, CLI tools (especially Node.js-based like Claude CLI) may
+            # send signals to the process group that kill PID 1 in Docker containers.
+            start_new_session=True,
         )
     except FileNotFoundError as e:
+        logger.error("Agent CLI not found: %s", cmd[0])
         raise GoldfishError(
             f"Agent CLI not found: {cmd[0]}",
             details={"binary": cmd[0]},
         ) from e
     except subprocess.TimeoutExpired as e:
+        logger.error("Agent CLI timed out after %ds", timeout_seconds)
         raise GoldfishError(
             f"Agent CLI timed out after {timeout_seconds}s",
             details={"command": " ".join(cmd)},
         ) from e
 
     duration_ms = int((time.time() - start) * 1000)
+    logger.debug("Command completed: exit_code=%d, duration=%dms", proc.returncode, duration_ms)
     return proc.returncode, proc.stdout, proc.stderr, duration_ms
 
 
@@ -575,6 +606,18 @@ class ClaudeCodeProvider:
         fallback_model = agent_request.context.get("fallback_model")
 
         env = os.environ.copy()
+        # Enable IS_SANDBOX=1 when using --dangerously-skip-permissions with tool_policy.
+        # This allows Claude CLI to run as root in Docker containers.
+        # See: https://github.com/anthropics/claude-code/issues/3490
+        if agent_request.tool_policy is not None:
+            env["IS_SANDBOX"] = "1"
+            # Set HOME to /tmp only if the current HOME is not writable.
+            # In Docker containers, the default HOME (/app) is often read-only,
+            # causing Claude CLI to hang while trying to create ~/.config/claude/.
+            # On local machines, HOME is writable, so we leave it unchanged.
+            current_home = os.environ.get("HOME", "/tmp")
+            if not os.access(current_home, os.W_OK):
+                env["HOME"] = "/tmp"
         extra_env = agent_request.context.get("env")
         if isinstance(extra_env, dict):
             env.update({k: str(v) for k, v in extra_env.items()})
@@ -591,23 +634,41 @@ class ClaudeCodeProvider:
         stderr_text = stderr.strip() if stderr else ""
         raw_output = stdout_text or stderr_text
 
+        logger.debug(
+            "Claude CLI response: stdout_len=%d, stderr_len=%d",
+            len(stdout) if stdout else 0,
+            len(stderr) if stderr else 0,
+        )
+        if not stdout_text and stderr:
+            logger.debug("Claude CLI stderr: %s", stderr[:500])
+
         total_duration_ms = duration_ms
 
         # Detect CLI failures (fail-open: still approve, caller handles error tracking)
+        # Empty output is also considered a failure (worth retrying with fallback model)
         cli_failed = False
         if exit_code != 0:
             cli_failed = True
-            logger.debug(
-                f"Claude CLI exited with code {exit_code}. "
-                f"AI review may not have run correctly. stderr: {stderr[:500] if stderr else 'none'}"
+            logger.warning(
+                "Claude CLI exited with code %d. stderr: %s",
+                exit_code,
+                stderr[:500] if stderr else "none",
+            )
+        elif not raw_output:
+            # Empty output - likely internal timeout or API issue
+            cli_failed = True
+            logger.warning(
+                "Claude CLI returned empty output (exit_code=%d, duration=%dms)",
+                exit_code,
+                duration_ms,
             )
         elif _is_cli_error_output(raw_output):
             cli_failed = True
-            logger.debug(f"Claude CLI returned error: {raw_output[:500]}. " "AI review may not have run correctly.")
+            logger.warning("Claude CLI returned error: %s", raw_output[:500])
 
         # Retry once with fallback model if configured and different from primary
         if cli_failed and fallback_model and str(fallback_model) != str(agent_request.model):
-            logger.debug(f"Retrying Claude CLI with fallback model: {fallback_model}")
+            logger.info("Retrying Claude CLI with fallback model: %s", fallback_model)
             retry_cmd = _build_cmd(model_override=str(fallback_model))
             exit_code, stdout, stderr, duration_ms = _run_command(
                 retry_cmd,
@@ -620,18 +681,27 @@ class ClaudeCodeProvider:
             stderr_text = stderr.strip() if stderr else ""
             raw_output = stdout_text or stderr_text
 
+            logger.debug(
+                "Fallback result: exit_code=%d, stdout_len=%d, stderr_len=%d",
+                exit_code,
+                len(stdout) if stdout else 0,
+                len(stderr) if stderr else 0,
+            )
+
             cli_failed = False
             if exit_code != 0:
                 cli_failed = True
-                logger.debug(
-                    f"Claude CLI fallback exited with code {exit_code}. "
-                    f"AI review may not have run correctly. stderr: {stderr[:500] if stderr else 'none'}"
+                logger.warning(
+                    "Claude CLI fallback exited with code %d. stderr: %s",
+                    exit_code,
+                    stderr[:500] if stderr else "none",
                 )
+            elif not raw_output:
+                cli_failed = True
+                logger.warning("Fallback also returned empty output. Both models failed.")
             elif _is_cli_error_output(raw_output):
                 cli_failed = True
-                logger.debug(
-                    f"Claude CLI fallback returned error: {raw_output[:500]}. " "AI review may not have run correctly."
-                )
+                logger.warning("Claude CLI fallback returned error: %s", raw_output[:500])
 
         if cli_failed:
             # Return approved with a clear finding that the review itself failed
@@ -805,9 +875,23 @@ def _binary_available(binary: str) -> bool:
 
 
 def get_agent_provider(provider_name: str) -> AgentProvider:
-    """Return an AgentProvider instance for the given name."""
+    """Return an AgentProvider instance for the given name.
+
+    The provider_name can be overridden by setting the GOLDFISH_SVS_AGENT_PROVIDER
+    environment variable. This is useful for testing or when the config is cached.
+    """
+    # Check for environment variable override
+    env_override = os.environ.get("GOLDFISH_SVS_AGENT_PROVIDER")
+    if env_override:
+        logger.debug("SVS agent provider override from env: %s", env_override)
+        provider_name = env_override
+
+    logger.debug("get_agent_provider() called with provider_name=%s", provider_name)
+
     if provider_name == "claude_code":
         claude_provider = ClaudeCodeProvider()
+        binary_path = shutil.which(claude_provider.binary)
+        logger.debug("Claude CLI binary=%s, which result=%s", claude_provider.binary, binary_path)
         if not _binary_available(claude_provider.binary):
             logger.warning("Claude CLI not found; falling back to NullProvider")
             return NullProvider()
@@ -825,5 +909,7 @@ def get_agent_provider(provider_name: str) -> AgentProvider:
             return NullProvider()
         return gemini_provider
     if provider_name == "null":
+        logger.debug("Returning NullProvider (explicit null)")
         return NullProvider()
+    logger.warning("Unknown provider %s, returning NullProvider", provider_name)
     return NullProvider()
