@@ -238,11 +238,36 @@ class StageDaemon:
 
         # Check for timeout first (applies to all active states)
         if self._check_timeout(run):
+            # RACE CONDITION FIX: Re-read state to avoid emitting TIMEOUT based on stale data.
+            # The 'run' dict was read at poll start; the state may have changed since then.
+            # Without this check, we could timeout a run that just transitioned to a new state.
+            run_id = run.get("id", UNKNOWN_RUN_ID)
+            fresh_run = self._db.get_stage_run(run_id)
+            if fresh_run is None:
+                # Run was deleted - skip
+                return None
+            if not self._check_timeout(fresh_run):
+                # State changed and no longer timed out - skip
+                logger.debug(
+                    "Run %s state changed from %s to %s, no longer timed out",
+                    run_id,
+                    run.get("state"),
+                    fresh_run.get("state"),
+                )
+                return None
+
+            # Use fresh data for the timeout event
+            fresh_state_str = fresh_run.get("state")
+            try:
+                fresh_state = StageState(fresh_state_str) if fresh_state_str else state
+            except ValueError:
+                fresh_state = state
+
             # For POST_RUN timeout, determine critical_phases_done (v1.2: renamed from FINALIZING)
             critical_phases_done: bool | None = None
-            if state == StageState.POST_RUN:
-                output_sync_done = run.get("output_sync_done", 0)
-                output_recording_done = run.get("output_recording_done", 0)
+            if fresh_state == StageState.POST_RUN:
+                output_sync_done = fresh_run.get("output_sync_done", 0)
+                output_recording_done = fresh_run.get("output_recording_done", 0)
                 critical_phases_done = bool(output_sync_done) and bool(output_recording_done)
 
             context = EventContext(

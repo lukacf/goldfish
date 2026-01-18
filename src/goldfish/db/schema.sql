@@ -485,6 +485,7 @@ CREATE TABLE IF NOT EXISTS docker_builds (
     logs_uri TEXT,                    -- GCS path to logs (Cloud Build only)
     workspace_name TEXT,              -- For workspace builds (NULL for base/project images)
     version TEXT,                     -- Workspace version (NULL for base/project images)
+    content_hash TEXT,                -- SHA256 of build context (for cache hit detection)
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -492,6 +493,7 @@ CREATE INDEX IF NOT EXISTS idx_docker_builds_status ON docker_builds(status);
 CREATE INDEX IF NOT EXISTS idx_docker_builds_backend ON docker_builds(backend);
 CREATE INDEX IF NOT EXISTS idx_docker_builds_started ON docker_builds(started_at);
 CREATE INDEX IF NOT EXISTS idx_docker_builds_workspace ON docker_builds(workspace_name, version);
+CREATE INDEX IF NOT EXISTS idx_docker_builds_content_hash ON docker_builds(content_hash);
 
 
 -- =============================================================================

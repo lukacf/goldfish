@@ -118,7 +118,7 @@ class TestGetExitCodeGCE:
         """GCS unavailable must return gcs_error=True, not exit code 1."""
         from goldfish.state_machine.exit_code import get_exit_code_gce
 
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.run") as mock_run, patch("time.sleep"):
             mock_run.side_effect = Exception("ServiceUnavailable: 503")
 
             result = get_exit_code_gce(
@@ -137,7 +137,7 @@ class TestGetExitCodeGCE:
 
         from goldfish.state_machine.exit_code import get_exit_code_gce
 
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.run") as mock_run, patch("time.sleep"):
             error = subprocess.CalledProcessError(1, "gsutil")
             error.stderr = "No URLs matched"
             mock_run.side_effect = error
@@ -192,7 +192,7 @@ class TestGetExitCodeGCE:
 
         from goldfish.state_machine.exit_code import get_exit_code_gce
 
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.run") as mock_run, patch("time.sleep"):
             mock_run.side_effect = subprocess.TimeoutExpired("gsutil", 30)
 
             result = get_exit_code_gce(

@@ -394,10 +394,14 @@ def get_input_path(name: str) -> Path:
 def get_output_path(name: str) -> Path:
     """Get path to write output for manual saving.
 
+    For 'file' type outputs, write directly to the returned path.
+    For 'directory' type outputs, call .mkdir() on the returned path first.
+
     Goldfish uploads from this location after stage completes.
     """
     path = _get_outputs_dir() / name
-    path.mkdir(parents=True, exist_ok=True)
+    # Create parent directory (not the path itself - for file type outputs)
+    path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
 
