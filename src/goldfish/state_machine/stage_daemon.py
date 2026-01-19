@@ -286,7 +286,10 @@ class StageDaemon:
                 project_id = self._config.gce.effective_project_id
             except ValueError:
                 pass
-            zone = getattr(self._config.gce, "zone", None)
+            # Use first zone from zones list as fallback for metadata lookup
+            # TODO: Store actual zone per-run for multi-zone capacity-aware launches
+            zones = getattr(self._config.gce, "zones", None)
+            zone = zones[0] if zones else None
 
         # 1) RUNNING: check for exit code (success/failure/missing) first
         if state == StageState.RUNNING:
@@ -299,7 +302,16 @@ class StageDaemon:
                 elif backend_type == BACKEND_GCE and self._config and self._config.gcs and self._config.gcs.bucket:
                     bucket = self._config.gcs.bucket
                     bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
-                    exit_result = get_exit_code_gce(bucket_uri, run.get("id", ""), project_id=project_id)
+                    # Try instance metadata first (PRIMARY), fall back to GCS (SECONDARY)
+                    # backend_handle is the instance name for GCE runs
+                    instance_name = run.get("backend_handle")
+                    exit_result = get_exit_code_gce(
+                        bucket_uri,
+                        run.get("id", ""),
+                        project_id=project_id,
+                        instance_name=instance_name,
+                        instance_zone=zone,
+                    )
             except Exception as e:
                 logger.warning("Error retrieving exit code for run %s: %s", run.get("id", UNKNOWN_RUN_ID), e)
                 exit_result = None
