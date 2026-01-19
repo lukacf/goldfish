@@ -82,25 +82,101 @@ class ExitCodeResult:
         return cls(exists=True, code=None, gcs_error=False, error=error)
 
 
+def _get_exit_code_from_metadata(
+    instance_name: str,
+    instance_zone: str,
+    project_id: str,
+) -> ExitCodeResult | None:
+    """Try to get exit code from instance metadata (PRIMARY channel).
+
+    Args:
+        instance_name: GCE instance name.
+        instance_zone: GCE zone (e.g., "us-central1-a").
+        project_id: GCP project ID.
+
+    Returns:
+        ExitCodeResult if metadata found, None if metadata not available.
+    """
+    try:
+        cmd = [
+            "gcloud",
+            "compute",
+            "instances",
+            "describe",
+            instance_name,
+            f"--zone={instance_zone}",
+            f"--project={project_id}",
+            "--format=value(metadata.items.goldfish_exit_code)",
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        content = result.stdout.strip()
+        if content:
+            try:
+                exit_code = int(content)
+                logger.info(
+                    "exit_code retrieved from instance metadata for %s (exit_code=%d)",
+                    instance_name,
+                    exit_code,
+                )
+                return ExitCodeResult.from_code(exit_code)
+            except ValueError:
+                logger.warning(
+                    "Invalid exit_code in metadata for %s: %s",
+                    instance_name,
+                    content,
+                )
+                return None
+        # Empty content - metadata not set yet
+        return None
+    except subprocess.CalledProcessError as e:
+        # Instance not found or other error - fall back to GCS
+        logger.debug(
+            "Could not get exit_code from metadata for %s: %s",
+            instance_name,
+            e.stderr,
+        )
+        return None
+    except subprocess.TimeoutExpired:
+        logger.debug("Timeout getting metadata for %s", instance_name)
+        return None
+    except Exception as e:
+        logger.debug("Error getting metadata for %s: %s", instance_name, e)
+        return None
+
+
 def get_exit_code_gce(
     bucket_uri: str,
     stage_run_id: str,
     project_id: str | None = None,
     max_attempts: int = 5,
     retry_delay: float = 2.0,
+    instance_name: str | None = None,
+    instance_zone: str | None = None,
 ) -> ExitCodeResult:
-    """Get exit code from GCS with proper error handling.
+    """Get exit code with metadata-first strategy.
 
-    Uses retries to handle GCS eventual consistency and temporary failures.
-    The instance uploads exit_code.txt before self-deleting, but there can be
-    a race condition where the daemon checks before GCS is synced.
+    Uses instance metadata as PRIMARY channel (fast, local, reliable).
+    Falls back to GCS when metadata is unavailable (instance deleted).
+
+    The flow:
+    1. If instance_name/zone provided, try metadata first (PRIMARY)
+    2. If metadata fails or no instance info, fall back to GCS (SECONDARY)
+    3. GCS uses retries to handle eventual consistency
 
     Args:
         bucket_uri: GCS bucket URI (e.g., "gs://my-bucket").
         stage_run_id: Stage run identifier.
         project_id: Optional GCP project ID.
-        max_attempts: Number of retry attempts (default 5).
+        max_attempts: Number of retry attempts for GCS (default 5).
         retry_delay: Seconds between retries (default 2.0).
+        instance_name: Optional GCE instance name (for metadata lookup).
+        instance_zone: Optional GCE zone (for metadata lookup).
 
     Returns:
         ExitCodeResult with proper categorization of the outcome.
@@ -113,6 +189,18 @@ def get_exit_code_gce(
     validate_stage_run_id(stage_run_id)
     if project_id:
         validate_project_id(project_id)
+
+    # PRIMARY: Try instance metadata first (if instance info available)
+    if instance_name and instance_zone and project_id:
+        metadata_result = _get_exit_code_from_metadata(instance_name, instance_zone, project_id)
+        if metadata_result is not None:
+            return metadata_result
+        logger.debug(
+            "Metadata lookup failed for %s, falling back to GCS",
+            stage_run_id,
+        )
+
+    # SECONDARY: Fall back to GCS
 
     gcs_path = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/exit_code.txt"
     last_error: str | None = None

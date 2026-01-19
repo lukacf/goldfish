@@ -1344,3 +1344,124 @@ class TestStateTimeoutsConstant:
 
         for state in TERMINAL_STATES:
             assert state not in STATE_TIMEOUTS, f"Unexpected timeout for terminal state {state}"
+
+
+class TestMetadataPrimaryExitCode:
+    """REGRESSION TESTS for metadata-primary exit code retrieval.
+
+    The daemon should pass instance_name and instance_zone to get_exit_code_gce()
+    to enable metadata-first lookup (fast, reliable, local to instance).
+
+    Bug (2026-01-19): GCS upload of exit_code.txt could fail, causing runs
+    to be marked as TERMINATED even when they completed successfully.
+
+    Fix: Use instance metadata as PRIMARY channel, GCS as fallback.
+    """
+
+    def test_daemon_passes_instance_info_to_get_exit_code_gce(self) -> None:
+        """REGRESSION: Daemon must pass instance_name and instance_zone for metadata lookup."""
+        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
+        # Create daemon with GCE config that has zones
+        config = GoldfishConfig(
+            project_name="test-project",
+            dev_repo_path="../test-dev",
+            gce=GCEConfig(project="test-project", zones=["us-central1-a", "us-central1-b"]),
+            gcs=GCSConfig(bucket="test-bucket"),
+            jobs=JobsConfig(backend="gce"),
+        )
+
+        daemon = StageDaemon(db=MagicMock(), config=config)
+        daemon._db.get_stage_run.return_value = {
+            "id": "stage-test-123",
+            "state": StageState.RUNNING.value,
+            "state_entered_at": datetime.now(UTC).isoformat(),
+            "backend_type": "gce",
+            "backend_handle": "instance-abc123",  # GCE instance name
+        }
+
+        run = {
+            "id": "stage-test-123",
+            "state": StageState.RUNNING.value,
+            "state_entered_at": datetime.now(UTC).isoformat(),
+            "backend_type": "gce",
+            "backend_handle": "instance-abc123",  # This should be passed as instance_name
+        }
+
+        captured_kwargs: dict = {}
+
+        def capture_get_exit_code_gce(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return ExitCodeResult.from_code(0)
+
+        with (
+            patch(
+                "goldfish.state_machine.stage_daemon.get_exit_code_gce",
+                side_effect=capture_get_exit_code_gce,
+            ),
+            patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
+        ):
+            daemon._determine_event(run)
+
+        # Verify instance info was passed
+        assert (
+            "instance_name" in captured_kwargs
+        ), "Daemon must pass instance_name to get_exit_code_gce for metadata lookup"
+        assert captured_kwargs["instance_name"] == "instance-abc123"
+
+        assert (
+            "instance_zone" in captured_kwargs
+        ), "Daemon must pass instance_zone to get_exit_code_gce for metadata lookup"
+        # First zone from config is used as fallback
+        assert captured_kwargs["instance_zone"] == "us-central1-a"
+
+    def test_daemon_falls_back_gracefully_without_instance_info(self) -> None:
+        """Daemon should still work when instance info is unavailable."""
+        from goldfish.config import GCSConfig, GoldfishConfig, JobsConfig
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
+        # Config without GCE (local backend but somehow running GCE check)
+        config = GoldfishConfig(
+            project_name="test-project",
+            dev_repo_path="../test-dev",
+            gcs=GCSConfig(bucket="test-bucket"),
+            jobs=JobsConfig(backend="gce"),
+            # No gce config - zones will be None
+        )
+
+        daemon = StageDaemon(db=MagicMock(), config=config)
+        daemon._db.get_stage_run.return_value = {
+            "id": "stage-test-456",
+            "state": StageState.RUNNING.value,
+            "state_entered_at": datetime.now(UTC).isoformat(),
+            "backend_type": "gce",
+            "backend_handle": "instance-xyz789",
+        }
+
+        run = {
+            "id": "stage-test-456",
+            "state": StageState.RUNNING.value,
+            "state_entered_at": datetime.now(UTC).isoformat(),
+            "backend_type": "gce",
+            "backend_handle": "instance-xyz789",
+        }
+
+        captured_kwargs: dict = {}
+
+        def capture_get_exit_code_gce(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return ExitCodeResult.from_code(0)
+
+        with (
+            patch(
+                "goldfish.state_machine.stage_daemon.get_exit_code_gce",
+                side_effect=capture_get_exit_code_gce,
+            ),
+            patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
+        ):
+            # Should not raise, should fall back to GCS-only
+            daemon._determine_event(run)
+
+        # instance_zone should be None (fallback to GCS)
+        assert captured_kwargs.get("instance_zone") is None
