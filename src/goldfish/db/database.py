@@ -505,9 +505,12 @@ class Database:
 
                 # Find stage_runs without experiment_records
                 # IMPORTANT: Only include runs where workspace_version exists (FK constraint)
+                # NOTE: Select both state and status - legacy DBs may have state=NULL
+                # but status populated. state is the new state machine column, status
+                # is the legacy column. Use COALESCE to prefer state over status.
                 orphaned = conn.execute(
                     """
-                    SELECT sr.id, sr.workspace_name, sr.version, sr.state
+                    SELECT sr.id, sr.workspace_name, sr.version, sr.state, sr.status
                     FROM stage_runs sr
                     LEFT JOIN experiment_records er ON er.stage_run_id = sr.id
                     INNER JOIN workspace_versions wv
@@ -521,7 +524,8 @@ class Database:
                     stage_run_id = row["id"]
                     workspace_name = row["workspace_name"]
                     version = row["version"]
-                    state = row["state"]
+                    # Use state if available, otherwise fall back to status (legacy column)
+                    state = row["state"] or row["status"]
 
                     # Generate ULID for record_id
                     record_id = generate_record_id()
