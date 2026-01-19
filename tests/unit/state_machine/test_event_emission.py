@@ -673,10 +673,16 @@ class TestInstanceLostEvent:
             assert result is None
             mock_verify.assert_not_called()
 
-    def test_post_run_state_can_emit_instance_lost(self) -> None:
-        """POST_RUN state CAN emit INSTANCE_LOST (instance may still exist)."""
+    def test_post_run_state_never_emits_instance_lost(self) -> None:
+        """POST_RUN state must NOT emit INSTANCE_LOST.
+
+        In POST_RUN, the instance being stopped is EXPECTED because the process
+        already exited. The executor handles POST_RUN → AWAITING_USER_FINALIZATION
+        via POST_RUN_OK. Emitting INSTANCE_LOST would race with that and
+        incorrectly terminate successful runs.
+        """
         from goldfish.state_machine.event_emission import determine_instance_event
-        from goldfish.state_machine.types import StageEvent, StageState
+        from goldfish.state_machine.types import StageState
 
         run = {
             "id": "stage-123",
@@ -685,18 +691,15 @@ class TestInstanceLostEvent:
             "backend_handle": "container-123",
         }
 
-        with patch("subprocess.run") as mock_run:
-            import subprocess
-
-            error = subprocess.CalledProcessError(1, "docker")
-            error.stderr = "No such container"
-            mock_run.side_effect = error
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            mock_verify.return_value = True  # Instance is stopped
 
             result = determine_instance_event(run)
 
-            assert result is not None
-            event, _ = result
-            assert event == StageEvent.INSTANCE_LOST
+            # POST_RUN should NOT emit INSTANCE_LOST
+            assert result is None
+            # verify_instance_stopped should not even be called
+            mock_verify.assert_not_called()
 
 
 class TestEdgeCases:
@@ -884,20 +887,20 @@ class TestStateBasedInstanceChecks:
         from goldfish.state_machine.types import StageEvent, StageState
 
         # States where instance check should be SKIPPED (no INSTANCE_LOST)
-        # These are states where an instance is not confirmed to exist
+        # These are states where INSTANCE_LOST should NOT be emitted
         states_skip_instance_check = {
             StageState.PREPARING,  # Code syncing, no instance
             StageState.BUILDING,  # Docker build, no instance
             StageState.LAUNCHING,  # Instance being created async
+            StageState.POST_RUN,  # Instance stopping is EXPECTED after exit
             StageState.AWAITING_USER_FINALIZATION,  # Instance may be cleaned up
             StageState.UNKNOWN,  # Can't assume anything
         }
 
         # States where instance check SHOULD happen
-        # These are states where an instance is confirmed to exist
+        # These are states where an instance being lost is unexpected
         states_do_instance_check = {
-            StageState.RUNNING,  # Instance must exist
-            StageState.POST_RUN,  # Instance should still exist
+            StageState.RUNNING,  # Instance must exist while code runs
         }
 
         # Terminal states - no checks needed, run is done
@@ -964,35 +967,34 @@ class TestStateBasedInstanceChecks:
             "This means LAUNCHING state MUST be excluded from instance checks."
         )
 
-    def test_running_and_post_run_are_only_states_with_instance_checks(self) -> None:
-        """Ensure ONLY RUNNING and POST_RUN perform instance checks.
+    def test_running_is_only_state_with_instance_checks(self) -> None:
+        """Ensure ONLY RUNNING performs instance checks.
 
-        This is the inverse of the skip test - explicitly verify that
-        only the expected states perform instance checks.
+        RUNNING is the only state where instance being lost is unexpected
+        and indicates a failure. All other states either don't have an
+        instance yet, or the instance stopping is expected.
         """
         from goldfish.state_machine.event_emission import determine_instance_event
         from goldfish.state_machine.types import StageEvent, StageState
 
-        states_with_instance_checks = {StageState.RUNNING, StageState.POST_RUN}
+        # Only RUNNING should emit INSTANCE_LOST
+        run = {
+            "id": "stage-123",
+            "state": StageState.RUNNING.value,
+            "backend_type": "local",
+            "backend_handle": "container-123",
+        }
 
-        for state in states_with_instance_checks:
-            run = {
-                "id": "stage-123",
-                "state": state.value,
-                "backend_type": "local",
-                "backend_handle": "container-123",
-            }
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            mock_verify.return_value = True
 
-            with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
-                mock_verify.return_value = True
+            with patch("goldfish.state_machine.event_emission.detect_termination_cause"):
+                result = determine_instance_event(run)
 
-                with patch("goldfish.state_machine.event_emission.detect_termination_cause"):
-                    result = determine_instance_event(run)
-
-                    assert result is not None, f"State {state.value} should emit INSTANCE_LOST"
-                    event, _ = result
-                    assert event == StageEvent.INSTANCE_LOST
-                    mock_verify.assert_called_once()
+                assert result is not None, "RUNNING state should emit INSTANCE_LOST"
+                event, _ = result
+                assert event == StageEvent.INSTANCE_LOST
+                mock_verify.assert_called_once()
 
     def test_no_backend_handle_never_emits_instance_lost(self) -> None:
         """Runs without backend_handle should never emit INSTANCE_LOST.
