@@ -8,7 +8,6 @@ import contextlib
 import fcntl
 import json
 import logging
-import os
 from collections.abc import Generator
 from pathlib import Path
 
@@ -25,14 +24,27 @@ class LocalMetadataBus(MetadataBus):
         self._ensure_exists()
 
     def _ensure_exists(self) -> None:
+        """Create metadata file if it doesn't exist, with proper locking.
+
+        Uses O_CREAT to atomically create or open the file, then initializes
+        with empty JSON under exclusive lock to prevent races with other
+        processes that may be trying to read/write simultaneously.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            # Atomic creation with 600 permissions
-            fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w") as f:
-                f.write("{}")
-        except FileExistsError:
-            pass
+        # Use a+ mode to create if not exists, open for read+write if exists
+        # The lock ensures only one process initializes the empty file
+        with open(self.path, "a+") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                content = f.read()
+                if not content:
+                    # File is empty, initialize with empty JSON
+                    f.seek(0)
+                    f.write("{}")
+                    f.truncate()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     @contextlib.contextmanager
     def _atomic_update(self) -> Generator[dict, None, None]:
@@ -43,7 +55,12 @@ class LocalMetadataBus(MetadataBus):
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 try:
                     content = f.read()
-                    data = json.loads(content) if content else {}
+                    try:
+                        data = json.loads(content) if content else {}
+                    except json.JSONDecodeError:
+                        # File corrupted, reset to empty dict
+                        logger.warning("Metadata file corrupted, resetting: %s", self.path)
+                        data = {}
                     yield data
                     f.seek(0)
                     f.write(json.dumps(data, indent=2))

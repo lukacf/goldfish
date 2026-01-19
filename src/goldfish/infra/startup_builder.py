@@ -148,7 +148,7 @@ def upload_helper_section() -> str:
     """Generate helper function for uploading logs with retry and verification.
 
     Returns:
-        Shell script fragment with upload_logs_with_retry function
+        Shell script fragment with upload_logs_with_retry and upload_exit_code functions
     """
     return """
 # === LOG UPLOAD HELPER (Ensures logs are uploaded before deletion) ===
@@ -186,6 +186,58 @@ upload_logs_with_retry() {
     done
 
     echo "✗ Failed to upload $file after $max_attempts attempts"
+    return 1
+}
+
+# === CRITICAL UPLOAD FOR EXIT CODE (State machine depends on this) ===
+# exit_code.txt is MANDATORY - the daemon uses it to determine run success/failure.
+# If this upload fails and the instance self-deletes, daemon sees "dead + no exit code"
+# and incorrectly concludes the run crashed (TERMINATED state).
+#
+# Unlike stdout/stderr which are nice-to-have, exit_code.txt is CRITICAL.
+# We use more retries and longer timeouts to maximize upload success.
+upload_exit_code() {
+    local file=$1
+    local dest=$2
+    local max_attempts=10  # More retries than normal uploads
+    local timeout_sec=120  # Longer timeout for transient issues
+
+    # Exit code file should always exist (we just created it)
+    if [[ ! -f "$file" ]]; then
+        echo "ERROR: exit_code file not found: $file"
+        return 1
+    fi
+
+    for i in $(seq 1 $max_attempts); do
+        echo "Uploading exit_code.txt to GCS (attempt $i/$max_attempts)..."
+
+        # Upload with extended timeout
+        if timeout $timeout_sec gsutil cp "$file" "$dest" 2>&1; then
+            # Verify upload succeeded
+            if timeout 30 gsutil ls "$dest" &>/dev/null; then
+                echo "✓ Exit code upload verified: $dest"
+                return 0
+            else
+                echo "✗ Exit code upload succeeded but verification failed"
+            fi
+        else
+            echo "✗ Exit code upload command failed"
+        fi
+
+        # Exponential backoff: 2s, 4s, 8s, ...
+        local sleep_time=$((2 ** i))
+        if [[ $sleep_time -gt 30 ]]; then
+            sleep_time=30  # Cap at 30 seconds
+        fi
+        if [[ $i -lt $max_attempts ]]; then
+            echo "Retrying in ${sleep_time}s..."
+            sleep $sleep_time
+        fi
+    done
+
+    # CRITICAL: Do NOT return silently here. The caller must know upload failed.
+    echo "CRITICAL: Failed to upload exit_code.txt after $max_attempts attempts"
+    echo "WARNING: Run may be marked as TERMINATED instead of COMPLETED"
     return 1
 }
 """
@@ -911,6 +963,21 @@ fi
     # Write exit code to file
     parts.append('echo "$EXIT_CODE" > "$EXIT_CODE_FILE"')
 
+    # Set exit code in instance metadata as FALLBACK channel for daemon
+    # This is fast (local metadata API) and doesn't depend on GCS being available.
+    # The daemon can read this if GCS upload fails but instance is still visible.
+    parts.append("""
+# Set exit code in instance metadata (fallback channel for daemon)
+# This is fast and reliable - daemon can read it if GCS upload fails
+if [[ -n "$INSTANCE_NAME" && -n "$INSTANCE_ZONE" && -n "$PROJECT_ID" ]]; then
+    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+        --zone="$INSTANCE_ZONE" \\
+        --project="$PROJECT_ID" \\
+        --metadata "goldfish_exit_code=$EXIT_CODE" \\
+        --quiet 2>/dev/null || echo "WARNING: Failed to set exit code metadata"
+fi
+""")
+
     # Upload logs with retry and verification (BLOCKING before exit)
     parts.append('echo "Uploading logs to GCS with verification..."')
     parts.append(
@@ -919,9 +986,11 @@ fi
     parts.append(
         f'upload_logs_with_retry "$STDERR_LOG" gs://{bucket}/{bucket_path}/logs/stderr.log || echo "WARNING: stderr upload failed"'
     )
-    parts.append(
-        f'upload_logs_with_retry "$EXIT_CODE_FILE" gs://{bucket}/{bucket_path}/logs/exit_code.txt || echo "WARNING: exit_code upload failed"'
-    )
+    # CRITICAL: exit_code.txt upload uses dedicated function with extended retries
+    # and NO FALLBACK - this is mandatory for correct state machine operation.
+    # If this fails after all retries, script continues (watchdog will eventually kill)
+    # but at least we tried much harder than for regular logs.
+    parts.append(f'upload_exit_code "$EXIT_CODE_FILE" gs://{bucket}/{bucket_path}/logs/exit_code.txt')
     parts.append('echo "Log upload attempts completed (instance will delete regardless for cost protection)"')
 
     # Exit with docker exit code - the EXIT trap will handle self-deletion

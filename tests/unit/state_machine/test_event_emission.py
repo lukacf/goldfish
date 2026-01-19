@@ -1291,3 +1291,268 @@ class TestGCEInstanceVerificationCommand:
                 "test-project-456",
             ]
             assert cmd == expected_cmd
+
+
+class TestExitCodeMetadataPrimary:
+    """REGRESSION TESTS for exit code retrieval via instance metadata (PRIMARY).
+
+    THE DESIGN (2026-01-19):
+    - Instance metadata is the PRIMARY channel for exit code (fast, local, reliable)
+    - GCS is the SECONDARY/backup channel (persists after instance deletion)
+    - Metadata doesn't depend on GCS availability or network issues
+
+    WHY METADATA IS PRIMARY:
+    - Local to instance - no network dependency
+    - Fast - immediate availability
+    - Reliable - no GCS eventual consistency issues
+    - Still available while instance exists
+
+    THE FLOW:
+    1. Docker exits with code X
+    2. Instance sets metadata `goldfish_exit_code=X` (fast, local) - PRIMARY
+    3. Instance uploads exit_code.txt to GCS (backup for after deletion)
+    4. Instance self-deletes
+    5. Daemon tries metadata FIRST (while instance still visible)
+    6. If metadata unavailable, daemon falls back to GCS
+
+    This ensures we get the exit code reliably for all normal completions.
+    """
+
+    def test_startup_script_sets_exit_code_metadata(self) -> None:
+        """Startup script must set exit code in instance metadata."""
+        from goldfish.infra.startup_builder import build_startup_script
+
+        script = build_startup_script(
+            bucket="test-bucket",
+            bucket_prefix="artifacts",
+            run_path="runs/stage-123",
+            image="test-image:latest",
+            entrypoint="/bin/bash",
+            env_map={"TEST": "value"},
+        )
+
+        # Must set goldfish_exit_code metadata
+        assert (
+            "goldfish_exit_code=$EXIT_CODE" in script
+        ), "Startup script must set exit code in instance metadata as fallback"
+        assert "gcloud compute instances add-metadata" in script
+
+    def test_startup_script_sets_metadata_before_gcs_upload(self) -> None:
+        """Exit code metadata must be set BEFORE GCS upload call (for reliability)."""
+        from goldfish.infra.startup_builder import build_startup_script
+
+        script = build_startup_script(
+            bucket="test-bucket",
+            bucket_prefix="artifacts",
+            run_path="runs/stage-123",
+            image="test-image:latest",
+            entrypoint="/bin/bash",
+            env_map={"TEST": "value"},
+        )
+
+        # Find positions of metadata set and GCS upload CALL (not function definition)
+        metadata_pos = script.find("goldfish_exit_code=$EXIT_CODE")
+        # Look for the actual call pattern: upload_exit_code "$EXIT_CODE_FILE"
+        gcs_upload_call_pos = script.find('upload_exit_code "$EXIT_CODE_FILE"')
+
+        assert metadata_pos != -1, "Should have metadata set"
+        assert gcs_upload_call_pos != -1, "Should have GCS upload call"
+        assert metadata_pos < gcs_upload_call_pos, (
+            f"Metadata (pos={metadata_pos}) must be set BEFORE GCS upload call "
+            f"(pos={gcs_upload_call_pos}) so it's available as primary channel"
+        )
+
+    def test_get_exit_code_gce_tries_metadata_first(self) -> None:
+        """get_exit_code_gce should try metadata FIRST (primary channel)."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.exit_code import get_exit_code_gce
+
+        with patch("goldfish.state_machine.exit_code.subprocess.run") as mock_run:
+            # Metadata returns exit code 0
+            metadata_result = MagicMock()
+            metadata_result.returncode = 0
+            metadata_result.stdout = "0"
+            mock_run.return_value = metadata_result
+
+            result = get_exit_code_gce(
+                bucket_uri="gs://test-bucket",
+                stage_run_id="stage-abc123",
+                project_id="test-project",
+                instance_name="instance-123",
+                instance_zone="us-central1-a",
+            )
+
+            # Should have succeeded via metadata (primary)
+            assert result.exists is True
+            assert result.code == 0
+
+            # Should only have made one call (metadata succeeded)
+            assert mock_run.call_count == 1
+
+            # The first call should be gcloud (metadata), not gsutil (GCS)
+            first_call = mock_run.call_args_list[0]
+            cmd = first_call[0][0]
+            assert cmd[0] == "gcloud", "First call should be gcloud (metadata), not gsutil"
+            assert "describe" in cmd, "Should use gcloud describe to get metadata"
+
+    def test_get_exit_code_gce_returns_not_found_when_both_fail(self) -> None:
+        """When both metadata and GCS fail, return not_found."""
+        from unittest.mock import patch
+
+        from goldfish.state_machine.exit_code import get_exit_code_gce
+
+        with patch("goldfish.state_machine.exit_code.subprocess.run") as mock_run:
+            import subprocess
+
+            # All attempts fail (metadata first, then GCS retries)
+            mock_run.side_effect = subprocess.CalledProcessError(1, "cmd", stderr="error")
+
+            result = get_exit_code_gce(
+                bucket_uri="gs://test-bucket",
+                stage_run_id="stage-abc123",
+                project_id="test-project",
+                instance_name="instance-123",
+                instance_zone="us-central1-a",
+            )
+
+            # Should return not_found
+            assert result.exists is False
+
+    def test_get_exit_code_gce_falls_back_to_gcs_when_metadata_fails(self) -> None:
+        """When metadata fails (instance deleted?), fall back to GCS."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.exit_code import get_exit_code_gce
+
+        with patch("goldfish.state_machine.exit_code.subprocess.run") as mock_run:
+            import subprocess
+
+            # Metadata fails (instance deleted), GCS succeeds
+            metadata_error = subprocess.CalledProcessError(1, "gcloud", stderr="not found")
+            gcs_result = MagicMock()
+            gcs_result.returncode = 0
+            gcs_result.stdout = "1"
+
+            mock_run.side_effect = [
+                metadata_error,  # Metadata fails
+                gcs_result,  # GCS succeeds
+            ]
+
+            result = get_exit_code_gce(
+                bucket_uri="gs://test-bucket",
+                stage_run_id="stage-abc123",
+                project_id="test-project",
+                instance_name="instance-123",
+                instance_zone="us-central1-a",
+            )
+
+            # Should have gotten exit code from GCS (fallback)
+            assert result.exists is True
+            assert result.code == 1
+
+            # Should have made two calls: metadata (failed), then GCS (succeeded)
+            assert mock_run.call_count == 2
+
+    def test_get_exit_code_gce_without_instance_info_uses_gcs_only(self) -> None:
+        """When no instance info provided, use GCS only (instance already deleted)."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.state_machine.exit_code import get_exit_code_gce
+
+        with patch("goldfish.state_machine.exit_code.subprocess.run") as mock_run:
+            # GCS returns exit code 1
+            gcs_result = MagicMock()
+            gcs_result.returncode = 0
+            gcs_result.stdout = "1"
+            mock_run.return_value = gcs_result
+
+            result = get_exit_code_gce(
+                bucket_uri="gs://test-bucket",
+                stage_run_id="stage-abc123",
+                project_id="test-project",
+                # No instance_name or instance_zone - can't try metadata
+            )
+
+            # Should have gotten exit code from GCS
+            assert result.exists is True
+            assert result.code == 1
+
+            # First call should be gsutil (GCS), not gcloud
+            first_call = mock_run.call_args_list[0]
+            cmd = first_call[0][0]
+            assert cmd[0] == "gsutil", "Without instance info, should go straight to GCS"
+
+
+class TestExitCodeUploadMandatory:
+    """REGRESSION TESTS for exit_code.txt upload reliability.
+
+    THE BUG (Found 2026-01-19):
+    - Instance completes successfully, attempts to upload exit_code.txt to GCS
+    - If upload fails (timeout, network issue), script logs "WARNING" but continues
+    - Script exits → triggers self-delete → daemon sees "instance dead + no exit code"
+    - Daemon assumes crash → emits EXIT_MISSING → transitions to TERMINATED
+    - But the actual exit code was 0!
+
+    THE SYMPTOM:
+    - Run shows "Stage completed successfully" in logs
+    - But state = "terminated" instead of "completed"
+    - post_run SVS never triggered
+
+    THE FIX:
+    - Make exit_code.txt upload MANDATORY with extended retries
+    - exit_code.txt is critical for state machine, unlike stdout/stderr
+    - Use a dedicated upload function with more retries and longer timeout
+    - If upload truly fails after extended retries, block (watchdog will eventually kill)
+
+    THE PROPER SOLUTION:
+    - Fix the root cause (startup script) rather than daemon-side workarounds
+    - Daemon-side grace periods are flakey and add complexity
+    """
+
+    def test_startup_script_has_critical_exit_code_upload(self) -> None:
+        """REGRESSION: exit_code.txt upload must use critical (blocking) upload.
+
+        Bug: used `upload_logs_with_retry ... || echo "WARNING"` which allowed
+        script to continue even if upload failed.
+
+        Fix: use `upload_exit_code` which has more retries and NO fallback.
+        """
+        from goldfish.infra.startup_builder import build_startup_script
+
+        # Generate a startup script
+        script = build_startup_script(
+            bucket="test-bucket",
+            bucket_prefix="artifacts",
+            run_path="runs/stage-123",
+            image="test-image:latest",
+            entrypoint="/bin/bash",
+            env_map={"TEST": "value"},
+        )
+
+        # Find the exit_code.txt upload line
+        lines = script.split("\n")
+        exit_code_upload_line = None
+        for line in lines:
+            if "exit_code.txt" in line and "upload" in line.lower():
+                exit_code_upload_line = line
+                break
+
+        assert exit_code_upload_line is not None, "Should have exit_code upload line"
+
+        # Must NOT have a fallback that allows continuation on failure
+        assert '|| echo "WARNING' not in exit_code_upload_line, (
+            "exit_code.txt upload must NOT have || echo fallback - "
+            "it's critical for state machine and must block until success"
+        )
+
+    def test_upload_critical_helper_exists(self) -> None:
+        """Startup script should have upload_critical helper for mandatory uploads."""
+        from goldfish.infra.startup_builder import upload_helper_section
+
+        helper = upload_helper_section()
+
+        # Should have upload_critical function with more retries
+        assert (
+            "upload_critical" in helper or "upload_exit_code" in helper
+        ), "Should have a dedicated critical upload function for exit_code.txt"
