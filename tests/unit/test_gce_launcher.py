@@ -733,3 +733,109 @@ class TestSerialConsoleNoiseFilter:
         assert not any("google_metadata_script_runner" in line for line in filtered)
         assert not any("SIG_JSON" in line for line in filtered)
         assert not any("sleep 1" in line for line in filtered)
+
+
+class TestGCELaunchResult:
+    """Tests for GCELaunchResult dataclass."""
+
+    def test_gce_launch_result_creation(self):
+        """GCELaunchResult should store instance_name and zone."""
+        from goldfish.infra.gce_launcher import GCELaunchResult
+
+        result = GCELaunchResult(instance_name="stage-abc123", zone="us-central1-a")
+        assert result.instance_name == "stage-abc123"
+        assert result.zone == "us-central1-a"
+
+    def test_gce_launch_result_different_zones(self):
+        """GCELaunchResult should work with various zone formats."""
+        from goldfish.infra.gce_launcher import GCELaunchResult
+
+        # Test various zone names
+        zones = ["us-central1-a", "europe-west1-b", "asia-east1-c", "us-west1-a"]
+        for zone in zones:
+            result = GCELaunchResult(instance_name=f"instance-{zone}", zone=zone)
+            assert result.zone == zone
+
+
+class TestLaunchInstanceReturnsZone:
+    """Tests for launch_instance returning GCELaunchResult with zone."""
+
+    @pytest.fixture
+    def launcher(self):
+        """Create a GCE launcher with mocked init."""
+        with patch("goldfish.infra.gce_launcher.GCELauncher.__init__", lambda x, y: None):
+            launcher = GCELauncher(MagicMock())
+            launcher.project_id = "test-project"
+            launcher.bucket = "gs://test-bucket"
+            launcher.resources = []
+            launcher.default_zone = "us-central1-a"
+            launcher.gpu_preference = None
+            launcher._project_number = None
+            launcher.service_account = None
+            return launcher
+
+    def test_launch_simple_returns_gce_launch_result(self, launcher):
+        """_launch_simple should return GCELaunchResult with zone."""
+        from goldfish.infra.gce_launcher import GCELaunchResult
+
+        with (
+            patch("goldfish.infra.gce_launcher.run_gcloud"),
+            patch("goldfish.infra.resource_launcher.wait_for_instance_ready"),
+        ):
+            result = launcher._launch_simple(
+                instance_name="stage-test123",
+                startup_script="#!/bin/bash\necho test",
+                machine_type="n1-standard-4",
+                gpu_type=None,
+                gpu_count=0,
+                zone="europe-west1-b",
+            )
+
+        assert isinstance(result, GCELaunchResult)
+        assert result.instance_name == "stage-test123"
+        assert result.zone == "europe-west1-b"
+
+    def test_launch_with_capacity_search_returns_gce_launch_result(self, launcher):
+        """_launch_with_capacity_search should return GCELaunchResult with zone."""
+        from dataclasses import dataclass
+
+        from goldfish.infra.gce_launcher import GCELaunchResult
+
+        @dataclass
+        class MockSelection:
+            zone: str
+
+        @dataclass
+        class MockLaunchResult:
+            instance_name: str
+            selection: MockSelection
+
+        # Set up resources for capacity search
+        launcher.resources = [
+            {
+                "machine": "n1-standard-4",
+                "zones": ["us-central1-a", "us-west1-b"],
+            }
+        ]
+
+        with (
+            patch("goldfish.infra.gce_launcher.ResourceLauncher") as MockResourceLauncher,
+            patch.object(launcher, "_resolve_service_account", return_value=None),
+        ):
+            mock_launcher_instance = MagicMock()
+            mock_launcher_instance.launch.return_value = MockLaunchResult(
+                instance_name="stage-capacity123",
+                selection=MockSelection(zone="us-west1-b"),
+            )
+            MockResourceLauncher.return_value = mock_launcher_instance
+
+            result = launcher._launch_with_capacity_search(
+                instance_name="stage-capacity123",
+                startup_script="#!/bin/bash\necho test",
+                gpu_type=None,
+                zones=["us-central1-a", "us-west1-b"],
+            )
+
+        assert isinstance(result, GCELaunchResult)
+        assert result.instance_name == "stage-capacity123"
+        assert result.zone == "us-west1-b"
