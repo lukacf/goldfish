@@ -470,6 +470,7 @@ class StageExecutor:
                 config_override=config_override,
                 inputs_override=inputs_override,
                 pipeline_name=pipeline_name,
+                results_spec=results_spec,
             )
         except Exception as e:
             error_msg = str(e)
@@ -2094,6 +2095,7 @@ echo "Stage completed successfully"
         config_override: dict | None = None,
         inputs_override: dict | None = None,
         pipeline_name: str | None = None,
+        results_spec: dict | None = None,
     ):
         """Launch Docker container (local) or GCE instance."""
         backend = self.config.jobs.backend
@@ -2121,6 +2123,9 @@ echo "Stage completed successfully"
                 }
                 for name, cfg in (output_configs or {}).items()
             },
+            # Include results_spec for post-run ML assessment
+            # Contains expected metrics: primary_metric, direction, min_value, goal_value, etc.
+            "results_spec": results_spec,
         }
 
         # Build Goldfish environment variables for metrics and provenance

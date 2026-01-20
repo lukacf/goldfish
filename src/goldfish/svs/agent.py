@@ -383,6 +383,43 @@ This is a test run to verify the AI review system works. You MUST:
             if reason_lines:
                 run_command_section += "\n## Run Reason\n" + "\n".join(reason_lines) + "\n"
 
+    # ML assessment instructions for post_run reviews
+    ml_assessment_section = ""
+    results_spec = run_context.get("results_spec") if run_context else None
+    if review_type == "post_run" and results_spec:
+        primary_metric = results_spec.get("primary_metric", "unknown")
+        direction = results_spec.get("direction", "maximize")
+        min_value = results_spec.get("min_value")
+        goal_value = results_spec.get("goal_value")
+        tolerance = results_spec.get("tolerance", 0)
+
+        ml_assessment_section = f"""
+## ML Assessment Required
+This is a post-run review. You must assess the ML outcome based on these expected results:
+
+**Expected Results (results_spec):**
+- Primary Metric: {primary_metric}
+- Direction: {direction}
+- Minimum Acceptable Value: {min_value}
+- Goal Value: {goal_value}
+- Tolerance: {tolerance}
+
+**Your Assessment:**
+1. Find the final value of the primary metric ({primary_metric}) in the outputs/stats
+2. Compare it to the expected values above
+3. Determine the ML outcome:
+   - **success**: Value {'≥' if direction == 'maximize' else '≤'} goal_value (within tolerance)
+   - **partial**: Value between min_value and goal_value
+   - **miss**: Value {'<' if direction == 'maximize' else '>'} min_value
+   - **unknown**: Cannot determine (metric not found or error occurred)
+
+**Required Output Format:**
+At the end of your review, include this line (replace VALUE and OUTCOME):
+ML_OUTCOME: {primary_metric}=VALUE, outcome=OUTCOME
+
+Example: ML_OUTCOME: val_accuracy=0.85, outcome=success
+"""
+
     # Filter out items that are displayed separately
     filtered_context = {k: v for k, v in context.items() if k not in ("tool_policy", "test_mode", "run_context")}
 
@@ -395,6 +432,7 @@ This is a test run to verify the AI review system works. You MUST:
         "You are an AI reviewer. Return findings as lines prefixed with "
         "ERROR:, WARNING:, or NOTE:. If nothing is wrong, say 'OK'.\n"
         f"{test_mode_section}"
+        f"{ml_assessment_section}"
         f"{run_command_section}"
         f"{tool_instructions}\n"
         "Review payload:\n" + json.dumps(payload, indent=2)
