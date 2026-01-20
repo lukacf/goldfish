@@ -323,6 +323,7 @@ class TestToolPolicyRequirement:
             result.decision = "approved"
             result.findings = []
             result.duration_ms = 100
+            result.response_text = "Test review response"
             return result
 
         mock_agent = MagicMock()
