@@ -944,3 +944,315 @@ class TestRunPostRunReviewIntegration:
         data = json.loads(findings_file.read_text())
         assert data["decision"] == "warned"
         assert data["findings"] == findings
+
+
+class TestParseMLOutcome:
+    """Test _parse_ml_outcome function for extracting ML assessment from AI response."""
+
+    def test_parses_success_outcome(self):
+        """Should parse ML_OUTCOME line with success outcome."""
+        from goldfish.svs.post_run import _parse_ml_outcome
+
+        response = """
+        The training completed successfully. Based on the outputs:
+        - Final accuracy: 0.85
+        - Loss converged nicely
+
+        ML_OUTCOME: val_accuracy=0.85, outcome=success
+        """
+        outcome, value = _parse_ml_outcome(response)
+        assert outcome == "success"
+        assert value == 0.85
+
+    def test_parses_partial_outcome(self):
+        """Should parse ML_OUTCOME line with partial outcome."""
+        from goldfish.svs.post_run import _parse_ml_outcome
+
+        response = "ML_OUTCOME: accuracy=0.72, outcome=partial"
+        outcome, value = _parse_ml_outcome(response)
+        assert outcome == "partial"
+        assert value == 0.72
+
+    def test_parses_miss_outcome(self):
+        """Should parse ML_OUTCOME line with miss outcome."""
+        from goldfish.svs.post_run import _parse_ml_outcome
+
+        response = "ML_OUTCOME: loss=0.95, outcome=miss"
+        outcome, value = _parse_ml_outcome(response)
+        assert outcome == "miss"
+        assert value == 0.95
+
+    def test_parses_unknown_outcome(self):
+        """Should parse ML_OUTCOME line with unknown outcome."""
+        from goldfish.svs.post_run import _parse_ml_outcome
+
+        response = "ML_OUTCOME: metric=0.0, outcome=unknown"
+        outcome, value = _parse_ml_outcome(response)
+        assert outcome == "unknown"
+        assert value == 0.0
+
+    def test_case_insensitive_outcome(self):
+        """Should parse outcome case-insensitively."""
+        from goldfish.svs.post_run import _parse_ml_outcome
+
+        response = "ML_OUTCOME: accuracy=0.9, outcome=SUCCESS"
+        outcome, value = _parse_ml_outcome(response)
+        assert outcome == "success"
+        assert value == 0.9
+
+    def test_handles_integer_value(self):
+        """Should parse integer metric values."""
+        from goldfish.svs.post_run import _parse_ml_outcome
+
+        response = "ML_OUTCOME: count=42, outcome=success"
+        outcome, value = _parse_ml_outcome(response)
+        assert outcome == "success"
+        assert value == 42.0
+
+    def test_handles_negative_value(self):
+        """Should not match negative values (not in pattern)."""
+        from goldfish.svs.post_run import _parse_ml_outcome
+
+        # Current pattern doesn't support negative values
+        response = "ML_OUTCOME: metric=-0.5, outcome=miss"
+        outcome, value = _parse_ml_outcome(response)
+        # Will return None since negative not matched
+        assert outcome is None
+        assert value is None
+
+    def test_returns_none_for_missing_ml_outcome(self):
+        """Should return None tuple when ML_OUTCOME line is missing."""
+        from goldfish.svs.post_run import _parse_ml_outcome
+
+        response = "The review completed but no outcome line was included."
+        outcome, value = _parse_ml_outcome(response)
+        assert outcome is None
+        assert value is None
+
+    def test_returns_none_for_empty_response(self):
+        """Should return None tuple for empty response."""
+        from goldfish.svs.post_run import _parse_ml_outcome
+
+        outcome, value = _parse_ml_outcome("")
+        assert outcome is None
+        assert value is None
+
+    def test_returns_none_for_malformed_line(self):
+        """Should return None for malformed ML_OUTCOME lines."""
+        from goldfish.svs.post_run import _parse_ml_outcome
+
+        response = "ML_OUTCOME: bad format here"
+        outcome, value = _parse_ml_outcome(response)
+        assert outcome is None
+        assert value is None
+
+    def test_returns_none_for_invalid_outcome_value(self):
+        """Should return None for invalid outcome value."""
+        from goldfish.svs.post_run import _parse_ml_outcome
+
+        response = "ML_OUTCOME: acc=0.5, outcome=invalid"
+        outcome, value = _parse_ml_outcome(response)
+        assert outcome is None
+        assert value is None
+
+    def test_handles_whitespace_variations(self):
+        """Should handle various whitespace in ML_OUTCOME line."""
+        from goldfish.svs.post_run import _parse_ml_outcome
+
+        response = "ML_OUTCOME:   metric = 0.75 ,  outcome = success"
+        outcome, value = _parse_ml_outcome(response)
+        assert outcome == "success"
+        assert value == 0.75
+
+    def test_parses_from_multiline_response(self):
+        """Should find ML_OUTCOME in multi-line response."""
+        from goldfish.svs.post_run import _parse_ml_outcome
+
+        response = """
+## Review Summary
+
+The model training completed with the following observations:
+
+1. Training converged after 50 epochs
+2. Validation loss stabilized around 0.15
+3. No anomalies detected in outputs
+
+Based on the results_spec comparison:
+- Target: val_accuracy >= 0.80
+- Achieved: 0.87
+
+ML_OUTCOME: val_accuracy=0.87, outcome=success
+
+Overall assessment: The run achieved the goal value.
+"""
+        outcome, value = _parse_ml_outcome(response)
+        assert outcome == "success"
+        assert value == 0.87
+
+
+class TestPostRunReviewMLOutcomeDataclass:
+    """Test PostRunReview dataclass ML outcome fields."""
+
+    def test_has_ml_outcome_field(self):
+        """PostRunReview should have ml_outcome field."""
+        from goldfish.svs.post_run import PostRunReview
+
+        review = PostRunReview(
+            skipped=False,
+            decision="approved",
+            findings=[],
+            stats={},
+            duration_ms=100,
+            ml_outcome="success",
+        )
+        assert review.ml_outcome == "success"
+
+    def test_has_ml_metric_value_field(self):
+        """PostRunReview should have ml_metric_value field."""
+        from goldfish.svs.post_run import PostRunReview
+
+        review = PostRunReview(
+            skipped=False,
+            decision="approved",
+            findings=[],
+            stats={},
+            duration_ms=100,
+            ml_metric_value=0.87,
+        )
+        assert review.ml_metric_value == 0.87
+
+    def test_ml_fields_default_to_none(self):
+        """ML fields should default to None."""
+        from goldfish.svs.post_run import PostRunReview
+
+        review = PostRunReview(
+            skipped=False,
+            decision="approved",
+            findings=[],
+            stats={},
+            duration_ms=100,
+        )
+        assert review.ml_outcome is None
+        assert review.ml_metric_value is None
+
+
+class TestRunPostRunReviewMLOutcome:
+    """Test run_post_run_review ML outcome extraction and propagation."""
+
+    def test_extracts_ml_outcome_from_response(self):
+        """Should extract ml_outcome from agent response_text."""
+        from goldfish.svs.post_run import run_post_run_review
+
+        config = SVSConfig(ai_post_run_enabled=True)
+        agent = Mock(spec=AgentProvider)
+        agent.name = "test_agent"
+        agent.run.return_value = ReviewResult(
+            decision="approved",
+            findings=[],
+            response_text="Analysis complete.\n\nML_OUTCOME: accuracy=0.91, outcome=success",
+            duration_ms=100,
+        )
+
+        result = run_post_run_review(
+            outputs_dir=Path("/tmp/outputs"),
+            stats={},
+            config=config,
+            agent=agent,
+        )
+
+        assert result.ml_outcome == "success"
+        assert result.ml_metric_value == 0.91
+
+    def test_ml_outcome_none_when_not_in_response(self):
+        """Should have None ml_outcome when not in response."""
+        from goldfish.svs.post_run import run_post_run_review
+
+        config = SVSConfig(ai_post_run_enabled=True)
+        agent = Mock(spec=AgentProvider)
+        agent.name = "test_agent"
+        agent.run.return_value = ReviewResult(
+            decision="approved",
+            findings=[],
+            response_text="All looks good, no issues found.",
+            duration_ms=100,
+        )
+
+        result = run_post_run_review(
+            outputs_dir=Path("/tmp/outputs"),
+            stats={},
+            config=config,
+            agent=agent,
+        )
+
+        assert result.ml_outcome is None
+        assert result.ml_metric_value is None
+
+    def test_writes_ml_outcome_to_findings_file(self, tmp_path: Path):
+        """Should write ml_outcome to svs_findings.json."""
+        import json
+
+        from goldfish.svs.post_run import run_post_run_review
+
+        config = SVSConfig(ai_post_run_enabled=True)
+        agent = Mock(spec=AgentProvider)
+        agent.name = "test_agent"
+        agent.run.return_value = ReviewResult(
+            decision="approved",
+            findings=[],
+            response_text="ML_OUTCOME: val_loss=0.15, outcome=partial",
+            duration_ms=100,
+        )
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        goldfish_dir = outputs_dir / ".goldfish"
+        goldfish_dir.mkdir()
+
+        run_post_run_review(
+            outputs_dir=outputs_dir,
+            stats={},
+            config=config,
+            agent=agent,
+        )
+
+        findings_file = goldfish_dir / "svs_findings.json"
+        data = json.loads(findings_file.read_text())
+        assert data["ml_outcome"] == "partial"
+        assert data["ml_metric_value"] == 0.15
+
+    def test_skipped_review_has_none_ml_outcome(self):
+        """Skipped review should have None ml_outcome."""
+        from goldfish.svs.post_run import run_post_run_review
+
+        config = SVSConfig(ai_post_run_enabled=False)
+        agent = NullProvider()
+
+        result = run_post_run_review(
+            outputs_dir=Path("/tmp/outputs"),
+            stats={},
+            config=config,
+            agent=agent,
+        )
+
+        assert result.ml_outcome is None
+        assert result.ml_metric_value is None
+
+    def test_agent_error_has_none_ml_outcome(self):
+        """Agent error should have None ml_outcome."""
+        from goldfish.svs.post_run import run_post_run_review
+
+        config = SVSConfig(ai_post_run_enabled=True)
+        agent = Mock(spec=AgentProvider)
+        agent.name = "test_agent"
+        agent.run.side_effect = RuntimeError("API error")
+
+        result = run_post_run_review(
+            outputs_dir=Path("/tmp/outputs"),
+            stats={},
+            config=config,
+            agent=agent,
+        )
+
+        # The error response won't have ML_OUTCOME line
+        assert result.ml_outcome is None
+        assert result.ml_metric_value is None

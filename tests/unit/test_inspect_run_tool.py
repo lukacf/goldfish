@@ -351,3 +351,134 @@ def test_inspect_run_refetches_row_after_sync():
     # sync_method is "none" because no metrics data in mock
     assert result["dashboard"]["sync_method"] == "none"
     assert result["dashboard"]["latest_metric_at"] is None  # No metrics data
+
+
+def test_inspect_run_includes_svs_ml_outcome():
+    """Test that inspect_run includes ml_outcome from SVS findings."""
+    import json
+
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-aabbcc123"
+    svs_findings = {
+        "ai_review": {
+            "decision": "approved",
+            "findings": [],
+            "duration_ms": 1500,
+            "response_text": "Model achieved target accuracy.\n\nML_OUTCOME: val_accuracy=0.91, outcome=success",
+            "ml_outcome": "success",
+            "ml_metric_value": 0.91,
+        }
+    }
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "completed",
+        "state": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": None,
+        "svs_findings_json": json.dumps(svs_findings),
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["svs"])
+
+    assert "svs" in result
+    assert result["svs"]["post_run"]["decision"] == "approved"
+    assert result["svs"]["post_run"]["ml_outcome"] == "success"
+    assert result["svs"]["post_run"]["ml_metric_value"] == 0.91
+    assert "ML_OUTCOME:" in result["svs"]["post_run"]["full_text"]
+
+
+def test_inspect_run_handles_missing_ml_outcome():
+    """Test that inspect_run handles missing ml_outcome fields gracefully."""
+    import json
+
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-ddeeff456"
+    # SVS findings without ml_outcome fields (legacy or when not applicable)
+    svs_findings = {
+        "ai_review": {
+            "decision": "approved",
+            "findings": [],
+            "duration_ms": 1000,
+            "response_text": "Run completed without issues.",
+        }
+    }
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "completed",
+        "state": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": None,
+        "svs_findings_json": json.dumps(svs_findings),
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["svs"])
+
+    assert "svs" in result
+    assert result["svs"]["post_run"]["decision"] == "approved"
+    # Missing fields should be None
+    assert result["svs"]["post_run"]["ml_outcome"] is None
+    assert result["svs"]["post_run"]["ml_metric_value"] is None
+
+
+def test_inspect_run_includes_svs_partial_outcome():
+    """Test that inspect_run correctly handles partial ML outcome."""
+    import json
+
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-aabbcc789"
+    svs_findings = {
+        "ai_review": {
+            "decision": "warned",
+            "findings": ["WARNING: Did not achieve goal value"],
+            "duration_ms": 2000,
+            "response_text": "Model achieved minimum but not goal.\n\nML_OUTCOME: accuracy=0.72, outcome=partial",
+            "ml_outcome": "partial",
+            "ml_metric_value": 0.72,
+        }
+    }
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "completed",
+        "state": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": None,
+        "svs_findings_json": json.dumps(svs_findings),
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["svs"])
+
+    assert result["svs"]["post_run"]["ml_outcome"] == "partial"
+    assert result["svs"]["post_run"]["ml_metric_value"] == 0.72
