@@ -333,22 +333,3 @@ class StageStateTransitionRow(TypedDict):
     error_message: str | None
     source: str
     created_at: str
-
-
-class MigrationProgressRow(TypedDict):
-    """Row from the migration_progress table.
-
-    Tracks progress of batch migrations for safe recovery and auditing.
-    """
-
-    id: int
-    migration_name: str  # e.g., "state_machine_v1"
-    started_at: str
-    completed_at: str | None  # NULL if in progress
-    status: str  # running|completed|completed_with_errors|failed|rolled_back
-    total_rows: int | None
-    migrated_rows: int
-    failed_rows: int
-    last_processed_id: str | None  # Last successfully processed run ID
-    error: str | None  # Error message if failed
-    backup_table: str | None  # Name of backup table
