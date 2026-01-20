@@ -3090,16 +3090,24 @@ class Database:
         stage_run_id: str,
         backend_type: str,
         backend_handle: str,
+        instance_zone: str | None = None,
     ) -> None:
-        """Persist backend info for cancellation/logging."""
+        """Persist backend info for cancellation/logging.
+
+        Args:
+            stage_run_id: Stage run ID
+            backend_type: Backend type (local or gce)
+            backend_handle: Container ID or instance name
+            instance_zone: GCE zone where instance was launched (None for local)
+        """
         with self._conn() as conn:
             conn.execute(
                 """
                 UPDATE stage_runs
-                SET backend_type = ?, backend_handle = ?
+                SET backend_type = ?, backend_handle = ?, instance_zone = ?
                 WHERE id = ?
                 """,
-                (backend_type, backend_handle, stage_run_id),
+                (backend_type, backend_handle, instance_zone, stage_run_id),
             )
 
     def get_signal(self, stage_run_id: str, signal_name: str) -> dict | None:

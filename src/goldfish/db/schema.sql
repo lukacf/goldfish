@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     preflight_warnings_json TEXT,     -- JSON list of preflight validation warnings
     backend_type TEXT,                -- local | gce
     backend_handle TEXT,              -- container_id or instance_name for cancel/log lookup
+    instance_zone TEXT,               -- GCE zone where instance was launched (NULL for local)
     error TEXT,
     outcome TEXT,                     -- NULL (unset), 'success', 'bad_results' - semantic result quality
     attempt_num INTEGER,              -- Groups consecutive runs; increments after outcome='success'
