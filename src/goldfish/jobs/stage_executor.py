@@ -1390,6 +1390,7 @@ class StageExecutor:
             decision = ai_review.get("decision", "approved")
             duration_ms = ai_review.get("duration_ms", 0)
             model = ai_review.get("model", self.config.svs.agent_model)
+            response_text = ai_review.get("response_text", "")
 
             try:
                 self.db.create_svs_review(
@@ -1401,6 +1402,7 @@ class StageExecutor:
                     parsed_findings=json.dumps(review_findings) if review_findings else None,
                     reviewed_at=datetime.now().isoformat(),
                     duration_ms=duration_ms,
+                    response_text=response_text if response_text else None,
                 )
             except Exception as e:
                 logger.debug(f"Failed to create post-run svs_review record: {e}")
