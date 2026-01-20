@@ -126,8 +126,7 @@ class StageDaemon:
         run_id = run.get("id", UNKNOWN_RUN_ID)
 
         try:
-            # Backfill missing state_entered_at for robustness (most commonly affects UNKNOWN
-            # rows created/modified during migrations).
+            # Backfill missing state_entered_at for robustness.
             self._ensure_state_entered_at(run)
 
             result = self._determine_event(run)

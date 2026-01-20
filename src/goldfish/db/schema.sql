@@ -224,7 +224,7 @@ CREATE TABLE IF NOT EXISTS stage_state_transitions (
     exit_code_exists INTEGER,         -- 0 or 1
     error_message TEXT,
     svs_review_id TEXT,               -- FK to svs_reviews.id for SVS_BLOCK and AI_STOP events
-    source TEXT NOT NULL CHECK(source IN ('mcp_tool', 'executor', 'daemon', 'container', 'migration')),
+    source TEXT NOT NULL CHECK(source IN ('mcp_tool', 'executor', 'daemon', 'container')),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE,
     FOREIGN KEY (svs_review_id) REFERENCES svs_reviews(id)
@@ -232,24 +232,6 @@ CREATE TABLE IF NOT EXISTS stage_state_transitions (
 
 CREATE INDEX IF NOT EXISTS idx_state_transitions_stage_run ON stage_state_transitions(stage_run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_state_transitions_created_at ON stage_state_transitions(created_at);
-
-
--- Migration progress tracking (for safe batch migrations)
-CREATE TABLE IF NOT EXISTS migration_progress (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    migration_name TEXT NOT NULL,       -- Name of migration (e.g., "state_machine_v1")
-    started_at TEXT NOT NULL,           -- When migration started
-    completed_at TEXT,                  -- When migration completed (NULL if in progress)
-    status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'completed', 'completed_with_errors', 'failed', 'rolled_back')),
-    total_rows INTEGER,                 -- Total rows to migrate
-    migrated_rows INTEGER DEFAULT 0,    -- Rows successfully migrated
-    failed_rows INTEGER DEFAULT 0,      -- Rows that failed migration
-    last_processed_id TEXT,             -- Last successfully processed run ID
-    error TEXT,                         -- Error message if failed
-    backup_table TEXT                   -- Name of backup table
-);
-
-CREATE INDEX IF NOT EXISTS idx_migration_progress_name ON migration_progress(migration_name);
 
 
 -- Pipeline runs (group stages for one pipeline invocation)
