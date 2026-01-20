@@ -40,6 +40,7 @@ class PostRunReview:
         findings: List of issues found (ERROR/WARNING/NOTE messages)
         stats: Stage output statistics that were reviewed
         duration_ms: Time taken for review in milliseconds
+        response_text: Full response text from the AI agent (for audit trail)
     """
 
     skipped: bool
@@ -47,6 +48,7 @@ class PostRunReview:
     findings: list[str]
     stats: dict
     duration_ms: int
+    response_text: str = ""
 
 
 def run_post_run_review(
@@ -136,20 +138,23 @@ def run_post_run_review(
     )
 
     # Run agent
+    response_text = ""
     try:
         result = agent.run(request)
         decision = result.decision
         findings = result.findings
         duration_ms = result.duration_ms
+        response_text = result.response_text
     except Exception as e:
         # Fail open - approve on error but record the error
         logger.warning("Post-run review agent error: %s", e)
         decision = "approved"
         findings = [f"SVS post-run review error: {e}"]
         duration_ms = int((time.time() - start_time) * 1000)
+        response_text = f"Error during review: {e}"
 
     # Write findings to file
-    _write_findings_file(outputs_dir, decision, findings, stats, duration_ms)
+    _write_findings_file(outputs_dir, decision, findings, stats, duration_ms, response_text)
 
     return PostRunReview(
         skipped=False,
@@ -157,6 +162,7 @@ def run_post_run_review(
         findings=findings,
         stats=stats,
         duration_ms=duration_ms,
+        response_text=response_text,
     )
 
 
@@ -166,6 +172,7 @@ def _write_findings_file(
     findings: list[str],
     stats: dict,
     duration_ms: int,
+    response_text: str = "",
 ) -> None:
     """Write findings to .goldfish/svs_findings.json.
 
@@ -178,6 +185,7 @@ def _write_findings_file(
         findings: List of finding messages
         stats: Stage output statistics
         duration_ms: Review duration in milliseconds
+        response_text: Full AI response text for audit trail
     """
     try:
         goldfish_dir = outputs_dir / ".goldfish"
@@ -220,6 +228,7 @@ def _write_findings_file(
                 "findings": merged_findings,
                 "stats": merged_stats,
                 "duration_ms": duration_ms,
+                "response_text": response_text,
             }
         )
 

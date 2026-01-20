@@ -650,7 +650,17 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
                     findings = json.loads(row["svs_findings_json"])
                     if isinstance(findings, dict):
                         svs_data["during_run"] = findings.get("during_run")
-                        svs_data["post_run"] = findings.get("ai_review")
+                        # Extract post_run and rename response_text to full_text for consistency
+                        ai_review = findings.get("ai_review")
+                        if ai_review and isinstance(ai_review, dict):
+                            svs_data["post_run"] = {
+                                "decision": ai_review.get("decision"),
+                                "findings": ai_review.get("findings", []),
+                                "duration_ms": ai_review.get("duration_ms"),
+                                "full_text": ai_review.get("response_text"),
+                            }
+                        else:
+                            svs_data["post_run"] = ai_review
                 except Exception:
                     pass
 
