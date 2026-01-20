@@ -106,7 +106,8 @@ def test_launch_with_capacity_search(mock_build_startup, mock_resource_launcher_
         use_capacity_search=True,
     )
 
-    assert result == "test-instance"
+    # Result is now GCELaunchResult with instance_name and zone
+    assert result.instance_name == "test-instance"
 
     # Verify startup script was built with correct params
     mock_build_startup.assert_called_once()
@@ -160,7 +161,8 @@ def test_launch_with_goldfish_env_vars(mock_build_startup, mock_resource_launche
         use_capacity_search=True,
     )
 
-    assert result == "test-instance"
+    # Result is now GCELaunchResult with instance_name and zone
+    assert result.instance_name == "test-instance"
 
     # Verify env_map includes goldfish_env variables
     mock_build_startup.assert_called_once()
@@ -219,7 +221,9 @@ def test_launch_simple_no_gpu(mock_build_startup, mock_run_gcloud, mock_tempfile
         use_capacity_search=False,
     )
 
-    assert result == "test-run"
+    # Result is now GCELaunchResult with instance_name and zone
+    assert result.instance_name == "test-run"
+    assert result.zone == "us-central1-a"
 
     # Verify gcloud create was called without GPU flags
     mock_run_gcloud.assert_called_once()
@@ -270,7 +274,9 @@ def test_launch_simple_with_gpu(mock_build_startup, mock_run_gcloud, mock_tempfi
         use_capacity_search=False,
     )
 
-    assert result == "gpu-run"
+    # Result is now GCELaunchResult with instance_name and zone
+    assert result.instance_name == "gpu-run"
+    assert result.zone == "us-central1-a"
 
     # Verify GPU flags are present
     mock_run_gcloud.assert_called_once()

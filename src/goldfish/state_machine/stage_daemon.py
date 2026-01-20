@@ -285,10 +285,11 @@ class StageDaemon:
                 project_id = self._config.gce.effective_project_id
             except ValueError:
                 pass
-            # Use first zone from zones list as fallback for metadata lookup
-            # TODO: Store actual zone per-run for multi-zone capacity-aware launches
-            zones = getattr(self._config.gce, "zones", None)
-            zone = zones[0] if zones else None
+            # Use stored zone (preferred) or fall back to config for legacy runs
+            zone = run.get("instance_zone")
+            if not zone:
+                zones = getattr(self._config.gce, "zones", None)
+                zone = zones[0] if zones else None
 
         # 1) RUNNING: check for exit code (success/failure/missing) first
         if state == StageState.RUNNING:

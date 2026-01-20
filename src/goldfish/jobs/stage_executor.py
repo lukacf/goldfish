@@ -2252,7 +2252,7 @@ echo "Stage completed successfully"
                 self.gce_launcher.resources = [profile]
 
             # Launch on GCE (gpu_preference from config is passed via GCELauncher init)
-            self.gce_launcher.launch_instance(
+            launch_result = self.gce_launcher.launch_instance(
                 image_tag=image_tag,
                 stage_run_id=stage_run_id,
                 entrypoint_script=self._build_entrypoint_script(stage_name, runtime, entrypoint),
@@ -2264,6 +2264,14 @@ echo "Stage completed successfully"
                 zones=zones,
                 use_capacity_search=use_capacity_search,
                 goldfish_env=goldfish_env,
+            )
+
+            # Store the zone where the instance was launched for monitoring/cleanup
+            self.db.set_stage_run_backend(
+                stage_run_id=stage_run_id,
+                backend_type="gce",
+                backend_handle=launch_result.instance_name,
+                instance_zone=launch_result.zone,
             )
 
             # State machine: LAUNCHING → RUNNING (LAUNCH_OK)

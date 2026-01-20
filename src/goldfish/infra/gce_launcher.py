@@ -13,6 +13,7 @@ import json
 import logging
 import subprocess
 import time
+from dataclasses import dataclass
 from datetime import UTC
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,18 @@ HYPERDISK_PROVISIONED_THROUGHPUT = 2400  # MB/s for hyperdisk-balanced
 # These prevent runaway instances from burning money
 DEFAULT_MAX_RUNTIME_SECONDS = 6 * 3600  # 6 hours - hard limit, instance self-deletes
 DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 600  # 10 minutes - if job uses heartbeat()
+
+
+@dataclass
+class GCELaunchResult:
+    """Result of a GCE instance launch.
+
+    Contains the instance name and the zone where it was launched,
+    enabling proper zone-aware operations (monitoring, cleanup, metadata access).
+    """
+
+    instance_name: str
+    zone: str
 
 
 class GCELauncher:
@@ -120,7 +133,7 @@ class GCELauncher:
         zones: list[str] | None = None,
         use_capacity_search: bool = True,
         goldfish_env: dict[str, str] | None = None,
-    ) -> str:
+    ) -> GCELaunchResult:
         """Launch GCE instance for stage run.
 
         Args:
@@ -139,7 +152,7 @@ class GCELauncher:
             goldfish_env: Goldfish environment variables (metrics, provenance, etc.)
 
         Returns:
-            Instance name
+            GCELaunchResult with instance_name and zone
 
         Raises:
             GoldfishError: If launch fails
@@ -345,7 +358,7 @@ class GCELauncher:
         startup_script: str,
         gpu_type: str | None,
         zones: list[str] | None,
-    ) -> str:
+    ) -> GCELaunchResult:
         """Launch using ResourceLauncher for capacity search.
 
         Args:
@@ -355,7 +368,7 @@ class GCELauncher:
             zones: Zones to search
 
         Returns:
-            Instance name
+            GCELaunchResult with instance_name and zone
 
         Raises:
             GoldfishError: If no capacity found
@@ -393,7 +406,10 @@ class GCELauncher:
             startup_script=startup_script,
         )
 
-        return result.instance_name
+        return GCELaunchResult(
+            instance_name=result.instance_name,
+            zone=result.selection.zone,
+        )
 
     def _launch_simple(
         self,
@@ -403,7 +419,7 @@ class GCELauncher:
         gpu_type: str | None,
         gpu_count: int,
         zone: str,
-    ) -> str:
+    ) -> GCELaunchResult:
         """Simple launch without capacity search.
 
         Args:
@@ -415,7 +431,7 @@ class GCELauncher:
             zone: Zone
 
         Returns:
-            Instance name
+            GCELaunchResult with instance_name and zone
 
         Raises:
             GoldfishError: If launch fails
@@ -474,7 +490,7 @@ class GCELauncher:
                 poll_interval=2.0,
             )
 
-            return instance_name
+            return GCELaunchResult(instance_name=instance_name, zone=zone)
 
         finally:
             startup_path.unlink(missing_ok=True)
