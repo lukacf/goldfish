@@ -658,6 +658,8 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
                                 "findings": ai_review.get("findings", []),
                                 "duration_ms": ai_review.get("duration_ms"),
                                 "full_text": ai_review.get("response_text"),
+                                "ml_outcome": ai_review.get("ml_outcome"),
+                                "ml_metric_value": ai_review.get("ml_metric_value"),
                             }
                         else:
                             svs_data["post_run"] = ai_review

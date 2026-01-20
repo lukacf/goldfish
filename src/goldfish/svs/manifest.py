@@ -117,6 +117,8 @@ def read_svs_manifests(outputs_dir: Path) -> dict[str, Any]:
                 "findings": filtered_findings,
                 "duration_ms": data.get("duration_ms"),
                 "response_text": data.get("response_text", ""),
+                "ml_outcome": data.get("ml_outcome"),
+                "ml_metric_value": data.get("ml_metric_value"),
             }
 
             # Findings stats OVERRIDE base stats (per-signal merge)
