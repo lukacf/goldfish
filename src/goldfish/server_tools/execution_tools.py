@@ -570,10 +570,22 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
         svs_rows = db.get_unnotified_svs_reviews(limit=50)
         new_svs_reviews = []
         review_ids_to_mark: list[int] = []
+        seen_during_run = False  # Only show latest during_run review (they're periodic)
         for svs_row in svs_rows:
             # Only include reviews for this specific run
             if svs_row["stage_run_id"] != run_id:
                 continue
+
+            review_type = svs_row["review_type"]
+
+            # For during_run reviews, only keep the latest one (first, since ordered DESC)
+            # They're periodic monitoring updates, not accumulated alerts
+            if review_type == "during_run":
+                if seen_during_run:
+                    # Still mark older during_run reviews as notified so they don't reappear
+                    review_ids_to_mark.append(svs_row["id"])
+                    continue
+                seen_during_run = True
 
             # Parse findings to include actual content
             findings = []
@@ -588,7 +600,7 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
 
             new_svs_reviews.append(
                 {
-                    "review_type": svs_row["review_type"],
+                    "review_type": review_type,
                     "decision": svs_row["decision"],
                     "findings": findings,
                     "full_text": svs_row.get("response_text"),
