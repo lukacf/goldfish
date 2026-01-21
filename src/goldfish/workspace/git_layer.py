@@ -491,6 +491,24 @@ class GitLayer:
         except GoldfishError:
             return False
 
+    def has_remote_branch(self, branch: str) -> bool:
+        """Check if a branch exists on the remote (origin).
+
+        Args:
+            branch: Local branch name (e.g., 'goldfish/my-workspace')
+
+        Returns:
+            True if origin/{branch} exists, False otherwise.
+        """
+        if not self.has_remote():
+            return False
+        try:
+            # Check if the remote branch ref exists
+            self._run_git("rev-parse", "--verify", f"origin/{branch}", check=True)
+            return True
+        except GoldfishError:
+            return False
+
     def diff_commits(self, from_sha: str, to_sha: str) -> dict:
         """Get diff between two commits.
 
@@ -1047,7 +1065,10 @@ class GitLayer:
 
             # Ensure it's on the correct branch and clean
             self._run_git("checkout", "-B", branch, cwd=temp_worktree)
-            self._run_git("reset", "--hard", f"origin/{branch}" if self.has_remote() else branch, cwd=temp_worktree)
+            # Only reset to origin/branch if the remote branch exists
+            # (new workspaces don't have remote branches until first push)
+            reset_target = f"origin/{branch}" if self.has_remote_branch(branch) else branch
+            self._run_git("reset", "--hard", reset_target, cwd=temp_worktree)
             self._run_git("clean", "-fd", cwd=temp_worktree)
 
             # Sync with delete: mirror slot to worktree (respecting .gitignore)
