@@ -119,6 +119,7 @@ class Database:
                 ("output_sync_done", "INTEGER DEFAULT 0"),  # Output sync completed
                 ("output_recording_done", "INTEGER DEFAULT 0"),  # Output recording completed
                 ("gcs_outage_started", "TEXT"),  # When GCS outage was first detected
+                ("instance_zone", "TEXT"),  # GCE zone where instance was launched
             ],
             "signal_lineage": [
                 ("source_stage_run_id", "TEXT"),  # Upstream stage run
