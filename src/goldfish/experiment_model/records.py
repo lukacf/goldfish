@@ -32,6 +32,74 @@ _CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 RecordType = Literal["run", "checkpoint"]
 
 
+def _format_age_from_ulid(record_id: str) -> str:
+    """Convert ULID record_id to relative age like '2h ago'.
+
+    ULIDs encode timestamp in first 10 chars (Crockford base32).
+    """
+    if not record_id or len(record_id) < 10:
+        return "unknown"
+
+    try:
+        # Decode first 10 chars from Crockford base32 to get millisecond timestamp
+        timestamp_chars = record_id[:10].upper()
+        timestamp_ms = 0
+        for char in timestamp_chars:
+            idx = _CROCKFORD_ALPHABET.find(char)
+            if idx < 0:
+                return "unknown"
+            timestamp_ms = (timestamp_ms << 5) | idx
+
+        # Convert to datetime
+        dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
+        now = datetime.now(UTC)
+        delta = now - dt
+
+        if delta.days > 0:
+            return f"{delta.days}d ago"
+        hours = delta.seconds // 3600
+        if hours > 0:
+            return f"{hours}h ago"
+        minutes = delta.seconds // 60
+        return f"{minutes}m ago"
+    except Exception:
+        return "unknown"
+
+
+def _extract_primary_metric(results_final: str | None, results_auto: str | None) -> dict[str, Any] | None:
+    """Extract primary metric from finalized or auto results JSON."""
+    # Prefer finalized results
+    for results_json in [results_final, results_auto]:
+        if not results_json:
+            continue
+        try:
+            results = json.loads(results_json)
+            if isinstance(results, dict):
+                metric_name = results.get("primary_metric")
+                value = results.get("value")
+                if metric_name and value is not None:
+                    return {"name": metric_name, "value": value}
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return None
+
+
+def _parse_reason_description(reason_json: str | None) -> str | None:
+    """Parse reason description from stage_runs.reason_json."""
+    if not reason_json:
+        return None
+    try:
+        reason_data = json.loads(reason_json)
+        if isinstance(reason_data, dict):
+            return reason_data.get("description")
+        # If it's a string, return it directly
+        if isinstance(reason_data, str):
+            return reason_data
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return None
+
+
 def generate_record_id() -> str:
     """Generate a new ULID-like ID for experiment records.
 
@@ -1295,6 +1363,7 @@ class ExperimentRecordManager:
         desc: bool = True,
         include_pruned: bool = False,
         include_internal_ids: bool = False,
+        finalized_only: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -1312,6 +1381,7 @@ class ExperimentRecordManager:
             desc: Sort descending if True
             include_pruned: Include pruned records (default False)
             include_internal_ids: Include internal IDs in response (default False)
+            finalized_only: Only return runs with finalized results (default False)
             limit: Max records to return
             offset: Records to skip
 
@@ -1444,6 +1514,17 @@ class ExperimentRecordManager:
                 params.append(min_value)
             query += ")"
 
+        # Finalized only filtering (only show runs with finalized results)
+        if finalized_only:
+            query += """
+                AND er.type = 'run'
+                AND EXISTS (
+                    SELECT 1 FROM run_results rr
+                    WHERE rr.stage_run_id = er.stage_run_id
+                    AND rr.results_status = 'finalized'
+                )
+            """
+
         # Sorting
         order_dir = "DESC" if desc else "ASC"
         if sort_by == "metric":
@@ -1514,7 +1595,10 @@ class ExperimentRecordManager:
             version_tags = {r["tag_name"] for r in version_tag_rows}
             record["tags"] = sorted(run_tags | version_tags)
 
-            # For run records, enrich with results_status, ml_outcome, stage
+            # Compute age from record_id (ULID contains timestamp)
+            record["age"] = _format_age_from_ulid(record["record_id"])
+
+            # For run records, enrich with results_status, ml_outcome, stage, reason, primary_metric
             stage_run_id = record.get("stage_run_id")
             if stage_run_id is not None and record["type"] == "run":
                 # Get run results
@@ -1522,18 +1606,34 @@ class ExperimentRecordManager:
                 if run_results:
                     record["results_status"] = run_results.get("results_status")
                     record["ml_outcome"] = run_results.get("ml_outcome")
+                    # Extract primary_metric from results_final or results_auto
+                    results_final = run_results.get("results_final")
+                    results_auto = run_results.get("results_auto")
+                    primary_metric = _extract_primary_metric(results_final, results_auto)
+                    if primary_metric:
+                        record["primary_metric"] = primary_metric
                 else:
                     record["results_status"] = "missing"
                     record["ml_outcome"] = "unknown"
 
-                # Get stage name
+                # Get stage name and reason
                 with self.db._conn() as conn2:
                     stage_row = conn2.execute(
-                        "SELECT stage_name FROM stage_runs WHERE id = ?",
+                        "SELECT stage_name, reason_json FROM stage_runs WHERE id = ?",
                         (stage_run_id,),
                     ).fetchone()
                     if stage_row:
                         record["stage"] = stage_row["stage_name"]
+                        # Extract reason description from JSON
+                        # Use try/except since sqlite3.Row doesn't have .get() and
+                        # mocks may not include all columns
+                        try:
+                            reason_json_value = stage_row["reason_json"]
+                            reason = _parse_reason_description(reason_json_value)
+                            if reason:
+                                record["reason"] = reason
+                        except (KeyError, TypeError):
+                            pass  # reason_json not available
 
                 # Include internal_ids if requested
                 if include_internal_ids:

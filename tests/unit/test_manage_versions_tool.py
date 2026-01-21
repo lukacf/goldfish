@@ -32,7 +32,7 @@ def mock_server_imports():
 
 
 def test_manage_versions_list():
-    """Test action='list'."""
+    """Test action='list' returns versions with default exclude_pruned."""
     from goldfish.server_tools.workspace_tools import manage_versions
 
     mock_db = MagicMock()
@@ -43,7 +43,8 @@ def test_manage_versions_list():
 
     assert result["workspace"] == "w1"
     assert len(result["versions"]) == 2
-    mock_db.list_versions.assert_called_once_with("w1", include_pruned=True, limit=50, offset=0)
+    # Default is include_pruned=False
+    mock_db.list_versions.assert_called_once_with("w1", include_pruned=False, limit=50, offset=0)
 
 
 def test_manage_versions_tag_success():
@@ -89,3 +90,32 @@ def test_manage_versions_invalid_action():
 
     with pytest.raises(GoldfishError, match="Unknown action: jump"):
         manage_versions(workspace="w1", action="jump")
+
+
+def test_manage_versions_list_excludes_pruned_by_default():
+    """Test that action='list' excludes pruned versions by default."""
+    from goldfish.server_tools.workspace_tools import manage_versions
+
+    mock_db = MagicMock()
+    mock_db.list_versions.return_value = [{"version": "v1"}, {"version": "v2"}]
+
+    with patch("goldfish.server_tools.workspace_tools._get_db", return_value=mock_db):
+        result = manage_versions(workspace="w1", action="list")
+
+    assert result["workspace"] == "w1"
+    # Default should be include_pruned=False
+    mock_db.list_versions.assert_called_once_with("w1", include_pruned=False, limit=50, offset=0)
+
+
+def test_manage_versions_list_includes_pruned_when_requested():
+    """Test that action='list' can include pruned versions when explicitly requested."""
+    from goldfish.server_tools.workspace_tools import manage_versions
+
+    mock_db = MagicMock()
+    mock_db.list_versions.return_value = [{"version": "v1", "pruned": False}, {"version": "v2", "pruned": True}]
+
+    with patch("goldfish.server_tools.workspace_tools._get_db", return_value=mock_db):
+        result = manage_versions(workspace="w1", action="list", include_pruned=True)
+
+    assert len(result["versions"]) == 2
+    mock_db.list_versions.assert_called_once_with("w1", include_pruned=True, limit=50, offset=0)

@@ -482,3 +482,64 @@ def test_inspect_run_includes_svs_partial_outcome():
 
     assert result["svs"]["post_run"]["ml_outcome"] == "partial"
     assert result["svs"]["post_run"]["ml_metric_value"] == 0.72
+
+
+def test_inspect_run_includes_reason():
+    """Test that inspect_run includes reason from reason_json."""
+    import json
+
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-abc123def"
+    reason_data = {"description": "Testing new learning rate schedule"}
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "completed",
+        "state": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": json.dumps(reason_data),
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["metadata"])
+
+    assert "reason" in result
+    assert result["reason"] == "Testing new learning rate schedule"
+
+
+def test_inspect_run_reason_null_when_missing():
+    """Test that inspect_run returns null reason when reason_json is missing."""
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-def456abc"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "completed",
+        "state": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": None,
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["metadata"])
+
+    assert "reason" in result
+    assert result["reason"] is None

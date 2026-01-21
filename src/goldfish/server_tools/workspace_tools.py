@@ -135,16 +135,26 @@ def status() -> dict:
 
 
 @mcp.tool()
-def inspect_workspace(name: str, version_limit: int = 10, version_offset: int = 0) -> dict:
+def inspect_workspace(
+    name: str,
+    version_limit: int = 10,
+    version_offset: int = 0,
+    include: list[str] | None = None,
+) -> dict:
     """Get a comprehensive view of a workspace.
 
-    Combines metadata, lineage (parent/branches), goal, and pipeline definition.
+    Combines metadata, lineage (parent/branches), goal, and tags.
     Version history is paginated (newest first).
+
+    By default returns essential info only. Use include=["pipeline"] to also get
+    the full pipeline definition.
 
     Args:
         name: Workspace name or slot (e.g., "baseline" or "w1")
         version_limit: Max number of versions to return (default 10)
         version_offset: Skip this many versions (default 0)
+        include: Optional list of additional data to include:
+                 - "pipeline": Full pipeline YAML definition
     """
     db = _get_db()
     workspace_manager = _get_workspace_manager()
@@ -165,14 +175,7 @@ def inspect_workspace(name: str, version_limit: int = 10, version_offset: int = 
         version_offset=version_offset,
     )
 
-    # 3. Pipeline Info
-    pipeline_manager = _get_pipeline_manager()
-    try:
-        pipeline_def = pipeline_manager.get_pipeline(workspace_name)
-    except Exception:
-        pipeline_def = None
-
-    # 4. Refresh STATE.md on disk if mounted
+    # 3. Refresh STATE.md on disk if mounted
     if ws_info.is_mounted and ws_info.mounted_slot:
         try:
             slot_path = workspace_manager.get_slot_path(ws_info.mounted_slot)
@@ -180,15 +183,26 @@ def inspect_workspace(name: str, version_limit: int = 10, version_offset: int = 
         except Exception as e:
             logger.warning(f"Failed to refresh STATE.md for {workspace_name}: {e}")
 
-    return {
+    result = {
         "name": workspace_name,
         "goal": goal,
         "is_mounted": ws_info.is_mounted,
         "slot": ws_info.mounted_slot,
         "lineage": lineage,
-        "pipeline": pipeline_def,
         "tags": db.list_tags(workspace_name),
     }
+
+    # 4. Pipeline Info (only if explicitly requested)
+    include_set = set(include) if include else set()
+    if "pipeline" in include_set:
+        pipeline_manager = _get_pipeline_manager()
+        try:
+            pipeline_def = pipeline_manager.get_pipeline(workspace_name)
+        except Exception:
+            pipeline_def = None
+        result["pipeline"] = pipeline_def
+
+    return result
 
 
 @mcp.tool()
@@ -202,6 +216,7 @@ def manage_versions(
     to_version: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    include_pruned: bool = False,
 ) -> dict:
     """Unified tool for version tagging, pruning, and listing.
 
@@ -214,13 +229,14 @@ def manage_versions(
         from_version / to_version: Range for bulk pruning
         limit: Max versions to return for action='list' (default 50)
         offset: Skip versions for action='list' (default 0)
+        include_pruned: For action='list' - include pruned versions (default False)
     """
     db = _get_db()
     validate_workspace_name(workspace)
     config = _get_config()
 
     if action == "list":
-        versions = db.list_versions(workspace, include_pruned=True, limit=limit, offset=offset)
+        versions = db.list_versions(workspace, include_pruned=include_pruned, limit=limit, offset=offset)
         return {"workspace": workspace, "versions": versions, "limit": limit, "offset": offset}
 
     elif action == "tag":

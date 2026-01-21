@@ -71,6 +71,26 @@ REDACTION_PATTERNS = [
     (r"ghp_[A-Za-z0-9]{36}", "[REDACTED_GITHUB_TOKEN]"),
 ]
 
+# Pattern to match stage run IDs in paths (e.g., "stage-abc123" or "stage-deadbeef012345")
+_STAGE_RUN_ID_PATTERN = re.compile(r"stage-[a-f0-9]+")
+
+
+def _extract_stage_run_id_from_path(path: str) -> str | None:
+    """Extract stage run ID from a storage path if present.
+
+    Looks for patterns like 'stage-abc123' in paths such as:
+    - gs://bucket/artifacts/stage-abc123/outputs/model
+    - /mnt/outputs/stage-deadbeef/features.npy
+
+    Args:
+        path: GCS path or local path that may contain a stage run ID
+
+    Returns:
+        The stage run ID if found, None otherwise
+    """
+    match = _STAGE_RUN_ID_PATTERN.search(path)
+    return match.group(0) if match else None
+
 
 @dataclass
 class _MetricsSyncState:
@@ -628,7 +648,12 @@ class StageExecutor:
 
                 # 3. Use as literal path (fallback)
                 inputs[input_name] = str(override_value)
-                sources[input_name] = {"source_type": "override"}
+                # Try to extract source_stage_run_id from the path for lineage tracking
+                source_run_id = _extract_stage_run_id_from_path(str(override_value))
+                sources[input_name] = {
+                    "source_type": "override",
+                    "source_stage_run_id": source_run_id,  # May be None if not extractable
+                }
                 logger.info("Stage '%s': input '%s' OVERRIDDEN to path '%s'", stage.name, input_name, override_value)
                 ctx.update(
                     {

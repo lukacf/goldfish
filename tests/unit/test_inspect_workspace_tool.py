@@ -69,5 +69,93 @@ def test_inspect_workspace_basic():
 
     assert result["name"] == workspace_name
     assert result["goal"] == "Run baseline"
-    assert result["pipeline"]["stages"] == ["train"]
+    # By default, pipeline should be excluded
+    assert "pipeline" not in result
     assert result["lineage"]["history"] == []
+
+
+def test_inspect_workspace_excludes_pipeline_by_default():
+    """Test inspect_workspace excludes pipeline by default (use include=['pipeline'] to get it)."""
+    from datetime import datetime
+
+    from goldfish.models import WorkspaceInfo
+    from goldfish.server_tools.workspace_tools import inspect_workspace
+
+    workspace_name = "baseline"
+    mock_db = MagicMock()
+    mock_db.get_workspace_goal.return_value = "Run baseline"
+    mock_db.list_tags.return_value = []
+
+    mock_wm = MagicMock()
+    mock_wm.get_workspace_for_slot.return_value = None
+    mock_wm.get_workspace.return_value = WorkspaceInfo(
+        name=workspace_name,
+        created_at=datetime.now(),
+        goal="Run baseline",
+        snapshot_count=0,
+        last_activity=datetime.now(),
+        is_mounted=False,
+        slot=None,
+    )
+
+    mock_pm = MagicMock()
+    mock_pm.get_pipeline.return_value = {"stages": ["train"]}
+
+    with (
+        patch("goldfish.server_tools.workspace_tools._get_db", return_value=mock_db),
+        patch("goldfish.server_tools.workspace_tools._get_workspace_manager", return_value=mock_wm),
+        patch("goldfish.server_tools.workspace_tools._get_pipeline_manager", return_value=mock_pm),
+        patch("goldfish.server_tools.workspace_tools.LineageManager") as mock_lm_class,
+    ):
+        mock_lm = mock_lm_class.return_value
+        mock_lm.get_workspace_lineage.return_value = {"history": []}
+
+        result = inspect_workspace(name=workspace_name)
+
+    # Pipeline should NOT be in the result by default
+    assert "pipeline" not in result
+    assert result["name"] == workspace_name
+    assert result["goal"] == "Run baseline"
+
+
+def test_inspect_workspace_includes_pipeline_when_requested():
+    """Test inspect_workspace includes pipeline when include=['pipeline'] is specified."""
+    from datetime import datetime
+
+    from goldfish.models import WorkspaceInfo
+    from goldfish.server_tools.workspace_tools import inspect_workspace
+
+    workspace_name = "baseline"
+    mock_db = MagicMock()
+    mock_db.get_workspace_goal.return_value = "Run baseline"
+    mock_db.list_tags.return_value = []
+
+    mock_wm = MagicMock()
+    mock_wm.get_workspace_for_slot.return_value = None
+    mock_wm.get_workspace.return_value = WorkspaceInfo(
+        name=workspace_name,
+        created_at=datetime.now(),
+        goal="Run baseline",
+        snapshot_count=0,
+        last_activity=datetime.now(),
+        is_mounted=False,
+        slot=None,
+    )
+
+    mock_pm = MagicMock()
+    mock_pm.get_pipeline.return_value = {"stages": ["train", "evaluate"]}
+
+    with (
+        patch("goldfish.server_tools.workspace_tools._get_db", return_value=mock_db),
+        patch("goldfish.server_tools.workspace_tools._get_workspace_manager", return_value=mock_wm),
+        patch("goldfish.server_tools.workspace_tools._get_pipeline_manager", return_value=mock_pm),
+        patch("goldfish.server_tools.workspace_tools.LineageManager") as mock_lm_class,
+    ):
+        mock_lm = mock_lm_class.return_value
+        mock_lm.get_workspace_lineage.return_value = {"history": []}
+
+        result = inspect_workspace(name=workspace_name, include=["pipeline"])
+
+    # Pipeline SHOULD be in the result when requested
+    assert "pipeline" in result
+    assert result["pipeline"]["stages"] == ["train", "evaluate"]
