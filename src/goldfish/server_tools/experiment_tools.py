@@ -3,7 +3,9 @@
 Provides tools for experiment record management, finalization, and history.
 """
 
+import json
 import logging
+from datetime import UTC, datetime
 from typing import Literal
 
 from goldfish.errors import GoldfishError
@@ -100,10 +102,14 @@ def list_history(
     desc: bool = True,
     include_pruned: bool = False,
     include_internal_ids: bool = False,
-    limit: int = 50,
+    finalized_only: bool = False,
+    limit: int = 20,
     offset: int = 0,
 ) -> dict:
-    """List experiment records (runs + checkpoints), newest first.
+    """Browse experiment history for a workspace - the essential tool for understanding what has been run.
+
+    This is the primary tool for reviewing experiment progress. Use it to see recent runs,
+    compare outcomes, and track what has been tried. Returns records newest-first by default.
 
     Args:
         workspace: Workspace name or slot (e.g., "w1", "baseline_lstm")
@@ -120,24 +126,19 @@ def list_history(
         desc: Sort descending (newest/highest first) if True
         include_pruned: Include records from pruned versions (default False)
         include_internal_ids: Include internal stage_run_id in results (default False)
-        limit: Max records to return (default 50)
+        finalized_only: Only show runs with finalized results (default False)
+        limit: Max records to return (default 20)
         offset: Skip first N records (for pagination)
 
     Returns:
-        Dict with:
-        - records: List of experiment records with:
-            - record_id, type, workspace, version, stage (if run)
-            - results_status, ml_outcome (if run)
-            - tags (merged from run_tags + version_tags)
-            - created_at
-        - total: Total count (before limit/offset)
-        - has_more: Whether more records exist
+        Dict with workspace context and records list containing:
+        - record_id, version, stage, reason, primary_metric, ml_outcome, age
+        - tags (only if non-empty)
 
     Example:
-        list_history("w1")  # All records
-        list_history("w1", record_type="run", stage="train")  # Train runs only
-        list_history("w1", tagged=True)  # Only tagged records
-        list_history("w1", tagged="best-v1")  # Records with specific tag
+        list_history("w1")  # Recent runs
+        list_history("w1", finalized_only=True)  # Only finalized runs
+        list_history("w1", tagged="best")  # Records with "best" tag
     """
     workspace_manager = _get_workspace_manager()
     manager = _get_experiment_manager()
@@ -159,13 +160,30 @@ def list_history(
         desc=desc,
         include_pruned=include_pruned,
         include_internal_ids=include_internal_ids,
+        finalized_only=finalized_only,
         limit=limit,
         offset=offset,
     )
 
-    # The manager returns a dict with 'records', 'total', and 'has_more'
+    # Post-process records to clean up output
+    cleaned_records = []
+    for record in records.get("records", []):
+        cleaned = dict(record)
+        # Remove workspace_name from each record (caller already knows it)
+        cleaned.pop("workspace_name", None)
+        # Remove empty tags
+        if "tags" in cleaned and not cleaned["tags"]:
+            del cleaned["tags"]
+        # Remove null experiment_group
+        if cleaned.get("experiment_group") is None:
+            cleaned.pop("experiment_group", None)
+        # Remove redundant type field (almost all records are "run")
+        cleaned.pop("type", None)
+        cleaned_records.append(cleaned)
+
     return {
-        "records": records.get("records", []),
+        "workspace": workspace_name,
+        "records": cleaned_records,
         "total": records.get("total", 0),
         "has_more": records.get("has_more", False),
     }
@@ -445,3 +463,180 @@ def save_results_spec(
         return {"success": True, "stage_run_id": stage_run_id}
     except InvalidResultsSpecError as e:
         raise GoldfishError(f"Invalid results_spec: {e.message}") from e
+
+
+def _format_age(created_at: str) -> str:
+    """Convert ISO timestamp to relative age like '2h ago'.
+
+    Args:
+        created_at: ISO format timestamp string
+
+    Returns:
+        Human-readable relative time (e.g., "5m ago", "2h ago", "3d ago")
+    """
+    # Handle Z suffix for UTC
+    timestamp = created_at.replace("Z", "+00:00")
+    dt = datetime.fromisoformat(timestamp)
+
+    # Ensure timezone-aware comparison
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+
+    now = datetime.now(UTC)
+    delta = now - dt
+
+    if delta.days > 0:
+        return f"{delta.days}d ago"
+    hours = delta.seconds // 3600
+    if hours > 0:
+        return f"{hours}h ago"
+    minutes = delta.seconds // 60
+    return f"{minutes}m ago"
+
+
+def _get_lineage_impl(
+    run_id: str,
+    direction: Literal["upstream", "downstream"] = "downstream",
+) -> dict:
+    """Internal implementation for get_lineage tool.
+
+    Args:
+        run_id: Stage run ID (e.g., "stage-abc123")
+        direction: "downstream" = who consumed my outputs
+                   "upstream" = where did my inputs come from
+
+    Returns:
+        Dict with connected runs including stage, reason, signal name, outcome, and age.
+    """
+    db = _get_db()
+
+    # Verify run exists
+    run = db.get_stage_run(run_id)
+    if run is None:
+        raise GoldfishError(f"Stage run not found: {run_id}")
+
+    if direction == "downstream":
+        # Find runs that consumed outputs from this run
+        downstream_signals = db.list_signals(source_stage_run_id=run_id)
+
+        # Deduplicate by consumer run
+        seen_consumers: set[str] = set()
+        consumers = []
+
+        for signal in downstream_signals:
+            consumer_id = signal.get("stage_run_id")
+            if not consumer_id or consumer_id in seen_consumers:
+                continue
+            seen_consumers.add(consumer_id)
+
+            # Get consumer run details
+            consumer_run = db.get_stage_run(consumer_id)
+            if consumer_run is None:
+                continue
+
+            # Parse reason from JSON
+            reason = None
+            reason_json = consumer_run.get("reason_json")
+            if reason_json:
+                try:
+                    reason_data = json.loads(reason_json)
+                    reason = reason_data.get("description")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # Format age
+            started_at = consumer_run.get("started_at")
+            age = _format_age(started_at) if started_at else "unknown"
+
+            consumers.append(
+                {
+                    "run_id": consumer_id,
+                    "stage": consumer_run.get("stage_name"),
+                    "reason": reason,
+                    "signal_consumed": signal.get("signal_name"),
+                    "outcome": consumer_run.get("state"),
+                    "age": age,
+                }
+            )
+
+        return {
+            "run_id": run_id,
+            "direction": "downstream",
+            "consumers": consumers,
+        }
+    else:
+        # Find runs that produced inputs for this run
+        input_signals = db.list_signals(stage_run_id=run_id, signal_type="input")
+
+        # Group by producer run
+        seen_producers: set[str] = set()
+        producers = []
+
+        for signal in input_signals:
+            producer_id = signal.get("source_stage_run_id")
+            if not producer_id or producer_id in seen_producers:
+                continue
+            seen_producers.add(producer_id)
+
+            # Get producer run details
+            producer_run = db.get_stage_run(producer_id)
+            if producer_run is None:
+                continue
+
+            # Parse reason from JSON
+            reason = None
+            reason_json = producer_run.get("reason_json")
+            if reason_json:
+                try:
+                    reason_data = json.loads(reason_json)
+                    reason = reason_data.get("description")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # Format age
+            started_at = producer_run.get("started_at")
+            age = _format_age(started_at) if started_at else "unknown"
+
+            producers.append(
+                {
+                    "run_id": producer_id,
+                    "stage": producer_run.get("stage_name"),
+                    "reason": reason,
+                    "signal_produced": signal.get("signal_name"),
+                    "outcome": producer_run.get("state"),
+                    "age": age,
+                }
+            )
+
+        return {
+            "run_id": run_id,
+            "direction": "upstream",
+            "producers": producers,
+        }
+
+
+@mcp.tool()
+def get_lineage(
+    run_id: str,
+    direction: Literal["upstream", "downstream"] = "downstream",
+) -> dict:
+    """Track which runs consumed this run's outputs (downstream) or produced its inputs (upstream).
+
+    This is the essential tool for understanding experiment dependencies. Use it to:
+    - Find all runs that depend on a completed run's outputs (downstream)
+    - Trace where a run's inputs came from (upstream)
+    - Debug data flow issues in multi-stage pipelines
+
+    Args:
+        run_id: Stage run ID (e.g., "stage-abc123")
+        direction: "downstream" (default) = who consumed my outputs
+                   "upstream" = where did my inputs come from
+
+    Returns:
+        Dict with connected runs including stage, reason, signal name, outcome, and age.
+
+    Example:
+        get_lineage("stage-abc123")  # What runs used my outputs?
+        get_lineage("stage-abc123", direction="upstream")  # Where did my data come from?
+    """
+    return _get_lineage_impl(run_id, direction)
