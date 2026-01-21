@@ -2808,7 +2808,7 @@ class Database:
         with self._conn() as conn:
             rows = conn.execute(
                 f"""
-                SELECT id, workspace_name, stage_name, state, error, completed_at
+                SELECT id, workspace_name, stage_name, state, error, completed_at, reason_json
                 FROM stage_runs
                 WHERE state IN ({placeholders})
                 ORDER BY completed_at DESC
@@ -2839,7 +2839,7 @@ class Database:
         with self._conn() as conn:
             rows = conn.execute(
                 f"""
-                SELECT id, workspace_name, stage_name, state, started_at
+                SELECT id, workspace_name, stage_name, state, started_at, reason_json
                 FROM stage_runs
                 WHERE state IN ({placeholders})
                 ORDER BY started_at DESC

@@ -118,6 +118,82 @@ class TestListHistoryIntegration:
         assert first_ids.isdisjoint(second_ids)
 
 
+class TestListHistorySemanticFields:
+    """Integration tests for list_history semantic enrichment fields."""
+
+    def test_list_history_includes_age(self, test_db: Database) -> None:
+        """list_history includes age field computed from ULID."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(test_db, "stage-age", "test_ws", "v1")
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-age")
+
+        result = manager.list_history("test_ws")
+
+        assert len(result["records"]) == 1
+        assert "age" in result["records"][0]
+        # Age should be a string like "0m ago", "1h ago", etc.
+        assert result["records"][0]["age"].endswith("ago")
+
+    def test_list_history_includes_reason(self, test_db: Database) -> None:
+        """list_history includes reason from stage_runs.reason_json."""
+        import json
+
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        reason_data = {"description": "Testing new architecture"}
+        _setup_stage_run(test_db, "stage-reason", "test_ws", "v1", reason_json=json.dumps(reason_data))
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-reason")
+
+        result = manager.list_history("test_ws")
+
+        assert len(result["records"]) == 1
+        assert "reason" in result["records"][0]
+        assert result["records"][0]["reason"] == "Testing new architecture"
+
+    def test_list_history_includes_primary_metric(self, test_db: Database) -> None:
+        """list_history includes primary_metric from run_results."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(test_db, "stage-metric", "test_ws", "v1")
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-metric")
+
+        # Finalize with results
+        results = {
+            "primary_metric": "accuracy",
+            "direction": "maximize",
+            "value": 0.85,
+            "dataset_split": "val",
+            "ml_outcome": "success",
+            "notes": "Great accuracy results.",
+        }
+        manager.finalize_run("stage-metric", results)
+
+        result = manager.list_history("test_ws")
+
+        assert len(result["records"]) == 1
+        assert "primary_metric" in result["records"][0]
+        assert result["records"][0]["primary_metric"]["name"] == "accuracy"
+        assert result["records"][0]["primary_metric"]["value"] == 0.85
+
+    def test_list_history_includes_stage(self, test_db: Database) -> None:
+        """list_history includes stage name from stage_runs."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(test_db, "stage-with-name", "test_ws", "v1", stage_name="train_model")
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(workspace_name="test_ws", version="v1", stage_run_id="stage-with-name")
+
+        result = manager.list_history("test_ws")
+
+        assert len(result["records"]) == 1
+        assert "stage" in result["records"][0]
+        assert result["records"][0]["stage"] == "train_model"
+
+
 class TestInspectRecordIntegration:
     """Integration tests for inspect_record with real database."""
 
@@ -258,6 +334,7 @@ def _setup_stage_run(
     version: str,
     status: str = "completed",
     stage_name: str = "test_stage",
+    reason_json: str | None = None,
 ) -> None:
     """Set up a stage run for foreign key constraints."""
     with db._conn() as conn:
@@ -270,8 +347,8 @@ def _setup_stage_run(
             conn.execute(
                 """
                 INSERT INTO stage_runs
-                (id, workspace_name, version, stage_name, status, started_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (id, workspace_name, version, stage_name, status, started_at, reason_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (run_id, workspace, version, stage_name, status, datetime.now(UTC).isoformat()),
+                (run_id, workspace, version, stage_name, status, datetime.now(UTC).isoformat(), reason_json),
             )

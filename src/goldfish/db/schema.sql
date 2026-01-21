@@ -293,6 +293,7 @@ CREATE TABLE IF NOT EXISTS signal_lineage (
 CREATE INDEX IF NOT EXISTS idx_signal_lineage_stage ON signal_lineage(stage_run_id);
 CREATE INDEX IF NOT EXISTS idx_signal_lineage_consumed ON signal_lineage(consumed_by);
 CREATE INDEX IF NOT EXISTS idx_signal_lineage_artifact ON signal_lineage(is_artifact);
+CREATE INDEX IF NOT EXISTS idx_signal_lineage_source ON signal_lineage(source_stage_run_id);
 
 
 -- Workspace mounts (tracks active copy-based workspace mounts)

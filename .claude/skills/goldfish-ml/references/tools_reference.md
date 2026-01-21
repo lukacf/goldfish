@@ -27,14 +27,30 @@ StatusResponse:
 ### dashboard()
 
 Get a quick overview of system state for situational awareness. **Call this to see what needs immediate attention.**
-Focuses on failed runs, active runs, and recent outcomes.
+Returns a structured summary organized for quick action.
 
 **Returns:**
-- `failed_runs`: Recent failures with error messages.
-- `active_runs`: Currently running or pending stages.
-- `workspaces`: Workspace list with dirty status.
-- `source_count`: Total registered sources.
-- `recent_outcomes`: Success/bad_results trends.
+```python
+{
+  "alerts": {
+    "failed_recent": [...],  # Failed runs with reason, error, age
+    "svs_reviews": [...]     # New AI reviews (shown once)
+  },
+  "active": {
+    "running": [...]  # Running stages with reason, elapsed time
+  },
+  "blocks": {
+    "pending_finalization": {
+      "by_workspace": {...}  # Grouped by workspace with count + example
+    }
+  },
+  "workspaces": {
+    "mounted": [...],  # Slots with workspace name, goal, dirty state
+    "unmounted_count": int
+  },
+  "source_count": int
+}
+```
 
 ---
 
@@ -89,9 +105,9 @@ Create a version of the current slot state. **Primary way to create save points.
 
 ---
 
-### inspect_workspace(name, version_limit, version_offset)
+### inspect_workspace(name, version_limit, version_offset, include)
 
-Get a comprehensive view of a workspace including history and pipeline.
+Get a comprehensive view of a workspace including history and lineage.
 
 **Parameters:**
 | Parameter | Type | Required | Default | Description |
@@ -99,6 +115,9 @@ Get a comprehensive view of a workspace including history and pipeline.
 | `name` | str | Yes | - | Workspace name or slot (e.g., "baseline" or "w1") |
 | `version_limit` | int | No | 10 | Max versions to show in history |
 | `version_offset` | int | No | 0 | Pagination for history |
+| `include` | list | No | None | Additional data: `["pipeline"]` to include pipeline definition |
+
+**Note:** Pipeline definition is excluded by default to reduce output size. Use `include=["pipeline"]` when you need to see it.
 
 ---
 
@@ -192,6 +211,20 @@ Optional fields: `unit`, `step`, `epoch`, `secondary`, `termination`.
 
 List experiment records (runs + checkpoints). Primary history/query tool.
 
+**Returns records with semantic context:**
+```python
+{
+  "record_id": "01KFE41G...",
+  "version": "v295",
+  "stage": "train_25m",
+  "reason": "Testing post_run SVS fix",  # From run's reason_json
+  "primary_metric": {"name": "dir_acc", "value": 0.600},  # From results
+  "ml_outcome": "partial",
+  "age": "2h ago",  # Human-readable relative time
+  "tags": ["best"]
+}
+```
+
 ---
 
 ### inspect_record(ref, include, workspace)
@@ -228,6 +261,55 @@ Resolve a record/tag to infra IDs and GCS/log URIs for debugging.
 
 Infra-level run view (SVS, logs, provenance). Use `inspect_record()` for experiment results.
 
+**Default includes:** `["dashboard", "metadata", "thoughts"]`
+
+**Metadata fields include:**
+- `workspace`, `stage`, `state`, `reason` (from reason_json)
+- `started_at`, `completed_at`, `error`
+
+**Additional include options:**
+- `"svs"`: SVS validation findings
+- `"provenance"`: Signal lineage and data dependencies
+- `"manifest"`: Full config and I/O details
+- `"attempt"`: Attempt history for retries
+
+---
+
+### get_lineage(run_id, direction)
+
+Track which runs consumed this run's outputs (downstream) or produced its inputs (upstream).
+**This is the essential tool for understanding experiment dependencies.**
+
+**Parameters:**
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `run_id` | str | Yes | - | Stage run ID (e.g., "stage-abc123") |
+| `direction` | str | No | "downstream" | "downstream" = who consumed my outputs; "upstream" = where did my inputs come from |
+
+**Returns:**
+```python
+{
+  "run_id": "stage-eac4899d",
+  "direction": "downstream",
+  "consumers": [  # or "producers" for upstream
+    {
+      "run_id": "stage-11aa...",
+      "stage": "compute_state_features",
+      "reason": "Testing binary labels",
+      "signal_consumed": "events",  # or "signal_produced" for upstream
+      "outcome": "completed",
+      "age": "2h ago"
+    }
+  ]
+}
+```
+
+**Examples:**
+```python
+get_lineage("stage-abc123")  # What runs used my outputs?
+get_lineage("stage-abc123", direction="upstream")  # Where did my data come from?
+```
+
 ---
 
 ### logs(run_id, tail, since, follow)
@@ -255,6 +337,8 @@ Advanced: persist a results_spec after the run was created.
 Unified tool for tagging milestones and cleaning up history.
 
 **Actions:** `list`, `tag`, `untag`, `prune`, `unprune`, `prune_before_tag`
+
+**Note:** `action="list"` excludes pruned versions by default. Include `include_pruned=True` to see all versions.
 
 ---
 

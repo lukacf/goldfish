@@ -237,31 +237,69 @@ def get_workspace_thoughts(workspace: str, limit: int = 50, offset: int = 0) -> 
     }
 
 
+def _format_age(created_at: str | None) -> str:
+    """Convert ISO timestamp to relative age like '2h ago'."""
+    if not created_at:
+        return "unknown"
+    from datetime import UTC, datetime
+
+    # Handle Z suffix for UTC
+    timestamp = created_at.replace("Z", "+00:00")
+    dt = datetime.fromisoformat(timestamp)
+
+    # Ensure timezone-aware comparison
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+
+    now = datetime.now(UTC)
+    delta = now - dt
+
+    if delta.days > 0:
+        return f"{delta.days}d ago"
+    hours = delta.seconds // 3600
+    if hours > 0:
+        return f"{hours}h ago"
+    minutes = delta.seconds // 60
+    return f"{minutes}m ago"
+
+
+def _truncate_goal(goal: str | None, max_len: int = 80) -> str | None:
+    """Truncate goal to max_len characters with ellipsis."""
+    if not goal:
+        return goal
+    if len(goal) <= max_len:
+        return goal
+    return goal[:max_len] + "..."
+
+
+def _parse_reason_from_json(reason_json: str | None) -> str | None:
+    """Parse reason description from JSON."""
+    if not reason_json:
+        return None
+    try:
+        reason_data = json.loads(reason_json)
+        desc = reason_data.get("description")
+        return str(desc) if desc is not None else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 @mcp.tool()
 def dashboard() -> dict:
     """Get a quick overview of system state for situational awareness.
 
-    Returns a summary designed for rapid understanding of:
-    - What's broken (failed runs)
-    - What's running (active runs)
-    - Workspace status (mounted, dirty state)
-    - Recent outcomes (success/bad_results trends)
-    - New AI reviews (SVS findings not yet shown)
+    This is the essential tool for understanding what needs attention. Use it at the
+    start of a session or whenever you need to understand current system state.
 
-    Unlike status(), this tool focuses on actionable information
-    rather than audit trails.
+    Returns a structured summary with:
+    - alerts: Failed runs and new SVS reviews requiring attention
+    - active: Currently running stages
+    - blocks: Pending finalizations grouped by workspace
+    - workspaces: Mounted workspace status with dirty state
+    - source_count: Total registered data sources
 
     SVS reviews are shown ONCE when new, then cleared from subsequent dashboard
     calls. Use inspect_run(include=["svs"]) to see all reviews for a run.
-
-    Returns:
-        dict with:
-        - failed_runs: Recent failed runs with error messages
-        - active_runs: Currently running or pending stages
-        - workspaces: Workspace summary with dirty status
-        - source_count: Total registered data sources
-        - recent_outcomes: Recent run outcomes for trend visibility
-        - new_svs_reviews: New AI reviews (marked as notified after return)
 
     Related tools:
     - status(): Global state including STATE.md and audit trail
@@ -273,74 +311,73 @@ def dashboard() -> dict:
     db = _get_db()
     ws_manager = _get_workspace_manager()
 
-    # Get failed runs
-    failed_rows = db.get_recent_failed_runs(limit=10)
-    failed_runs = [
-        {
-            "run_id": row["id"],
-            "workspace": row["workspace_name"],
-            "stage": row["stage_name"],
-            "error": row.get("error", "Unknown error"),
-            "completed_at": row.get("completed_at"),
-        }
-        for row in failed_rows
-    ]
+    # Get failed runs with reason and age
+    failed_rows = db.get_recent_failed_runs(limit=5)
+    failed_recent = []
+    for failed_row in failed_rows:
+        reason = _parse_reason_from_json(failed_row.get("reason_json"))
+        failed_recent.append(
+            {
+                "run_id": failed_row["id"],
+                "workspace": failed_row["workspace_name"],
+                "stage": failed_row["stage_name"],
+                "reason": reason,
+                "error": failed_row.get("error", "Unknown error"),
+                "age": _format_age(failed_row.get("completed_at")),
+            }
+        )
 
-    # Get active runs
+    # Get active runs with elapsed time
     active_rows = db.get_active_runs()
-    active_runs = [
-        {
-            "run_id": row["id"],
-            "workspace": row["workspace_name"],
-            "stage": row["stage_name"],
-            "state": row.get("state"),
-            "started_at": row.get("started_at"),
-        }
-        for row in active_rows
-    ]
+    running = []
+    for active_row in active_rows:
+        reason = _parse_reason_from_json(active_row.get("reason_json"))
+        running.append(
+            {
+                "run_id": active_row["id"],
+                "workspace": active_row["workspace_name"],
+                "stage": active_row["stage_name"],
+                "reason": reason,
+                "elapsed": _format_age(active_row.get("started_at")).replace(" ago", ""),
+            }
+        )
 
-    # Get workspace summary with dirty status
-    workspaces = []
-    for ws_info in ws_manager.list_workspaces(limit=50):
-        ws_entry = {
-            "name": ws_info.name,
-            "is_mounted": ws_info.is_mounted,
-            "slot": ws_info.mounted_slot,
-            "goal": ws_info.goal,
-            "dirty": False,  # default
-        }
-        # Get dirty status if mounted
+    # Get workspace summary - separate mounted and unmounted
+    all_workspaces = list(ws_manager.list_workspaces(limit=50))
+    mounted = []
+    unmounted_count = 0
+
+    for ws_info in all_workspaces:
         if ws_info.is_mounted and ws_info.mounted_slot:
+            dirty = False
             try:
                 slot_info = ws_manager.get_slot_info(ws_info.mounted_slot)
-                ws_entry["dirty"] = slot_info.dirty == DirtyState.DIRTY
+                dirty = slot_info.dirty == DirtyState.DIRTY
             except Exception:
                 pass
-        workspaces.append(ws_entry)
+
+            mounted.append(
+                {
+                    "slot": ws_info.mounted_slot,
+                    "name": ws_info.name,
+                    "goal": _truncate_goal(ws_info.goal),
+                    "dirty": dirty,
+                }
+            )
+        else:
+            unmounted_count += 1
 
     # Get source count
     source_count = db.count_sources()
 
-    # Get recent outcomes
-    outcome_rows = db.get_recent_outcomes(limit=10)
-    recent_outcomes = [
-        {
-            "workspace": row["workspace_name"],
-            "stage": row["stage_name"],
-            "outcome": row["outcome"],
-            "completed_at": row.get("completed_at"),
-        }
-        for row in outcome_rows
-    ]
-
     # Get unnotified SVS reviews (new since last dashboard view)
     svs_rows = db.get_unnotified_svs_reviews(limit=50)
-    new_svs_reviews = []
+    svs_reviews = []
     review_ids_to_mark: list[int] = []
-    for row in svs_rows:
+    for svs_row in svs_rows:
         # Parse findings count from JSON string
         findings_count = 0
-        findings_json = row.get("parsed_findings")
+        findings_json = svs_row.get("parsed_findings")
         if findings_json:
             try:
                 findings = json.loads(findings_json)
@@ -349,55 +386,83 @@ def dashboard() -> dict:
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        new_svs_reviews.append(
+        svs_reviews.append(
             {
-                "run_id": row["stage_run_id"],
-                "workspace": row.get("workspace_name"),
-                "stage": row.get("stage_name"),
-                "review_type": row["review_type"],
-                "decision": row["decision"],
+                "run_id": svs_row["stage_run_id"],
+                "workspace": svs_row.get("workspace_name"),
+                "stage": svs_row.get("stage_name"),
+                "review_type": svs_row["review_type"],
+                "decision": svs_row["decision"],
                 "findings_count": findings_count,
-                "reviewed_at": row["reviewed_at"],
+                "age": _format_age(svs_row.get("reviewed_at")),
             }
         )
-        review_ids_to_mark.append(row["id"])
+        review_ids_to_mark.append(svs_row["id"])
 
     # Mark these reviews as notified so they don't appear again
     if review_ids_to_mark:
         db.mark_svs_reviews_notified(review_ids_to_mark)
 
-    # Get pending finalizations across all workspaces
-    pending_finalizations = []
+    # Get pending finalizations grouped by workspace
+    pending_by_workspace: dict[str, dict] = {}
     try:
         from goldfish.experiment_model.records import ExperimentRecordManager
 
         exp_manager = ExperimentRecordManager(db)
         # Get unique workspace names from mounted workspaces
-        mounted_workspaces: list[str] = [str(ws["name"]) for ws in workspaces if ws.get("is_mounted")]
-        for ws_name in mounted_workspaces:
+        mounted_workspace_names: list[str] = [str(ws["name"]) for ws in mounted]
+        for ws_name in mounted_workspace_names:
             unfinalized = exp_manager.list_unfinalized_runs(ws_name)
-            for run in unfinalized:
-                pending_finalizations.append(
-                    {
-                        "workspace": ws_name,
-                        "record_id": run.get("record_id"),
-                        "stage_run_id": run.get("stage_run_id"),
-                        "stage_name": run.get("stage_name"),
-                        "infra_outcome": run.get("infra_outcome"),
-                    }
-                )
+            if unfinalized:
+                # Create example from first run with available info
+                first_run = unfinalized[0]
+                reason = first_run.get("reason", "")
+                metric = first_run.get("primary_metric", {})
+                if isinstance(metric, dict) and metric.get("value") is not None:
+                    metric_str = f"{metric.get('name', 'metric')}={metric.get('value'):.1%}"
+                else:
+                    metric_str = "pending finalization"
+                example = f"'{reason}' -> {metric_str}" if reason else metric_str
+
+                pending_by_workspace[ws_name] = {
+                    "count": len(unfinalized),
+                    "example": example,
+                }
     except Exception:
         # If experiment model fails, continue without it
         pass
 
+    # Get recent outcomes (compact, max 5)
+    outcome_rows = db.get_recent_outcomes(limit=5)
+    recent_outcomes = [
+        {
+            "workspace": outcome_row["workspace_name"],
+            "stage": outcome_row["stage_name"],
+            "outcome": outcome_row["outcome"],
+            "age": _format_age(outcome_row.get("completed_at")),
+        }
+        for outcome_row in outcome_rows
+    ]
+
     return {
-        "failed_runs": failed_runs,
-        "active_runs": active_runs,
-        "workspaces": workspaces,
+        "alerts": {
+            "failed_recent": failed_recent,
+            "svs_reviews": svs_reviews,
+        },
+        "active": {
+            "running": running,
+        },
+        "blocks": {
+            "pending_finalization": {
+                "by_workspace": pending_by_workspace,
+            },
+        },
+        "workspaces": {
+            "mounted": mounted,
+            "unmounted_count": unmounted_count,
+        },
         "source_count": source_count,
         "recent_outcomes": recent_outcomes,
-        "new_svs_reviews": new_svs_reviews,
-        "pending_finalizations": pending_finalizations,
     }
 
 

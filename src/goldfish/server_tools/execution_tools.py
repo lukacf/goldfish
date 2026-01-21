@@ -451,11 +451,25 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
     result: dict[str, Any] = {"run_id": run_id}
 
     if "metadata" in include:
+        # Parse reason from reason_json
+        reason = None
+        reason_json = row.get("reason_json")
+        if reason_json:
+            try:
+                reason_data = json.loads(reason_json)
+                if isinstance(reason_data, dict):
+                    reason = reason_data.get("description")
+                elif isinstance(reason_data, str):
+                    reason = reason_data
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         result.update(
             {
                 "workspace": row["workspace_name"],
                 "stage": row["stage_name"],
                 "state": row.get("state"),  # State machine state (source of truth)
+                "reason": reason,
                 "started_at": row["started_at"],
                 "completed_at": row["completed_at"],
                 "error": row.get("error"),

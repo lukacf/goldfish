@@ -137,7 +137,7 @@ class TestDashboard:
     """Tests for the dashboard tool."""
 
     def test_dashboard_returns_failed_runs(self):
-        """Test that dashboard shows recent failed runs."""
+        """Test that dashboard shows recent failed runs in alerts section."""
         from goldfish.server_tools.utility_tools import dashboard
 
         mock_db = MagicMock()
@@ -154,6 +154,7 @@ class TestDashboard:
         mock_db.get_active_runs.return_value = []
         mock_db.count_sources.return_value = 5
         mock_db.get_recent_outcomes.return_value = []
+        mock_db.get_unnotified_svs_reviews.return_value = []
 
         mock_ws_manager = MagicMock()
         mock_ws_manager.list_workspaces.return_value = []
@@ -164,12 +165,13 @@ class TestDashboard:
         ):
             result = dashboard()
 
-        assert len(result["failed_runs"]) == 1
-        assert result["failed_runs"][0]["run_id"] == "stage-fail1"
-        assert result["failed_runs"][0]["error"] == "CUDA out of memory"
+        # New structure: alerts > failed_recent
+        assert len(result["alerts"]["failed_recent"]) == 1
+        assert result["alerts"]["failed_recent"][0]["run_id"] == "stage-fail1"
+        assert result["alerts"]["failed_recent"][0]["error"] == "CUDA out of memory"
 
     def test_dashboard_returns_active_runs(self):
-        """Test that dashboard shows currently active runs."""
+        """Test that dashboard shows currently active runs in active section."""
         from goldfish.server_tools.utility_tools import dashboard
 
         mock_db = MagicMock()
@@ -185,6 +187,7 @@ class TestDashboard:
         ]
         mock_db.count_sources.return_value = 5
         mock_db.get_recent_outcomes.return_value = []
+        mock_db.get_unnotified_svs_reviews.return_value = []
 
         mock_ws_manager = MagicMock()
         mock_ws_manager.list_workspaces.return_value = []
@@ -195,9 +198,10 @@ class TestDashboard:
         ):
             result = dashboard()
 
-        assert len(result["active_runs"]) == 1
-        assert result["active_runs"][0]["run_id"] == "stage-running1"
-        assert result["active_runs"][0]["state"] == "running"
+        # New structure: active > running
+        assert len(result["active"]["running"]) == 1
+        assert result["active"]["running"][0]["run_id"] == "stage-running1"
+        assert result["active"]["running"][0]["workspace"] == "baseline"
 
     def test_dashboard_returns_workspace_summary(self):
         """Test that dashboard shows workspace summary with dirty status."""
@@ -211,6 +215,7 @@ class TestDashboard:
         mock_db.get_active_runs.return_value = []
         mock_db.count_sources.return_value = 5
         mock_db.get_recent_outcomes.return_value = []
+        mock_db.get_unnotified_svs_reviews.return_value = []
 
         mock_ws_manager = MagicMock()
         mock_ws_manager.list_workspaces.return_value = [
@@ -232,9 +237,10 @@ class TestDashboard:
         ):
             result = dashboard()
 
-        assert len(result["workspaces"]) == 1
-        assert result["workspaces"][0]["name"] == "baseline"
-        assert result["workspaces"][0]["dirty"] is True
+        # New structure: workspaces > mounted
+        assert len(result["workspaces"]["mounted"]) == 1
+        assert result["workspaces"]["mounted"][0]["name"] == "baseline"
+        assert result["workspaces"]["mounted"][0]["dirty"] is True
 
     def test_dashboard_returns_source_count(self):
         """Test that dashboard shows data source count."""
@@ -245,6 +251,7 @@ class TestDashboard:
         mock_db.get_active_runs.return_value = []
         mock_db.count_sources.return_value = 42
         mock_db.get_recent_outcomes.return_value = []
+        mock_db.get_unnotified_svs_reviews.return_value = []
 
         mock_ws_manager = MagicMock()
         mock_ws_manager.list_workspaces.return_value = []
@@ -279,6 +286,7 @@ class TestDashboard:
                 "completed_at": "2025-01-04T09:00:00Z",
             },
         ]
+        mock_db.get_unnotified_svs_reviews.return_value = []
 
         mock_ws_manager = MagicMock()
         mock_ws_manager.list_workspaces.return_value = []
