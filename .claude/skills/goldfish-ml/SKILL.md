@@ -40,6 +40,13 @@ Goldfish manages ML experiments through **seven key abstractions** (with a new E
 - **Pre-run review**: The configured SVS agent reviews your code before execution to catch bugs early
 - **Experiment Records** hide the run/version split in normal UX (use record_id or tags)
 
+**CRITICAL: Never use git directly.**
+Goldfish manages all version control internally via a hidden dev repo. **Never run git commands** on the user's project directory or the dev repo (`*-dev/`). Direct git operations will corrupt Goldfish's state and break provenance tracking. Use Goldfish tools instead:
+- `save_version()` instead of `git commit`
+- `rollback()` instead of `git reset`
+- `diff()` instead of `git diff`
+- `manage_versions()` for tagging and history
+
 ## Workflow Decision Tree
 
 ```
