@@ -543,3 +543,165 @@ def test_inspect_run_reason_null_when_missing():
 
     assert "reason" in result
     assert result["reason"] is None
+
+
+def test_inspect_run_only_shows_latest_during_run_review():
+    """Regression: inspect_run should only show the LATEST during_run SVS review.
+
+    Bug: All unnotified during_run reviews were shown, flooding the output with
+    redundant periodic monitoring updates.
+    Fix: Only show the most recent during_run review (first one, since ordered DESC).
+    Pre-run and post-run reviews should still all be shown.
+    """
+    import json
+
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-abc123def"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "running",
+        "state": "running",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": None,
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": None,
+        "backend_type": "local",
+        "backend_handle": "container-1",
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    # Multiple during_run reviews (all for same run, ordered by reviewed_at DESC)
+    mock_db.get_unnotified_svs_reviews.return_value = [
+        {
+            "id": 3,
+            "stage_run_id": run_id,
+            "review_type": "during_run",
+            "decision": "warned",
+            "parsed_findings": json.dumps([{"severity": "WARN", "summary": "Latest warning"}]),
+            "response_text": "Latest during_run review",
+            "reviewed_at": "2025-12-27T10:30:00Z",
+        },
+        {
+            "id": 2,
+            "stage_run_id": run_id,
+            "review_type": "during_run",
+            "decision": "warned",
+            "parsed_findings": json.dumps([{"severity": "WARN", "summary": "Older warning"}]),
+            "response_text": "Older during_run review",
+            "reviewed_at": "2025-12-27T10:20:00Z",
+        },
+        {
+            "id": 1,
+            "stage_run_id": run_id,
+            "review_type": "during_run",
+            "decision": "warned",
+            "parsed_findings": json.dumps([{"severity": "WARN", "summary": "Oldest warning"}]),
+            "response_text": "Oldest during_run review",
+            "reviewed_at": "2025-12-27T10:10:00Z",
+        },
+    ]
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["dashboard"])
+
+    # Should only have ONE during_run review (the latest)
+    svs_reviews = result["dashboard"]["new_svs_reviews"]
+    assert len(svs_reviews) == 1, f"Expected 1 review, got {len(svs_reviews)}"
+    assert svs_reviews[0]["full_text"] == "Latest during_run review"
+    assert svs_reviews[0]["findings"][0]["summary"] == "Latest warning"
+
+    # All 3 reviews should be marked as notified (even the ones not shown)
+    mock_db.mark_svs_reviews_notified.assert_called_once()
+    notified_ids = mock_db.mark_svs_reviews_notified.call_args[0][0]
+    assert sorted(notified_ids) == [1, 2, 3], f"Expected all IDs to be notified, got {notified_ids}"
+
+
+def test_inspect_run_keeps_all_pre_run_and_post_run_reviews():
+    """Test that pre_run and post_run reviews are all shown (not filtered like during_run)."""
+    import json
+
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-def789abc"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "completed",
+        "state": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": None,
+        "backend_type": "local",
+        "backend_handle": "container-1",
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    # Mix of review types
+    mock_db.get_unnotified_svs_reviews.return_value = [
+        {
+            "id": 4,
+            "stage_run_id": run_id,
+            "review_type": "post_run",
+            "decision": "approved",
+            "parsed_findings": json.dumps([]),
+            "response_text": "Post-run review",
+            "reviewed_at": "2025-12-27T11:00:00Z",
+        },
+        {
+            "id": 3,
+            "stage_run_id": run_id,
+            "review_type": "during_run",
+            "decision": "warned",
+            "parsed_findings": json.dumps([{"severity": "WARN", "summary": "Latest during"}]),
+            "response_text": "Latest during_run",
+            "reviewed_at": "2025-12-27T10:30:00Z",
+        },
+        {
+            "id": 2,
+            "stage_run_id": run_id,
+            "review_type": "during_run",
+            "decision": "warned",
+            "parsed_findings": json.dumps([{"severity": "WARN", "summary": "Older during"}]),
+            "response_text": "Older during_run",
+            "reviewed_at": "2025-12-27T10:20:00Z",
+        },
+        {
+            "id": 1,
+            "stage_run_id": run_id,
+            "review_type": "pre_run",
+            "decision": "approved",
+            "parsed_findings": json.dumps([]),
+            "response_text": "Pre-run review",
+            "reviewed_at": "2025-12-27T10:00:00Z",
+        },
+    ]
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["dashboard"])
+
+    # Should have: 1 pre_run + 1 during_run (latest only) + 1 post_run = 3 reviews
+    svs_reviews = result["dashboard"]["new_svs_reviews"]
+    assert len(svs_reviews) == 3, f"Expected 3 reviews, got {len(svs_reviews)}"
+
+    review_types = [r["review_type"] for r in svs_reviews]
+    assert review_types.count("during_run") == 1, "Should only have 1 during_run review"
+    assert review_types.count("pre_run") == 1, "Should have 1 pre_run review"
+    assert review_types.count("post_run") == 1, "Should have 1 post_run review"
+
+    # All 4 reviews should be marked as notified
+    mock_db.mark_svs_reviews_notified.assert_called_once()
+    notified_ids = mock_db.mark_svs_reviews_notified.call_args[0][0]
+    assert sorted(notified_ids) == [1, 2, 3, 4]
