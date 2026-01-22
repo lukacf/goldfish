@@ -418,6 +418,24 @@ class GoldfishConfig(BaseModel):
                             if "count" not in gpu:
                                 gpu["count"] = 1 if gpu.get("accelerator") else 0
 
+        # Migrate legacy extra_packages at root level to docker.extra_packages.base
+        # Old format: extra_packages: [list] at root
+        # New format: docker: {extra_packages: {base: [list]}}
+        if "extra_packages" in data:
+            extra_packages = data.pop("extra_packages")
+            if isinstance(extra_packages, list):
+                # Root-level list -> docker.extra_packages.base
+                if "docker" not in data:
+                    data["docker"] = {}
+                if "extra_packages" not in data["docker"]:
+                    data["docker"]["extra_packages"] = {}
+                # Put in "base" key - applies to both cpu and gpu
+                data["docker"]["extra_packages"]["base"] = extra_packages
+                logger.info(
+                    "Migrated legacy extra_packages to docker.extra_packages.base. "
+                    "Consider updating goldfish.yaml to use the new format."
+                )
+
         try:
             config = cls(**data)
         except ValidationError as e:

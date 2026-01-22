@@ -287,7 +287,12 @@ class BaseImageManager:
         Returns:
             List of pip install arguments
         """
-        return self.docker_config.extra_packages.get(image_type, [])
+        # Get base packages that apply to all image types
+        base_packages = self.docker_config.extra_packages.get("base", [])
+        # Get type-specific packages
+        type_packages = self.docker_config.extra_packages.get(image_type, [])
+        # Combine: base first, then type-specific (allows overrides)
+        return list(base_packages) + list(type_packages)
 
     def _generate_dockerfile_content(self, image_type: str) -> str:
         """Generate Dockerfile content for project image.
