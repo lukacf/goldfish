@@ -28,6 +28,50 @@ class AuditConfig(BaseModel):
     min_reason_length: int = 15
 
 
+class LocalStorageConfig(BaseModel):
+    """Local storage simulation configuration per LOCAL_PARITY_SPEC."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    root: str = ".local_gcs"  # Directory for emulated buckets
+    consistency_delay_ms: int = 0  # Delay reads after writes (0 = immediate)
+    size_limit_mb: int | None = None  # Optional: simulate bucket quota
+
+
+class LocalComputeConfig(BaseModel):
+    """Local compute simulation configuration per LOCAL_PARITY_SPEC."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    docker_socket: str = "/var/run/docker.sock"
+    simulate_preemption_after_seconds: int | None = None  # null = no preemption
+    preemption_grace_period_seconds: int = 30  # Match GCP behavior
+    zone_availability: dict[str, bool] = Field(default_factory=lambda: {"local-zone-1": True})
+
+
+class LocalSignalingConfig(BaseModel):
+    """Local signaling simulation configuration per LOCAL_PARITY_SPEC."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    metadata_file: str = ".local_metadata.json"
+    size_limit_bytes: int = 262144  # 256KB per value (GCP limit)
+    latency_ms: int = 0  # Simulated latency
+
+
+class LocalConfig(BaseModel):
+    """Local backend simulation configuration per LOCAL_PARITY_SPEC.
+
+    Controls how the local backend emulates GCP semantics for testing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    storage: LocalStorageConfig = Field(default_factory=LocalStorageConfig)
+    compute: LocalComputeConfig = Field(default_factory=LocalComputeConfig)
+    signaling: LocalSignalingConfig = Field(default_factory=LocalSignalingConfig)
+
+
 class JobsConfig(BaseModel):
     """Job execution configuration."""
 
@@ -217,6 +261,7 @@ def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
         "jobs": list(JobsConfig.model_fields.keys()),
         "gcs": list(GCSConfig.model_fields.keys()),
         "gce": list(GCEConfig.model_fields.keys()),
+        "local": list(LocalConfig.model_fields.keys()),
         "pre_run_review": list(PreRunReviewConfig.model_fields.keys()),
         "metrics": list(MetricsConfig.model_fields.keys()),
         "docker": list(DockerConfig.model_fields.keys()),
@@ -233,6 +278,7 @@ def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
         "jobs",
         "gcs",
         "gce",
+        "local",
         "pre_run_review",
         "metrics",
         "docker",
@@ -270,6 +316,7 @@ class GoldfishConfig(BaseModel):
     jobs: JobsConfig = Field(default_factory=JobsConfig)
     gcs: GCSConfig | None = None
     gce: GCEConfig | None = None
+    local: LocalConfig = Field(default_factory=LocalConfig)  # Local simulation config
     pre_run_review: PreRunReviewConfig = Field(default_factory=PreRunReviewConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     docker: DockerConfig = Field(default_factory=DockerConfig)

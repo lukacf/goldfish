@@ -16,10 +16,12 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from google.cloud.storage import Client as GCSClient
+    from goldfish.cloud.protocols import ObjectStorage, RunBackend, SignalBus
 
 import yaml
 
+from goldfish.cloud.contracts import StorageURI
+from goldfish.cloud.factory import AdapterFactory
 from goldfish.config import GoldfishConfig
 from goldfish.datasets.registry import DatasetRegistry
 from goldfish.db.database import Database
@@ -114,6 +116,11 @@ class StageExecutor:
         pipeline_manager: PipelineManager,
         project_root: Path,
         dataset_registry: DatasetRegistry | None = None,
+        *,
+        # Protocol injection for testing and abstraction layer
+        storage: "ObjectStorage | None" = None,
+        run_backend: "RunBackend | None" = None,
+        signal_bus: "SignalBus | None" = None,
     ):
         self.db = db
         self.config = config
@@ -208,15 +215,88 @@ class StageExecutor:
             service_account=gce_service_account,
         )
 
+        # Initialize cloud abstraction layer via AdapterFactory
+        # This provides protocol-based adapters for storage, compute, and signaling
+        self._adapter_factory = AdapterFactory(config)
+        # Support protocol injection for testing - if provided, use directly
+        # Otherwise, lazily initialize via factory
+        self._storage: ObjectStorage | None = storage
+        self._run_backend: RunBackend | None = run_backend
+        self._signal_bus: SignalBus | None = signal_bus
+
         # Live metrics sync state (per run)
         self._metrics_sync_state: dict[str, _MetricsSyncState] = {}
         self._metrics_sync_lock = threading.Lock()
         self._svs_sync_state: dict[str, float] = {}
         self._svs_sync_lock = threading.Lock()
-        self._gcs_client: GCSClient | None = None
-        self._gcs_client_lock = threading.Lock()
         self._refresh_lock = threading.Lock()
         self._refreshing_runs: set[str] = set()
+
+    @classmethod
+    def create(
+        cls,
+        db: Database,
+        config: GoldfishConfig,
+        workspace_manager: WorkspaceManager,
+        pipeline_manager: PipelineManager,
+        project_root: Path,
+        dataset_registry: DatasetRegistry | None = None,
+    ) -> "StageExecutor":
+        """Factory method that creates StageExecutor with appropriate adapters.
+
+        This method creates the executor with protocol adapters selected based
+        on config.jobs.backend (local vs gce). Use this for production code.
+
+        For testing, use the constructor directly with injected adapters.
+
+        Args:
+            db: Database instance
+            config: Goldfish configuration
+            workspace_manager: Workspace manager
+            pipeline_manager: Pipeline manager
+            project_root: Project root path
+            dataset_registry: Optional dataset registry
+
+        Returns:
+            StageExecutor with adapters configured based on backend type
+        """
+        factory = AdapterFactory(config)
+
+        return cls(
+            db=db,
+            config=config,
+            workspace_manager=workspace_manager,
+            pipeline_manager=pipeline_manager,
+            project_root=project_root,
+            dataset_registry=dataset_registry,
+            storage=factory.create_storage(root=project_root / ".local_gcs"),
+            run_backend=factory.create_run_backend(),
+            signal_bus=factory.create_signal_bus(),
+        )
+
+    @property
+    def storage(self) -> "ObjectStorage":
+        """Get the storage adapter (lazily initialized or injected)."""
+        if self._storage is None:
+            self._storage = self._adapter_factory.create_storage(root=self.project_root / ".local_gcs")
+        assert self._storage is not None  # Guaranteed by factory
+        return self._storage
+
+    @property
+    def run_backend(self) -> "RunBackend":
+        """Get the run backend adapter (lazily initialized or injected)."""
+        if self._run_backend is None:
+            self._run_backend = self._adapter_factory.create_run_backend()
+        assert self._run_backend is not None  # Guaranteed by factory
+        return self._run_backend
+
+    @property
+    def signal_bus(self) -> "SignalBus":
+        """Get the signal bus adapter (lazily initialized or injected)."""
+        if self._signal_bus is None:
+            self._signal_bus = self._adapter_factory.create_signal_bus()
+        assert self._signal_bus is not None  # Guaranteed by factory
+        return self._signal_bus
 
     def run_stage(
         self,
@@ -1377,7 +1457,7 @@ class StageExecutor:
             # We use a simplified approach: just try to download the known manifest files
             for filename in ["svs_stats.json", "svs_findings.json", "svs_findings_during.json"]:
                 dest = temp_dir / ".goldfish" / filename
-                self._download_metrics_from_gcs(gcs_prefix + filename, dest)
+                self._download_metrics_from_storage(gcs_prefix + filename, dest)
 
             outputs_dir = temp_dir
         else:
@@ -1485,7 +1565,7 @@ class StageExecutor:
             temp_dir.mkdir(parents=True, exist_ok=True)
             metrics_file = temp_dir / "metrics.jsonl"
 
-            if not self._download_metrics_from_gcs(gcs_path, metrics_file):
+            if not self._download_metrics_from_storage(gcs_path, metrics_file):
                 logger.debug(f"No metrics file found in GCS for {stage_run_id}")
                 return
         else:
@@ -1495,71 +1575,35 @@ class StageExecutor:
         # Collect metrics from file
         collector.collect_from_file(stage_run_id, metrics_file)
 
-    def _download_metrics_from_gcs(self, gcs_path: str, destination: Path) -> bool:
-        """Download metrics.jsonl from GCS using the Python client.
+    def _download_metrics_from_storage(self, storage_path: str, destination: Path) -> bool:
+        """Download metrics.jsonl from storage using the storage adapter.
 
         Returns True if download succeeded, False if the object doesn't exist.
         """
-        client, client_error = self._get_gcs_client()
-        if client is None:
-            if self._download_metrics_from_gcs_cli(gcs_path, destination):
-                return True
-            if client_error:
-                logger.warning("GCS client unavailable for metrics download: %s", client_error)
+        if not storage_path.startswith("gs://"):
+            logger.warning("Invalid storage path: %s", storage_path)
             return False
 
         try:
-            from google.api_core.exceptions import NotFound
-        except Exception as exc:
-            logger.warning("google-cloud-storage not available for metrics download: %s", exc)
-            return False
-
-        if not gcs_path.startswith("gs://"):
-            logger.warning("Invalid GCS path: %s", gcs_path)
-            return False
-
-        bucket_name, blob_path = gcs_path[5:].split("/", 1)
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(blob_path)
-
-        try:
-            blob.reload()
-        except NotFound:
-            return False
-        except Exception as exc:
-            if self._download_metrics_from_gcs_cli(gcs_path, destination):
+            uri = StorageURI.parse(storage_path)
+            storage = self._adapter_factory.create_storage()
+            if storage.download_to_file(uri, destination):
                 return True
-            logger.warning("Failed to access metrics in GCS: %s", exc)
-            return False
-
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            blob.download_to_filename(str(destination))
+            # Fall back to CLI if adapter download returns False (not found)
+            return self._download_metrics_from_storage_cli(storage_path, destination)
         except Exception as exc:
-            if self._download_metrics_from_gcs_cli(gcs_path, destination):
+            # Fall back to CLI on any error
+            if self._download_metrics_from_storage_cli(storage_path, destination):
                 return True
-            logger.warning("Failed to download metrics from GCS: %s", exc)
+            logger.warning("Failed to download metrics from storage: %s", exc)
             return False
-        return True
-
-    def _get_gcs_client(self) -> tuple["GCSClient | None", str | None]:
-        if self._gcs_client is not None:
-            return self._gcs_client, None
-
-        with self._gcs_client_lock:
-            if self._gcs_client is not None:
-                return self._gcs_client, None
-            try:
-                from google.cloud import storage
-            except Exception as exc:
-                return None, f"google-cloud-storage not available: {exc}"
-            try:
-                self._gcs_client = storage.Client()
-            except Exception as exc:
-                return None, f"GCS credentials unavailable: {exc}"
-            return self._gcs_client, None
 
     def _ensure_gcs_access(self, operation: str) -> None:
+        """Ensure GCS is accessible for GCE backend operations.
+
+        For GCE backend, validates that GCS is configured and reachable.
+        Uses the storage adapter to check connectivity.
+        """
         if self.config.jobs.backend != "gce":
             return
         if not self.config.gcs or not self.config.gcs.bucket:
@@ -1567,14 +1611,16 @@ class StageExecutor:
                 f"GCE backend requires gcs.bucket for {operation}. "
                 "Set gcs.bucket in goldfish.yaml or GOLDFISH_GCS_BUCKET."
             )
-        client, client_error = self._get_gcs_client()
-        if client is None:
-            raise GoldfishError(f"GCS access unavailable for {operation}: {client_error}")
+        # Use the storage adapter to verify connectivity
         try:
-            bucket = client.bucket(self.config.gcs.bucket)
-            bucket.exists()
+            # Check if we can access the bucket by listing (with empty prefix)
+            storage = self._adapter_factory.create_storage()
+            # For GCS backend, try to list to verify connectivity
+            # Use a non-existent prefix to minimize data transfer
+            health_check_uri = StorageURI.parse(f"gs://{self.config.gcs.bucket}/_goldfish_health_check_")
+            list(storage.list_prefix(health_check_uri))
         except Exception as exc:
-            raise GoldfishError(f"GCS access check failed for {operation}: {exc}") from exc
+            raise GoldfishError(f"Storage access check failed for {operation}: {exc}") from exc
 
     def _metrics_live_sync_enabled(self) -> bool:
         value = os.getenv("GOLDFISH_METRICS_LIVE_SYNC", "1").strip().lower()
@@ -1596,7 +1642,7 @@ class StageExecutor:
                 self._metrics_sync_state[stage_run_id] = state
             return state
 
-    def _download_metrics_from_gcs_cli(self, gcs_path: str, destination: Path) -> bool:
+    def _download_metrics_from_storage_cli(self, gcs_path: str, destination: Path) -> bool:
         """Download metrics.jsonl from GCS using gcloud/gsutil CLI (fallback)."""
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -1617,101 +1663,68 @@ class StageExecutor:
 
         return False
 
-    def _sync_metrics_file_from_gcs(
-        self, gcs_path: str, state: _MetricsSyncState
+    def _sync_metrics_file_from_storage(
+        self, storage_path: str, state: _MetricsSyncState
     ) -> tuple[Path | None, int, str | None]:
-        """Append new bytes from GCS metrics.jsonl into a local temp file."""
-        client, client_error = self._get_gcs_client()
-        if client is None:
-            local_path = state.temp_path
-            if local_path is None:
-                import tempfile
+        """Download metrics.jsonl from storage into a local temp file.
 
-                temp_dir = (
-                    Path(tempfile.gettempdir())
-                    / "goldfish_metrics_live"
-                    / gcs_path.replace("gs://", "").replace("/", "_")
-                )
-                temp_dir.mkdir(parents=True, exist_ok=True)
-                local_path = temp_dir / "metrics.jsonl"
-                state.temp_path = local_path
+        Uses the storage adapter to download the complete file.
+        The offset tracking is maintained for compatibility but we download
+        the full file each time (simpler, works across all storage backends).
+        """
+        import tempfile
 
-            if self._download_metrics_from_gcs_cli(gcs_path, local_path):
-                return local_path, state.offset, None
-            if client_error:
-                return None, state.offset, f"Live metrics sync skipped: {client_error}"
-            return None, state.offset, "Live metrics sync skipped: GCS client unavailable and CLI download failed."
+        if not storage_path.startswith("gs://"):
+            logger.warning("Invalid storage path: %s", storage_path)
+            return None, state.offset, "Live metrics sync skipped: invalid storage path."
 
-        try:
-            from google.api_core.exceptions import NotFound
-        except Exception as exc:
-            logger.warning("google-cloud-storage not available for live metrics sync: %s", exc)
-            return None, state.offset, "Live metrics sync skipped: google-cloud-storage unavailable."
-
-        if not gcs_path.startswith("gs://"):
-            logger.warning("Invalid GCS path: %s", gcs_path)
-            return None, state.offset, "Live metrics sync skipped: invalid GCS path."
-
-        bucket_name, blob_path = gcs_path[5:].split("/", 1)
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(blob_path)
-
-        try:
-            blob.reload()
-        except NotFound:
-            return None, state.offset, None
-        except Exception as exc:
-            import tempfile
-
-            temp_dir = (
-                Path(tempfile.gettempdir()) / "goldfish_metrics_live" / gcs_path.replace("gs://", "").replace("/", "_")
-            )
-            temp_dir.mkdir(parents=True, exist_ok=True)
-            fallback_path = temp_dir / "metrics.jsonl"
-            if self._download_metrics_from_gcs_cli(gcs_path, fallback_path):
-                state.temp_path = fallback_path
-                return fallback_path, state.offset, None
-            return None, state.offset, f"Live metrics sync failed: {exc}"
-
-        size = blob.size or 0
+        # Set up local temp path if not already done
         local_path = state.temp_path
         if local_path is None:
-            import tempfile
-
-            temp_dir = Path(tempfile.gettempdir()) / "goldfish_metrics_live" / blob_path.replace("/", "_")
+            temp_dir = (
+                Path(tempfile.gettempdir())
+                / "goldfish_metrics_live"
+                / storage_path.replace("gs://", "").replace("/", "_")
+            )
             temp_dir.mkdir(parents=True, exist_ok=True)
             local_path = temp_dir / "metrics.jsonl"
             state.temp_path = local_path
 
-        if state.offset == 0 and local_path.exists():
-            try:
-                local_path.unlink()
-            except Exception:
-                pass
-
-        if size < state.offset:
-            # GCS object reset; start over
-            state.offset = 0
-            if local_path.exists():
-                local_path.unlink()
-
-        if size == state.offset:
-            return local_path, state.offset, None
-
         try:
-            data = blob.download_as_bytes(start=state.offset)
-        except Exception as exc:
-            if self._download_metrics_from_gcs_cli(gcs_path, local_path):
+            uri = StorageURI.parse(storage_path)
+            storage = self._adapter_factory.create_storage()
+
+            # Check if file exists and get its size
+            size = storage.get_size(uri)
+            if size is None:
+                return None, state.offset, None  # File doesn't exist yet
+
+            # If file hasn't changed, return existing local copy
+            if size == state.offset and local_path.exists():
                 return local_path, state.offset, None
-            logger.warning("Failed to download metrics bytes from GCS: %s", exc)
+
+            # If file got smaller (reset), start over
+            if size < state.offset:
+                state.offset = 0
+                if local_path.exists():
+                    local_path.unlink()
+
+            # Download the full file (simpler than range downloads, works everywhere)
+            if storage.download_to_file(uri, local_path):
+                state.offset = size  # Update offset to current size
+                return local_path, state.offset, None
+
+            # Fall back to CLI download
+            if self._download_metrics_from_storage_cli(storage_path, local_path):
+                return local_path, state.offset, None
+            return None, state.offset, "Live metrics sync failed: download failed"
+
+        except Exception as exc:
+            # Fall back to CLI download on any error
+            if self._download_metrics_from_storage_cli(storage_path, local_path):
+                return local_path, state.offset, None
+            logger.warning("Failed to sync metrics from storage: %s", exc)
             return local_path, state.offset, f"Live metrics sync failed: {exc}"
-
-        if data:
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(local_path, "ab") as f:
-                f.write(data)
-
-        return local_path, state.offset, None
 
     def sync_metrics_if_running(self, stage_run_id: str) -> list[str]:
         """Best-effort incremental metrics sync for running stages."""
@@ -1752,7 +1765,7 @@ class StageExecutor:
                 bucket = self.config.gcs.bucket
                 bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
                 gcs_path = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/metrics.jsonl"
-                metrics_file, start_offset, sync_warning = self._sync_metrics_file_from_gcs(gcs_path, state)
+                metrics_file, start_offset, sync_warning = self._sync_metrics_file_from_storage(gcs_path, state)
                 if sync_warning:
                     warnings.append(sync_warning)
             else:
@@ -1822,9 +1835,9 @@ class StageExecutor:
             findings_dest = temp_dir / ".goldfish" / "svs_findings.json"
             stats_dest = temp_dir / ".goldfish" / "svs_stats.json"
             during_dest = temp_dir / ".goldfish" / "svs_findings_during.json"
-            self._download_metrics_from_gcs(gcs_prefix + "svs_findings.json", findings_dest)
-            self._download_metrics_from_gcs(gcs_prefix + "svs_stats.json", stats_dest)
-            self._download_metrics_from_gcs(gcs_prefix + "svs_findings_during.json", during_dest)
+            self._download_metrics_from_storage(gcs_prefix + "svs_findings.json", findings_dest)
+            self._download_metrics_from_storage(gcs_prefix + "svs_stats.json", stats_dest)
+            self._download_metrics_from_storage(gcs_prefix + "svs_findings_during.json", during_dest)
             outputs_dir = temp_dir
         else:
             return
@@ -2016,6 +2029,53 @@ class StageExecutor:
         except Exception as e:
             raise GoldfishError(f"Failed to resolve profile '{profile_name}': {e}") from e
 
+    def _validate_capabilities_for_stage(self, workspace: str, stage_name: str, backend: str) -> None:
+        """Validate that backend capabilities match profile requirements.
+
+        This prevents misconfigurations like GPU profiles on local backend.
+        Part of the cloud abstraction layer capability contract.
+
+        Args:
+            workspace: Workspace name
+            stage_name: Stage name
+            backend: Backend type ("local" or "gce")
+
+        Raises:
+            GoldfishError: If profile requires capabilities the backend doesn't support
+        """
+        # Get backend capabilities from the abstraction layer
+        capabilities = self.run_backend.capabilities
+
+        # Load and resolve the profile for this stage
+        stage_config = self._load_stage_config(workspace, stage_name)
+        profile = self._resolve_profile_from_config(stage_config)
+
+        if not profile:
+            return  # No profile, no capability requirements to check
+
+        # Check GPU capability
+        gpu_info = profile.get("gpu", {})
+        if gpu_info.get("type") != "none" and gpu_info.get("count", 0) > 0:
+            if not capabilities.supports_gpu:
+                raise GoldfishError(
+                    f"Stage '{stage_name}' requires GPU (profile specifies "
+                    f"gpu.type={gpu_info.get('type')}, count={gpu_info.get('count')}), "
+                    f"but backend '{backend}' does not support GPU. "
+                    "Use a GPU-capable backend (e.g., 'gce') or select a CPU profile."
+                )
+
+        # Check spot/preemptible capability
+        # Profile indicates spot preference via preemptible_allowed
+        if profile.get("preemptible_allowed", False):
+            # Only warn if spot is preferred but not supported - it's a preference, not requirement
+            if not capabilities.supports_spot:
+                logger.debug(
+                    "Stage '%s' profile allows preemptible instances, but backend '%s' "
+                    "does not support spot/preemptible. Will use on-demand instances.",
+                    stage_name,
+                    backend,
+                )
+
     @staticmethod
     def _poll_interval(elapsed: int) -> int:
         if elapsed < 60:
@@ -2124,6 +2184,10 @@ echo "Stage completed successfully"
     ):
         """Launch Docker container (local) or GCE instance."""
         backend = self.config.jobs.backend
+
+        # Capability validation: ensure backend supports requested features
+        # This is critical for catching misconfigurations early (e.g., GPU profile on local backend)
+        self._validate_capabilities_for_stage(workspace, stage_name, backend)
 
         # Build stage config for goldfish.io
         # Start with user config (freeze_backbone, epochs, etc.) and add stage/inputs/outputs
@@ -3101,39 +3165,39 @@ echo "Stage completed successfully"
         if not path:
             return []
 
-        # 1. GCS Path
+        # 1. Cloud Storage Path (gs://)
         if path.startswith("gs://"):
             try:
-                client, _ = self._get_gcs_client()
-                if client:
-                    bucket_name, prefix = path[5:].split("/", 1)
-                    bucket = client.bucket(bucket_name)
-                    blobs = bucket.list_blobs(prefix=prefix, max_results=limit)
+                uri = StorageURI.parse(path)
+                storage = self._adapter_factory.create_storage()
+                uris = storage.list_prefix(uri)
 
-                    results = []
-                    for b in blobs:
-                        # Make path relative to the input root
-                        rel_path = b.name[len(prefix) :].lstrip("/")
-                        if rel_path:
-                            results.append(rel_path)
-                    return sorted(results)
-
-                # Fallback to gsutil
-                cmd = ["gsutil", "ls", "-r", path]
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-                if proc.returncode == 0:
-                    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
-                    # gsutil ls -r returns absolute paths, strip the base
-                    results = []
-                    for ln in lines:
-                        if ln.startswith(path):
-                            rel = ln[len(path) :].lstrip("/")
-                            if rel:
-                                results.append(rel)
-                    return sorted(results)[:limit]
+                # Make paths relative to the prefix
+                results = []
+                prefix_len = len(uri.path)
+                for item_uri in uris[:limit]:
+                    rel_path = item_uri.path[prefix_len:].lstrip("/")
+                    if rel_path:
+                        results.append(rel_path)
+                return sorted(results)
             except Exception as e:
-                logger.debug(f"Failed to list GCS contents for {path}: {e}")
-                return [f"[Error listing GCS contents: {e}]"]
+                # Fall back to CLI listing
+                try:
+                    cmd = ["gsutil", "ls", "-r", path]
+                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    if proc.returncode == 0:
+                        lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+                        results = []
+                        for ln in lines:
+                            if ln.startswith(path):
+                                rel = ln[len(path) :].lstrip("/")
+                                if rel:
+                                    results.append(rel)
+                        return sorted(results)[:limit]
+                except Exception:
+                    pass
+                logger.debug(f"Failed to list storage contents for {path}: {e}")
+                return [f"[Error listing storage contents: {e}]"]
 
         # 2. Local Path
         try:

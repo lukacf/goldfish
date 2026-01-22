@@ -29,6 +29,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from goldfish.cloud.factory import AdapterFactory
 from goldfish.config import GoldfishConfig
 from goldfish.context import ServerContext, set_context
 from goldfish.datasets.registry import DatasetRegistry
@@ -336,17 +337,26 @@ class GoldfishDaemon:
         )
         pipeline_executor = PipelineExecutor(stage_executor=stage_executor, pipeline_manager=pipeline_manager, db=db)
 
-        # Initialize MetadataBus (Cloud-native or Local simulation)
-        metadata_bus: MetadataBus
+        # Initialize MetadataBus using AdapterFactory (Cloud-native or Local simulation)
+        # The factory creates the appropriate adapter based on config.jobs.backend
+        adapter_factory = AdapterFactory(self.config)
         local_metadata_bus: LocalMetadataBus | None = None
-        if self.config.gce:
+
+        # Create signal bus (MetadataBus) via factory
+        signal_bus = adapter_factory.create_signal_bus(metadata_path=self.dev_repo_path / ".metadata_bus.json")
+
+        # For backwards compatibility, cast to MetadataBus
+        # Both LocalMetadataBus and GCPSignalBus implement the SignalBus protocol
+        metadata_bus: MetadataBus
+        if isinstance(signal_bus, LocalMetadataBus):
+            local_metadata_bus = signal_bus
+            metadata_bus = signal_bus
+        else:
+            # For GCP backend, we need the old-style MetadataBus interface
+            # The GCPSignalBus adapter wraps GCPMetadataBus
             from goldfish.infra.metadata.gcp import GCPMetadataBus
 
             metadata_bus = GCPMetadataBus()
-        else:
-            # Use a file in dev repo for local simulation
-            local_metadata_bus = LocalMetadataBus(self.dev_repo_path / ".metadata_bus.json")
-            metadata_bus = local_metadata_bus
 
         # Create and set context
         self.context = ServerContext(

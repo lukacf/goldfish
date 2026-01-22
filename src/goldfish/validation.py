@@ -301,6 +301,50 @@ class InvalidProjectIdError(ValidationError):
         )
 
 
+class InvalidDockerImageError(ValidationError):
+    """Docker image name is invalid."""
+
+    def __init__(self, image: str, reason: str):
+        super().__init__(
+            f"Invalid Docker image '{image}': {reason}",
+            value=image,
+            field="image",
+        )
+
+
+class InvalidEnvKeyError(ValidationError):
+    """Environment variable key is invalid."""
+
+    def __init__(self, key: str, reason: str):
+        super().__init__(
+            f"Invalid env key '{key}': {reason}",
+            value=key,
+            field="env_key",
+        )
+
+
+class InvalidEnvValueError(ValidationError):
+    """Environment variable value is invalid."""
+
+    def __init__(self, key: str, value: str, reason: str):
+        super().__init__(
+            f"Invalid env value for '{key}': {reason}",
+            value=value,
+            field="env_value",
+        )
+
+
+class InvalidSignalNameError(ValidationError):
+    """Signal/input name is invalid."""
+
+    def __init__(self, name: str, reason: str):
+        super().__init__(
+            f"Invalid signal name '{name}': {reason}",
+            value=name,
+            field="signal_name",
+        )
+
+
 # Regex patterns
 # Workspace/source names: start with alphanumeric, contain alphanumeric/hyphen/underscore,
 # end with alphanumeric. Length 1-64.
@@ -1944,4 +1988,153 @@ def validate_project_id(project_id: str) -> None:
         raise InvalidProjectIdError(
             project_id,
             "must be 6-30 chars, start with lowercase letter, contain only lowercase alphanumeric and hyphens",
+        )
+
+
+# Docker image pattern: [registry/]name[:tag]
+# Allows: alpine, alpine:latest, gcr.io/project/image:v1, localhost:5000/image
+# Registry: optional, alphanumeric with dots, hyphens, colons (for ports)
+# Name: alphanumeric with dots, hyphens, underscores, slashes
+# Tag: optional, alphanumeric with dots, hyphens, underscores
+_DOCKER_IMAGE_PATTERN = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9._/:@-]{0,253}[a-zA-Z0-9])?$")
+
+# Environment variable key pattern: POSIX-compliant
+# Must start with letter or underscore, contain only alphanumeric and underscore
+_ENV_KEY_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,255}$")
+
+# Signal/input name pattern: same as output name
+# Alphanumeric, hyphens, underscores. Max 64 chars.
+_SIGNAL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+
+
+def validate_docker_image(image: str) -> None:
+    """Validate a Docker image name.
+
+    Docker image names can include:
+    - Simple names: alpine, python
+    - Names with tags: alpine:latest, python:3.12
+    - Registry paths: gcr.io/project/image:tag
+    - Digest references: image@sha256:...
+
+    This prevents command injection via Docker subprocess calls.
+
+    Args:
+        image: The Docker image name to validate
+
+    Raises:
+        InvalidDockerImageError: If validation fails
+    """
+    if not image:
+        raise InvalidDockerImageError(image, "image name cannot be empty")
+
+    if len(image) > 255:
+        raise InvalidDockerImageError(image, "image name too long (max 255 chars)")
+
+    # Check for dangerous characters first
+    dangerous = _contains_dangerous_chars(image)
+    if dangerous:
+        raise InvalidDockerImageError(image, f"contains invalid character: '{dangerous}'")
+
+    # Must match Docker image pattern
+    if not _DOCKER_IMAGE_PATTERN.match(image):
+        raise InvalidDockerImageError(
+            image,
+            "must be valid Docker image format (e.g., alpine, alpine:latest, gcr.io/project/image:tag)",
+        )
+
+
+def validate_env_key(key: str) -> None:
+    """Validate an environment variable key.
+
+    Environment variable keys must:
+    - Start with letter or underscore
+    - Contain only alphanumeric and underscore
+    - Be at most 256 characters
+
+    This prevents command injection via Docker -e arguments.
+
+    Args:
+        key: The environment variable key to validate
+
+    Raises:
+        InvalidEnvKeyError: If validation fails
+    """
+    if not key:
+        raise InvalidEnvKeyError(key, "env key cannot be empty")
+
+    if len(key) > 256:
+        raise InvalidEnvKeyError(key, "env key too long (max 256 chars)")
+
+    # Check for dangerous characters first
+    dangerous = _contains_dangerous_chars(key)
+    if dangerous:
+        raise InvalidEnvKeyError(key, f"contains invalid character: '{dangerous}'")
+
+    # Must match POSIX env key pattern
+    if not _ENV_KEY_PATTERN.match(key):
+        raise InvalidEnvKeyError(
+            key,
+            "must start with letter/underscore, contain only alphanumeric and underscore",
+        )
+
+
+def validate_env_value(key: str, value: str) -> None:
+    """Validate an environment variable value.
+
+    Environment variable values must not contain:
+    - Shell metacharacters that could enable injection
+    - Newlines (could break -e argument parsing)
+
+    Args:
+        key: The environment variable key (for error messages)
+        value: The environment variable value to validate
+
+    Raises:
+        InvalidEnvValueError: If validation fails
+    """
+    if len(value) > 32768:
+        raise InvalidEnvValueError(key, value[:50] + "...", "env value too long (max 32KB)")
+
+    # Check for dangerous characters
+    dangerous = _contains_dangerous_chars(value)
+    if dangerous:
+        raise InvalidEnvValueError(key, value[:50], f"contains invalid character: '{dangerous}'")
+
+
+def validate_signal_name(name: str) -> None:
+    """Validate a signal/input name.
+
+    Signal names must:
+    - Start with alphanumeric
+    - Contain only alphanumeric, hyphens, underscores
+    - Be at most 64 characters
+
+    This prevents path injection via mount paths.
+
+    Args:
+        name: The signal name to validate
+
+    Raises:
+        InvalidSignalNameError: If validation fails
+    """
+    if not name:
+        raise InvalidSignalNameError(name, "signal name cannot be empty")
+
+    if len(name) > 64:
+        raise InvalidSignalNameError(name, "signal name too long (max 64 chars)")
+
+    # Check for dangerous characters first
+    dangerous = _contains_dangerous_chars(name)
+    if dangerous:
+        raise InvalidSignalNameError(name, f"contains invalid character: '{dangerous}'")
+
+    # Check for path components
+    if "/" in name or "\\" in name:
+        raise InvalidSignalNameError(name, "cannot contain path separators")
+
+    # Must match signal name pattern
+    if not _SIGNAL_NAME_PATTERN.match(name):
+        raise InvalidSignalNameError(
+            name,
+            "must start with alphanumeric, contain only alphanumeric, hyphens, and underscores",
         )

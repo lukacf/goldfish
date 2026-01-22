@@ -133,6 +133,7 @@ class GCELauncher:
         zones: list[str] | None = None,
         use_capacity_search: bool = True,
         goldfish_env: dict[str, str] | None = None,
+        preemptible: bool | None = None,
     ) -> GCELaunchResult:
         """Launch GCE instance for stage run.
 
@@ -150,6 +151,7 @@ class GCELauncher:
             zones: List of zones to search (None = use default)
             use_capacity_search: Use ResourceLauncher for capacity search
             goldfish_env: Goldfish environment variables (metrics, provenance, etc.)
+            preemptible: Force spot (True), on-demand (False), or auto (None)
 
         Returns:
             GCELaunchResult with instance_name and zone
@@ -340,6 +342,7 @@ class GCELauncher:
                 startup_script=startup_script,
                 gpu_type=gpu_type,
                 zones=zones,
+                preemptible=preemptible,
             )
         else:
             # Simple launch without capacity search
@@ -350,6 +353,7 @@ class GCELauncher:
                 gpu_type=gpu_type,
                 gpu_count=gpu_count,
                 zone=zones[0] if zones else self.default_zone,
+                preemptible=preemptible,
             )
 
     def _launch_with_capacity_search(
@@ -358,6 +362,7 @@ class GCELauncher:
         startup_script: str,
         gpu_type: str | None,
         zones: list[str] | None,
+        preemptible: bool | None = None,
     ) -> GCELaunchResult:
         """Launch using ResourceLauncher for capacity search.
 
@@ -366,6 +371,7 @@ class GCELauncher:
             startup_script: Startup script content
             gpu_type: GPU type to filter resources
             zones: Zones to search
+            preemptible: Force spot (True), on-demand (False), or auto (None)
 
         Returns:
             GCELaunchResult with instance_name and zone
@@ -389,12 +395,21 @@ class GCELauncher:
         if not filtered_resources:
             raise GoldfishError(f"No resources found for GPU type: {gpu_type or 'none'}")
 
+        # Determine preemptible preference
+        # None = default (spot_first), True = force spot, False = force on_demand
+        force_preemptible: str | None = None
+        if preemptible is True:
+            force_preemptible = "spot"
+        elif preemptible is False:
+            force_preemptible = "on_demand"
+
         # Create ResourceLauncher
         # Use instance gpu_preference for ordering, but force_gpu restricts to specific type
         launcher = ResourceLauncher(
             resources=filtered_resources,
             gpu_preference=self.gpu_preference,
             force_gpu=gpu_type,
+            force_preemptible=force_preemptible,
             zones_override=zones,
             project_id=self.project_id,
             service_account=self._resolve_service_account(),
@@ -419,6 +434,7 @@ class GCELauncher:
         gpu_type: str | None,
         gpu_count: int,
         zone: str,
+        preemptible: bool | None = None,
     ) -> GCELaunchResult:
         """Simple launch without capacity search.
 
@@ -429,6 +445,7 @@ class GCELauncher:
             gpu_type: GPU accelerator type
             gpu_count: GPU count
             zone: Zone
+            preemptible: Request spot/preemptible (True), on-demand (False), or default (None)
 
         Returns:
             GCELaunchResult with instance_name and zone
@@ -469,6 +486,10 @@ class GCELauncher:
                 cmd.append("--maintenance-policy=TERMINATE")
                 cmd.append("--restart-on-failure")
                 cmd.append("--metadata=install-nvidia-driver=True")
+
+            # Handle spot/preemptible preference
+            if preemptible is True:
+                cmd.append("--provisioning-model=SPOT")
 
             if self.project_id:
                 cmd.append(f"--project={self.project_id}")
