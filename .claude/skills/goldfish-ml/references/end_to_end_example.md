@@ -326,6 +326,8 @@ logs("stage-abc123", tail=100)
 Track experiment status:
 ```
 list_history("1b-8k-lm", record_type="run", sort_by="created")
+# Returns records with reason, primary_metric, age fields for quick orientation
+
 inspect_record("01HXYZ...", include=["results", "comparison"])
 list_unfinalized_runs("1b-8k-lm")
 ```
@@ -347,6 +349,7 @@ finalize_run("stage-abc123", {
 Inspect outputs + lineage:
 ```
 inspect_run("stage-abc123", include=["manifest", "provenance"])
+get_lineage("stage-abc123")  # See downstream consumers of this run's outputs
 get_debug_info("stage-abc123")
 ```
 
@@ -376,11 +379,13 @@ hibernate("w1", "Completed 1B-8k LM training experiment")
 4. mount("1b-8k-lm", "w1", reason="...")              # Mount to slot
 5. [Create files: pipeline.yaml, configs/train.yaml, modules/train.py]
 6. run("w1", stages=["train"], reason={...}, results_spec=RESULTS_SPEC)
-7. inspect_run("stage-abc123")                         # Infra status
-8. inspect_record("01HXYZ...", include=["results", "comparison"])
-9. finalize_run("stage-abc123", {...})                 # Required finalization
-10. tag_record("stage-abc123", "initial-training-complete")
-11. hibernate("w1", "Done with experiment")            # Clean up
+7. inspect_run("stage-abc123")                         # Infra status + reason
+8. list_history("1b-8k-lm")                            # Records with reason, metric, age
+9. inspect_record("01HXYZ...", include=["results", "comparison"])
+10. finalize_run("stage-abc123", {...})                # Required finalization
+11. get_lineage("stage-abc123")                        # Track downstream dependencies
+12. tag_record("stage-abc123", "initial-training-complete")
+13. hibernate("w1", "Done with experiment")            # Clean up
 ```
 
 ## Common Variations

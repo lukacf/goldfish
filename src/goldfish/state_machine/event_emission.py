@@ -1,0 +1,701 @@
+"""Event emission layer for state machine transitions.
+
+This module provides functions to determine what events to emit based on
+exit codes, GCS status, and backend state. It replaces direct status updates
+with event-driven state machine transitions.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import subprocess
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
+
+from goldfish.state_machine.exit_code import ExitCodeResult
+from goldfish.state_machine.types import (
+    EventContext,
+    StageEvent,
+    StageState,
+    TerminationCause,
+)
+from goldfish.validation import (
+    validate_container_id,
+    validate_instance_name,
+    validate_project_id,
+    validate_zone,
+)
+
+if TYPE_CHECKING:
+    from goldfish.db.database import Database
+
+logger = logging.getLogger(__name__)
+
+# GCS outage threshold before giving up (1 hour)
+GCS_OUTAGE_THRESHOLD = timedelta(hours=1)
+
+
+def determine_exit_event(
+    run: dict[str, Any],
+    exit_result: ExitCodeResult | None,
+    *,
+    db: Database | None = None,
+    project_id: str | None = None,
+    zone: str | None = None,
+) -> tuple[StageEvent, EventContext] | None:
+    """Determine what exit event to emit based on exit code result.
+
+    This function is called by the daemon when a stage is in RUNNING state
+    and we've checked for an exit code.
+
+    Args:
+        run: Stage run dictionary with state, id, gcs_outage_started, etc.
+        exit_result: Result of exit code retrieval.
+
+    Returns:
+        Tuple of (event, context) to emit, or None if no event should be emitted.
+    """
+    if exit_result is None:
+        return None
+
+    # Only emit exit events for RUNNING state
+    state = run.get("state")
+    if state and state != StageState.RUNNING.value:
+        return None
+
+    now = datetime.now(UTC)
+
+    # Handle GCS errors specially
+    if exit_result.gcs_error:
+        return _handle_gcs_error(
+            run,
+            exit_result,
+            now,
+            db=db,
+            project_id=project_id,
+            zone=zone,
+        )
+
+    # If GCS was previously erroring but is now reachable, clear outage marker.
+    if db is not None and get_gcs_outage_started(run) is not None:
+        clear_gcs_outage_started(db, run_id=run.get("id", ""))
+
+    # Create base context
+    context = EventContext(
+        timestamp=now,
+        source="daemon",
+        exit_code=exit_result.code,
+        exit_code_exists=exit_result.exists,
+    )
+
+    # Determine event based on exit result
+    if exit_result.exists and exit_result.code == 0:
+        # Check if this was an AI-requested stop
+        ai_stop_info = check_ai_stop_requested(run, db=db, project_id=project_id)
+        if ai_stop_info is not None:
+            context.termination_cause = TerminationCause.AI_STOPPED
+            context.svs_review_id = ai_stop_info.get("svs_review_id")
+            return (StageEvent.AI_STOP, context)
+        return (StageEvent.EXIT_SUCCESS, context)
+    elif exit_result.exists and exit_result.code is not None:
+        return (StageEvent.EXIT_FAILURE, context)
+    elif not exit_result.exists:
+        # Spec: Only emit EXIT_MISSING once we've verified the instance/container is stopped.
+        backend_handle = run.get("backend_handle")
+        if not backend_handle:
+            return None
+
+        backend_type = run.get("backend_type", "local")
+        is_stopped = verify_instance_stopped(
+            run_id=run.get("id", ""),
+            backend_type=backend_type,
+            backend_handle=backend_handle,
+            project_id=project_id,
+            zone=zone,
+        )
+        if not is_stopped:
+            return None
+
+        cause = detect_termination_cause(
+            run_id=run.get("id", ""),
+            backend_type=backend_type,
+            backend_handle=backend_handle,
+            project_id=project_id,
+            zone=zone,
+        )
+        context.instance_confirmed_dead = True
+        context.termination_cause = cause
+        context.exit_code = None
+        context.exit_code_exists = False
+        return (StageEvent.EXIT_MISSING, context)
+
+    return None
+
+
+def _handle_gcs_error(
+    run: dict[str, Any],
+    exit_result: ExitCodeResult,
+    now: datetime,
+    *,
+    db: Database | None,
+    project_id: str | None,
+    zone: str | None,
+) -> tuple[StageEvent, EventContext] | None:
+    """Handle GCS error during exit code retrieval.
+
+    GCS errors get special handling:
+    - First error: Don't emit event, just track outage start
+    - Under 1 hour: Keep waiting
+    - Over 1 hour: Emit EXIT_MISSING with gcs_error flag
+
+    Args:
+        run: Stage run dictionary.
+        exit_result: Exit code result with gcs_error=True.
+        now: Current timestamp.
+
+    Returns:
+        Tuple of (event, context) or None.
+    """
+    outage_started = get_gcs_outage_started(run)
+
+    if outage_started is None:
+        # First GCS error - start outage clock and don't emit yet.
+        if db is not None:
+            set_gcs_outage_started(db, run_id=run.get("id", ""), timestamp=now)
+        return None
+
+    # Check if we've exceeded the threshold
+    elapsed = now - outage_started
+    if elapsed < GCS_OUTAGE_THRESHOLD:
+        # Keep waiting
+        return None
+
+    # Exceeded threshold - only emit EXIT_MISSING once instance is confirmed dead.
+    backend_handle = run.get("backend_handle")
+    if not backend_handle:
+        return None
+
+    backend_type = run.get("backend_type", "local")
+    is_stopped = verify_instance_stopped(
+        run_id=run.get("id", ""),
+        backend_type=backend_type,
+        backend_handle=backend_handle,
+        project_id=project_id,
+        zone=zone,
+    )
+    if not is_stopped:
+        return None
+
+    cause = detect_termination_cause(
+        run_id=run.get("id", ""),
+        backend_type=backend_type,
+        backend_handle=backend_handle,
+        project_id=project_id,
+        zone=zone,
+    )
+
+    # Exceeded threshold - give up and emit EXIT_MISSING
+    context = EventContext(
+        timestamp=now,
+        source="daemon",
+        exit_code=None,
+        exit_code_exists=False,
+        gcs_error=True,
+        gcs_outage_started=outage_started,
+        error_message=exit_result.error,
+        instance_confirmed_dead=True,
+        termination_cause=cause,
+    )
+    return (StageEvent.EXIT_MISSING, context)
+
+
+def get_gcs_outage_started(run: dict[str, Any]) -> datetime | None:
+    """Get the GCS outage start time from run data.
+
+    Args:
+        run: Stage run dictionary.
+
+    Returns:
+        Datetime when GCS outage started, or None.
+    """
+    value = run.get("gcs_outage_started")
+    if value is None:
+        return None
+
+    try:
+        return datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def set_gcs_outage_started(db: Database, run_id: str, timestamp: datetime) -> None:
+    """Set the GCS outage start time in database.
+
+    Args:
+        db: Database instance.
+        run_id: Stage run ID.
+        timestamp: When the outage started.
+    """
+    db.update_stage_run_gcs_outage(run_id, timestamp.isoformat())
+
+
+def clear_gcs_outage_started(db: Database, run_id: str) -> None:
+    """Clear the GCS outage start time in database.
+
+    Called when GCS becomes available again.
+
+    Args:
+        db: Database instance.
+        run_id: Stage run ID.
+    """
+    db.update_stage_run_gcs_outage(run_id, None)
+
+
+def verify_instance_stopped(
+    run_id: str,
+    backend_type: str,
+    backend_handle: str,
+    project_id: str | None = None,
+    zone: str | None = None,
+) -> bool:
+    """Verify that an instance/container has stopped.
+
+    Used to confirm that EXIT_MISSING is due to actual termination,
+    not just GCS lag.
+
+    Args:
+        run_id: Stage run ID.
+        backend_type: "gce" or "local".
+        backend_handle: Instance name or container ID.
+        project_id: GCP project ID (for GCE).
+        zone: GCE zone (for GCE).
+
+    Returns:
+        True if instance is confirmed stopped/missing, False if still running.
+
+    Raises:
+        InvalidInstanceNameError: If GCE instance name is invalid.
+        InvalidContainerIdError: If Docker container ID is invalid.
+    """
+    # Validate inputs before subprocess calls (security)
+    if backend_type == "gce":
+        validate_instance_name(backend_handle)
+        if project_id:
+            validate_project_id(project_id)
+        if zone:
+            validate_zone(zone)
+        return _verify_gce_instance_stopped(backend_handle, project_id, zone)
+    else:
+        validate_container_id(backend_handle)
+        return _verify_docker_container_stopped(backend_handle)
+
+
+def _verify_gce_instance_stopped(
+    instance_name: str,
+    project_id: str | None,
+    zone: str | None = None,
+) -> bool:
+    """Verify GCE instance status.
+
+    Uses `gcloud compute instances list` to find the instance across all zones.
+    This is more robust than `instances describe` which requires a zone parameter
+    and would fail with "not found" if the wrong zone is used.
+
+    Args:
+        instance_name: GCE instance name.
+        project_id: GCP project ID.
+        zone: GCE zone (optional, not used - kept for API compatibility).
+
+    Returns:
+        True if instance is stopped/terminated/not found.
+    """
+    try:
+        # Use instances list with filter - works across all zones
+        # This avoids the bug where describe fails when zone is wrong/missing
+        cmd = [
+            "gcloud",
+            "compute",
+            "instances",
+            "list",
+            f"--filter=name={instance_name}",
+            "--format=value(status)",
+        ]
+        if project_id:
+            cmd.extend(["--project", project_id])
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+
+        status = result.stdout.strip().upper()
+        if not status:
+            # Instance not found anywhere - confirmed dead
+            return True
+        # RUNNING, STAGING, PROVISIONING = still alive
+        # TERMINATED, STOPPED = dead
+        return status not in ("RUNNING", "STAGING", "PROVISIONING")
+
+    except subprocess.CalledProcessError as e:
+        logger.warning("Error checking GCE instance %s: %s", instance_name, e.stderr)
+        return False  # Can't confirm, assume still running
+
+    except Exception as e:
+        logger.warning("Error checking GCE instance %s: %s", instance_name, e)
+        return False
+
+
+def _verify_docker_container_stopped(container_id: str) -> bool:
+    """Verify Docker container status.
+
+    Args:
+        container_id: Docker container ID or name.
+
+    Returns:
+        True if container is stopped/exited/not found.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Status}}", container_id],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+
+        status = result.stdout.strip().lower()
+        # running, restarting, paused = still alive
+        # exited, dead, removing, created = not running
+        return status not in ("running", "restarting", "paused")
+
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").lower()
+        if "no such container" in stderr:
+            return True  # Container doesn't exist = confirmed dead
+        logger.warning("Error checking Docker container %s: %s", container_id, e.stderr)
+        return False
+
+    except Exception as e:
+        logger.warning("Error checking Docker container %s: %s", container_id, e)
+        return False
+
+
+def detect_termination_cause(
+    run_id: str,
+    backend_type: str,
+    backend_handle: str,
+    project_id: str | None = None,
+    zone: str | None = None,
+) -> TerminationCause:
+    """Detect why an instance/container terminated.
+
+    Checks backend APIs for preemption, OOM, etc.
+
+    Args:
+        run_id: Stage run ID.
+        backend_type: "gce" or "local".
+        backend_handle: Instance name or container ID.
+        project_id: GCP project ID (for GCE).
+        zone: GCE zone (for GCE).
+
+    Returns:
+        TerminationCause enum value.
+
+    Raises:
+        InvalidInstanceNameError: If GCE instance name is invalid.
+        InvalidContainerIdError: If Docker container ID is invalid.
+    """
+    # Validate inputs before subprocess calls (security)
+    if backend_type == "gce":
+        validate_instance_name(backend_handle)
+        if project_id:
+            validate_project_id(project_id)
+        return _detect_gce_termination_cause(backend_handle, project_id, zone)
+    else:
+        validate_container_id(backend_handle)
+        return _detect_docker_termination_cause(backend_handle)
+
+
+def _detect_gce_termination_cause(
+    instance_name: str,
+    project_id: str | None,
+    zone: str | None = None,
+) -> TerminationCause:
+    """Detect GCE instance termination cause.
+
+    Checks GCE operations API for preemption events.
+
+    Args:
+        instance_name: GCE instance name.
+        project_id: GCP project ID.
+        zone: GCE zone.
+
+    Returns:
+        TerminationCause.PREEMPTED or TerminationCause.CRASHED.
+    """
+    try:
+        # Check for preemption via operations API
+        cmd = [
+            "gcloud",
+            "compute",
+            "operations",
+            "list",
+            "--filter",
+            f'targetLink:"{instance_name}" AND operationType:compute.instances.preempted',
+            "--format",
+            "json",
+        ]
+        if project_id:
+            cmd.extend(["--project", project_id])
+
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+
+        operations = json.loads(result.stdout or "[]")
+        if operations:
+            return TerminationCause.PREEMPTED
+
+        return TerminationCause.CRASHED
+
+    except Exception as e:
+        logger.warning("Error detecting GCE termination cause for %s: %s", instance_name, e)
+        return TerminationCause.ORPHANED
+
+
+def _detect_docker_termination_cause(container_id: str) -> TerminationCause:
+    """Detect Docker container termination cause.
+
+    Checks for OOM kill.
+
+    Args:
+        container_id: Docker container ID or name.
+
+    Returns:
+        TerminationCause.CRASHED (OOM) or TerminationCause.ORPHANED.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.OOMKilled}}", container_id],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+
+        oom_killed = result.stdout.strip().lower()
+        if oom_killed == "true":
+            return TerminationCause.CRASHED
+
+        return TerminationCause.ORPHANED
+
+    except Exception as e:
+        logger.warning("Error detecting Docker termination cause for %s: %s", container_id, e)
+        return TerminationCause.ORPHANED
+
+
+def _gcs_file_exists(gcs_path: str) -> bool:
+    """Check if a GCS file exists using gsutil stat.
+
+    Args:
+        gcs_path: Full GCS path (gs://bucket/path/to/file).
+
+    Returns:
+        True if the file exists, False otherwise.
+    """
+    try:
+        result = subprocess.run(
+            ["gsutil", "stat", gcs_path],
+            capture_output=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def check_ai_stop_requested(
+    run: dict[str, Any],
+    *,
+    db: Database | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Check if AI/SVS requested a stop for this run.
+
+    Checks for the existence of a stop_requested file, which is written
+    by during-run SVS when it detects issues.
+
+    Args:
+        run: Stage run dictionary.
+        db: Database instance (to look up svs_review_id).
+        project_id: GCP project ID (for GCE).
+
+    Returns:
+        Dict with stop info including svs_review_id, or None if no stop requested.
+    """
+    run_id = run.get("id", "")
+    backend_type = run.get("backend_type", "local")
+
+    stop_requested = False
+
+    if backend_type == "gce":
+        # Check GCS for stop_requested file
+        try:
+            # Get bucket from run or config
+            # The stop_requested file is at: gs://bucket/<run_id>/.goldfish/stop_requested
+            bucket = run.get("gcs_bucket")
+            if bucket:
+                bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+                stop_file_path = f"{bucket_uri}/{run_id}/.goldfish/stop_requested"
+                stop_requested = _gcs_file_exists(stop_file_path)
+        except Exception as e:
+            logger.debug("Error checking GCS stop_requested for %s: %s", run_id, e)
+
+    else:
+        # Local: check outputs directory
+        try:
+            outputs_dir = run.get("outputs_dir")
+            if outputs_dir:
+                from pathlib import Path
+
+                stop_file = Path(outputs_dir) / ".goldfish" / "stop_requested"
+                stop_requested = stop_file.exists()
+        except Exception as e:
+            logger.debug("Error checking local stop_requested for %s: %s", run_id, e)
+
+    if not stop_requested:
+        return None
+
+    # Stop was requested - look up the svs_review_id that triggered it
+    svs_review_id = None
+    if db is not None:
+        try:
+            with db._conn() as conn:
+                # Find the most recent during_run review for this run
+                row = conn.execute(
+                    """
+                    SELECT id FROM svs_reviews
+                    WHERE stage_run_id = ? AND review_type = 'during_run'
+                    ORDER BY reviewed_at DESC
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()
+                if row:
+                    svs_review_id = str(row["id"])
+        except Exception as e:
+            logger.debug("Error looking up svs_review_id for %s: %s", run_id, e)
+
+    return {"stop_requested": True, "svs_review_id": svs_review_id}
+
+
+def determine_instance_event(
+    run: dict[str, Any],
+    project_id: str | None = None,
+) -> tuple[StageEvent, EventContext] | None:
+    """Determine if instance has been lost.
+
+    Checks if the backend instance/container has unexpectedly disappeared.
+
+    IMPORTANT: Only checks instance status for RUNNING state. This is the
+    only state where an instance being lost is unexpected and indicates failure.
+
+    The following states are excluded from INSTANCE_LOST checks:
+    - PREPARING: Code syncing, no instance yet
+    - BUILDING: Docker build, no instance yet
+    - LAUNCHING: Instance creation is async - might not be visible yet
+    - POST_RUN: Instance stopping is EXPECTED after the process exits.
+      The executor handles POST_RUN → AWAITING_USER_FINALIZATION via POST_RUN_OK.
+    - AWAITING_USER_FINALIZATION: Instance may have been cleaned up after post-run
+    - UNKNOWN: Cannot assume anything about instance existence
+
+    NOTE: The daemon polls every 2 seconds, but instance creation (especially GCE)
+    can take 5+ seconds. Checking during LAUNCHING would incorrectly report
+    INSTANCE_LOST before the instance is ready.
+
+    Args:
+        run: Stage run dictionary.
+        project_id: GCP project ID (for GCE).
+
+    Returns:
+        Tuple of (INSTANCE_LOST, context) if instance is gone, None otherwise.
+    """
+    # Only check instance status for RUNNING state - the only state where
+    # instance disappearance indicates unexpected failure.
+    #
+    # States where we should NOT emit INSTANCE_LOST:
+    # - PREPARING: syncing code, no instance yet
+    # - BUILDING: building Docker image, no instance yet
+    # - LAUNCHING: instance is being created - might not be visible yet!
+    # - POST_RUN: instance stopping is EXPECTED after process exits
+    # - AWAITING_USER_FINALIZATION: instance may have been cleaned up after post-run
+    # - UNKNOWN: can't assume anything about instance existence
+    #
+    # States where we SHOULD check for INSTANCE_LOST:
+    # - RUNNING: instance is confirmed running, should still exist
+    #
+    # CRITICAL: LAUNCHING must be excluded because the instance creation is async.
+    # The executor emits LAUNCH_OK after verifying the instance is ready, but until
+    # then the daemon would incorrectly see "no instance" and emit INSTANCE_LOST.
+    #
+    # CRITICAL: POST_RUN must be excluded because the instance stopping is EXPECTED
+    # after the process exits. The post-run phase handles output sync and finalization,
+    # and the executor will emit POST_RUN_OK when done. Emitting INSTANCE_LOST here
+    # would race with POST_RUN_OK and incorrectly terminate successful runs.
+    state_str = run.get("state")
+    if state_str:
+        try:
+            state = StageState(state_str)
+            # States where INSTANCE_LOST should NOT be emitted
+            states_skip_instance_lost = {
+                StageState.PREPARING,  # No instance yet
+                StageState.BUILDING,  # No instance yet
+                StageState.LAUNCHING,  # Instance creation is async
+                StageState.POST_RUN,  # Instance stopping is EXPECTED after exit
+                StageState.AWAITING_USER_FINALIZATION,  # Instance may be cleaned up
+                StageState.UNKNOWN,  # Can't assume anything
+            }
+            if state in states_skip_instance_lost:
+                return None
+        except ValueError:
+            pass  # Unknown state string, proceed with check
+
+    backend_type = run.get("backend_type", "local")
+    backend_handle = run.get("backend_handle")
+
+    if not backend_handle:
+        return None
+
+    is_stopped = verify_instance_stopped(
+        run_id=run.get("id", ""),
+        backend_type=backend_type,
+        backend_handle=backend_handle,
+        project_id=project_id,
+    )
+
+    if is_stopped:
+        # Detect why it stopped
+        cause = detect_termination_cause(
+            run_id=run.get("id", ""),
+            backend_type=backend_type,
+            backend_handle=backend_handle,
+            project_id=project_id,
+        )
+
+        context = EventContext(
+            timestamp=datetime.now(UTC),
+            source="daemon",
+            termination_cause=cause,
+            instance_confirmed_dead=True,
+        )
+        return (StageEvent.INSTANCE_LOST, context)
+
+    return None

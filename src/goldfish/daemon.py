@@ -41,9 +41,17 @@ from goldfish.jobs.pipeline_executor import PipelineExecutor
 from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.jobs.tracker import JobTracker
 from goldfish.logging import setup_logging
-from goldfish.models import PipelineStatus, StageRunStatus
+from goldfish.models import PipelineStatus
 from goldfish.pipeline.manager import PipelineManager
 from goldfish.state.state_md import StateManager
+from goldfish.state_machine import transition
+from goldfish.state_machine.exit_code import ExitCodeResult
+from goldfish.state_machine.types import (
+    EventContext,
+    StageEvent,
+    StageState,
+    TerminationCause,
+)
 from goldfish.workspace.manager import WorkspaceManager
 
 logger = logging.getLogger("goldfish.daemon")
@@ -533,9 +541,15 @@ class GoldfishDaemon:
             # Wait a bit before first check to let things settle
             self.shutdown_event.wait(timeout=30)
 
+            # State-machine poller (single source of truth for stage run lifecycle)
+            from goldfish.state_machine.stage_daemon import StageDaemon
+
+            stage_daemon = StageDaemon(db=self._db, config=self.config)
+
             while not self.shutdown_event.is_set():
                 try:
-                    self._check_orphaned_instances()
+                    # NOTE: Legacy orphan checker is deprecated; state machine daemon drives state.
+                    stage_daemon.poll_active_runs()
                     self._cleanup_stalled_pipelines()
                 except Exception as e:
                     logger.exception("Instance monitor error: %s", e)
@@ -723,20 +737,27 @@ class GoldfishDaemon:
             logger.warning("Failed to list GCE instances: %s", e)
             return
 
-        # === Check 1: DB says 'running' but instance is gone ===
+        # === Check 1: DB says active but instance is gone ===
         # IMPORTANT: Add grace period - don't check runs started less than 20 minutes ago
         # H100/GPU instance allocation can take 10+ minutes due to capacity constraints
+        # Use state (source of truth) instead of legacy status column (v1.2: FINALIZING → POST_RUN)
+        # Note: AWAITING_USER_FINALIZATION is NOT included - instance is already cleaned up by then
+        active_states = (
+            StageState.RUNNING.value,
+            StageState.POST_RUN.value,
+        )
+        placeholders = ", ".join("?" for _ in active_states)
         with self._db._conn() as conn:
             rows = conn.execute(
-                """
-                SELECT id, backend_handle, workspace_name, stage_name
+                f"""
+                SELECT id, backend_handle, workspace_name, stage_name, state
                 FROM stage_runs
-                WHERE status = ?
+                WHERE state IN ({placeholders})
                 AND backend_type = 'gce'
                 AND backend_handle IS NOT NULL
                 AND started_at < datetime('now', '-20 minutes')
                 """,
-                (StageRunStatus.RUNNING,),
+                active_states,
             ).fetchall()
 
         if rows:
@@ -753,60 +774,95 @@ class GoldfishDaemon:
 
             if instance_name not in alive_instances:
                 # Check for exit_code.txt in GCS first to handle race conditions
-                # where the instance self-deletes before final status update.
-                exit_code = self._get_exit_code(stage_run_id)
+                # where the instance self-deletes before final state update.
+                exit_result = self._get_exit_code(stage_run_id)
 
-                if exit_code == 0:
-                    status = StageRunStatus.COMPLETED
-                    error_msg = None
+                if exit_result.exists and exit_result.code == 0 and not exit_result.gcs_error:
+                    # Instance completed successfully - use EXIT_SUCCESS event
                     logger.info(
                         "Stage run %s completed successfully (found exit_code=0 in GCS)",
                         stage_run_id,
                     )
-                else:
-                    # Check if the instance was preempted
-                    was_preempted = self._check_if_preempted(instance_name, project_id)
-                    status = StageRunStatus.FAILED
+                    try:
+                        from datetime import UTC, datetime
 
-                    if was_preempted:
+                        transition(
+                            self._db,
+                            stage_run_id,
+                            StageEvent.EXIT_SUCCESS,
+                            EventContext(
+                                timestamp=datetime.now(UTC),
+                                source="daemon",
+                            ),
+                        )
+                        logger.info(
+                            "Marked stage run %s as completed (workspace=%s, stage=%s)",
+                            stage_run_id,
+                            workspace,
+                            stage,
+                        )
+                    except Exception as e:
+                        logger.exception("Failed to transition stage run %s: %s", stage_run_id, e)
+                else:
+                    # Instance disappeared - use INSTANCE_LOST event
+                    # Check for termination cause file first (supervisor/watchdog kills write this)
+                    explicit_cause = self._get_termination_cause(stage_run_id)
+                    was_preempted = self._check_if_preempted(instance_name, project_id)
+                    exit_code_val = exit_result.code if exit_result.exists else None
+
+                    if explicit_cause is not None:
+                        # Supervisor or watchdog killed it - use that cause
+                        term_cause = explicit_cause
+                        error_msg = f"Instance terminated by {explicit_cause.value} (exit_code={exit_code_val})"
+                        logger.warning(
+                            "%s terminated stage run: %s (instance %s, cause=%s)",
+                            explicit_cause.value.title(),
+                            stage_run_id,
+                            instance_name,
+                            explicit_cause.value,
+                        )
+                    elif was_preempted:
                         error_msg = "Instance preempted by GCE (spot/preemptible)"
+                        term_cause = TerminationCause.PREEMPTED
                         logger.warning(
                             "Preempted stage run detected: %s (instance %s was preempted)",
                             stage_run_id,
                             instance_name,
                         )
                     else:
-                        error_msg = f"Instance disappeared (orphan cleanup, exit_code={exit_code})"
+                        error_msg = f"Instance disappeared (orphan cleanup, exit_code={exit_code_val})"
+                        term_cause = TerminationCause.ORPHANED
                         logger.warning(
                             "Orphaned stage run detected: %s (instance %s not running)",
                             stage_run_id,
                             instance_name,
                         )
 
-                # Update stage run status
-                try:
-                    with self._db._conn() as conn:
-                        conn.execute(
-                            """
-                            UPDATE stage_runs
-                            SET status = ?,
-                                error = ?,
-                                completed_at = datetime('now')
-                            WHERE id = ? AND status = ?
-                            """,
-                            (status, error_msg, stage_run_id, StageRunStatus.RUNNING),
-                        )
-                    logger.info(
-                        "Marked stage run %s as %s (workspace=%s, stage=%s)",
-                        stage_run_id,
-                        status,
-                        workspace,
-                        stage,
-                    )
-                except Exception as e:
-                    logger.exception("Failed to update stage run %s: %s", stage_run_id, e)
+                    try:
+                        from datetime import UTC, datetime
 
-    def _get_exit_code(self, stage_run_id: str, max_attempts: int = 2, retry_delay: float = 1.0) -> int:
+                        transition(
+                            self._db,
+                            stage_run_id,
+                            StageEvent.INSTANCE_LOST,
+                            EventContext(
+                                timestamp=datetime.now(UTC),
+                                source="daemon",
+                                termination_cause=term_cause,
+                                error_message=error_msg,
+                            ),
+                        )
+                        logger.info(
+                            "Marked stage run %s as terminated (workspace=%s, stage=%s, cause=%s)",
+                            stage_run_id,
+                            workspace,
+                            stage,
+                            term_cause.value,
+                        )
+                    except Exception as e:
+                        logger.exception("Failed to transition stage run %s: %s", stage_run_id, e)
+
+    def _get_exit_code(self, stage_run_id: str, max_attempts: int = 2, retry_delay: float = 1.0) -> ExitCodeResult:
         """Get exit code from GCS for a stage run.
 
         Args:
@@ -815,33 +871,74 @@ class GoldfishDaemon:
             retry_delay: Seconds between retries
 
         Returns:
-            Exit code (0 for success), or 1 if not found or failed.
+            ExitCodeResult with proper categorization (exists, code, gcs_error).
         """
-        import subprocess
-        import time
+        from goldfish.state_machine.exit_code import get_exit_code_gce
 
         if not self.config or not self.config.gce or not self.config.gcs or not self.config.gcs.bucket:
-            return 1
+            # No bucket configured - assume success for local-like behavior
+            return ExitCodeResult.from_code(0)
 
         bucket = self.config.gcs.bucket
         bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
-        gcs_path = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/exit_code.txt"
 
-        for attempt in range(1, max_attempts + 1):
-            try:
-                result = subprocess.run(
-                    ["gsutil", "cat", gcs_path],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=20,
-                )
-                return int(result.stdout.strip() or "0")
-            except Exception:
-                if attempt < max_attempts:
-                    time.sleep(retry_delay)
+        try:
+            project_id = self.config.gce.effective_project_id if self.config.gce else None
+            return get_exit_code_gce(
+                bucket_uri=bucket_uri,
+                stage_run_id=stage_run_id,
+                project_id=project_id,
+                max_attempts=max_attempts,
+                retry_delay=retry_delay,
+            )
+        except Exception as e:
+            # Defensive: treat unexpected errors as GCS errors
+            return ExitCodeResult.from_gcs_error(str(e))
 
-        return 1  # Default to failure if not found
+    def _get_termination_cause(self, stage_run_id: str) -> TerminationCause | None:
+        """Get termination cause from GCS for a stage run.
+
+        The startup script writes termination_cause.txt when supervisor
+        or watchdog kills the job, before the instance is deleted.
+
+        Args:
+            stage_run_id: Stage run identifier
+
+        Returns:
+            TerminationCause if file exists and is valid, None otherwise.
+        """
+        import subprocess
+
+        if not self.config or not self.config.gce or not self.config.gcs or not self.config.gcs.bucket:
+            return None
+
+        bucket = self.config.gcs.bucket
+        bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
+        gcs_path = f"{bucket_uri}/runs/{stage_run_id}/logs/termination_cause.txt"
+
+        try:
+            project_id = self.config.gce.effective_project_id if self.config.gce else None
+            cmd = ["gsutil"]
+            if project_id:
+                cmd.extend(["-o", f"GSUtil:project_id={project_id}"])
+            cmd.extend(["cat", gcs_path])
+
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
+            cause_str = result.stdout.strip().lower()
+
+            # Map string to enum (file contains internal names for simplicity)
+            cause_map = {
+                "supervisor": TerminationCause.NO_HEARTBEAT,
+                "watchdog": TerminationCause.MAX_RUNTIME_EXCEEDED,
+            }
+            return cause_map.get(cause_str)
+
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            # File not found or timeout - not an error, just no cause info
+            return None
+        except Exception as e:
+            logger.debug("Error reading termination cause for %s: %s", stage_run_id, e)
+            return None
 
     def start_http_server(self) -> None:
         """Start the HTTP server on Unix socket."""

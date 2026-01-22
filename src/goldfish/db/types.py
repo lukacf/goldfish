@@ -224,6 +224,7 @@ class DockerBuildRow(TypedDict):
     logs_uri: str | None  # GCS path to logs (Cloud Build only)
     workspace_name: str | None  # Workspace name (for workspace builds only)
     version: str | None  # Workspace version (for workspace builds only)
+    content_hash: str | None  # SHA256 of build context (for cache hit detection)
     created_at: str
 
 
@@ -233,6 +234,7 @@ class BackupRow(TypedDict):
     Tracks database backups with tiered retention (GFS).
     """
 
+    id: int
     backup_id: str  # "backup-{uuid8}"
     tier: str  # "event", "daily", "weekly", "monthly"
     trigger: str  # "run", "save_version", "create_workspace", "manual", etc.
@@ -261,6 +263,7 @@ class ExperimentRecordRow(TypedDict):
     type: str  # "run" | "checkpoint"
     stage_run_id: str | None  # FK stage_runs (NULL for checkpoints)
     version: str  # FK workspace_versions
+    experiment_group: str | None  # Optional grouping for filtering
     created_at: str
 
 
@@ -303,4 +306,30 @@ class RunTagRow(TypedDict):
     workspace_name: str
     record_id: str  # FK experiment_records
     tag_name: str
+    created_at: str
+
+
+# =============================================================================
+# State Machine Types
+# =============================================================================
+
+
+class StageStateTransitionRow(TypedDict):
+    """Row from the stage_state_transitions table.
+
+    Audit trail for all state transitions in stage runs.
+    Records from_state → to_state with the triggering event and normalized context.
+    """
+
+    id: int
+    stage_run_id: str  # FK stage_runs
+    from_state: str
+    to_state: str
+    event: str
+    phase: str | None
+    termination_cause: str | None
+    exit_code: int | None
+    exit_code_exists: int | None
+    error_message: str | None
+    source: str
     created_at: str

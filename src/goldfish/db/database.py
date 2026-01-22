@@ -26,7 +26,7 @@ from goldfish.db.types import (
     VersionTagRow,
 )
 from goldfish.errors import DatabaseError
-from goldfish.models import JobStatus, PipelineStatus, StageRunStatus
+from goldfish.models import JobStatus, PipelineStatus
 
 # Load schema from file
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -109,6 +109,17 @@ class Database:
                 ("outcome", "TEXT"),  # NULL, 'success', 'bad_results' - semantic result quality
                 ("attempt_num", "INTEGER"),  # Groups consecutive runs per stage
                 ("svs_findings_json", "TEXT"),  # SVS post-run findings
+                # State machine columns (Phase 3)
+                ("state", "TEXT"),  # State machine state
+                ("phase", "TEXT"),  # Sub-phase within state
+                ("termination_cause", "TEXT"),  # Why run terminated
+                ("state_entered_at", "TEXT"),  # When current state was entered
+                ("phase_updated_at", "TEXT"),  # When phase was last updated
+                ("completed_with_warnings", "INTEGER DEFAULT 0"),  # Completed with non-critical failures
+                ("output_sync_done", "INTEGER DEFAULT 0"),  # Output sync completed
+                ("output_recording_done", "INTEGER DEFAULT 0"),  # Output recording completed
+                ("gcs_outage_started", "TEXT"),  # When GCS outage was first detected
+                ("instance_zone", "TEXT"),  # GCE zone where instance was launched
             ],
             "signal_lineage": [
                 ("source_stage_run_id", "TEXT"),  # Upstream stage run
@@ -133,9 +144,13 @@ class Database:
             "docker_builds": [
                 ("workspace_name", "TEXT"),  # Workspace name (for workspace builds)
                 ("version", "TEXT"),  # Workspace version (for workspace builds)
+                ("content_hash", "TEXT"),  # SHA256 of build context (for cache hit detection)
             ],
             "experiment_records": [
                 ("experiment_group", "TEXT"),  # Optional grouping for filtering
+            ],
+            "stage_state_transitions": [
+                ("svs_review_id", "TEXT"),  # FK to svs_reviews.id for SVS_BLOCK and AI_STOP events
             ],
         }
 
@@ -306,6 +321,34 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_run_tags_record
                     ON run_tags(record_id);
+
+                -- Stage state transitions (audit trail for state machine)
+                CREATE TABLE IF NOT EXISTS stage_state_transitions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stage_run_id TEXT NOT NULL,
+                    from_state TEXT NOT NULL,
+                    to_state TEXT NOT NULL,
+                    event TEXT NOT NULL,
+                    phase TEXT,
+                    termination_cause TEXT CHECK(termination_cause IS NULL OR termination_cause IN ('preempted', 'crashed', 'orphaned', 'timeout', 'ai_stopped', 'manual')),
+                    exit_code INTEGER,
+                    exit_code_exists INTEGER,
+                    error_message TEXT,
+                    svs_review_id TEXT,
+                    source TEXT NOT NULL CHECK(source IN ('mcp_tool', 'executor', 'daemon', 'container', 'migration', 'admin')),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE,
+                    FOREIGN KEY (svs_review_id) REFERENCES svs_reviews(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_state_transitions_stage_run
+                    ON stage_state_transitions(stage_run_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_state_transitions_created_at
+                    ON stage_state_transitions(created_at);
+
+                -- Partial index for active states (used by daemon polling)
+                CREATE INDEX IF NOT EXISTS idx_stage_runs_active_state
+                    ON stage_runs(state)
+                    WHERE state IN ('preparing', 'building', 'launching', 'running', 'finalizing', 'unknown');
                 """
             )
 
@@ -445,9 +488,12 @@ class Database:
 
                 # Find stage_runs without experiment_records
                 # IMPORTANT: Only include runs where workspace_version exists (FK constraint)
+                # NOTE: Select both state and status - legacy DBs may have state=NULL
+                # but status populated. state is the new state machine column, status
+                # is the legacy column. Use COALESCE to prefer state over status.
                 orphaned = conn.execute(
                     """
-                    SELECT sr.id, sr.workspace_name, sr.version, sr.status
+                    SELECT sr.id, sr.workspace_name, sr.version, sr.state, sr.status
                     FROM stage_runs sr
                     LEFT JOIN experiment_records er ON er.stage_run_id = sr.id
                     INNER JOIN workspace_versions wv
@@ -461,21 +507,23 @@ class Database:
                     stage_run_id = row["id"]
                     workspace_name = row["workspace_name"]
                     version = row["version"]
-                    status = row["status"]
+                    # Use state if available, otherwise fall back to status (legacy column)
+                    state = row["state"] or row["status"]
 
                     # Generate ULID for record_id
                     record_id = generate_record_id()
 
-                    # Determine infra_outcome from status
-                    # Only terminal statuses get mapped; non-terminal get "unknown"
+                    # Determine infra_outcome from state (state machine is source of truth)
+                    # Only terminal states get mapped; non-terminal get "unknown"
                     # to satisfy CHECK constraint (completed/preempted/crashed/canceled/unknown)
                     infra_outcome_map = {
                         "completed": "completed",
                         "failed": "crashed",
+                        "terminated": "crashed",
                         "canceled": "canceled",
                     }
-                    # running/pending -> unknown (valid CHECK value, will be updated later)
-                    infra_outcome = infra_outcome_map.get(status, "unknown")
+                    # Active states -> unknown (valid CHECK value, will be updated later)
+                    infra_outcome = infra_outcome_map.get(state, "unknown") if state else "unknown"
 
                     # Create experiment_record
                     conn.execute(
@@ -498,6 +546,117 @@ class Database:
                     )
 
                 new_version = 5
+
+            # Version 6: Normalize stage_state_transitions schema (remove context_json)
+            if current_version < 6:
+                # stage_state_transitions may exist in older DBs with:
+                #   (stage_run_id, from_state, to_state, event, context_json, timestamp)
+                # New schema stores normalized columns (phase, termination_cause, exit_code, etc.)
+                table_exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='stage_state_transitions'"
+                ).fetchone()
+                if table_exists is not None:
+                    transition_cols: set[str] = {
+                        row["name"] for row in conn.execute("PRAGMA table_info(stage_state_transitions)")
+                    }
+                    if "context_json" in transition_cols:
+                        legacy_rows = conn.execute(
+                            """
+                            SELECT id, stage_run_id, from_state, to_state, event, context_json, timestamp
+                            FROM stage_state_transitions
+                            ORDER BY id
+                            """
+                        ).fetchall()
+
+                        # Rebuild via table recreation (portable across SQLite versions)
+                        # NOTE: PRAGMA foreign_keys is per-connection; restore it after.
+                        conn.execute("PRAGMA foreign_keys = OFF")
+                        conn.execute("DROP TABLE IF EXISTS stage_state_transitions_new")
+                        conn.execute(
+                            """
+                            CREATE TABLE stage_state_transitions_new (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                stage_run_id TEXT NOT NULL,
+                                from_state TEXT NOT NULL,
+                                to_state TEXT NOT NULL,
+                                event TEXT NOT NULL,
+                                phase TEXT,
+                                termination_cause TEXT CHECK(
+                                    termination_cause IS NULL OR termination_cause IN
+                                    ('preempted', 'crashed', 'orphaned', 'timeout', 'ai_stopped', 'manual')
+                                ),
+                                exit_code INTEGER,
+                                exit_code_exists INTEGER,
+                                error_message TEXT,
+                                svs_review_id TEXT,
+                                source TEXT NOT NULL CHECK(
+                                    source IN ('mcp_tool', 'executor', 'daemon', 'container', 'migration', 'admin')
+                                ),
+                                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                                FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE,
+                                FOREIGN KEY (svs_review_id) REFERENCES svs_reviews(id)
+                            )
+                            """
+                        )
+
+                        for r in legacy_rows:
+                            raw = r["context_json"] or "{}"
+                            try:
+                                ctx = json.loads(raw)
+                            except Exception:
+                                ctx = {}
+
+                            phase = ctx.get("phase")
+                            termination_cause = ctx.get("termination_cause")
+                            exit_code = ctx.get("exit_code")
+                            exit_code_exists = 1 if ctx.get("exit_code_exists") else 0
+                            error_message = ctx.get("error_message")
+                            source = ctx.get("source") or "migration"
+                            created_at = r["timestamp"] or datetime.now(UTC).isoformat()
+
+                            svs_review_id = ctx.get("svs_review_id")
+
+                            conn.execute(
+                                """
+                                INSERT INTO stage_state_transitions_new
+                                (id, stage_run_id, from_state, to_state, event,
+                                 phase, termination_cause, exit_code, exit_code_exists,
+                                 error_message, svs_review_id, source, created_at)
+                                VALUES (?, ?, ?, ?, ?,
+                                        ?, ?, ?, ?,
+                                        ?, ?, ?, ?)
+                                """,
+                                (
+                                    r["id"],
+                                    r["stage_run_id"],
+                                    r["from_state"],
+                                    r["to_state"],
+                                    r["event"],
+                                    phase,
+                                    termination_cause,
+                                    exit_code,
+                                    exit_code_exists,
+                                    error_message,
+                                    svs_review_id,
+                                    source,
+                                    created_at,
+                                ),
+                            )
+
+                        conn.execute("DROP TABLE stage_state_transitions")
+                        conn.execute("ALTER TABLE stage_state_transitions_new RENAME TO stage_state_transitions")
+                        conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_state_transitions_stage_run ON stage_state_transitions(stage_run_id, created_at)"
+                        )
+                        conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_state_transitions_created_at ON stage_state_transitions(created_at)"
+                        )
+                        conn.execute("PRAGMA foreign_keys = ON")
+
+                new_version = 6
+
+            if current_version < 7:
+                new_version = 7
 
             # Bump schema version if needed
             if new_version != current_version:
@@ -546,6 +705,20 @@ class Database:
             raise
         finally:
             conn.close()
+
+    def _get_raw_conn(self) -> sqlite3.Connection:
+        """Get a raw database connection for manual transaction control.
+
+        This is used for leader election with BEGIN IMMEDIATE.
+        The caller is responsible for committing/rolling back and closing.
+
+        Returns:
+            Raw SQLite connection (caller must close).
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
 
     # --- Audit operations ---
 
@@ -2113,14 +2286,22 @@ class Database:
             # Compute attempt_num: increment after a successful run, otherwise continue current attempt
             attempt_num = self._compute_attempt_num(conn, workspace_name, stage_name)
 
+            # Initial state machine state: PREPARING with GCS_CHECK phase
+            # NOTE: status column is deprecated - uses default value, only state matters
+            from goldfish.state_machine.types import ProgressPhase, StageState
+
+            initial_state = StageState.PREPARING
+            initial_phase = ProgressPhase.GCS_CHECK.value
+
             conn.execute(
                 """
                 INSERT INTO stage_runs
-                (id, job_id, pipeline_run_id, workspace_name, pipeline_name, version, stage_name, status,
+                (id, job_id, pipeline_run_id, workspace_name, pipeline_name, version, stage_name,
                  started_at, profile, hints_json, config_json, inputs_json, reason_json,
                  preflight_errors_json, preflight_warnings_json,
-                 backend_type, backend_handle, attempt_num)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 backend_type, backend_handle, attempt_num,
+                 state, phase, state_entered_at, phase_updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stage_run_id,
@@ -2130,7 +2311,6 @@ class Database:
                     pipeline_name,
                     version,
                     stage_name,
-                    StageRunStatus.PENDING,
                     timestamp,
                     profile,
                     hints_json,
@@ -2142,6 +2322,37 @@ class Database:
                     backend_type,
                     backend_handle,
                     attempt_num,
+                    initial_state.value,
+                    initial_phase,
+                    timestamp,  # state_entered_at = same as started_at initially
+                    timestamp,  # phase_updated_at = same as state_entered_at initially
+                ),
+            )
+
+            # Record initial run_start pseudo-event for audit/provenance.
+            # This makes the audit trail complete even before the first explicit transition.
+            conn.execute(
+                """
+                INSERT INTO stage_state_transitions
+                (stage_run_id, from_state, to_state, event,
+                 phase, termination_cause, exit_code, exit_code_exists, error_message,
+                 source, created_at)
+                VALUES (?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?)
+                """,
+                (
+                    stage_run_id,
+                    "none",
+                    initial_state,
+                    "run_start",
+                    initial_phase,
+                    None,
+                    None,
+                    0,
+                    None,
+                    "executor",
+                    timestamp,
                 ),
             )
 
@@ -2195,18 +2406,20 @@ class Database:
         Returns:
             True if updated, False if run not found
         """
+        from goldfish.state_machine.types import StageState
+
         if outcome not in ("success", "bad_results"):
             raise ValueError(f"Invalid outcome: {outcome}. Must be 'success' or 'bad_results'")
 
         with self._conn() as conn:
-            # Only update completed runs
+            # Only update completed runs (state machine is source of truth)
             result = conn.execute(
                 """
                 UPDATE stage_runs
                 SET outcome = ?
-                WHERE id = ? AND status = ?
+                WHERE id = ? AND state = ?
                 """,
-                (outcome, stage_run_id, StageRunStatus.COMPLETED),
+                (outcome, stage_run_id, StageState.COMPLETED.value),
             )
             return result.rowcount > 0
 
@@ -2226,14 +2439,17 @@ class Database:
         Returns:
             List of attempt summaries with run counts and status
         """
+        from goldfish.state_machine.types import StageState
+
         # Build query to group runs by attempt
+        # Use state column (source of truth) for lifecycle counts
         query = """
             SELECT
                 stage_name,
                 attempt_num,
                 COUNT(*) as run_count,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as completed_count,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as failed_count,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as completed_count,
+                SUM(CASE WHEN state IN (?, ?, ?) THEN 1 ELSE 0 END) as failed_count,
                 SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) as success_count,
                 SUM(CASE WHEN outcome = 'bad_results' THEN 1 ELSE 0 END) as bad_results_count,
                 MIN(version) as first_version,
@@ -2243,7 +2459,13 @@ class Database:
             FROM stage_runs
             WHERE workspace_name = ?
         """
-        params: list = [StageRunStatus.COMPLETED, StageRunStatus.FAILED, workspace_name]
+        params: list = [
+            StageState.COMPLETED.value,
+            StageState.FAILED.value,
+            StageState.TERMINATED.value,
+            StageState.CANCELED.value,
+            workspace_name,
+        ]
 
         if stage_name:
             query += " AND stage_name = ?"
@@ -2300,11 +2522,14 @@ class Database:
         Returns:
             Dict with attempt summary or None if not found
         """
+        from goldfish.state_machine.types import StageState
+
+        # Use state column (source of truth) for statistics
         query = """
             SELECT
                 COUNT(*) as run_count,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as completed_count,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as failed_count,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as completed_count,
+                SUM(CASE WHEN state IN (?, ?, ?) THEN 1 ELSE 0 END) as failed_count,
                 SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) as success_count,
                 SUM(CASE WHEN outcome = 'bad_results' THEN 1 ELSE 0 END) as bad_results_count
             FROM stage_runs
@@ -2312,9 +2537,11 @@ class Database:
             AND stage_name = ?
             AND attempt_num = ?
         """
-        params = [
-            StageRunStatus.COMPLETED,
-            StageRunStatus.FAILED,
+        params: list = [
+            StageState.COMPLETED.value,
+            StageState.FAILED.value,
+            StageState.TERMINATED.value,
+            StageState.CANCELED.value,
             workspace_name,
             stage_name,
             attempt_num,
@@ -2346,28 +2573,31 @@ class Database:
     def update_stage_run_status(
         self,
         stage_run_id: str,
-        status: str,
         completed_at: str | None = None,
         log_uri: str | None = None,
         artifact_uri: str | None = None,
-        progress: str | None = None,
         outputs_json: dict | None = None,
         error: str | None = None,
+        progress: str | None = None,
     ) -> None:
-        """Update stage run status.
+        """Update stage run metadata fields.
+
+        Note: The state machine is now the source of truth for run state.
+        Use transition() from goldfish.state_machine for state changes.
+        This method updates auxiliary fields like completed_at, log_uri, etc.
 
         Args:
             stage_run_id: Stage run ID
-            status: New status (pending, running, completed, failed)
             completed_at: Completion timestamp
             log_uri: Log file location
             artifact_uri: Artifact URI if produced
-            progress: Progress string
             outputs_json: Outputs map
             error: Error message if failed
+            progress: User-facing training progress string (e.g., "Epoch 10/10")
         """
-        fields = ["status = ?"]
-        params: list = [status]
+        fields: list[str] = []
+        params: list = []
+
         if completed_at is not None:
             fields.append("completed_at = ?")
             params.append(completed_at)
@@ -2377,15 +2607,18 @@ class Database:
         if artifact_uri is not None:
             fields.append("artifact_uri = ?")
             params.append(artifact_uri)
-        if progress is not None:
-            fields.append("progress = ?")
-            params.append(progress)
         if outputs_json is not None:
             fields.append("outputs_json = ?")
             params.append(json.dumps(outputs_json))
         if error is not None:
             fields.append("error = ?")
             params.append(error)
+        if progress is not None:
+            fields.append("progress = ?")
+            params.append(progress)
+
+        if not fields:
+            return  # Nothing to update
 
         params.append(stage_run_id)
         query = f"UPDATE stage_runs SET {', '.join(fields)} WHERE id = ?"
@@ -2404,6 +2637,23 @@ class Database:
             conn.execute(
                 "UPDATE stage_runs SET outcome = ? WHERE id = ?",
                 (outcome, stage_run_id),
+            )
+
+    def update_stage_run_gcs_outage(self, stage_run_id: str, gcs_outage_started: str | None) -> None:
+        """Update stage run GCS outage start time.
+
+        Used by the state machine to track GCS outages. When GCS becomes unavailable
+        while checking for exit codes, the outage start time is recorded. After 1 hour,
+        the run is transitioned to a terminal state.
+
+        Args:
+            stage_run_id: Stage run ID.
+            gcs_outage_started: ISO timestamp when outage started, or None to clear.
+        """
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE stage_runs SET gcs_outage_started = ? WHERE id = ?",
+                (gcs_outage_started, stage_run_id),
             )
 
     def get_stage_run(self, stage_run_id: str) -> dict | None:
@@ -2426,7 +2676,7 @@ class Database:
         self,
         workspace_name: str | None = None,
         stage_name: str | None = None,
-        status: str | None = None,
+        state: str | None = None,
         outcome: str | None = None,
         pipeline_run_id: str | None = None,
         limit: int = 50,
@@ -2437,7 +2687,7 @@ class Database:
         Args:
             workspace_name: Filter by workspace
             stage_name: Filter by stage
-            status: Filter by status
+            state: Filter by state (source of truth for lifecycle)
             outcome: Filter by outcome (e.g., 'success', 'bad_results')
             limit: Maximum number of results
             offset: Number of results to skip
@@ -2457,9 +2707,9 @@ class Database:
         if pipeline_run_id:
             query += " AND pipeline_run_id = ?"
             params.append(pipeline_run_id)
-        if status:
-            query += " AND status = ?"
-            params.append(status)
+        if state:
+            query += " AND state = ?"
+            params.append(state)
         if outcome:
             query += " AND outcome = ?"
             params.append(outcome)
@@ -2475,7 +2725,7 @@ class Database:
         self,
         workspace_name: str | None = None,
         stage_name: str | None = None,
-        status: str | None = None,
+        state: str | None = None,
         outcome: str | None = None,
         pipeline_run_id: str | None = None,
         limit: int = 50,
@@ -2494,9 +2744,9 @@ class Database:
         if pipeline_run_id:
             query += " AND pipeline_run_id = ?"
             params.append(pipeline_run_id)
-        if status:
-            query += " AND status = ?"
-            params.append(status)
+        if state:
+            query += " AND state = ?"
+            params.append(state)
         if outcome:
             query += " AND outcome = ?"
             params.append(outcome)
@@ -2512,7 +2762,7 @@ class Database:
         self,
         workspace_name: str | None = None,
         stage_name: str | None = None,
-        status: str | None = None,
+        state: str | None = None,
         pipeline_run_id: str | None = None,
     ) -> int:
         """Count stage runs for pagination."""
@@ -2528,9 +2778,9 @@ class Database:
         if pipeline_run_id:
             query += " AND pipeline_run_id = ?"
             params.append(pipeline_run_id)
-        if status:
-            query += " AND status = ?"
-            params.append(status)
+        if state:
+            query += " AND state = ?"
+            params.append(state)
 
         with self._conn() as conn:
             row = conn.execute(query, params).fetchone()
@@ -2548,34 +2798,54 @@ class Database:
         Returns:
             List of failed runs with workspace, stage, error, and timestamp
         """
+        from goldfish.state_machine.types import StageState
+
+        # Terminal failure states (state machine is source of truth)
+        failed_states = (
+            StageState.FAILED.value,
+            StageState.TERMINATED.value,
+        )
+        placeholders = ", ".join("?" for _ in failed_states)
         with self._conn() as conn:
             rows = conn.execute(
-                """
-                SELECT id, workspace_name, stage_name, status, error, completed_at
+                f"""
+                SELECT id, workspace_name, stage_name, state, error, completed_at, reason_json
                 FROM stage_runs
-                WHERE status = ?
+                WHERE state IN ({placeholders})
                 ORDER BY completed_at DESC
                 LIMIT ?
                 """,
-                (StageRunStatus.FAILED, limit),
+                (*failed_states, limit),
             ).fetchall()
             return [dict(row) for row in rows]
 
     def get_active_runs(self) -> list[dict]:
-        """Get all currently running or pending stage runs.
+        """Get all currently active (non-terminal) stage runs.
 
         Returns:
-            List of active runs with progress info
+            List of active runs with state info
         """
+        from goldfish.state_machine.types import StageState
+
+        # Active states (non-terminal) - v1.2
+        active_states = (
+            StageState.PREPARING.value,
+            StageState.BUILDING.value,
+            StageState.LAUNCHING.value,
+            StageState.RUNNING.value,
+            StageState.POST_RUN.value,
+            StageState.AWAITING_USER_FINALIZATION.value,
+        )
+        placeholders = ", ".join("?" for _ in active_states)
         with self._conn() as conn:
             rows = conn.execute(
-                """
-                SELECT id, workspace_name, stage_name, status, progress, started_at
+                f"""
+                SELECT id, workspace_name, stage_name, state, started_at, reason_json
                 FROM stage_runs
-                WHERE status IN (?, ?)
+                WHERE state IN ({placeholders})
                 ORDER BY started_at DESC
                 """,
-                (StageRunStatus.RUNNING, StageRunStatus.PENDING),
+                active_states,
             ).fetchall()
             return [dict(row) for row in rows]
 
@@ -2588,30 +2858,32 @@ class Database:
         Returns:
             List of recent outcomes (success/bad_results) with metadata
         """
+        from goldfish.state_machine.types import StageState
+
         with self._conn() as conn:
             rows = conn.execute(
                 """
                 SELECT workspace_name, stage_name, outcome, completed_at
                 FROM stage_runs
                 WHERE outcome IS NOT NULL
-                AND status = ?
+                AND state = ?
                 ORDER BY completed_at DESC
                 LIMIT ?
                 """,
-                (StageRunStatus.COMPLETED, limit),
+                (StageState.COMPLETED.value, limit),
             ).fetchall()
             return [dict(row) for row in rows]
 
     def list_all_stage_runs(
         self,
-        status: str | None = None,
+        state: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
         """List stage runs across ALL workspaces (newest first).
 
         Args:
-            status: Optional status filter
+            state: Optional state filter (state machine is source of truth)
             limit: Maximum runs to return
             offset: Pagination offset
 
@@ -2621,9 +2893,9 @@ class Database:
         query = "SELECT *, COUNT(*) OVER() AS total_count FROM stage_runs WHERE 1=1"
         params: list = []
 
-        if status:
-            query += " AND status = ?"
-            params.append(status)
+        if state:
+            query += " AND state = ?"
+            params.append(state)
 
         query += " ORDER BY started_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
@@ -2819,16 +3091,24 @@ class Database:
         stage_run_id: str,
         backend_type: str,
         backend_handle: str,
+        instance_zone: str | None = None,
     ) -> None:
-        """Persist backend info for cancellation/logging."""
+        """Persist backend info for cancellation/logging.
+
+        Args:
+            stage_run_id: Stage run ID
+            backend_type: Backend type (local or gce)
+            backend_handle: Container ID or instance name
+            instance_zone: GCE zone where instance was launched (None for local)
+        """
         with self._conn() as conn:
             conn.execute(
                 """
                 UPDATE stage_runs
-                SET backend_type = ?, backend_handle = ?
+                SET backend_type = ?, backend_handle = ?, instance_zone = ?
                 WHERE id = ?
                 """,
-                (backend_type, backend_handle, stage_run_id),
+                (backend_type, backend_handle, instance_zone, stage_run_id),
             )
 
     def get_signal(self, stage_run_id: str, signal_name: str) -> dict | None:
@@ -3135,15 +3415,17 @@ class Database:
         Returns:
             Stage run dict or None if no completed runs exist
         """
+        from goldfish.state_machine.types import StageState
+
         with self._conn() as conn:
             row = conn.execute(
                 """
                 SELECT * FROM stage_runs
-                WHERE workspace_name = ? AND stage_name = ? AND status = ?
+                WHERE workspace_name = ? AND stage_name = ? AND state = ?
                 ORDER BY started_at DESC
                 LIMIT 1
                 """,
-                (workspace, stage_name, StageRunStatus.COMPLETED),
+                (workspace, stage_name, StageState.COMPLETED.value),
             ).fetchone()
             return dict(row) if row else None
 
@@ -4454,6 +4736,7 @@ class Database:
         cloud_build_id: str | None = None,
         workspace_name: str | None = None,
         version: str | None = None,
+        content_hash: str | None = None,
     ) -> None:
         """Insert a new Docker build record.
 
@@ -4468,6 +4751,7 @@ class Database:
             cloud_build_id: GCP Cloud Build operation ID (if backend=cloud)
             workspace_name: Workspace name (for workspace builds only)
             version: Workspace version (for workspace builds only)
+            content_hash: SHA256 of build context (for cache hit detection)
         """
         with self._conn() as conn:
             conn.execute(
@@ -4475,9 +4759,9 @@ class Database:
                 INSERT INTO docker_builds (
                     id, image_type, target, backend, cloud_build_id,
                     status, image_tag, registry_tag, started_at,
-                    workspace_name, version
+                    workspace_name, version, content_hash
                 )
-                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     build_id,
@@ -4490,6 +4774,7 @@ class Database:
                     started_at,
                     workspace_name,
                     version,
+                    content_hash,
                 ),
             )
 
@@ -4510,7 +4795,7 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, created_at
+                       version, content_hash, created_at
                 FROM docker_builds
                 WHERE id = ?
                 """,
@@ -4536,13 +4821,77 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, created_at
+                       version, content_hash, created_at
                 FROM docker_builds
                 WHERE workspace_name = ? AND version = ?
                 ORDER BY started_at DESC
                 LIMIT 1
                 """,
                 (workspace_name, version),
+            ).fetchone()
+            return cast(DockerBuildRow, dict(row)) if row else None
+
+    def get_latest_docker_build_for_workspace(self, workspace_name: str) -> "DockerBuildRow | None":
+        """Get the most recent completed Docker build for a workspace (any version).
+
+        Used for Docker layer caching - we want to use any previous successful build
+        as a cache source, regardless of which version it was built for.
+
+        Args:
+            workspace_name: Workspace name
+
+        Returns:
+            DockerBuildRow if found, None otherwise
+        """
+        from goldfish.db.types import DockerBuildRow
+
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT id, image_type, target, backend, cloud_build_id,
+                       status, image_tag, registry_tag, started_at,
+                       completed_at, error, logs_uri, workspace_name,
+                       version, content_hash, created_at
+                FROM docker_builds
+                WHERE workspace_name = ? AND status = 'completed' AND registry_tag IS NOT NULL
+                ORDER BY completed_at DESC
+                LIMIT 1
+                """,
+                (workspace_name,),
+            ).fetchone()
+            return cast(DockerBuildRow, dict(row)) if row else None
+
+    def get_docker_build_by_content_hash(self, workspace_name: str, content_hash: str) -> "DockerBuildRow | None":
+        """Get a completed Docker build by content hash.
+
+        Used to detect unchanged workspace content - if we've built this exact
+        content before, we can skip the build entirely.
+
+        Args:
+            workspace_name: Workspace name (to scope the search)
+            content_hash: SHA256 of build context
+
+        Returns:
+            DockerBuildRow if a completed build with this hash exists, None otherwise
+        """
+        from goldfish.db.types import DockerBuildRow
+
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT id, image_type, target, backend, cloud_build_id,
+                       status, image_tag, registry_tag, started_at,
+                       completed_at, error, logs_uri, workspace_name,
+                       version, content_hash, created_at
+                FROM docker_builds
+                WHERE workspace_name = ?
+                  AND content_hash = ?
+                  AND status = 'completed'
+                  AND registry_tag IS NOT NULL
+                ORDER BY completed_at DESC
+                LIMIT 1
+                """,
+                (workspace_name, content_hash),
             ).fetchone()
             return cast(DockerBuildRow, dict(row)) if row else None
 
@@ -4652,7 +5001,7 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, created_at
+                       version, content_hash, created_at
                 FROM docker_builds
                 WHERE {where_clause}
                 ORDER BY started_at DESC
@@ -4676,7 +5025,7 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, created_at
+                       version, content_hash, created_at
                 FROM docker_builds
                 WHERE status IN ('pending', 'building')
                 ORDER BY started_at DESC

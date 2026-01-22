@@ -23,12 +23,81 @@ from goldfish.experiment_model.schemas import (
     validate_finalize_results,
     validate_results_spec,
 )
+from goldfish.state_machine import EventContext, StageEvent, StageState, transition
 
 # Crockford's Base32 alphabet (excludes I, L, O, U to avoid confusion)
 _CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 # Valid record types
 RecordType = Literal["run", "checkpoint"]
+
+
+def _format_age_from_ulid(record_id: str) -> str:
+    """Convert ULID record_id to relative age like '2h ago'.
+
+    ULIDs encode timestamp in first 10 chars (Crockford base32).
+    """
+    if not record_id or len(record_id) < 10:
+        return "unknown"
+
+    try:
+        # Decode first 10 chars from Crockford base32 to get millisecond timestamp
+        timestamp_chars = record_id[:10].upper()
+        timestamp_ms = 0
+        for char in timestamp_chars:
+            idx = _CROCKFORD_ALPHABET.find(char)
+            if idx < 0:
+                return "unknown"
+            timestamp_ms = (timestamp_ms << 5) | idx
+
+        # Convert to datetime
+        dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
+        now = datetime.now(UTC)
+        delta = now - dt
+
+        if delta.days > 0:
+            return f"{delta.days}d ago"
+        hours = delta.seconds // 3600
+        if hours > 0:
+            return f"{hours}h ago"
+        minutes = delta.seconds // 60
+        return f"{minutes}m ago"
+    except Exception:
+        return "unknown"
+
+
+def _extract_primary_metric(results_final: str | None, results_auto: str | None) -> dict[str, Any] | None:
+    """Extract primary metric from finalized or auto results JSON."""
+    # Prefer finalized results
+    for results_json in [results_final, results_auto]:
+        if not results_json:
+            continue
+        try:
+            results = json.loads(results_json)
+            if isinstance(results, dict):
+                metric_name = results.get("primary_metric")
+                value = results.get("value")
+                if metric_name and value is not None:
+                    return {"name": metric_name, "value": value}
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return None
+
+
+def _parse_reason_description(reason_json: str | None) -> str | None:
+    """Parse reason description from stage_runs.reason_json."""
+    if not reason_json:
+        return None
+    try:
+        reason_data = json.loads(reason_json)
+        if isinstance(reason_data, dict):
+            return reason_data.get("description")
+        # If it's a string, return it directly
+        if isinstance(reason_data, str):
+            return reason_data
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return None
 
 
 def generate_record_id() -> str:
@@ -460,21 +529,30 @@ class ExperimentRecordManager:
         Args:
             stage_run_id: The stage run ID
             auto_results: The auto-extracted results
-            run_status: The run status for deriving infra_outcome
+            run_status: The run status for deriving infra_outcome (legacy, used if state is NULL)
         """
         results_auto_json = json.dumps(auto_results)
 
-        # Fetch error text from stage_runs for preemption detection
+        # Fetch state machine columns and error text from stage_runs
+        state: str | None = None
+        termination_cause: str | None = None
         error_text: str | None = None
         with self.db._conn() as conn:
             row = conn.execute(
-                "SELECT error FROM stage_runs WHERE id = ?",
+                "SELECT state, termination_cause, error FROM stage_runs WHERE id = ?",
                 (stage_run_id,),
             ).fetchone()
             if row:
+                state = row["state"]
+                termination_cause = row["termination_cause"]
                 error_text = row["error"]
 
-        infra_outcome = self.derive_infra_outcome(run_status, error_text)
+        # Prefer state machine columns when available (post-migration)
+        if state is not None:
+            infra_outcome = self.derive_infra_outcome_from_state(state, termination_cause)
+        else:
+            # Fall back to legacy status-based derivation (during migration)
+            infra_outcome = self.derive_infra_outcome(run_status, error_text)
 
         with self.db._conn() as conn:
             # Only update results_status if not already finalized
@@ -490,22 +568,71 @@ class ExperimentRecordManager:
                 (results_auto_json, "auto", infra_outcome, stage_run_id),
             )
 
-    def derive_infra_outcome(self, run_status: str, error_text: str | None = None) -> str:
-        """Derive infra_outcome from run status and error text.
+    def derive_infra_outcome_from_state(self, state: str, termination_cause: str | None = None) -> str:
+        """Derive infra_outcome from state machine state and termination_cause.
 
-        Preemptions are stored as "failed" with error text containing
-        preemption-related keywords, so we check the error text to detect them.
+        This is the canonical method per the state machine spec. infra_outcome answers:
+        "Did the infrastructure successfully run the code?" (NOT "Did the code succeed?")
 
         Args:
-            run_status: The run status string
-            error_text: Optional error message to check for preemption keywords
+            state: The state machine state (e.g., 'completed', 'failed', 'terminated')
+            termination_cause: For TERMINATED state, the cause (e.g., 'preempted', 'crashed')
+
+        Returns:
+            The infra_outcome value: 'completed', 'preempted', 'crashed', 'canceled', or 'unknown'
+        """
+        # Mapping from termination_cause to valid infra_outcome values
+        # Per spec: infra_outcome CHECK constraint allows 'completed', 'preempted', 'crashed', 'canceled', 'unknown'
+        termination_cause_to_infra_outcome = {
+            "preempted": "preempted",  # Direct mapping
+            "crashed": "crashed",  # Direct mapping
+            "timeout": "crashed",  # Timeout is an infra failure (didn't complete)
+            "orphaned": "unknown",  # We don't know what happened
+            "ai_stopped": "canceled",  # Intentional stop requested by AI
+            "manual": "canceled",  # Admin intervention counts as cancellation
+        }
+
+        if state == "completed":
+            return "completed"
+        if state == "failed":
+            # Per spec section 9.1: failed -> crashed
+            # The 'failed' state covers build failures, launch failures, execution
+            # failures (EXIT_FAILURE), and critical post-run failures. All are
+            # treated as infrastructure failures for outcome derivation.
+            return "crashed"
+        if state == "canceled":
+            return "canceled"
+        if state == "terminated":
+            # Map termination_cause to valid infra_outcome
+            return termination_cause_to_infra_outcome.get(termination_cause or "", "unknown")
+        if state == "unknown":
+            return "unknown"
+        return "unknown"
+
+    def derive_infra_outcome(self, run_status: str, error_text: str | None = None) -> str:
+        """Derive infra_outcome from legacy run status and error text.
+
+        This is a backwards-compatible method for use during migration.
+        Prefers derive_infra_outcome_from_state() when state machine columns are available.
+
+        Note: This method maps 'failed' → 'completed' because code failure means
+        infrastructure worked correctly (it ran the code successfully, the code just failed).
+        Infrastructure failures (preemptions, crashes) go to 'terminated' state with
+        appropriate termination_cause.
+
+        Args:
+            run_status: The run status string (legacy 'status' column)
+            error_text: Optional error message to check for preemption/crash keywords
 
         Returns:
             The infra_outcome value
         """
-        # Check for preemption keywords in error text (GCE spot preemption messages)
+        # Check for infrastructure failure keywords in error text
+        # These indicate TERMINATED-equivalent scenarios stored with legacy 'failed' status
         if run_status == "failed" and error_text:
             error_lower = error_text.lower()
+
+            # Preemption keywords (GCE spot preemption messages)
             preemption_keywords = [
                 "preempted",
                 "preemption",
@@ -517,11 +644,33 @@ class ExperimentRecordManager:
             if any(keyword in error_lower for keyword in preemption_keywords):
                 return "preempted"
 
+            # Crash keywords (infrastructure failures, not code failures)
+            crash_keywords = [
+                "oom",
+                "killed",
+                "signal",
+                "segfault",
+                "core dump",
+                "instance lost",
+                "instance gone",
+                "container crashed",
+            ]
+            if any(keyword in error_lower for keyword in crash_keywords):
+                return "crashed"
+
+            # Timeout keywords
+            timeout_keywords = ["timeout", "timed out", "exceeded maximum"]
+            if any(keyword in error_lower for keyword in timeout_keywords):
+                return "crashed"  # Timeout is an infra failure
+
+        # Status mapping per spec:
+        # 'failed' → 'completed' because code failure means infra worked correctly
         status_mapping = {
             "completed": "completed",
-            "failed": "crashed",
+            "failed": "completed",  # Code failed, but infra worked correctly
             "preempted": "preempted",
             "canceled": "canceled",
+            "terminated": "unknown",  # Legacy terminated without cause
         }
         return status_mapping.get(run_status, "unknown")
 
@@ -599,6 +748,15 @@ class ExperimentRecordManager:
                 """,
                 (results_json, "finalized", ml_outcome, finalized_by, finalized_at, comparison_json, stage_run_id),
             )
+
+        # Emit USER_FINALIZE state transition if in AWAITING_USER_FINALIZATION state
+        stage_run = self.db.get_stage_run(stage_run_id)
+        if stage_run and stage_run.get("state") == StageState.AWAITING_USER_FINALIZATION.value:
+            ctx = EventContext(
+                timestamp=datetime.now(UTC),
+                source="mcp_tool",
+            )
+            transition(self.db, stage_run_id, StageEvent.USER_FINALIZE, ctx)
 
         return {
             "record_id": record_id,
@@ -1205,6 +1363,7 @@ class ExperimentRecordManager:
         desc: bool = True,
         include_pruned: bool = False,
         include_internal_ids: bool = False,
+        finalized_only: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -1222,6 +1381,7 @@ class ExperimentRecordManager:
             desc: Sort descending if True
             include_pruned: Include pruned records (default False)
             include_internal_ids: Include internal IDs in response (default False)
+            finalized_only: Only return runs with finalized results (default False)
             limit: Max records to return
             offset: Records to skip
 
@@ -1354,6 +1514,17 @@ class ExperimentRecordManager:
                 params.append(min_value)
             query += ")"
 
+        # Finalized only filtering (only show runs with finalized results)
+        if finalized_only:
+            query += """
+                AND er.type = 'run'
+                AND EXISTS (
+                    SELECT 1 FROM run_results rr
+                    WHERE rr.stage_run_id = er.stage_run_id
+                    AND rr.results_status = 'finalized'
+                )
+            """
+
         # Sorting
         order_dir = "DESC" if desc else "ASC"
         if sort_by == "metric":
@@ -1424,7 +1595,10 @@ class ExperimentRecordManager:
             version_tags = {r["tag_name"] for r in version_tag_rows}
             record["tags"] = sorted(run_tags | version_tags)
 
-            # For run records, enrich with results_status, ml_outcome, stage
+            # Compute age from record_id (ULID contains timestamp)
+            record["age"] = _format_age_from_ulid(record["record_id"])
+
+            # For run records, enrich with results_status, ml_outcome, stage, reason, primary_metric
             stage_run_id = record.get("stage_run_id")
             if stage_run_id is not None and record["type"] == "run":
                 # Get run results
@@ -1432,18 +1606,34 @@ class ExperimentRecordManager:
                 if run_results:
                     record["results_status"] = run_results.get("results_status")
                     record["ml_outcome"] = run_results.get("ml_outcome")
+                    # Extract primary_metric from results_final or results_auto
+                    results_final = run_results.get("results_final")
+                    results_auto = run_results.get("results_auto")
+                    primary_metric = _extract_primary_metric(results_final, results_auto)
+                    if primary_metric:
+                        record["primary_metric"] = primary_metric
                 else:
                     record["results_status"] = "missing"
                     record["ml_outcome"] = "unknown"
 
-                # Get stage name
+                # Get stage name and reason
                 with self.db._conn() as conn2:
                     stage_row = conn2.execute(
-                        "SELECT stage_name FROM stage_runs WHERE id = ?",
+                        "SELECT stage_name, reason_json FROM stage_runs WHERE id = ?",
                         (stage_run_id,),
                     ).fetchone()
                     if stage_row:
                         record["stage"] = stage_row["stage_name"]
+                        # Extract reason description from JSON
+                        # Use try/except since sqlite3.Row doesn't have .get() and
+                        # mocks may not include all columns
+                        try:
+                            reason_json_value = stage_row["reason_json"]
+                            reason = _parse_reason_description(reason_json_value)
+                            if reason:
+                                record["reason"] = reason
+                        except (KeyError, TypeError):
+                            pass  # reason_json not available
 
                 # Include internal_ids if requested
                 if include_internal_ids:
@@ -1560,7 +1750,8 @@ class ExperimentRecordManager:
         return self.get_record_by_stage_run(ref)
 
     # Terminal infra outcomes that require finalization before new runs
-    _TERMINAL_INFRA_OUTCOMES = {"completed", "preempted", "crashed", "canceled"}
+    # NOTE: canceled is excluded because cancel() already captures the reason
+    _TERMINAL_INFRA_OUTCOMES = {"completed", "preempted", "crashed"}
 
     def is_terminal_infra_outcome(self, infra_outcome: str) -> bool:
         """Check if an infra_outcome is terminal.

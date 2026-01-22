@@ -68,8 +68,8 @@ class TestClaudeCodeProvider:
         provider.run(request)
 
         cmd = mock_run.call_args[0][0]
-        assert "--permission-mode" in cmd
-        assert "bypassPermissions" in cmd
+        # Now uses --dangerously-skip-permissions instead of --permission-mode
+        assert "--dangerously-skip-permissions" in cmd
         assert "--allowed-tools" in cmd
         assert "read_file" in cmd
         assert "list_directory" in cmd
@@ -79,20 +79,15 @@ class TestClaudeCodeProvider:
         assert "github" in cmd
         assert "google-search" in cmd
 
-    def test_tool_policy_default_permission_mode_is_valid(self):
-        """Regression test: permission_mode default must be a valid Claude CLI value.
+    def test_tool_policy_default_permission_mode_is_bypass(self):
+        """Test that ToolPolicy defaults to bypassPermissions for internal tracking.
 
-        The Claude CLI only accepts specific permission modes:
-        bypassPermissions, default, acceptEdits, dontAsk, plan, delegate.
-
-        Previously the default was 'auto' which caused silent failures:
-        'error: option --permission-mode argument auto is invalid'
+        Note: We now use --dangerously-skip-permissions flag on CLI instead of
+        --permission-mode, but keep the internal field for documentation/tracking.
         """
         policy = ToolPolicy()
-        valid_modes = {"bypassPermissions", "default", "acceptEdits", "dontAsk", "plan", "delegate"}
-        assert policy.permission_mode in valid_modes, (
-            f"ToolPolicy.permission_mode default '{policy.permission_mode}' is not valid. "
-            f"Valid modes: {valid_modes}"
+        assert policy.permission_mode == "bypassPermissions", (
+            f"ToolPolicy.permission_mode should default to 'bypassPermissions', " f"got '{policy.permission_mode}'"
         )
 
     @patch("shutil.which")
@@ -109,7 +104,7 @@ class TestClaudeCodeProvider:
         mock_run.return_value = MagicMock(
             returncode=1,
             stdout="",
-            stderr="error: option '--permission-mode <mode>' argument 'auto' is invalid",
+            stderr="error: unexpected argument '--unknown-flag'",
             text=True,
         )
 
@@ -328,6 +323,7 @@ class TestToolPolicyRequirement:
             result.decision = "approved"
             result.findings = []
             result.duration_ms = 100
+            result.response_text = "Test review response"
             return result
 
         mock_agent = MagicMock()
