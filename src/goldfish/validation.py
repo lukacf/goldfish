@@ -257,6 +257,50 @@ class InvalidBatchSizeError(ValidationError):
         )
 
 
+class InvalidContainerIdError(ValidationError):
+    """Container ID is invalid."""
+
+    def __init__(self, container_id: str, reason: str):
+        super().__init__(
+            f"Invalid container ID '{container_id}': {reason}",
+            value=container_id,
+            field="container_id",
+        )
+
+
+class InvalidInstanceNameError(ValidationError):
+    """GCE instance name is invalid."""
+
+    def __init__(self, instance_name: str, reason: str):
+        super().__init__(
+            f"Invalid instance name '{instance_name}': {reason}",
+            value=instance_name,
+            field="instance_name",
+        )
+
+
+class InvalidZoneError(ValidationError):
+    """GCE zone is invalid."""
+
+    def __init__(self, zone: str, reason: str):
+        super().__init__(
+            f"Invalid zone '{zone}': {reason}",
+            value=zone,
+            field="zone",
+        )
+
+
+class InvalidProjectIdError(ValidationError):
+    """GCP project ID is invalid."""
+
+    def __init__(self, project_id: str, reason: str):
+        super().__init__(
+            f"Invalid project ID '{project_id}': {reason}",
+            value=project_id,
+            field="project_id",
+        )
+
+
 # Regex patterns
 # Workspace/source names: start with alphanumeric, contain alphanumeric/hyphen/underscore,
 # end with alphanumeric. Length 1-64.
@@ -1752,3 +1796,152 @@ def validate_build_id(build_id: str) -> None:
     # Must match exact format
     if not _BUILD_ID_PATTERN.match(build_id):
         raise InvalidBuildIdError(build_id, "must match format build-{8 hex chars}")
+
+
+# Container ID pattern: 12-64 hex chars or name pattern (alphanumeric + hyphens/underscores/dots)
+# Docker container IDs are 64 hex chars, short form is 12 chars
+_CONTAINER_ID_PATTERN = re.compile(r"^([a-f0-9]{12,64}|[a-zA-Z0-9][a-zA-Z0-9._-]{0,127})$")
+
+# GCE instance name: lowercase alphanumeric + hyphens, max 63 chars
+# Must start with lowercase letter, end with alphanumeric
+_INSTANCE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]?$")
+
+# GCE zone pattern: region-zone (e.g., us-central1-a)
+_ZONE_PATTERN = re.compile(r"^[a-z]+-[a-z]+[0-9]+-[a-z]$")
+
+# GCP project ID: lowercase alphanumeric + hyphens, 6-30 chars
+_PROJECT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
+
+
+def validate_container_id(container_id: str) -> None:
+    """Validate a Docker container ID.
+
+    Container IDs can be:
+    - Full hex hash (64 chars)
+    - Short hex hash (12 chars)
+    - Container name (alphanumeric with hyphens, underscores, dots)
+
+    This prevents command injection via subprocess calls.
+
+    Args:
+        container_id: The container ID to validate
+
+    Raises:
+        InvalidContainerIdError: If validation fails
+    """
+    if not container_id:
+        raise InvalidContainerIdError(container_id, "container ID cannot be empty")
+
+    if len(container_id) > 128:
+        raise InvalidContainerIdError(container_id, "container ID too long (max 128 chars)")
+
+    # Check for dangerous characters first
+    dangerous = _contains_dangerous_chars(container_id)
+    if dangerous:
+        raise InvalidContainerIdError(container_id, f"contains invalid character: '{dangerous}'")
+
+    # Must match allowed pattern
+    if not _CONTAINER_ID_PATTERN.match(container_id):
+        raise InvalidContainerIdError(
+            container_id,
+            "must be hex hash (12-64 chars) or valid name (alphanumeric with .-_)",
+        )
+
+
+def validate_instance_name(instance_name: str) -> None:
+    """Validate a GCE instance name.
+
+    GCE instance names must:
+    - Start with lowercase letter
+    - Contain only lowercase alphanumeric and hyphens
+    - Be at most 63 characters
+    - End with alphanumeric
+
+    This prevents command injection via gcloud subprocess calls.
+
+    Args:
+        instance_name: The instance name to validate
+
+    Raises:
+        InvalidInstanceNameError: If validation fails
+    """
+    if not instance_name:
+        raise InvalidInstanceNameError(instance_name, "instance name cannot be empty")
+
+    if len(instance_name) > 63:
+        raise InvalidInstanceNameError(instance_name, "instance name too long (max 63 chars)")
+
+    # Check for dangerous characters first
+    dangerous = _contains_dangerous_chars(instance_name)
+    if dangerous:
+        raise InvalidInstanceNameError(instance_name, f"contains invalid character: '{dangerous}'")
+
+    # GCE requires lowercase
+    if instance_name != instance_name.lower():
+        raise InvalidInstanceNameError(instance_name, "must be lowercase (GCE requirement)")
+
+    # Must match GCE naming pattern
+    if not _INSTANCE_NAME_PATTERN.match(instance_name):
+        raise InvalidInstanceNameError(
+            instance_name,
+            "must start with lowercase letter, contain only lowercase alphanumeric and hyphens",
+        )
+
+
+def validate_zone(zone: str) -> None:
+    """Validate a GCE zone name.
+
+    GCE zones must match pattern: region-zone (e.g., us-central1-a)
+
+    This prevents command injection via gcloud subprocess calls.
+
+    Args:
+        zone: The zone to validate
+
+    Raises:
+        InvalidZoneError: If validation fails
+    """
+    if not zone:
+        raise InvalidZoneError(zone, "zone cannot be empty")
+
+    # Check for dangerous characters first
+    dangerous = _contains_dangerous_chars(zone)
+    if dangerous:
+        raise InvalidZoneError(zone, f"contains invalid character: '{dangerous}'")
+
+    # Must match zone pattern
+    if not _ZONE_PATTERN.match(zone):
+        raise InvalidZoneError(zone, "must match format region-zone (e.g., us-central1-a)")
+
+
+def validate_project_id(project_id: str) -> None:
+    """Validate a GCP project ID.
+
+    GCP project IDs must:
+    - Be 6-30 characters
+    - Start with lowercase letter
+    - Contain only lowercase alphanumeric and hyphens
+    - End with alphanumeric
+
+    This prevents command injection via gcloud subprocess calls.
+
+    Args:
+        project_id: The project ID to validate
+
+    Raises:
+        InvalidProjectIdError: If validation fails
+    """
+    if not project_id:
+        raise InvalidProjectIdError(project_id, "project ID cannot be empty")
+
+    # Check for dangerous characters first
+    dangerous = _contains_dangerous_chars(project_id)
+    if dangerous:
+        raise InvalidProjectIdError(project_id, f"contains invalid character: '{dangerous}'")
+
+    # Must match project ID pattern
+    if not _PROJECT_ID_PATTERN.match(project_id):
+        raise InvalidProjectIdError(
+            project_id,
+            "must be 6-30 chars, start with lowercase letter, contain only lowercase alphanumeric and hyphens",
+        )

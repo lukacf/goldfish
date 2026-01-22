@@ -4,15 +4,19 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.models import StageRunProgress, StageRunStatus
+from goldfish.state_machine.exit_code import ExitCodeResult
+from goldfish.state_machine.types import StageState
+
+# Note: These tests use state instead of the deprecated progress column
 
 
 def _create_running_stage_run(test_db) -> str:
     test_db.create_workspace_lineage("ws", description="test")
     test_db.create_version("ws", "v1", "tag-v1", "sha123", "manual")
-    run_id = "stage-refresh123"
+    run_id = f"stage-{uuid4().hex[:8]}"
     test_db.create_stage_run(
         stage_run_id=run_id,
         workspace_name="ws",
@@ -27,7 +31,9 @@ def _create_running_stage_run(test_db) -> str:
         backend_type="gce",
         backend_handle=run_id,
     )
-    test_db.update_stage_run_status(run_id, StageRunStatus.RUNNING, progress=StageRunProgress.RUNNING)
+    # Set state to RUNNING (state machine is source of truth)
+    with test_db._conn() as conn:
+        conn.execute("UPDATE stage_runs SET state = ? WHERE id = ?", (StageState.RUNNING.value, run_id))
     return run_id
 
 
@@ -50,14 +56,14 @@ def test_refresh_status_once_not_found_completed(test_db, test_config, tmp_path,
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=0)
+    executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_code(0))
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
     status = executor.refresh_status_once(run_id)
 
-    assert status == StageRunStatus.COMPLETED
-    executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageRunStatus.COMPLETED)
+    assert status == StageState.COMPLETED
+    executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageState.COMPLETED)
 
 
 def test_refresh_status_once_not_found_failed(test_db, test_config, tmp_path, monkeypatch):
@@ -79,14 +85,14 @@ def test_refresh_status_once_not_found_failed(test_db, test_config, tmp_path, mo
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=1)
+    executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_code(1))
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
     status = executor.refresh_status_once(run_id)
 
-    assert status == StageRunStatus.FAILED
-    executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageRunStatus.FAILED)
+    assert status == StageState.FAILED
+    executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageState.FAILED)
 
 
 def test_refresh_status_once_not_found_during_build_phase(test_db, test_config, tmp_path, monkeypatch):
@@ -98,11 +104,12 @@ def test_refresh_status_once_not_found_during_build_phase(test_db, test_config, 
     """
     run_id = _create_running_stage_run(test_db)
     # Set started_at to 1 hour ago - would normally trigger timeout
+    # State machine: state=BUILDING means we're still building the image
     started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     with test_db._conn() as conn:
         conn.execute(
-            "UPDATE stage_runs SET started_at=?, progress=? WHERE id=?",
-            (started_at, StageRunProgress.BUILD, run_id),
+            "UPDATE stage_runs SET started_at=?, state=? WHERE id=?",
+            (started_at, "building", run_id),
         )
 
     config = test_config.model_copy(deep=True)
@@ -117,7 +124,9 @@ def test_refresh_status_once_not_found_during_build_phase(test_db, test_config, 
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=None)  # No exit code = never ran
+    executor.gce_launcher._get_exit_code = MagicMock(
+        return_value=ExitCodeResult.from_not_found()
+    )  # No exit code = never ran
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -137,11 +146,12 @@ def test_refresh_status_once_not_found_during_launch_phase(test_db, test_config,
     """
     run_id = _create_running_stage_run(test_db)
     # Set started_at to 1 hour ago - would normally trigger timeout
+    # State machine: state=LAUNCHING means we're creating the GCE instance
     started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     with test_db._conn() as conn:
         conn.execute(
-            "UPDATE stage_runs SET started_at=?, progress=? WHERE id=?",
-            (started_at, StageRunProgress.LAUNCH, run_id),
+            "UPDATE stage_runs SET started_at=?, state=? WHERE id=?",
+            (started_at, "launching", run_id),
         )
 
     config = test_config.model_copy(deep=True)
@@ -156,7 +166,9 @@ def test_refresh_status_once_not_found_during_launch_phase(test_db, test_config,
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=None)  # No exit code = never ran
+    executor.gce_launcher._get_exit_code = MagicMock(
+        return_value=ExitCodeResult.from_not_found()
+    )  # No exit code = never ran
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -168,18 +180,18 @@ def test_refresh_status_once_not_found_during_launch_phase(test_db, test_config,
 
 
 def test_refresh_status_once_not_found_during_launch_but_exit_code_exists(test_db, test_config, tmp_path, monkeypatch):
-    """Preempted instance during LAUNCH phase should finalize if exit code exists.
+    """Preempted instance during LAUNCHING state should finalize if exit code exists.
 
-    If an instance was preempted between poll intervals, progress might still
-    be LAUNCH but there's an exit code file in GCS proving it ran. In this case,
+    If an instance was preempted between poll intervals, state might still
+    be LAUNCHING but there's an exit code file in GCS proving it ran. In this case,
     we should finalize based on the exit code.
     """
     run_id = _create_running_stage_run(test_db)
     started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     with test_db._conn() as conn:
         conn.execute(
-            "UPDATE stage_runs SET started_at=?, progress=? WHERE id=?",
-            (started_at, StageRunProgress.LAUNCH, run_id),
+            "UPDATE stage_runs SET started_at=?, state=? WHERE id=?",
+            (started_at, StageState.LAUNCHING.value, run_id),
         )
 
     config = test_config.model_copy(deep=True)
@@ -194,15 +206,17 @@ def test_refresh_status_once_not_found_during_launch_but_exit_code_exists(test_d
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=1)  # Exit code exists = ran and failed
+    executor.gce_launcher._get_exit_code = MagicMock(
+        return_value=ExitCodeResult.from_code(1)
+    )  # Exit code exists = ran and failed
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
     status = executor.refresh_status_once(run_id)
 
     # Should finalize as FAILED because exit_code=1
-    assert status == StageRunStatus.FAILED
-    executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageRunStatus.FAILED)
+    assert status == StageState.FAILED
+    executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageState.FAILED)
 
     # Check error message indicates preemption
     row = test_db.get_stage_run(run_id)
@@ -215,10 +229,10 @@ def test_refresh_status_once_not_found_during_launch_but_exit_code_exists(test_d
 # =============================================================================
 
 
-def test_wait_for_completion_preemption_with_running_progress(test_db, test_config, tmp_path, monkeypatch):
+def test_wait_for_completion_preemption_with_running_state(test_db, test_config, tmp_path, monkeypatch):
     """wait_for_completion should finalize preempted instance that was running.
 
-    When an instance was running (progress=RUNNING) and gets preempted,
+    When an instance was running (state=RUNNING) and gets preempted,
     wait_for_completion should check the exit code and finalize appropriately
     instead of throwing an exception.
     """
@@ -226,8 +240,8 @@ def test_wait_for_completion_preemption_with_running_progress(test_db, test_conf
     started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     with test_db._conn() as conn:
         conn.execute(
-            "UPDATE stage_runs SET started_at=?, progress=? WHERE id=?",
-            (started_at, StageRunProgress.RUNNING, run_id),
+            "UPDATE stage_runs SET started_at=?, state=? WHERE id=?",
+            (started_at, StageState.RUNNING.value, run_id),
         )
 
     config = test_config.model_copy(deep=True)
@@ -242,15 +256,17 @@ def test_wait_for_completion_preemption_with_running_progress(test_db, test_conf
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=1)  # Failed with exit code 1
+    executor.gce_launcher._get_exit_code = MagicMock(
+        return_value=ExitCodeResult.from_code(1)
+    )  # Failed with exit code 1
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
     status = executor.wait_for_completion(run_id)
 
     # Should finalize as FAILED
-    assert status == StageRunStatus.FAILED
-    executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageRunStatus.FAILED)
+    assert status == StageState.FAILED
+    executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageState.FAILED)
 
     # Check error message
     row = test_db.get_stage_run(run_id)
@@ -258,18 +274,18 @@ def test_wait_for_completion_preemption_with_running_progress(test_db, test_conf
     assert "preempted" in row["error"].lower() or "terminated" in row["error"].lower()
 
 
-def test_wait_for_completion_preemption_with_launch_progress_and_exit_code(test_db, test_config, tmp_path, monkeypatch):
-    """wait_for_completion should finalize preempted instance even if progress is LAUNCH.
+def test_wait_for_completion_preemption_with_launching_state_and_exit_code(test_db, test_config, tmp_path, monkeypatch):
+    """wait_for_completion should finalize preempted instance even if state is LAUNCHING.
 
-    If an instance was preempted between poll intervals, progress might still be LAUNCH.
+    If an instance was preempted between poll intervals, state might still be LAUNCHING.
     But if there's an exit code in GCS, we know it ran and should finalize it.
     """
     run_id = _create_running_stage_run(test_db)
     started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     with test_db._conn() as conn:
         conn.execute(
-            "UPDATE stage_runs SET started_at=?, progress=? WHERE id=?",
-            (started_at, StageRunProgress.LAUNCH, run_id),
+            "UPDATE stage_runs SET started_at=?, state=? WHERE id=?",
+            (started_at, StageState.LAUNCHING.value, run_id),
         )
 
     config = test_config.model_copy(deep=True)
@@ -284,29 +300,29 @@ def test_wait_for_completion_preemption_with_launch_progress_and_exit_code(test_
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=0)  # Completed successfully
+    executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_code(0))  # Completed successfully
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
     status = executor.wait_for_completion(run_id)
 
     # Should finalize as COMPLETED since exit_code=0
-    assert status == StageRunStatus.COMPLETED
-    executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageRunStatus.COMPLETED)
+    assert status == StageState.COMPLETED
+    executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageState.COMPLETED)
 
 
 def test_wait_for_completion_launch_failure_no_exit_code(test_db, test_config, tmp_path, monkeypatch):
     """wait_for_completion should mark as failed if instance never ran.
 
-    If progress is LAUNCH and there's no exit code, the instance never ran.
+    If state is LAUNCHING and there's no exit code, the instance never ran.
     This should be marked as FAILED with an appropriate error message.
     """
     run_id = _create_running_stage_run(test_db)
     started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     with test_db._conn() as conn:
         conn.execute(
-            "UPDATE stage_runs SET started_at=?, progress=? WHERE id=?",
-            (started_at, StageRunProgress.LAUNCH, run_id),
+            "UPDATE stage_runs SET started_at=?, state=? WHERE id=?",
+            (started_at, StageState.LAUNCHING.value, run_id),
         )
 
     config = test_config.model_copy(deep=True)
@@ -321,14 +337,15 @@ def test_wait_for_completion_launch_failure_no_exit_code(test_db, test_config, t
     )
 
     executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=None)  # No exit code
+    executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_not_found())  # No exit code
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
+    monkeypatch.setenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "0")  # Also set launch timeout for LAUNCH phase
 
     status = executor.wait_for_completion(run_id)
 
-    # Should return FAILED (no finalize needed since it never ran)
-    assert status == StageRunStatus.FAILED
+    # Should return TERMINATED via INSTANCE_LOST (no finalize needed since it never ran)
+    assert status == StageState.TERMINATED
 
     # Check error message indicates launch failure
     row = test_db.get_stage_run(run_id)

@@ -9,6 +9,7 @@ Tests verify:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -16,7 +17,8 @@ import pytest
 
 from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.models import StageRunStatus
+from goldfish.state_machine import EventContext, StageEvent, transition
+from goldfish.state_machine.types import StageState
 
 
 @pytest.fixture
@@ -49,8 +51,8 @@ def executor_with_mocks(test_db, test_config, setup_workspace_for_run):
     return executor
 
 
-def _create_failed_stage_run(db: Database, stage_run_id: str = "test-run-1") -> str:
-    """Create a failed stage run for testing."""
+def _create_running_stage_run(db: Database, stage_run_id: str = "test-run-1") -> str:
+    """Create a running stage run for testing."""
     db.create_stage_run(
         stage_run_id=stage_run_id,
         workspace_name="test_workspace",
@@ -60,11 +62,23 @@ def _create_failed_stage_run(db: Database, stage_run_id: str = "test-run-1") -> 
         inputs={"test": "input"},
         reason={"description": "test"},
     )
-    db.update_stage_run_status(
-        stage_run_id=stage_run_id,
-        status=StageRunStatus.RUNNING,
-    )
+    # Transition to RUNNING state using state machine
+    ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+    transition(db, stage_run_id, StageEvent.BUILD_START, ctx)
+    transition(db, stage_run_id, StageEvent.BUILD_OK, ctx)
+    transition(db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
     return stage_run_id
+
+
+def _transition_to_failed(db: Database, stage_run_id: str) -> None:
+    """Transition a running stage to FAILED state via state machine."""
+    fail_ctx = EventContext(
+        timestamp=datetime.now(UTC),
+        source="executor",
+        exit_code=1,
+        exit_code_exists=True,
+    )
+    transition(db, stage_run_id, StageEvent.EXIT_FAILURE, fail_ctx)
 
 
 class TestPatternExtractionOnFailure:
@@ -72,7 +86,7 @@ class TestPatternExtractionOnFailure:
 
     def test_pattern_extraction_called_on_failed_stage(self, executor_with_mocks, test_db):
         """Should call extract_failure_pattern when stage fails and auto_learn_failures enabled."""
-        stage_run_id = _create_failed_stage_run(test_db)
+        stage_run_id = _create_running_stage_run(test_db)
 
         # Enable SVS and auto_learn_failures (both required for pattern extraction)
         executor_with_mocks.config.svs.enabled = True
@@ -83,7 +97,7 @@ class TestPatternExtractionOnFailure:
             patch.object(executor_with_mocks, "_run_post_run_svs_review"),
             patch.object(executor_with_mocks, "_collect_svs_manifests"),
         ):
-            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageRunStatus.FAILED)
+            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageState.FAILED)
 
         # Should be called with correct arguments
         mock_extract.assert_called_once()
@@ -96,7 +110,7 @@ class TestPatternExtractionOnFailure:
 
     def test_pattern_extraction_not_called_on_success(self, executor_with_mocks, test_db):
         """Should NOT call extract_failure_pattern when stage succeeds (even with auto_learn enabled)."""
-        stage_run_id = _create_failed_stage_run(test_db)
+        stage_run_id = _create_running_stage_run(test_db)
 
         # Enable auto_learn_failures to verify it's skipped due to success, not config
         executor_with_mocks.config.svs.auto_learn_failures = True
@@ -109,13 +123,13 @@ class TestPatternExtractionOnFailure:
             patch.object(executor_with_mocks, "_run_post_run_svs_review"),
             patch.object(executor_with_mocks, "_collect_svs_manifests"),
         ):
-            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageRunStatus.COMPLETED)
+            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageState.COMPLETED)
 
         mock_extract.assert_not_called()
 
     def test_pattern_extraction_disabled_by_default(self, executor_with_mocks, test_db):
         """Should NOT extract patterns by default (auto_learn_failures is opt-in)."""
-        stage_run_id = _create_failed_stage_run(test_db)
+        stage_run_id = _create_running_stage_run(test_db)
 
         # Verify default is False (opt-in)
         assert executor_with_mocks.config.svs.auto_learn_failures is False
@@ -125,13 +139,13 @@ class TestPatternExtractionOnFailure:
             patch.object(executor_with_mocks, "_run_post_run_svs_review"),
             patch.object(executor_with_mocks, "_collect_svs_manifests"),
         ):
-            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageRunStatus.FAILED)
+            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageState.FAILED)
 
         mock_extract.assert_not_called()
 
     def test_pattern_extraction_respects_svs_disabled(self, executor_with_mocks, test_db):
         """Should NOT extract patterns when SVS is disabled (even with auto_learn enabled)."""
-        stage_run_id = _create_failed_stage_run(test_db)
+        stage_run_id = _create_running_stage_run(test_db)
 
         # Enable auto_learn but disable SVS entirely
         executor_with_mocks.config.svs.auto_learn_failures = True
@@ -142,7 +156,7 @@ class TestPatternExtractionOnFailure:
             patch.object(executor_with_mocks, "_run_post_run_svs_review"),
             patch.object(executor_with_mocks, "_collect_svs_manifests"),
         ):
-            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageRunStatus.FAILED)
+            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageState.FAILED)
 
         mock_extract.assert_not_called()
 
@@ -152,7 +166,9 @@ class TestPatternExtractionErrorHandling:
 
     def test_extraction_error_does_not_fail_finalization(self, executor_with_mocks, test_db):
         """Errors in pattern extraction should be logged but not raise."""
-        stage_run_id = _create_failed_stage_run(test_db)
+        stage_run_id = _create_running_stage_run(test_db)
+        # Transition to FAILED via state machine first
+        _transition_to_failed(test_db, stage_run_id)
 
         # Enable auto_learn_failures to test error handling
         executor_with_mocks.config.svs.auto_learn_failures = True
@@ -165,16 +181,18 @@ class TestPatternExtractionErrorHandling:
             mock_extract.side_effect = Exception("AI agent failed")
 
             # Should not raise
-            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageRunStatus.FAILED)
+            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageState.FAILED)
 
         # Stage should still be finalized
         stage_run = test_db.get_stage_run(stage_run_id)
         assert stage_run is not None
-        assert stage_run["status"] == StageRunStatus.FAILED
+        assert stage_run["state"] == "failed"
 
     def test_rate_limit_error_logged_but_not_raised(self, executor_with_mocks, test_db):
         """Rate limit errors should be handled gracefully."""
-        stage_run_id = _create_failed_stage_run(test_db)
+        stage_run_id = _create_running_stage_run(test_db)
+        # Transition to FAILED via state machine first
+        _transition_to_failed(test_db, stage_run_id)
 
         # Enable auto_learn_failures to test error handling
         executor_with_mocks.config.svs.auto_learn_failures = True
@@ -189,11 +207,11 @@ class TestPatternExtractionErrorHandling:
             mock_extract.side_effect = RateLimitExceededError("Too many patterns")
 
             # Should not raise
-            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageRunStatus.FAILED)
+            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageState.FAILED)
 
         # Finalization should complete
         stage_run = test_db.get_stage_run(stage_run_id)
-        assert stage_run["status"] == StageRunStatus.FAILED
+        assert stage_run["state"] == "failed"
 
 
 class TestPatternExtractionWithAgent:
@@ -201,7 +219,7 @@ class TestPatternExtractionWithAgent:
 
     def test_uses_configured_agent_provider(self, executor_with_mocks, test_db):
         """Should use the configured agent provider for extraction."""
-        stage_run_id = _create_failed_stage_run(test_db)
+        stage_run_id = _create_running_stage_run(test_db)
 
         # Enable auto_learn_failures to test agent provider passing
         executor_with_mocks.config.svs.auto_learn_failures = True
@@ -211,7 +229,7 @@ class TestPatternExtractionWithAgent:
             patch.object(executor_with_mocks, "_run_post_run_svs_review"),
             patch.object(executor_with_mocks, "_collect_svs_manifests"),
         ):
-            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageRunStatus.FAILED)
+            executor_with_mocks._finalize_stage_run(stage_run_id, "local", StageState.FAILED)
 
         # Should pass an agent provider
         if mock_extract.called:

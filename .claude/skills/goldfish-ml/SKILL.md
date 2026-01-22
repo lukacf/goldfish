@@ -40,6 +40,13 @@ Goldfish manages ML experiments through **seven key abstractions** (with a new E
 - **Pre-run review**: The configured SVS agent reviews your code before execution to catch bugs early
 - **Experiment Records** hide the run/version split in normal UX (use record_id or tags)
 
+**CRITICAL: Never use git directly.**
+Goldfish manages all version control internally via a hidden dev repo. **Never run git commands** on the user's project directory or the dev repo (`*-dev/`). Direct git operations will corrupt Goldfish's state and break provenance tracking. Use Goldfish tools instead:
+- `save_version()` instead of `git commit`
+- `rollback()` instead of `git reset`
+- `diff()` instead of `git diff`
+- `manage_versions()` for tagging and history
+
 ## Workflow Decision Tree
 
 ```
@@ -64,7 +71,7 @@ START: What task?
   │     └─▶ register_source() or manage_sources(action="list")
   │
   ├─▶ "Track lineage"
-  │     └─▶ inspect_record(include=["comparison"]) → inspect_run(include=["provenance"])
+  │     └─▶ get_lineage(run_id, direction) → inspect_run(include=["provenance"])
   │
   └─▶ "Save progress / Switch context"
         └─▶ save_version() → hibernate() (auto-saves)
@@ -668,11 +675,15 @@ svs:
 
 ```
 # Experiment-level context
-list_history("baseline")
+list_history("baseline")  # Returns reason, primary_metric, age for each record
 inspect_record(record_id, include=["results", "comparison"])
 
+# Track data dependencies (essential for understanding experiment flow)
+get_lineage("stage-abc123")  # Who consumed my outputs?
+get_lineage("stage-abc123", direction="upstream")  # Where did my inputs come from?
+
 # Infra-level provenance
-inspect_run(run_id, include=["provenance"])
+inspect_run(run_id, include=["provenance"])  # Includes reason field
 
 # Debugging: map record/tag to GCS/logs
 get_debug_info("@best-v1", workspace="baseline")
@@ -806,7 +817,7 @@ manage_base_images(action="push", image_type="gpu", target="project")
 
 
 
-| `dashboard()` | Actionable summary of system health | None |
+| `dashboard()` | Alerts, blocks, active runs with reason/age | None |
 
 
 
@@ -852,13 +863,14 @@ manage_base_images(action="push", image_type="gpu", target="project")
 |------|---------|----------------|
 | `run()` | Execute stages (requires results_spec; finalization gate enforced) | workspace, stages, results_spec, reason |
 | `finalize_run()` | Finalize ML results and outcome (authoritative) | record_or_run_id, results |
-| `list_history()` | Experiment records (runs + checkpoints) | workspace, tagged, stage, metric, min_value |
+| `list_history()` | Experiment records with reason, metric, age | workspace, tagged, stage, metric, min_value |
 | `inspect_record()` | Record details (results, comparison, tags) | ref, include, workspace |
 | `tag_record()` | Tag a run/checkpoint (runs also tag version) | ref, tag |
 | `list_unfinalized_runs()` | Runs needing finalization | workspace |
 | `get_experiment_context()` | Best run + pending finalizations + trends | workspace |
 | `get_debug_info()` | Infra IDs + GCS paths for a record | ref, workspace |
-| `inspect_run()` | Infra status, SVS, provenance | run_id, include |
+| `inspect_run()` | Infra status, SVS, provenance, reason | run_id, include |
+| `get_lineage()` | Track upstream/downstream run dependencies | run_id, direction |
 | `logs()` | Container logs (supports follow mode) | run_id, tail, follow |
 | `cancel()` | Stop a running stage | run_id, reason |
 | `save_results_spec()` | Pre-save results_spec for a run | workspace, stage, results_spec |

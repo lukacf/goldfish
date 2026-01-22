@@ -307,6 +307,33 @@ class TestGetPaths:
         assert isinstance(path, Path)
         assert "results" in str(path)
 
+    def test_get_output_path_does_not_create_directory_for_file_type(self, temp_dir):
+        """Regression: get_output_path should NOT create path as directory.
+
+        Bug: Previously get_output_path() called path.mkdir() which created the
+        output path as a directory. This broke 'file' type outputs where the user
+        needs to write directly to the path. The fix creates only the parent dir.
+        """
+        from goldfish.io import get_output_path
+
+        env = {
+            "GOLDFISH_OUTPUTS_DIR": str(temp_dir / "outputs"),
+        }
+        with patch.dict(os.environ, env):
+            path = get_output_path("results.json")
+
+        # Parent directory should exist for writing
+        assert path.parent.exists()
+        assert path.parent.is_dir()
+
+        # But the path itself should NOT exist as a directory
+        # (so we can write a file to it)
+        assert not path.exists()
+
+        # Should be able to write a file to the path
+        path.write_text('{"test": true}')
+        assert path.is_file()
+
 
 class TestGCSURIFallback:
     """Test GCS URI handling when input staging fails."""

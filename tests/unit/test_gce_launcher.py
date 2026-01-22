@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from goldfish.infra.gce_launcher import GCELauncher
+from goldfish.state_machine.exit_code import ExitCodeResult
 
 
 class TestBucketUri:
@@ -68,7 +69,10 @@ class TestGetExitCode:
                 stderr="",
             )
             result = launcher._get_exit_code("stage-abc123")
-            assert result == 0
+            assert isinstance(result, ExitCodeResult)
+            assert result.exists is True
+            assert result.code == 0
+            assert result.gcs_error is False
             assert mock_run.call_count == 1
 
     def test_get_exit_code_non_zero_exit(self, launcher):
@@ -80,7 +84,9 @@ class TestGetExitCode:
                 stderr="",
             )
             result = launcher._get_exit_code("stage-abc123")
-            assert result == 42
+            assert result.exists is True
+            assert result.code == 42
+            assert result.gcs_error is False
 
     def test_get_exit_code_retry_on_failure(self, launcher):
         """Should retry on gsutil failure and succeed eventually."""
@@ -92,18 +98,22 @@ class TestGetExitCode:
                 MagicMock(returncode=0, stdout="0\n", stderr=""),
             ]
             result = launcher._get_exit_code("stage-abc123", max_attempts=5, retry_delay=0.1)
-            assert result == 0
+            assert result.exists is True
+            assert result.code == 0
+            assert result.gcs_error is False
             assert mock_run.call_count == 3
 
     def test_get_exit_code_all_retries_exhausted(self, launcher):
-        """Should return 1 after all retries exhausted."""
+        """Should return exists=False (missing file) after all retries exhausted."""
         with patch("subprocess.run") as mock_run, patch("time.sleep"):
             # All attempts fail
             mock_run.side_effect = subprocess.CalledProcessError(
                 1, "gsutil", stderr="CommandException: No URLs matched"
             )
             result = launcher._get_exit_code("stage-abc123", max_attempts=3, retry_delay=0.1)
-            assert result == 1
+            assert result.exists is False
+            assert result.code is None
+            assert result.gcs_error is False
             assert mock_run.call_count == 3
 
     def test_get_exit_code_timeout_retry(self, launcher):
@@ -115,7 +125,9 @@ class TestGetExitCode:
                 MagicMock(returncode=0, stdout="0\n", stderr=""),
             ]
             result = launcher._get_exit_code("stage-abc123", max_attempts=3, retry_delay=0.1)
-            assert result == 0
+            assert result.exists is True
+            assert result.code == 0
+            assert result.gcs_error is False
             assert mock_run.call_count == 2
 
     def test_get_exit_code_invalid_content_no_retry(self, launcher):
@@ -127,7 +139,10 @@ class TestGetExitCode:
                 stderr="",
             )
             result = launcher._get_exit_code("stage-abc123", max_attempts=3, retry_delay=0.1)
-            assert result == 1
+            assert result.exists is True
+            assert result.code is None
+            assert result.gcs_error is False
+            assert result.error is not None
             # Should only try once - invalid content means file exists but is corrupt
             assert mock_run.call_count == 1
             # No retries means no sleep calls
@@ -137,7 +152,8 @@ class TestGetExitCode:
         """Should return 0 if no bucket configured."""
         launcher.bucket = None
         result = launcher._get_exit_code("stage-abc123")
-        assert result == 0
+        assert result.exists is True
+        assert result.code == 0
 
     def test_get_exit_code_correct_gcs_path(self, launcher):
         """Should construct correct GCS path with gs:// prefix and project_id."""
@@ -284,7 +300,7 @@ class TestMapGceStatusIntegration:
         as FAILED because the bucket path was constructed without gs:// prefix,
         causing gsutil to fail and _get_exit_code to return 1 (failure).
         """
-        from goldfish.models import StageRunStatus
+        from goldfish.state_machine.types import StageState
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
@@ -296,7 +312,7 @@ class TestMapGceStatusIntegration:
             status = launcher._map_gce_status("TERMINATED", "stage-68043eed")
 
             # Must return COMPLETED, not FAILED
-            assert status == StageRunStatus.COMPLETED, f"TERMINATED with exit_code=0 should be COMPLETED, got {status}"
+            assert status == StageState.COMPLETED, f"TERMINATED with exit_code=0 should be COMPLETED, got {status}"
 
             # Verify correct GCS path was used (includes project_id option)
             call_args = mock_run.call_args[0][0]
@@ -310,7 +326,7 @@ class TestMapGceStatusIntegration:
 
     def test_terminated_with_exit_code_nonzero_returns_failed(self, launcher):
         """TERMINATED instance with non-zero exit code should return FAILED."""
-        from goldfish.models import StageRunStatus
+        from goldfish.state_machine.types import StageState
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
@@ -320,7 +336,7 @@ class TestMapGceStatusIntegration:
             )
 
             status = launcher._map_gce_status("TERMINATED", "stage-xyz")
-            assert status == StageRunStatus.FAILED
+            assert status == StageState.FAILED
 
 
 class TestGetInstanceLogsRetry:
@@ -717,3 +733,109 @@ class TestSerialConsoleNoiseFilter:
         assert not any("google_metadata_script_runner" in line for line in filtered)
         assert not any("SIG_JSON" in line for line in filtered)
         assert not any("sleep 1" in line for line in filtered)
+
+
+class TestGCELaunchResult:
+    """Tests for GCELaunchResult dataclass."""
+
+    def test_gce_launch_result_creation(self):
+        """GCELaunchResult should store instance_name and zone."""
+        from goldfish.infra.gce_launcher import GCELaunchResult
+
+        result = GCELaunchResult(instance_name="stage-abc123", zone="us-central1-a")
+        assert result.instance_name == "stage-abc123"
+        assert result.zone == "us-central1-a"
+
+    def test_gce_launch_result_different_zones(self):
+        """GCELaunchResult should work with various zone formats."""
+        from goldfish.infra.gce_launcher import GCELaunchResult
+
+        # Test various zone names
+        zones = ["us-central1-a", "europe-west1-b", "asia-east1-c", "us-west1-a"]
+        for zone in zones:
+            result = GCELaunchResult(instance_name=f"instance-{zone}", zone=zone)
+            assert result.zone == zone
+
+
+class TestLaunchInstanceReturnsZone:
+    """Tests for launch_instance returning GCELaunchResult with zone."""
+
+    @pytest.fixture
+    def launcher(self):
+        """Create a GCE launcher with mocked init."""
+        with patch("goldfish.infra.gce_launcher.GCELauncher.__init__", lambda x, y: None):
+            launcher = GCELauncher(MagicMock())
+            launcher.project_id = "test-project"
+            launcher.bucket = "gs://test-bucket"
+            launcher.resources = []
+            launcher.default_zone = "us-central1-a"
+            launcher.gpu_preference = None
+            launcher._project_number = None
+            launcher.service_account = None
+            return launcher
+
+    def test_launch_simple_returns_gce_launch_result(self, launcher):
+        """_launch_simple should return GCELaunchResult with zone."""
+        from goldfish.infra.gce_launcher import GCELaunchResult
+
+        with (
+            patch("goldfish.infra.gce_launcher.run_gcloud"),
+            patch("goldfish.infra.resource_launcher.wait_for_instance_ready"),
+        ):
+            result = launcher._launch_simple(
+                instance_name="stage-test123",
+                startup_script="#!/bin/bash\necho test",
+                machine_type="n1-standard-4",
+                gpu_type=None,
+                gpu_count=0,
+                zone="europe-west1-b",
+            )
+
+        assert isinstance(result, GCELaunchResult)
+        assert result.instance_name == "stage-test123"
+        assert result.zone == "europe-west1-b"
+
+    def test_launch_with_capacity_search_returns_gce_launch_result(self, launcher):
+        """_launch_with_capacity_search should return GCELaunchResult with zone."""
+        from dataclasses import dataclass
+
+        from goldfish.infra.gce_launcher import GCELaunchResult
+
+        @dataclass
+        class MockSelection:
+            zone: str
+
+        @dataclass
+        class MockLaunchResult:
+            instance_name: str
+            selection: MockSelection
+
+        # Set up resources for capacity search
+        launcher.resources = [
+            {
+                "machine": "n1-standard-4",
+                "zones": ["us-central1-a", "us-west1-b"],
+            }
+        ]
+
+        with (
+            patch("goldfish.infra.gce_launcher.ResourceLauncher") as MockResourceLauncher,
+            patch.object(launcher, "_resolve_service_account", return_value=None),
+        ):
+            mock_launcher_instance = MagicMock()
+            mock_launcher_instance.launch.return_value = MockLaunchResult(
+                instance_name="stage-capacity123",
+                selection=MockSelection(zone="us-west1-b"),
+            )
+            MockResourceLauncher.return_value = mock_launcher_instance
+
+            result = launcher._launch_with_capacity_search(
+                instance_name="stage-capacity123",
+                startup_script="#!/bin/bash\necho test",
+                gpu_type=None,
+                zones=["us-central1-a", "us-west1-b"],
+            )
+
+        assert isinstance(result, GCELaunchResult)
+        assert result.instance_name == "stage-capacity123"
+        assert result.zone == "us-west1-b"

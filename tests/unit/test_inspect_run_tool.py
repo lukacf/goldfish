@@ -42,12 +42,12 @@ def test_inspect_run_basic():
         "workspace_name": "w1",
         "stage_name": "train",
         "status": "completed",
+        "state": "completed",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": "2025-12-27T11:00:00Z",
         "config_json": "{}",
         "inputs_json": "{}",
         "outputs_json": "[]",
-        "progress": "100%",
         "reason_json": None,
     }
     mock_db.get_metrics_trends.return_value = {}
@@ -57,8 +57,8 @@ def test_inspect_run_basic():
         result = inspect_run(run_id)
 
     assert result["run_id"] == run_id
-    assert result["status"] == "completed"
-    assert result["dashboard"]["progress"] == "100%"
+    assert result["state"] == "completed"  # State machine state (source of truth)
+    assert result["dashboard"]["state"] == "completed"
 
 
 def test_inspect_run_triggers_sync_when_running():
@@ -73,6 +73,7 @@ def test_inspect_run_triggers_sync_when_running():
         "workspace_name": "w1",
         "stage_name": "train",
         "status": "running",
+        "state": "running",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": None,
         "config_json": "{}",
@@ -95,6 +96,8 @@ def test_inspect_run_triggers_sync_when_running():
         patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db),
         patch("goldfish.server_tools.execution_tools._get_metadata_bus", return_value=mock_bus),
         patch("goldfish.server_tools.execution_tools._get_stage_executor", return_value=mock_stage_exec),
+        patch("goldfish.server_tools.execution_tools._overdrive_ack_timeout", return_value=0.0),
+        patch("time.sleep"),  # Avoid actual sleep delays
     ):
         inspect_run(run_id)
 
@@ -120,6 +123,7 @@ def test_inspect_run_pending_when_ack_missing():
         "workspace_name": "w1",
         "stage_name": "train",
         "status": "running",
+        "state": "running",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": None,
         "config_json": "{}",
@@ -143,6 +147,8 @@ def test_inspect_run_pending_when_ack_missing():
         patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db),
         patch("goldfish.server_tools.execution_tools._get_metadata_bus", return_value=mock_bus),
         patch("goldfish.server_tools.execution_tools._get_stage_executor", return_value=mock_stage_exec),
+        patch("goldfish.server_tools.execution_tools._overdrive_ack_timeout", return_value=0.0),
+        patch("time.sleep"),  # Avoid actual sleep delays
     ):
         result = inspect_run(run_id)
 
@@ -151,7 +157,6 @@ def test_inspect_run_pending_when_ack_missing():
 
 def test_inspect_run_skips_sync_when_launching():
     """GCE runs in launch/build should not report timeout sync."""
-    from goldfish.models import StageRunProgress
     from goldfish.server_tools.execution_tools import inspect_run
 
     run_id = "stage-abcd1234"
@@ -161,12 +166,12 @@ def test_inspect_run_skips_sync_when_launching():
         "workspace_name": "w1",
         "stage_name": "train",
         "status": "running",
+        "state": "launching",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": None,
         "config_json": "{}",
         "inputs_json": "{}",
         "outputs_json": "[]",
-        "progress": StageRunProgress.LAUNCH,
         "reason_json": None,
         "backend_type": "gce",
         "backend_handle": "instance-1",
@@ -201,6 +206,7 @@ def test_inspect_run_includes_thoughts():
         "workspace_name": "w1",
         "stage_name": "train",
         "status": "completed",
+        "state": "completed",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": "2025-12-27T11:00:00Z",
         "config_json": "{}",
@@ -239,6 +245,7 @@ def test_inspect_run_includes_attempt_info():
         "workspace_name": "baseline",
         "stage_name": "train",
         "status": "completed",
+        "state": "completed",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": "2025-12-27T11:00:00Z",
         "config_json": "{}",
@@ -286,6 +293,7 @@ def test_inspect_run_refetches_row_after_sync():
         "workspace_name": "w1",
         "stage_name": "train",
         "status": "running",
+        "state": "running",  # State machine column (source of truth)
         "started_at": "2025-12-27T10:00:00Z",
         "completed_at": None,
         "config_json": "{}",
@@ -328,6 +336,7 @@ def test_inspect_run_refetches_row_after_sync():
         patch("goldfish.server_tools.execution_tools._get_stage_executor", return_value=mock_stage_exec),
         patch("goldfish.server_tools.execution_tools._overdrive_ack_timeout", return_value=0.5),
         patch("uuid.uuid4", return_value=mock_uuid_obj),
+        patch("time.sleep"),  # Avoid actual sleep delays
     ):
         result = inspect_run(run_id)
 
@@ -342,3 +351,357 @@ def test_inspect_run_refetches_row_after_sync():
     # sync_method is "none" because no metrics data in mock
     assert result["dashboard"]["sync_method"] == "none"
     assert result["dashboard"]["latest_metric_at"] is None  # No metrics data
+
+
+def test_inspect_run_includes_svs_ml_outcome():
+    """Test that inspect_run includes ml_outcome from SVS findings."""
+    import json
+
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-aabbcc123"
+    svs_findings = {
+        "ai_review": {
+            "decision": "approved",
+            "findings": [],
+            "duration_ms": 1500,
+            "response_text": "Model achieved target accuracy.\n\nML_OUTCOME: val_accuracy=0.91, outcome=success",
+            "ml_outcome": "success",
+            "ml_metric_value": 0.91,
+        }
+    }
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "completed",
+        "state": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": None,
+        "svs_findings_json": json.dumps(svs_findings),
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["svs"])
+
+    assert "svs" in result
+    assert result["svs"]["post_run"]["decision"] == "approved"
+    assert result["svs"]["post_run"]["ml_outcome"] == "success"
+    assert result["svs"]["post_run"]["ml_metric_value"] == 0.91
+    assert "ML_OUTCOME:" in result["svs"]["post_run"]["full_text"]
+
+
+def test_inspect_run_handles_missing_ml_outcome():
+    """Test that inspect_run handles missing ml_outcome fields gracefully."""
+    import json
+
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-ddeeff456"
+    # SVS findings without ml_outcome fields (legacy or when not applicable)
+    svs_findings = {
+        "ai_review": {
+            "decision": "approved",
+            "findings": [],
+            "duration_ms": 1000,
+            "response_text": "Run completed without issues.",
+        }
+    }
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "completed",
+        "state": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": None,
+        "svs_findings_json": json.dumps(svs_findings),
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["svs"])
+
+    assert "svs" in result
+    assert result["svs"]["post_run"]["decision"] == "approved"
+    # Missing fields should be None
+    assert result["svs"]["post_run"]["ml_outcome"] is None
+    assert result["svs"]["post_run"]["ml_metric_value"] is None
+
+
+def test_inspect_run_includes_svs_partial_outcome():
+    """Test that inspect_run correctly handles partial ML outcome."""
+    import json
+
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-aabbcc789"
+    svs_findings = {
+        "ai_review": {
+            "decision": "warned",
+            "findings": ["WARNING: Did not achieve goal value"],
+            "duration_ms": 2000,
+            "response_text": "Model achieved minimum but not goal.\n\nML_OUTCOME: accuracy=0.72, outcome=partial",
+            "ml_outcome": "partial",
+            "ml_metric_value": 0.72,
+        }
+    }
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "completed",
+        "state": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": None,
+        "svs_findings_json": json.dumps(svs_findings),
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["svs"])
+
+    assert result["svs"]["post_run"]["ml_outcome"] == "partial"
+    assert result["svs"]["post_run"]["ml_metric_value"] == 0.72
+
+
+def test_inspect_run_includes_reason():
+    """Test that inspect_run includes reason from reason_json."""
+    import json
+
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-abc123def"
+    reason_data = {"description": "Testing new learning rate schedule"}
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "completed",
+        "state": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": json.dumps(reason_data),
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["metadata"])
+
+    assert "reason" in result
+    assert result["reason"] == "Testing new learning rate schedule"
+
+
+def test_inspect_run_reason_null_when_missing():
+    """Test that inspect_run returns null reason when reason_json is missing."""
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-def456abc"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "completed",
+        "state": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": None,
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["metadata"])
+
+    assert "reason" in result
+    assert result["reason"] is None
+
+
+def test_inspect_run_only_shows_latest_during_run_review():
+    """Regression: inspect_run should only show the LATEST during_run SVS review.
+
+    Bug: All unnotified during_run reviews were shown, flooding the output with
+    redundant periodic monitoring updates.
+    Fix: Only show the most recent during_run review (first one, since ordered DESC).
+    Pre-run and post-run reviews should still all be shown.
+    """
+    import json
+
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-abc123def"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "running",
+        "state": "running",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": None,
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": None,
+        "backend_type": "local",
+        "backend_handle": "container-1",
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    # Multiple during_run reviews (all for same run, ordered by reviewed_at DESC)
+    mock_db.get_unnotified_svs_reviews.return_value = [
+        {
+            "id": 3,
+            "stage_run_id": run_id,
+            "review_type": "during_run",
+            "decision": "warned",
+            "parsed_findings": json.dumps([{"severity": "WARN", "summary": "Latest warning"}]),
+            "response_text": "Latest during_run review",
+            "reviewed_at": "2025-12-27T10:30:00Z",
+        },
+        {
+            "id": 2,
+            "stage_run_id": run_id,
+            "review_type": "during_run",
+            "decision": "warned",
+            "parsed_findings": json.dumps([{"severity": "WARN", "summary": "Older warning"}]),
+            "response_text": "Older during_run review",
+            "reviewed_at": "2025-12-27T10:20:00Z",
+        },
+        {
+            "id": 1,
+            "stage_run_id": run_id,
+            "review_type": "during_run",
+            "decision": "warned",
+            "parsed_findings": json.dumps([{"severity": "WARN", "summary": "Oldest warning"}]),
+            "response_text": "Oldest during_run review",
+            "reviewed_at": "2025-12-27T10:10:00Z",
+        },
+    ]
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["dashboard"])
+
+    # Should only have ONE during_run review (the latest)
+    svs_reviews = result["dashboard"]["new_svs_reviews"]
+    assert len(svs_reviews) == 1, f"Expected 1 review, got {len(svs_reviews)}"
+    assert svs_reviews[0]["full_text"] == "Latest during_run review"
+    assert svs_reviews[0]["findings"][0]["summary"] == "Latest warning"
+
+    # All 3 reviews should be marked as notified (even the ones not shown)
+    mock_db.mark_svs_reviews_notified.assert_called_once()
+    notified_ids = mock_db.mark_svs_reviews_notified.call_args[0][0]
+    assert sorted(notified_ids) == [1, 2, 3], f"Expected all IDs to be notified, got {notified_ids}"
+
+
+def test_inspect_run_keeps_all_pre_run_and_post_run_reviews():
+    """Test that pre_run and post_run reviews are all shown (not filtered like during_run)."""
+    import json
+
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-def789abc"
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "completed",
+        "state": "completed",
+        "started_at": "2025-12-27T10:00:00Z",
+        "completed_at": "2025-12-27T11:00:00Z",
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": None,
+        "backend_type": "local",
+        "backend_handle": "container-1",
+    }
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    # Mix of review types
+    mock_db.get_unnotified_svs_reviews.return_value = [
+        {
+            "id": 4,
+            "stage_run_id": run_id,
+            "review_type": "post_run",
+            "decision": "approved",
+            "parsed_findings": json.dumps([]),
+            "response_text": "Post-run review",
+            "reviewed_at": "2025-12-27T11:00:00Z",
+        },
+        {
+            "id": 3,
+            "stage_run_id": run_id,
+            "review_type": "during_run",
+            "decision": "warned",
+            "parsed_findings": json.dumps([{"severity": "WARN", "summary": "Latest during"}]),
+            "response_text": "Latest during_run",
+            "reviewed_at": "2025-12-27T10:30:00Z",
+        },
+        {
+            "id": 2,
+            "stage_run_id": run_id,
+            "review_type": "during_run",
+            "decision": "warned",
+            "parsed_findings": json.dumps([{"severity": "WARN", "summary": "Older during"}]),
+            "response_text": "Older during_run",
+            "reviewed_at": "2025-12-27T10:20:00Z",
+        },
+        {
+            "id": 1,
+            "stage_run_id": run_id,
+            "review_type": "pre_run",
+            "decision": "approved",
+            "parsed_findings": json.dumps([]),
+            "response_text": "Pre-run review",
+            "reviewed_at": "2025-12-27T10:00:00Z",
+        },
+    ]
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["dashboard"])
+
+    # Should have: 1 pre_run + 1 during_run (latest only) + 1 post_run = 3 reviews
+    svs_reviews = result["dashboard"]["new_svs_reviews"]
+    assert len(svs_reviews) == 3, f"Expected 3 reviews, got {len(svs_reviews)}"
+
+    review_types = [r["review_type"] for r in svs_reviews]
+    assert review_types.count("during_run") == 1, "Should only have 1 during_run review"
+    assert review_types.count("pre_run") == 1, "Should have 1 pre_run review"
+    assert review_types.count("post_run") == 1, "Should have 1 post_run review"
+
+    # All 4 reviews should be marked as notified
+    mock_db.mark_svs_reviews_notified.assert_called_once()
+    notified_ids = mock_db.mark_svs_reviews_notified.call_args[0][0]
+    assert sorted(notified_ids) == [1, 2, 3, 4]

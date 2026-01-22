@@ -132,31 +132,36 @@ class TestCheckFinalizationGate:
 
 
 class TestTerminalInfraOutcomes:
-    """Tests that correct infra outcomes are considered terminal."""
+    """Tests that correct infra outcomes require finalization.
 
-    def test_completed_is_terminal(self) -> None:
-        """'completed' is a terminal infra outcome."""
+    Note: 'is_terminal_infra_outcome' means "requires finalization before new runs",
+    not just "the run has ended". Canceled runs do NOT require finalization because
+    the cancel() call already captures the reason.
+    """
+
+    def test_completed_requires_finalization(self) -> None:
+        """'completed' requires finalization."""
         mock_db = MagicMock()
         manager = ExperimentRecordManager(mock_db)
         assert manager.is_terminal_infra_outcome("completed") is True
 
-    def test_preempted_is_terminal(self) -> None:
-        """'preempted' is a terminal infra outcome."""
+    def test_preempted_requires_finalization(self) -> None:
+        """'preempted' requires finalization."""
         mock_db = MagicMock()
         manager = ExperimentRecordManager(mock_db)
         assert manager.is_terminal_infra_outcome("preempted") is True
 
-    def test_crashed_is_terminal(self) -> None:
-        """'crashed' is a terminal infra outcome."""
+    def test_crashed_requires_finalization(self) -> None:
+        """'crashed' requires finalization."""
         mock_db = MagicMock()
         manager = ExperimentRecordManager(mock_db)
         assert manager.is_terminal_infra_outcome("crashed") is True
 
-    def test_canceled_is_terminal(self) -> None:
-        """'canceled' is a terminal infra outcome."""
+    def test_canceled_does_not_require_finalization(self) -> None:
+        """'canceled' does NOT require finalization - cancel() already captured reason."""
         mock_db = MagicMock()
         manager = ExperimentRecordManager(mock_db)
-        assert manager.is_terminal_infra_outcome("canceled") is True
+        assert manager.is_terminal_infra_outcome("canceled") is False
 
     def test_unknown_is_not_terminal(self) -> None:
         """'unknown' is NOT a terminal infra outcome."""

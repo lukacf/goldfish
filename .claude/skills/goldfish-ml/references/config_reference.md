@@ -126,16 +126,14 @@ svs:
   
   # During-run monitoring parameters
   ai_during_run_interval_seconds: 300
-  ai_during_run_min_metrics: 200
-  ai_during_run_min_log_lines: 20
+  ai_during_run_min_metrics: 1        # Trigger as soon as any metrics exist
+  ai_during_run_min_log_lines: 1      # Trigger as soon as any logs exist
   ai_during_run_max_runs_per_hour: 12
   ai_during_run_auto_stop: false
-  
-  # Log filtering for AI monitoring
+
+  # Log filtering for AI monitoring (default: match all, let AI decide)
   ai_during_run_log_filters:
-    - "(ERROR|WARN|EXCEPTION|Traceback)"
-    - "(CUDA|OOM|nan|inf|segfault|Killed|RuntimeError)"
-    - "(loss=|ppl=|acc=|val_|train_|dir_)"
+    - ".*"                            # Match all lines by default
   ai_during_run_log_max_lines: 200
   ai_during_run_log_max_bytes: 16384
   ai_during_run_log_file_max_bytes: 10000000
@@ -448,8 +446,20 @@ Domain profiles provide optimized thresholds and policies for common ML tasks. E
 | Field | Default | Description |
 |-------|---------|-------------|
 | `ai_during_run_interval_seconds` | `300` | Frequency of background reviews |
-| `ai_during_run_min_metrics` | `200` | Data points required before first review |
-| `ai_during_run_auto_stop` | `false` | If true, SVS will termination run if critical anomaly detected |
+| `ai_during_run_min_metrics` | `1` | Metrics required before first review (trigger early) |
+| `ai_during_run_min_log_lines` | `1` | Log lines required before first review |
+| `ai_during_run_log_filters` | `[".*"]` | Regex filters for logs (default: match all, AI decides relevance) |
+| `ai_during_run_auto_stop` | `false` | If true, SVS will terminate run if critical anomaly detected |
+
+### Agent Configuration
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `agent_provider` | `claude_code` | AI provider: `claude_code`, `codex_cli`, `gemini_cli`, or `"null"` |
+| `agent_model` | `opus` | Model to use for AI reviews |
+| `agent_timeout` | `120` | Timeout in seconds for AI calls |
+
+**Note:** In YAML, `agent_provider: null` (unquoted) means "use default" (`claude_code`). To explicitly disable AI reviews, use `agent_provider: "null"` (quoted string) for NullProvider.
 
 ## Metrics Configuration
 

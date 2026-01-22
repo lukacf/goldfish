@@ -23,9 +23,9 @@ from goldfish.models import (
     RunReason,
     RunReview,
     StageDef,
-    StageRunStatus,
 )
 from goldfish.pre_run_review import PreRunReviewer
+from goldfish.state_machine.types import StageState
 from goldfish.svs.agent import ClaudeCodeProvider
 from goldfish.svs.config import SVSConfig
 
@@ -278,12 +278,12 @@ class TestStageExecutorReviewIntegration:
         result = executor.run_stage(workspace="test_workspace", stage_name="preprocess", reason="Test run")
 
         # Verify run was blocked
-        assert result.status == StageRunStatus.FAILED
+        assert result.status == StageState.FAILED
 
         # Verify database record was created
         stage_run = test_db.get_stage_run(result.stage_run_id)
         assert stage_run is not None
-        assert stage_run["status"] == StageRunStatus.FAILED
+        assert stage_run["state"] == "failed"
         assert "review" in (stage_run["error"] or "").lower()
 
     def test_approved_run_proceeds_normally(
@@ -337,7 +337,7 @@ class TestStageExecutorReviewIntegration:
         result = executor.run_stage(workspace="test_workspace", stage_name="preprocess", reason="Test run")
 
         # Verify run proceeded
-        assert result.status == StageRunStatus.RUNNING
+        assert result.status == StageState.RUNNING
         executor._build_docker_image.assert_called_once()
         executor._launch_container.assert_called_once()
 
@@ -384,7 +384,7 @@ class TestStageExecutorReviewIntegration:
 
         # Verify review was not performed
         executor._perform_pre_run_review.assert_not_called()
-        assert result.status == StageRunStatus.RUNNING
+        assert result.status == StageState.RUNNING
 
     def test_review_with_warnings_does_not_block(
         self, test_db: Database, test_config: GoldfishConfig, temp_dir: Path
@@ -443,7 +443,7 @@ class TestStageExecutorReviewIntegration:
         result = executor.run_stage(workspace="test_workspace", stage_name="preprocess", reason="Test run")
 
         # Verify run proceeded despite warnings
-        assert result.status == StageRunStatus.RUNNING
+        assert result.status == StageState.RUNNING
 
 
 class TestReviewTimeoutHandling:

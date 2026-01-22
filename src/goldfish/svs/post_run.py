@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,9 @@ class PostRunReview:
         findings: List of issues found (ERROR/WARNING/NOTE messages)
         stats: Stage output statistics that were reviewed
         duration_ms: Time taken for review in milliseconds
+        response_text: Full response text from the AI agent (for audit trail)
+        ml_outcome: ML assessment result (success/partial/miss/unknown) or None
+        ml_metric_value: The actual metric value found by the AI, or None
     """
 
     skipped: bool
@@ -47,6 +51,39 @@ class PostRunReview:
     findings: list[str]
     stats: dict
     duration_ms: int
+    response_text: str = ""
+    ml_outcome: str | None = None
+    ml_metric_value: float | None = None
+
+
+def _parse_ml_outcome(response_text: str) -> tuple[str | None, float | None]:
+    """Parse ML_OUTCOME line from AI response.
+
+    Expected format: ML_OUTCOME: metric_name=VALUE, outcome=OUTCOME
+    Example: ML_OUTCOME: val_accuracy=0.85, outcome=success
+
+    Args:
+        response_text: Full response text from the AI agent
+
+    Returns:
+        Tuple of (ml_outcome, ml_metric_value) or (None, None) if not found
+    """
+    if not response_text:
+        return None, None
+
+    # Pattern matches: ML_OUTCOME: metric=value, outcome=success/partial/miss/unknown
+    pattern = r"ML_OUTCOME:\s*\w+\s*=\s*([\d.]+)\s*,\s*outcome\s*=\s*(success|partial|miss|unknown)"
+    match = re.search(pattern, response_text, re.IGNORECASE)
+
+    if not match:
+        return None, None
+
+    try:
+        metric_value = float(match.group(1))
+        outcome = match.group(2).lower()
+        return outcome, metric_value
+    except (ValueError, IndexError):
+        return None, None
 
 
 def run_post_run_review(
@@ -136,20 +173,28 @@ def run_post_run_review(
     )
 
     # Run agent
+    response_text = ""
     try:
         result = agent.run(request)
         decision = result.decision
         findings = result.findings
         duration_ms = result.duration_ms
+        response_text = result.response_text
     except Exception as e:
         # Fail open - approve on error but record the error
         logger.warning("Post-run review agent error: %s", e)
         decision = "approved"
         findings = [f"SVS post-run review error: {e}"]
         duration_ms = int((time.time() - start_time) * 1000)
+        response_text = f"Error during review: {e}"
+
+    # Parse ML outcome from response (if present)
+    ml_outcome, ml_metric_value = _parse_ml_outcome(response_text)
 
     # Write findings to file
-    _write_findings_file(outputs_dir, decision, findings, stats, duration_ms)
+    _write_findings_file(
+        outputs_dir, decision, findings, stats, duration_ms, response_text, ml_outcome, ml_metric_value
+    )
 
     return PostRunReview(
         skipped=False,
@@ -157,6 +202,9 @@ def run_post_run_review(
         findings=findings,
         stats=stats,
         duration_ms=duration_ms,
+        response_text=response_text,
+        ml_outcome=ml_outcome,
+        ml_metric_value=ml_metric_value,
     )
 
 
@@ -166,6 +214,9 @@ def _write_findings_file(
     findings: list[str],
     stats: dict,
     duration_ms: int,
+    response_text: str = "",
+    ml_outcome: str | None = None,
+    ml_metric_value: float | None = None,
 ) -> None:
     """Write findings to .goldfish/svs_findings.json.
 
@@ -178,6 +229,9 @@ def _write_findings_file(
         findings: List of finding messages
         stats: Stage output statistics
         duration_ms: Review duration in milliseconds
+        response_text: Full AI response text for audit trail
+        ml_outcome: ML assessment result (success/partial/miss/unknown)
+        ml_metric_value: The actual metric value found by the AI
     """
     try:
         goldfish_dir = outputs_dir / ".goldfish"
@@ -220,6 +274,9 @@ def _write_findings_file(
                 "findings": merged_findings,
                 "stats": merged_stats,
                 "duration_ms": duration_ms,
+                "response_text": response_text,
+                "ml_outcome": ml_outcome,
+                "ml_metric_value": ml_metric_value,
             }
         )
 
