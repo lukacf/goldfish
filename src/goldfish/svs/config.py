@@ -76,16 +76,12 @@ class SVSConfig(BaseModel):
     ai_post_run_enabled: bool = True
     ai_during_run_enabled: bool = True
     ai_during_run_interval_seconds: int = Field(default=300, ge=10)  # min 10s in test_mode, validated below
-    ai_during_run_min_metrics: int = Field(default=200, ge=10)
-    ai_during_run_min_log_lines: int = Field(default=20, ge=0)
+    ai_during_run_min_metrics: int = Field(default=1, ge=1)  # Trigger as soon as any metrics exist
+    ai_during_run_min_log_lines: int = Field(default=1, ge=0)  # Trigger as soon as any logs exist
     ai_during_run_max_runs_per_hour: int = Field(default=12, ge=1)
     ai_during_run_auto_stop: bool = False
     ai_during_run_log_filters: list[str] = Field(
-        default_factory=lambda: [
-            r"(ERROR|WARN|EXCEPTION|Traceback)",
-            r"(CUDA|OOM|nan|inf|segfault|Killed|RuntimeError)",
-            r"(loss=|ppl=|acc=|val_|train_|dir_)",
-        ]
+        default_factory=lambda: [r".*"]  # Match all lines by default - let AI decide what's relevant
     )
     ai_during_run_log_max_lines: int = Field(default=200, ge=10)
     ai_during_run_log_max_bytes: int = Field(default=16384, ge=1024)
@@ -109,6 +105,19 @@ class SVSConfig(BaseModel):
         """Validate domain is non-empty."""
         if not v or not v.strip():
             raise ValueError("domain cannot be empty")
+        return v
+
+    @field_validator("agent_provider", mode="before")
+    @classmethod
+    def coerce_null_agent_provider(cls, v: str | None) -> str:
+        """Use default provider when YAML null is specified.
+
+        In YAML, `agent_provider: null` is parsed as Python None.
+        We treat this as "use default" (claude_code), NOT as NullProvider.
+        To explicitly use NullProvider, write `agent_provider: "null"` (quoted).
+        """
+        if v is None:
+            return "claude_code"
         return v
 
     @model_validator(mode="after")

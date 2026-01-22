@@ -958,8 +958,6 @@ class TestOrphanCleanupWithPreemption:
 
     def test_orphan_cleanup_marks_preempted_with_correct_message(self, test_db):
         """Orphan cleanup uses preemption-specific error message when instance was preempted."""
-        from goldfish.models import StageRunStatus
-
         daemon = GoldfishDaemon(Path("/tmp/fake"))
         daemon._db = test_db
 
@@ -976,19 +974,21 @@ class TestOrphanCleanupWithPreemption:
         with test_db._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, backend_type, backend_handle, started_at)
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, state, backend_type, backend_handle, started_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '-30 minutes'))
                 """,
-                ("stage-preempt-test", "ws1", "v1", "train", StageRunStatus.RUNNING, "gce", "stage-preempt-test"),
+                ("stage-preempt-test", "ws1", "v1", "train", "running", "gce", "stage-preempt-test"),
             )
 
         # Mock gcloud to return no instances (instance gone)
         # Mock preemption check to return True
-        # Mock _get_exit_code to return 1 (not found in GCS)
+        # Mock _get_exit_code to return ExitCodeResult (not found in GCS)
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
         with (
             patch("subprocess.run") as mock_run,
             patch.object(daemon, "_check_if_preempted", return_value=True),
-            patch.object(daemon, "_get_exit_code", return_value=1),
+            patch.object(daemon, "_get_exit_code", return_value=ExitCodeResult.from_not_found()),
         ):
             # First call: list instances - returns empty (instance gone)
             mock_run.return_value = MagicMock(stdout="", returncode=0)
@@ -998,18 +998,16 @@ class TestOrphanCleanupWithPreemption:
         # Verify the error message mentions preemption
         with test_db._conn() as conn:
             row = conn.execute(
-                "SELECT status, error FROM stage_runs WHERE id = ?",
+                "SELECT state, error FROM stage_runs WHERE id = ?",
                 ("stage-preempt-test",),
             ).fetchone()
 
-        assert row["status"] == StageRunStatus.FAILED
+        assert row["state"] == "terminated"  # INSTANCE_LOST transitions to terminated
         assert "preempted" in row["error"].lower()
         assert "spot" in row["error"].lower() or "preemptible" in row["error"].lower()
 
     def test_orphan_cleanup_marks_disappeared_with_generic_message(self, test_db):
         """Orphan cleanup uses generic error message when instance not preempted."""
-        from goldfish.models import StageRunStatus
-
         daemon = GoldfishDaemon(Path("/tmp/fake"))
         daemon._db = test_db
 
@@ -1026,19 +1024,21 @@ class TestOrphanCleanupWithPreemption:
         with test_db._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, backend_type, backend_handle, started_at)
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, state, backend_type, backend_handle, started_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '-30 minutes'))
                 """,
-                ("stage-orphan-test", "ws1", "v1", "train", StageRunStatus.RUNNING, "gce", "stage-orphan-test"),
+                ("stage-orphan-test", "ws1", "v1", "train", "running", "gce", "stage-orphan-test"),
             )
 
         # Mock gcloud to return no instances (instance gone)
         # Mock preemption check to return False (not preempted)
-        # Mock _get_exit_code to return 1 (not found in GCS)
+        # Mock _get_exit_code to return ExitCodeResult (not found in GCS)
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
         with (
             patch("subprocess.run") as mock_run,
             patch.object(daemon, "_check_if_preempted", return_value=False),
-            patch.object(daemon, "_get_exit_code", return_value=1),
+            patch.object(daemon, "_get_exit_code", return_value=ExitCodeResult.from_not_found()),
         ):
             mock_run.return_value = MagicMock(stdout="", returncode=0)
 
@@ -1047,18 +1047,16 @@ class TestOrphanCleanupWithPreemption:
         # Verify the error message is generic (not preemption)
         with test_db._conn() as conn:
             row = conn.execute(
-                "SELECT status, error FROM stage_runs WHERE id = ?",
+                "SELECT state, error FROM stage_runs WHERE id = ?",
                 ("stage-orphan-test",),
             ).fetchone()
 
-        assert row["status"] == StageRunStatus.FAILED
+        assert row["state"] == "terminated"  # INSTANCE_LOST transitions to terminated
         assert "orphan" in row["error"].lower()
         assert "preempted" not in row["error"].lower()
 
     def test_orphan_cleanup_skips_recent_runs(self, test_db):
         """Orphan cleanup doesn't check runs started less than 20 minutes ago."""
-        from goldfish.models import StageRunStatus
-
         daemon = GoldfishDaemon(Path("/tmp/fake"))
         daemon._db = test_db
 
@@ -1075,10 +1073,10 @@ class TestOrphanCleanupWithPreemption:
         with test_db._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, backend_type, backend_handle, started_at)
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, state, backend_type, backend_handle, started_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '-5 minutes'))
                 """,
-                ("stage-recent-test", "ws1", "v1", "train", StageRunStatus.RUNNING, "gce", "stage-recent-test"),
+                ("stage-recent-test", "ws1", "v1", "train", "running", "gce", "stage-recent-test"),
             )
 
         # Mock gcloud to return no instances
@@ -1090,16 +1088,14 @@ class TestOrphanCleanupWithPreemption:
         # Verify the run was NOT marked as failed (still within grace period)
         with test_db._conn() as conn:
             row = conn.execute(
-                "SELECT status FROM stage_runs WHERE id = ?",
+                "SELECT state FROM stage_runs WHERE id = ?",
                 ("stage-recent-test",),
             ).fetchone()
 
-        assert row["status"] == StageRunStatus.RUNNING  # Still running, not touched
+        assert row["state"] == "running"  # Still running, not touched
 
     def test_orphan_cleanup_skips_on_gcloud_error(self, test_db):
         """Orphan cleanup should not mark runs failed when gcloud list errors."""
-        from goldfish.models import StageRunStatus
-
         daemon = GoldfishDaemon(Path("/tmp/fake"))
         daemon._db = test_db
 
@@ -1116,10 +1112,10 @@ class TestOrphanCleanupWithPreemption:
         with test_db._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO stage_runs (id, workspace_name, version, stage_name, status, backend_type, backend_handle, started_at)
+                INSERT INTO stage_runs (id, workspace_name, version, stage_name, state, backend_type, backend_handle, started_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '-30 minutes'))
                 """,
-                ("stage-gcloud-error", "ws1", "v1", "train", StageRunStatus.RUNNING, "gce", "stage-gcloud-error"),
+                ("stage-gcloud-error", "ws1", "v1", "train", "running", "gce", "stage-gcloud-error"),
             )
 
         # Mock gcloud list to return error (non-zero return code)
@@ -1131,11 +1127,11 @@ class TestOrphanCleanupWithPreemption:
         # Verify the run was NOT marked as failed
         with test_db._conn() as conn:
             row = conn.execute(
-                "SELECT status FROM stage_runs WHERE id = ?",
+                "SELECT state FROM stage_runs WHERE id = ?",
                 ("stage-gcloud-error",),
             ).fetchone()
 
-        assert row["status"] == StageRunStatus.RUNNING
+        assert row["state"] == "running"
 
     def test_orphan_cleanup_skips_without_gce_config(self):
         """Orphan cleanup does nothing when GCE not configured."""

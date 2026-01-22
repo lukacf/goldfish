@@ -169,3 +169,42 @@ def test_fingerprint_performance_large_file(tmp_path):
     assert stats["size_bytes"] == size
     assert "row_count" not in stats
     assert stats["row_count_approx"] is True
+
+
+def test_extract_stage_run_id_from_gcs_path():
+    """Test extracting stage run ID from GCS paths."""
+    from goldfish.jobs.stage_executor import _extract_stage_run_id_from_path
+
+    # Valid GCS path with stage run ID
+    path = "gs://bucket/artifacts/stage-abc123def456/outputs/model"
+    assert _extract_stage_run_id_from_path(path) == "stage-abc123def456"
+
+    # Path with stage ID in different positions
+    path2 = "gs://my-bucket/some/prefix/stage-abcdef01/data.npy"
+    assert _extract_stage_run_id_from_path(path2) == "stage-abcdef01"
+
+
+def test_extract_stage_run_id_from_path_without_stage_id():
+    """Test that paths without stage IDs return None."""
+    from goldfish.jobs.stage_executor import _extract_stage_run_id_from_path
+
+    # Path without stage run ID
+    path = "gs://bucket/sources/my_data.csv"
+    assert _extract_stage_run_id_from_path(path) is None
+
+    # Path with similar but invalid pattern
+    path2 = "gs://bucket/staged-data/output.npy"
+    assert _extract_stage_run_id_from_path(path2) is None
+
+
+def test_extract_stage_run_id_handles_local_paths():
+    """Test extraction from local paths."""
+    from goldfish.jobs.stage_executor import _extract_stage_run_id_from_path
+
+    # Local path with stage run ID
+    path = "/mnt/outputs/stage-deadbeef/features.npy"
+    assert _extract_stage_run_id_from_path(path) == "stage-deadbeef"
+
+    # Local path without stage run ID
+    path2 = "/data/raw/input.csv"
+    assert _extract_stage_run_id_from_path(path2) is None

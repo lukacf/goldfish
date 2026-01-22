@@ -1,14 +1,44 @@
 """Tests for StageExecutor - TDD Phase 4."""
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 
+from goldfish.db.database import Database
 from goldfish.errors import GoldfishError
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.models import PipelineDef, SignalDef, StageDef, StageRunStatus
+from goldfish.models import PipelineDef, SignalDef, StageDef
+from goldfish.state_machine import EventContext, StageEvent, transition
+from goldfish.state_machine.exit_code import ExitCodeResult
+from goldfish.state_machine.types import StageState
+
+
+def _transition_to_completed(db: Database, stage_run_id: str) -> None:
+    """Transition a stage run to COMPLETED state via state machine (v1.2 lifecycle)."""
+    ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+    transition(db, stage_run_id, StageEvent.BUILD_START, ctx)
+    transition(db, stage_run_id, StageEvent.BUILD_OK, ctx)
+    transition(db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
+    success_ctx = EventContext(timestamp=datetime.now(UTC), source="executor", exit_code=0, exit_code_exists=True)
+    transition(db, stage_run_id, StageEvent.EXIT_SUCCESS, success_ctx)
+    transition(db, stage_run_id, StageEvent.POST_RUN_OK, ctx)
+    # v1.2: Now need USER_FINALIZE to reach COMPLETED
+    finalize_ctx = EventContext(timestamp=datetime.now(UTC), source="mcp_tool")
+    transition(db, stage_run_id, StageEvent.USER_FINALIZE, finalize_ctx)
+
+
+def _transition_to_failed(db: Database, stage_run_id: str) -> None:
+    """Transition a stage run to FAILED state via state machine."""
+    ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+    transition(db, stage_run_id, StageEvent.BUILD_START, ctx)
+    transition(db, stage_run_id, StageEvent.BUILD_OK, ctx)
+    transition(db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
+    fail_ctx = EventContext(timestamp=datetime.now(UTC), source="executor", exit_code=1, exit_code_exists=True)
+    transition(db, stage_run_id, StageEvent.EXIT_FAILURE, fail_ctx)
 
 
 def _tensor_dataset_metadata(array_name: str, shape: list[int], dtype: str) -> dict:
@@ -94,15 +124,15 @@ class TestInputResolutionOutcome:
             conn.execute("PRAGMA foreign_keys = OFF")
             # Old success
             conn.execute(
-                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, status, outcome, started_at) "
+                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, state, outcome, started_at)"
                 "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-10 minutes'))",
-                ("run-success", "w1", "preprocess", "v1", StageRunStatus.COMPLETED, "success"),
+                ("run-success", "w1", "preprocess", "v1", "completed", "success"),
             )
             # New unreviewed
             conn.execute(
-                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, status, outcome, started_at) "
+                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, state, outcome, started_at)"
                 "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-5 minutes'))",
-                ("run-new", "w1", "preprocess", "v1", StageRunStatus.COMPLETED, None),
+                ("run-new", "w1", "preprocess", "v1", "completed", None),
             )
             # Add signal to success run
             conn.execute(
@@ -144,15 +174,15 @@ class TestInputResolutionOutcome:
             conn.execute("PRAGMA foreign_keys = OFF")
             # Newer but bad
             conn.execute(
-                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, status, outcome, started_at) "
+                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, state, outcome, started_at)"
                 "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-5 minutes'))",
-                ("run-bad", "w1", "preprocess", "v1", StageRunStatus.COMPLETED, "bad_results"),
+                ("run-bad", "w1", "preprocess", "v1", "completed", "bad_results"),
             )
             # Older success
             conn.execute(
-                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, status, outcome, started_at) "
+                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, state, outcome, started_at)"
                 "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-10 minutes'))",
-                ("run-good", "w1", "preprocess", "v1", StageRunStatus.COMPLETED, "success"),
+                ("run-good", "w1", "preprocess", "v1", "completed", "success"),
             )
             conn.execute(
                 "INSERT INTO signal_lineage (stage_run_id, signal_name, signal_type, storage_location) "
@@ -184,15 +214,15 @@ class TestInputResolutionOutcome:
             conn.execute("PRAGMA foreign_keys = OFF")
             # Most recent unreviewed
             conn.execute(
-                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, status, outcome, started_at) "
+                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, state, outcome, started_at)"
                 "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-5 minutes'))",
-                ("run-latest", "w1", "preprocess", "v1", StageRunStatus.COMPLETED, None),
+                ("run-latest", "w1", "preprocess", "v1", "completed", None),
             )
             # Older unreviewed
             conn.execute(
-                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, status, outcome, started_at) "
+                "INSERT INTO stage_runs (id, workspace_name, stage_name, version, state, outcome, started_at)"
                 "VALUES (?, ?, ?, ?, ?, ?, datetime('now', '-10 minutes'))",
-                ("run-older", "w1", "preprocess", "v1", StageRunStatus.COMPLETED, None),
+                ("run-older", "w1", "preprocess", "v1", "completed", None),
             )
             conn.execute(
                 "INSERT INTO signal_lineage (stage_run_id, signal_name, signal_type, storage_location) "
@@ -322,7 +352,7 @@ class TestInputResolutionOutcome:
         test_db.create_stage_run(
             stage_run_id=stage_run_id, workspace_name="test_workspace", version="v1", stage_name="preprocess"
         )
-        test_db.update_stage_run_status(stage_run_id, StageRunStatus.COMPLETED)
+        _transition_to_completed(test_db, stage_run_id)
         test_db.add_signal(
             stage_run_id=stage_run_id,
             signal_name="features",
@@ -548,7 +578,7 @@ class TestStageRunRecords:
         assert record["workspace_name"] == "test_workspace"
         assert record["version"] == "v1"
         assert record["stage_name"] == "preprocess"
-        assert record["status"] == StageRunStatus.PENDING
+        assert record["state"] == StageState.PREPARING.value
         assert json.loads(record["config_json"]) == config_override
         assert record["stage_version_id"] == stage_version_id
 
@@ -604,7 +634,7 @@ class TestStageExecution:
         # Verify
         assert result.workspace == "test_workspace"
         assert result.stage == "preprocess"
-        assert result.status == StageRunStatus.RUNNING
+        assert result.status == StageState.RUNNING
         assert result.version == "v1"
 
         # Verify Docker image was built
@@ -1028,7 +1058,7 @@ class TestLineageTracking:
             stage_name="preprocess",
         )
         test_db.update_stage_run_version(upstream_run_id, upstream_version_id)
-        test_db.update_stage_run_status(upstream_run_id, StageRunStatus.COMPLETED)
+        _transition_to_completed(test_db, upstream_run_id)
 
         # Record output signal from upstream stage
         test_db.add_signal(
@@ -1617,23 +1647,23 @@ class TestGCEPreemptionHandling:
     3. The dashboard shows correct status (not stuck on "launching")
     """
 
-    def test_preempted_instance_with_running_progress_finalizes_as_failed(
+    def test_preempted_instance_with_running_state_finalizes_as_failed(
         self, test_db, test_config, temp_dir, monkeypatch
     ):
         """Preempted instance that was RUNNING should finalize based on exit code.
 
         Regression test: Previously, preempted instances would throw GoldfishError
-        and remain stuck with progress=LAUNCH/RUNNING forever.
+        and remain stuck in LAUNCHING/RUNNING state forever.
         """
         from datetime import UTC, datetime, timedelta
 
-        from goldfish.models import StageRunProgress
+        from goldfish.state_machine.types import StageState
 
         # Setup workspace and stage run
         test_db.create_workspace_lineage("test_workspace", description="Test")
         test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
 
-        run_id = "stage-preempt001"
+        run_id = f"stage-{uuid4().hex[:8]}"
         test_db.create_stage_run(
             stage_run_id=run_id,
             workspace_name="test_workspace",
@@ -1648,12 +1678,12 @@ class TestGCEPreemptionHandling:
             backend_type="gce",
             backend_handle=run_id,
         )
-        # Set to RUNNING progress (instance was running before preemption)
+        # Set to RUNNING state (instance was running before preemption)
         started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
         with test_db._conn() as conn:
             conn.execute(
-                "UPDATE stage_runs SET status=?, progress=?, started_at=? WHERE id=?",
-                (StageRunStatus.RUNNING, StageRunProgress.RUNNING, started_at, run_id),
+                "UPDATE stage_runs SET state=?, started_at=? WHERE id=?",
+                (StageState.RUNNING.value, started_at, run_id),
             )
 
         # Create executor with GCE backend
@@ -1671,7 +1701,7 @@ class TestGCEPreemptionHandling:
 
         # Mock GCE launcher to simulate preemption
         executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-        executor.gce_launcher._get_exit_code = MagicMock(return_value=137)  # Killed by signal
+        executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_code(137))  # Killed by signal
         executor._finalize_stage_run = MagicMock()
         monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -1679,32 +1709,33 @@ class TestGCEPreemptionHandling:
         status = executor.wait_for_completion(run_id)
 
         # Verify finalization happened
-        assert status == StageRunStatus.FAILED
-        executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageRunStatus.FAILED)
+        assert status == StageState.FAILED
+        executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageState.FAILED)
 
         # Verify database was updated with error message
         row = test_db.get_stage_run(run_id)
         assert row is not None
-        assert row["progress"] == StageRunProgress.FINALIZING
+        # Note: state transition to terminal state happens inside _finalize_stage_run which is mocked.
+        # We verify the error was set and the mock was called correctly (above).
         assert "preempted" in row["error"].lower() or "terminated" in row["error"].lower()
 
-    def test_preempted_instance_with_launch_progress_but_exit_code_finalizes(
+    def test_preempted_instance_with_launching_state_but_exit_code_finalizes(
         self, test_db, test_config, temp_dir, monkeypatch
     ):
-        """Preemption between polls may leave progress=LAUNCH but exit code exists.
+        """Preemption between polls may leave state=LAUNCHING but exit code exists.
 
         Regression test: Instance could run and be preempted before status poll
-        updated progress to RUNNING. The exit code in GCS proves it ran.
+        updated state to RUNNING. The exit code in GCS proves it ran.
         """
         from datetime import UTC, datetime, timedelta
 
-        from goldfish.models import StageRunProgress
+        from goldfish.state_machine.types import StageState
 
         # Setup
         test_db.create_workspace_lineage("test_workspace", description="Test")
         test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
 
-        run_id = "stage-preempt002"
+        run_id = f"stage-{uuid4().hex[:8]}"
         test_db.create_stage_run(
             stage_run_id=run_id,
             workspace_name="test_workspace",
@@ -1719,12 +1750,12 @@ class TestGCEPreemptionHandling:
             backend_type="gce",
             backend_handle=run_id,
         )
-        # Still at LAUNCH progress (polls never caught it running)
+        # Still at LAUNCHING state (polls never caught it running)
         started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
         with test_db._conn() as conn:
             conn.execute(
-                "UPDATE stage_runs SET status=?, progress=?, started_at=? WHERE id=?",
-                (StageRunStatus.RUNNING, StageRunProgress.LAUNCH, started_at, run_id),
+                "UPDATE stage_runs SET state=?, started_at=? WHERE id=?",
+                (StageState.LAUNCHING.value, started_at, run_id),
             )
 
         config = test_config.model_copy(deep=True)
@@ -1740,15 +1771,17 @@ class TestGCEPreemptionHandling:
         )
 
         executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-        executor.gce_launcher._get_exit_code = MagicMock(return_value=0)  # Completed OK before preempt
+        executor.gce_launcher._get_exit_code = MagicMock(
+            return_value=ExitCodeResult.from_code(0)
+        )  # Completed OK before preempt
         executor._finalize_stage_run = MagicMock()
         monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
         status = executor.wait_for_completion(run_id)
 
         # Should finalize as COMPLETED because exit_code=0
-        assert status == StageRunStatus.COMPLETED
-        executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageRunStatus.COMPLETED)
+        assert status == StageState.COMPLETED
+        executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageState.COMPLETED)
 
     def test_launch_failure_without_exit_code_marks_failed(self, test_db, test_config, temp_dir, monkeypatch):
         """Instance that never ran (no exit code) should be marked FAILED.
@@ -1757,13 +1790,13 @@ class TestGCEPreemptionHandling:
         """
         from datetime import UTC, datetime, timedelta
 
-        from goldfish.models import StageRunProgress
+        from goldfish.state_machine.types import StageState
 
         # Setup
         test_db.create_workspace_lineage("test_workspace", description="Test")
         test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
 
-        run_id = "stage-preempt003"
+        run_id = f"stage-{uuid4().hex[:8]}"
         test_db.create_stage_run(
             stage_run_id=run_id,
             workspace_name="test_workspace",
@@ -1781,8 +1814,8 @@ class TestGCEPreemptionHandling:
         started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
         with test_db._conn() as conn:
             conn.execute(
-                "UPDATE stage_runs SET status=?, progress=?, started_at=? WHERE id=?",
-                (StageRunStatus.RUNNING, StageRunProgress.LAUNCH, started_at, run_id),
+                "UPDATE stage_runs SET state=?, started_at=? WHERE id=?",
+                (StageState.LAUNCHING.value, started_at, run_id),
             )
 
         config = test_config.model_copy(deep=True)
@@ -1798,39 +1831,42 @@ class TestGCEPreemptionHandling:
         )
 
         executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-        executor.gce_launcher._get_exit_code = MagicMock(return_value=None)  # No exit code = never ran
+        executor.gce_launcher._get_exit_code = MagicMock(
+            return_value=ExitCodeResult.from_not_found()
+        )  # No exit code = never ran
         executor._finalize_stage_run = MagicMock()
         monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
         status = executor.wait_for_completion(run_id)
 
-        # Should mark as FAILED without calling finalize (never ran)
-        assert status == StageRunStatus.FAILED
+        # Should mark as TERMINATED without calling finalize (never ran)
+        assert status == StageState.TERMINATED
         executor._finalize_stage_run.assert_not_called()
 
         # Verify error message in DB
         row = test_db.get_stage_run(run_id)
         assert row is not None
-        assert row["status"] == StageRunStatus.FAILED
+        # State machine transitions to TERMINATED via INSTANCE_LOST (never ran)
+        assert row["state"] == StageState.TERMINATED.value
         assert "not found" in row["error"].lower() or "failed to launch" in row["error"].lower()
 
-    def test_refresh_status_recovers_preempted_run_with_launch_progress(
+    def test_refresh_status_recovers_preempted_run_with_launching_state(
         self, test_db, test_config, temp_dir, monkeypatch
     ):
-        """refresh_status_once should recover preempted runs even at LAUNCH progress.
+        """refresh_status_once should recover preempted runs even at LAUNCHING state.
 
         Regression test: _refresh_status_once_unlocked would skip recovery when
-        progress was BUILD/LAUNCH, even if exit code in GCS proved it ran.
+        state was BUILDING/LAUNCHING, even if exit code in GCS proved it ran.
         """
         from datetime import UTC, datetime, timedelta
 
-        from goldfish.models import StageRunProgress
+        from goldfish.state_machine.types import StageState
 
         # Setup
         test_db.create_workspace_lineage("test_workspace", description="Test")
         test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
 
-        run_id = "stage-preempt004"
+        run_id = f"stage-{uuid4().hex[:8]}"
         test_db.create_stage_run(
             stage_run_id=run_id,
             workspace_name="test_workspace",
@@ -1848,8 +1884,8 @@ class TestGCEPreemptionHandling:
         started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
         with test_db._conn() as conn:
             conn.execute(
-                "UPDATE stage_runs SET status=?, progress=?, started_at=? WHERE id=?",
-                (StageRunStatus.RUNNING, StageRunProgress.LAUNCH, started_at, run_id),
+                "UPDATE stage_runs SET state=?, started_at=? WHERE id=?",
+                (StageState.LAUNCHING.value, started_at, run_id),
             )
 
         config = test_config.model_copy(deep=True)
@@ -1865,7 +1901,9 @@ class TestGCEPreemptionHandling:
         )
 
         executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-        executor.gce_launcher._get_exit_code = MagicMock(return_value=1)  # Exit code proves it ran
+        executor.gce_launcher._get_exit_code = MagicMock(
+            return_value=ExitCodeResult.from_code(1)
+        )  # Exit code proves it ran
         executor._finalize_stage_run = MagicMock()
         monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -1873,24 +1911,24 @@ class TestGCEPreemptionHandling:
         status = executor.refresh_status_once(run_id)
 
         # Should finalize as FAILED
-        assert status == StageRunStatus.FAILED
-        executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageRunStatus.FAILED)
+        assert status == StageState.FAILED
+        executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageState.FAILED)
 
-    def test_dashboard_shows_correct_status_after_preemption(self, test_db, test_config, temp_dir, monkeypatch):
-        """After preemption recovery, list_runs should show correct status.
+    def test_dashboard_shows_correct_state_after_preemption(self, test_db, test_config, temp_dir, monkeypatch):
+        """After preemption recovery, list_runs should show correct state.
 
         Regression test: Dashboard was showing 'launching' for runs that had
         actually run for 9 epochs and been preempted.
         """
         from datetime import UTC, datetime, timedelta
 
-        from goldfish.models import StageRunProgress
+        from goldfish.state_machine.types import StageState
 
         # Setup
         test_db.create_workspace_lineage("test_workspace", description="Test")
         test_db.create_version("test_workspace", "v1", "test_workspace-v1", "sha123", "run")
 
-        run_id = "stage-preempt005"
+        run_id = f"stage-{uuid4().hex[:8]}"
         test_db.create_stage_run(
             stage_run_id=run_id,
             workspace_name="test_workspace",
@@ -1908,8 +1946,8 @@ class TestGCEPreemptionHandling:
         started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
         with test_db._conn() as conn:
             conn.execute(
-                "UPDATE stage_runs SET status=?, progress=?, started_at=? WHERE id=?",
-                (StageRunStatus.RUNNING, StageRunProgress.RUNNING, started_at, run_id),
+                "UPDATE stage_runs SET state=?, started_at=? WHERE id=?",
+                (StageState.RUNNING.value, started_at, run_id),
             )
 
         config = test_config.model_copy(deep=True)
@@ -1925,18 +1963,20 @@ class TestGCEPreemptionHandling:
         )
 
         executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-        executor.gce_launcher._get_exit_code = MagicMock(return_value=137)
+        executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_code(137))
         executor._finalize_stage_run = MagicMock()
         monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
         # Recover the preempted run
         executor.wait_for_completion(run_id)
 
-        # Verify list_runs shows FAILED, not RUNNING/launching
+        # Verify list_runs shows error was recorded (state transition to POST_RUN
+        # happens inside _finalize_stage_run which is mocked)
         runs = test_db.list_stage_runs(workspace_name="test_workspace")
         assert len(runs) == 1
         assert runs[0]["id"] == run_id
-        assert runs[0]["progress"] == StageRunProgress.FINALIZING
-        # Status will be RUNNING during finalization, but error should be set
+        # State remains RUNNING since _finalize_stage_run is mocked (transition happens inside it)
+        assert runs[0]["state"] == StageState.RUNNING.value
+        # But error should be set before finalization is called
         assert runs[0]["error"] is not None
         assert "preempted" in runs[0]["error"].lower() or "terminated" in runs[0]["error"].lower()

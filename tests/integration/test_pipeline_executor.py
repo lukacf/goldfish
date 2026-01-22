@@ -6,8 +6,45 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from goldfish.db.database import Database
 from goldfish.jobs.pipeline_executor import PipelineExecutor
-from goldfish.models import PipelineDef, PipelineStatus, StageDef, StageRunInfo, StageRunStatus
+from goldfish.models import PipelineDef, PipelineStatus, StageDef, StageRunInfo
+from goldfish.state_machine import EventContext, StageEvent, transition
+from goldfish.state_machine.types import StageState
+
+
+def _transition_to_running(db: Database, stage_run_id: str) -> None:
+    """Transition a stage run to RUNNING state via state machine."""
+    ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+    transition(db, stage_run_id, StageEvent.BUILD_START, ctx)
+    transition(db, stage_run_id, StageEvent.BUILD_OK, ctx)
+    transition(db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
+
+
+def _transition_to_completed(db: Database, stage_run_id: str) -> None:
+    """Transition a stage run to COMPLETED state via state machine (v1.2 lifecycle)."""
+    ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+    transition(db, stage_run_id, StageEvent.BUILD_START, ctx)
+    transition(db, stage_run_id, StageEvent.BUILD_OK, ctx)
+    transition(db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
+    success_ctx = EventContext(timestamp=datetime.now(UTC), source="executor", exit_code=0, exit_code_exists=True)
+    transition(db, stage_run_id, StageEvent.EXIT_SUCCESS, success_ctx)
+    transition(db, stage_run_id, StageEvent.POST_RUN_OK, ctx)
+    # v1.2: Now need USER_FINALIZE to reach COMPLETED
+    finalize_ctx = EventContext(timestamp=datetime.now(UTC), source="mcp_tool")
+    transition(db, stage_run_id, StageEvent.USER_FINALIZE, finalize_ctx)
+
+
+def _transition_running_to_completed(db: Database, stage_run_id: str) -> None:
+    """Transition a stage run from RUNNING to COMPLETED state via state machine (v1.2 lifecycle)."""
+    ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+    success_ctx = EventContext(timestamp=datetime.now(UTC), source="executor", exit_code=0, exit_code_exists=True)
+    transition(db, stage_run_id, StageEvent.EXIT_SUCCESS, success_ctx)
+    transition(db, stage_run_id, StageEvent.POST_RUN_OK, ctx)
+    # v1.2: Now need USER_FINALIZE to reach COMPLETED
+    finalize_ctx = EventContext(timestamp=datetime.now(UTC), source="mcp_tool")
+    transition(db, stage_run_id, StageEvent.USER_FINALIZE, finalize_ctx)
+
 
 # Track all PipelineExecutors created during tests for cleanup
 _executors_to_shutdown: list[PipelineExecutor] = []
@@ -74,9 +111,12 @@ class DummyStageExecutor:
         skip_review: bool = False,
         experiment_group: str | None = None,
         results_spec: dict | None = None,
+        stage_run_id: str | None = None,
     ) -> StageRunInfo:
         self._ensure_workspace_version(workspace)
-        stage_run_id = f"stage-{len(self.calls) + 1}"
+        # Use pre-generated stage_run_id if provided, otherwise generate
+        if stage_run_id is None:
+            stage_run_id = f"stage-{len(self.calls) + 1}"
         self.calls.append(stage_name)
         self.db.create_stage_run(
             stage_run_id=stage_run_id,
@@ -93,8 +133,8 @@ class DummyStageExecutor:
             backend_type="local",
             backend_handle=stage_run_id,
         )
-        # mark running immediately
-        self.db.update_stage_run_status(stage_run_id, status=StageRunStatus.RUNNING)
+        # mark running immediately via state machine
+        _transition_to_running(self.db, stage_run_id)
         self.call_kwargs.append(
             {
                 "workspace": workspace,
@@ -112,11 +152,11 @@ class DummyStageExecutor:
             stage=stage_name,
             pipeline=pipeline_name,
             pipeline_run_id=pipeline_run_id,
-            status=StageRunStatus.RUNNING,
+            status=StageState.RUNNING,
         )
 
     def refresh_status_once(self, stage_run_id: str):  # pragma: no cover - not used in tests
-        return StageRunStatus.RUNNING
+        return StageState.RUNNING
 
 
 class TestRunFullPipeline:
@@ -142,17 +182,17 @@ class TestRunFullPipeline:
                 workspace="test_ws",
                 version="v1",
                 stage="preprocess",
-                status=StageRunStatus.RUNNING,
+                status=StageState.RUNNING,
             ),
             StageRunInfo(
                 stage_run_id="stage-2",
                 workspace="test_ws",
                 version="v1",
                 stage="tokenize",
-                status=StageRunStatus.RUNNING,
+                status=StageState.RUNNING,
             ),
             StageRunInfo(
-                stage_run_id="stage-3", workspace="test_ws", version="v1", stage="train", status=StageRunStatus.RUNNING
+                stage_run_id="stage-3", workspace="test_ws", version="v1", stage="train", status=StageState.RUNNING
             ),
         ]
 
@@ -183,7 +223,7 @@ class TestRunFullPipeline:
 
         stage_executor = MagicMock()
         stage_executor.run_stage.return_value = StageRunInfo(
-            stage_run_id="stage-1", workspace="test_ws", version="v1", stage="preprocess", status=StageRunStatus.RUNNING
+            stage_run_id="stage-1", workspace="test_ws", version="v1", stage="preprocess", status=StageState.RUNNING
         )
 
         pipeline_manager = MagicMock()
@@ -232,10 +272,10 @@ class TestRunSpecificStages:
                 workspace="test_ws",
                 version="v1",
                 stage="tokenize",
-                status=StageRunStatus.RUNNING,
+                status=StageState.RUNNING,
             ),
             StageRunInfo(
-                stage_run_id="stage-2", workspace="test_ws", version="v1", stage="train", status=StageRunStatus.RUNNING
+                stage_run_id="stage-2", workspace="test_ws", version="v1", stage="train", status=StageState.RUNNING
             ),
         ]
 
@@ -351,7 +391,7 @@ class TestAsyncQueueSemantics:
         first_stage_id = first_launched[0].stage_run_id
 
         # Mark first stage complete in DB to satisfy dependency
-        test_db.update_stage_run_status(first_stage_id, status=StageRunStatus.COMPLETED)
+        _transition_running_to_completed(test_db, first_stage_id)
 
         # Process queue again - now second stage should be runnable
         second_launched = executor._process_pipeline_queue_once(
@@ -502,7 +542,7 @@ class TestAsyncQueueSemantics:
         )
 
         assert len(launched) == 1
-        assert launched[0].status == StageRunStatus.RUNNING
+        assert launched[0].status == StageState.RUNNING
         # stage_executor.run_stage is invoked once with default wait=False (not supplied)
         assert len(executor.stage_executor.call_kwargs) == 1
         assert executor.stage_executor.call_kwargs[0]["wait"] is False
@@ -1054,9 +1094,11 @@ class TestResultsSpecPersistence:
                 skip_review: bool = False,
                 experiment_group: str | None = None,
                 results_spec: dict | None = None,  # NEW: accept results_spec
+                stage_run_id: str | None = None,  # Use pre-generated ID if provided
             ) -> StageRunInfo:
                 self._ensure_workspace_version(workspace)
-                stage_run_id = f"stage-{len(self.calls) + 1}"
+                if stage_run_id is None:
+                    stage_run_id = f"stage-{len(self.calls) + 1}"
                 self.calls.append(stage_name)
 
                 # Create stage run
@@ -1090,7 +1132,7 @@ class TestResultsSpecPersistence:
                 if results_spec and record_id:
                     exp_manager.save_results_spec(stage_run_id, record_id, results_spec)
 
-                self.db.update_stage_run_status(stage_run_id, status=StageRunStatus.RUNNING)
+                _transition_to_running(self.db, stage_run_id)
 
                 return StageRunInfo(
                     stage_run_id=stage_run_id,
@@ -1100,7 +1142,7 @@ class TestResultsSpecPersistence:
                     pipeline=pipeline_name,
                     pipeline_run_id=pipeline_run_id,
                     record_id=record_id,  # Return the record_id!
-                    status=StageRunStatus.RUNNING,
+                    status=StageState.RUNNING,
                 )
 
         stage_executor = ExperimentTrackingStageExecutor(test_db)

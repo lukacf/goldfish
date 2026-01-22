@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
 from goldfish.daemon import GoldfishDaemon
 from goldfish.db.database import Database
-from goldfish.models import StageRunStatus
+from goldfish.state_machine.exit_code import ExitCodeResult
 
 
 class TestDaemonRaceCondition:
@@ -34,30 +34,30 @@ class TestDaemonRaceCondition:
             conn.execute(
                 """
                 INSERT INTO stage_runs (
-                    id, workspace_name, stage_name, version, status,
+                    id, workspace_name, stage_name, version, state,
                     started_at, backend_type, backend_handle
                 ) VALUES (?, ?, ?, ?, ?, datetime('now', '-21 minutes'), ?, ?)
                 """,
-                (stage_run_id, "w1", "train", "v1", StageRunStatus.RUNNING, "gce", stage_run_id),
+                (stage_run_id, "w1", "train", "v1", "running", "gce", stage_run_id),
             )
 
         # 3. Mock gcloud list to show NO instances (instance disappeared)
-        mock_run.side_effect = [
+        # Mock _get_exit_code to return ExitCodeResult with exit_code=0
+        with (
+            patch("subprocess.run") as mock_subprocess,
+            patch.object(daemon, "_get_exit_code", return_value=ExitCodeResult.from_code(0)),
+        ):
             # First call: gcloud compute instances list
-            MagicMock(stdout="", returncode=0),
-            # Second call: gsutil cat exit_code.txt (to be implemented in fix)
-            MagicMock(stdout="0", returncode=0),
-        ]
+            mock_subprocess.return_value = MagicMock(stdout="", returncode=0)
 
-        # 4. Run the check
-        # We need to ensure _check_orphaned_instances is called.
-        daemon._check_orphaned_instances()
+            # 4. Run the check
+            daemon._check_orphaned_instances()
 
         # 5. Verify outcome
         stage_run = db.get_stage_run(stage_run_id)
 
-        # EXPECTATION: It should be COMPLETED now that we check GCS
-        assert stage_run["status"] == StageRunStatus.COMPLETED
+        # EXPECTATION: EXIT_SUCCESS transitions RUNNING → POST_RUN
+        assert stage_run["state"] == "post_run"
         assert stage_run["error"] is None
 
     @patch("subprocess.run")
@@ -84,21 +84,24 @@ class TestDaemonRaceCondition:
             conn.execute(
                 """
                 INSERT INTO stage_runs (
-                    id, workspace_name, stage_name, version, status,
+                    id, workspace_name, stage_name, version, state,
                     started_at, backend_type, backend_handle
                 ) VALUES (?, ?, ?, ?, ?, datetime('now', '-21 minutes'), ?, ?)
                 """,
-                (stage_run_id, "w1", "train", "v1", StageRunStatus.RUNNING, "gce", stage_run_id),
+                (stage_run_id, "w1", "train", "v1", "running", "gce", stage_run_id),
             )
 
-        mock_run.side_effect = [
-            MagicMock(stdout="", returncode=0),  # instances list
-            MagicMock(stdout="1", returncode=0),  # exit_code.txt = 1
-            MagicMock(stdout="", returncode=1),  # _check_if_preempted (not preempted)
-        ]
+        # Mock gcloud list and _get_exit_code
+        with (
+            patch("subprocess.run") as mock_subprocess,
+            patch.object(daemon, "_get_exit_code", return_value=ExitCodeResult.from_code(1)),
+            patch.object(daemon, "_check_if_preempted", return_value=False),
+        ):
+            mock_subprocess.return_value = MagicMock(stdout="", returncode=0)
 
-        daemon._check_orphaned_instances()
+            daemon._check_orphaned_instances()
 
         stage_run = db.get_stage_run(stage_run_id)
-        assert stage_run["status"] == StageRunStatus.FAILED
+        # INSTANCE_LOST transitions RUNNING → TERMINATED (non-zero exit means instance crashed)
+        assert stage_run["state"] == "terminated"
         assert "exit_code=1" in stage_run["error"]

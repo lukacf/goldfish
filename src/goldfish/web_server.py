@@ -903,7 +903,7 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
                     sv.created_at,
                     COUNT(sr.id) as run_count,
                     MAX(sr.started_at) as last_run_at,
-                    (SELECT status FROM stage_runs
+                    (SELECT state FROM stage_runs
                      WHERE stage_version_id = sv.id
                      ORDER BY started_at DESC LIMIT 1) as last_run_status
                 FROM stage_versions sv
@@ -949,7 +949,7 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
             if workspace:
                 runs = conn.execute(
                     """
-                    SELECT sr.id, sr.workspace_name, sr.stage_name, sr.status,
+                    SELECT sr.id, sr.workspace_name, sr.stage_name, sr.state,
                            sr.started_at, sr.completed_at, sr.pipeline_name,
                            sv.version_num as stage_version
                     FROM stage_runs sr
@@ -963,7 +963,7 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
             else:
                 runs = conn.execute(
                     """
-                    SELECT sr.id, sr.workspace_name, sr.stage_name, sr.status,
+                    SELECT sr.id, sr.workspace_name, sr.stage_name, sr.state,
                            sr.started_at, sr.completed_at, sr.pipeline_name,
                            sv.version_num as stage_version
                     FROM stage_runs sr
@@ -981,7 +981,7 @@ class ProvenanceRequestHandler(http.server.BaseHTTPRequestHandler):
                     "type": "stage_run",
                     "workspace": r["workspace_name"],
                     "stage": r["stage_name"],
-                    "status": r["status"],
+                    "state": r["state"],  # state is source of truth
                     "started_at": r["started_at"],
                     "completed_at": r["completed_at"],
                     "pipeline": r["pipeline_name"],

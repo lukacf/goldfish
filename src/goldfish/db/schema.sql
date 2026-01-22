@@ -180,10 +180,21 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     preflight_warnings_json TEXT,     -- JSON list of preflight validation warnings
     backend_type TEXT,                -- local | gce
     backend_handle TEXT,              -- container_id or instance_name for cancel/log lookup
+    instance_zone TEXT,               -- GCE zone where instance was launched (NULL for local)
     error TEXT,
     outcome TEXT,                     -- NULL (unset), 'success', 'bad_results' - semantic result quality
     attempt_num INTEGER,              -- Groups consecutive runs; increments after outcome='success'
     svs_findings_json TEXT,           -- JSON: SVS post-run findings (stats + AI review)
+    -- State machine columns (Phase 3)
+    state TEXT CHECK(state IS NULL OR state IN ('preparing', 'building', 'launching', 'running', 'post_run', 'awaiting_user_finalization', 'completed', 'failed', 'terminated', 'canceled', 'unknown')),
+    phase TEXT,                       -- Sub-phase within state (gcs_check, docker_build, etc.)
+    termination_cause TEXT CHECK(termination_cause IS NULL OR termination_cause IN ('preempted', 'crashed', 'orphaned', 'timeout', 'ai_stopped', 'manual')),
+    state_entered_at TEXT,            -- When current state was entered (for timeout calculations)
+    phase_updated_at TEXT,            -- When phase was last updated
+    completed_with_warnings INTEGER DEFAULT 0,  -- 1 if completed with non-critical failures
+    output_sync_done INTEGER DEFAULT 0,         -- 1 if output sync completed
+    output_recording_done INTEGER DEFAULT 0,    -- 1 if output recording completed
+    gcs_outage_started TEXT,          -- When GCS outage was first detected
     FOREIGN KEY (workspace_name, version) REFERENCES workspace_versions(workspace_name, version),
     FOREIGN KEY (stage_version_id) REFERENCES stage_versions(id)
 );
@@ -196,6 +207,33 @@ CREATE INDEX IF NOT EXISTS idx_stage_runs_pipeline_run ON stage_runs(pipeline_ru
 CREATE INDEX IF NOT EXISTS idx_stage_runs_ws_stage_status ON stage_runs(workspace_name, stage_name, status);
 CREATE INDEX IF NOT EXISTS idx_stage_runs_ws_stage_attempt ON stage_runs(workspace_name, stage_name, attempt_num);
 CREATE INDEX IF NOT EXISTS idx_stage_runs_outcome ON stage_runs(outcome);
+-- Partial index for active states (used by daemon polling)
+CREATE INDEX IF NOT EXISTS idx_stage_runs_active_state ON stage_runs(state)
+    WHERE state IN ('preparing', 'building', 'launching', 'running', 'finalizing', 'unknown');
+
+
+-- Stage state transitions (audit trail for state machine)
+CREATE TABLE IF NOT EXISTS stage_state_transitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage_run_id TEXT NOT NULL,
+    from_state TEXT NOT NULL,
+    to_state TEXT NOT NULL,
+    event TEXT NOT NULL,
+    phase TEXT,
+    termination_cause TEXT CHECK(termination_cause IS NULL OR termination_cause IN ('preempted', 'crashed', 'orphaned', 'timeout', 'ai_stopped', 'manual')),
+    exit_code INTEGER,
+    exit_code_exists INTEGER,         -- 0 or 1
+    error_message TEXT,
+    svs_review_id TEXT,               -- FK to svs_reviews.id for SVS_BLOCK and AI_STOP events
+    source TEXT NOT NULL CHECK(source IN ('mcp_tool', 'executor', 'daemon', 'container')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (stage_run_id) REFERENCES stage_runs(id) ON DELETE CASCADE,
+    FOREIGN KEY (svs_review_id) REFERENCES svs_reviews(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_state_transitions_stage_run ON stage_state_transitions(stage_run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_state_transitions_created_at ON stage_state_transitions(created_at);
+
 
 -- Pipeline runs (group stages for one pipeline invocation)
 CREATE TABLE IF NOT EXISTS pipeline_runs (
@@ -255,6 +293,7 @@ CREATE TABLE IF NOT EXISTS signal_lineage (
 CREATE INDEX IF NOT EXISTS idx_signal_lineage_stage ON signal_lineage(stage_run_id);
 CREATE INDEX IF NOT EXISTS idx_signal_lineage_consumed ON signal_lineage(consumed_by);
 CREATE INDEX IF NOT EXISTS idx_signal_lineage_artifact ON signal_lineage(is_artifact);
+CREATE INDEX IF NOT EXISTS idx_signal_lineage_source ON signal_lineage(source_stage_run_id);
 
 
 -- Workspace mounts (tracks active copy-based workspace mounts)
@@ -430,6 +469,7 @@ CREATE TABLE IF NOT EXISTS docker_builds (
     logs_uri TEXT,                    -- GCS path to logs (Cloud Build only)
     workspace_name TEXT,              -- For workspace builds (NULL for base/project images)
     version TEXT,                     -- Workspace version (NULL for base/project images)
+    content_hash TEXT,                -- SHA256 of build context (for cache hit detection)
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -437,6 +477,7 @@ CREATE INDEX IF NOT EXISTS idx_docker_builds_status ON docker_builds(status);
 CREATE INDEX IF NOT EXISTS idx_docker_builds_backend ON docker_builds(backend);
 CREATE INDEX IF NOT EXISTS idx_docker_builds_started ON docker_builds(started_at);
 CREATE INDEX IF NOT EXISTS idx_docker_builds_workspace ON docker_builds(workspace_name, version);
+CREATE INDEX IF NOT EXISTS idx_docker_builds_content_hash ON docker_builds(content_hash);
 
 
 -- =============================================================================
@@ -547,3 +588,17 @@ CREATE TABLE IF NOT EXISTS run_tags (
 
 CREATE INDEX IF NOT EXISTS idx_run_tags_record
     ON run_tags(record_id);
+
+
+-- =============================================================================
+-- Daemon Leader Election
+-- =============================================================================
+
+-- Daemon leases (prevents duplicate event emission from multiple daemons)
+-- Uses single-row lease with optimistic locking for leader election
+CREATE TABLE IF NOT EXISTS daemon_leases (
+    lease_name TEXT PRIMARY KEY,
+    holder_id TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);

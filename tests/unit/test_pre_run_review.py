@@ -357,7 +357,7 @@ class TestPreRunReviewerReview:
                 "selected_run_id": "stage-old",
                 "selected_run_started_at": "2025-12-28T00:00:00+00:00",
                 "latest_run_id": "stage-new",
-                "latest_run_status": "running",
+                "latest_run_state": "running",  # State machine state (source of truth)
                 "latest_run_started_at": "2025-12-29T00:00:00+00:00",
                 "consumer_stage": "train",
             }
@@ -386,7 +386,7 @@ class TestPreRunReviewerReview:
                 "selected_run_id": "stage-old",
                 "selected_run_started_at": "2025-12-28T00:00:00+00:00",
                 "latest_run_id": "stage-new",
-                "latest_run_status": "running",
+                "latest_run_state": "running",  # State machine state (source of truth)
                 "latest_run_started_at": "2025-12-29T00:00:00+00:00",
                 "consumer_stage": "train",
             }

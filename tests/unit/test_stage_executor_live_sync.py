@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.models import StageRunStatus
+from goldfish.state_machine.types import StageState
 
 
 class _DummyBlob:
@@ -56,7 +56,10 @@ def _create_running_stage_run(test_db) -> str:
         backend_type="gce",
         backend_handle="instance-123",
     )
-    test_db.update_stage_run_status(run_id, StageRunStatus.RUNNING)
+    test_db.update_stage_run_status(run_id, StageState.RUNNING)
+    # Also set state column (source of truth)
+    with test_db._conn() as conn:
+        conn.execute("UPDATE stage_runs SET state = ? WHERE id = ?", (StageState.RUNNING.value, run_id))
     return run_id
 
 
@@ -78,7 +81,10 @@ def _create_running_stage_run_local(test_db) -> str:
         backend_type="local",
         backend_handle=None,
     )
-    test_db.update_stage_run_status(run_id, StageRunStatus.RUNNING)
+    test_db.update_stage_run_status(run_id, StageState.RUNNING)
+    # Also set state column (source of truth)
+    with test_db._conn() as conn:
+        conn.execute("UPDATE stage_runs SET state = ? WHERE id = ?", (StageState.RUNNING.value, run_id))
     return run_id
 
 

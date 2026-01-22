@@ -238,10 +238,18 @@ class StateManager:
         if recent_runs:
             lines.append("## Recent Runs")
             for run in recent_runs:
-                status_emoji = (
-                    "✓" if run.get("status") == "completed" else "⏳" if run.get("status") == "running" else "✗"
+                # Use state machine state (not legacy status)
+                state = run.get("state", "unknown")
+                active_states = (
+                    "preparing",
+                    "building",
+                    "launching",
+                    "running",
+                    "post_run",
+                    "awaiting_user_finalization",
                 )
-                run_line = f"- {status_emoji} {run.get('stage_name', 'unknown')} ({run.get('status', 'unknown')})"
+                state_emoji = "✓" if state == "completed" else "⏳" if state in active_states else "✗"
+                run_line = f"- {state_emoji} {run.get('stage_name', 'unknown')} ({state})"
                 if run.get("started_at"):
                     run_line += f" - {run['started_at'][:16]}"
                 lines.append(run_line)

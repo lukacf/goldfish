@@ -34,6 +34,20 @@ def reset_finalized_flag() -> None:
     _reset_finalized_flag()
 
 
+@pytest.fixture(autouse=True)
+def disable_during_run_monitor():
+    """Disable during-run monitor and sleep by default for fast tests.
+
+    The during-run monitor has a 1s sleep which slows down every test.
+    Tests that need the monitor should patch _during_run_enabled to True.
+    """
+    with (
+        patch("goldfish.io.bootstrap._during_run_enabled", return_value=False),
+        patch("goldfish.io.bootstrap.time.sleep"),
+    ):
+        yield
+
+
 class TestRunStageWithSVSBasics:
     """Test fundamental run_stage_with_svs operations."""
 
@@ -407,3 +421,95 @@ class TestSVSFinalizeFlagManagement:
         # Finalize called twice: once by atexit, once by finally
         # But internal flag should prevent duplicate work
         assert mock_finalize.call_count == 2
+
+
+class TestDuringRunMonitorStartup:
+    """Test that during-run monitor starts correctly in run_stage_with_svs."""
+
+    @pytest.fixture(autouse=True)
+    def reset_monitor(self) -> None:
+        """Reset global monitor state before each test."""
+        from goldfish.io.bootstrap import _reset_monitor_state
+
+        _reset_monitor_state()
+
+    def test_monitor_started_when_enabled(self) -> None:
+        """Monitor should start when _during_run_enabled() returns True."""
+        module_main = Mock(return_value=0)
+        mock_monitor_instance = Mock()
+
+        with (
+            patch("goldfish.io.bootstrap._svs_finalize"),
+            patch("goldfish.io.bootstrap._during_run_enabled", return_value=True),
+            patch("goldfish.io.bootstrap.time.sleep"),  # Skip 1s delay
+            patch("goldfish.svs.during_run_monitor.DuringRunMonitor", return_value=mock_monitor_instance),
+        ):
+            run_stage_with_svs(module_main)
+
+        mock_monitor_instance.start.assert_called_once()
+        mock_monitor_instance.stop.assert_called_once()
+
+    def test_monitor_not_started_when_disabled(self) -> None:
+        """Monitor should not start when _during_run_enabled() returns False."""
+        module_main = Mock(return_value=0)
+
+        with (
+            patch("goldfish.io.bootstrap._svs_finalize"),
+            patch("goldfish.io.bootstrap._during_run_enabled", return_value=False),
+            patch("goldfish.svs.during_run_monitor.DuringRunMonitor") as mock_monitor_cls,
+        ):
+            run_stage_with_svs(module_main)
+
+        mock_monitor_cls.assert_not_called()
+
+    def test_monitor_error_does_not_fail_stage(self) -> None:
+        """Monitor startup errors should not fail the stage."""
+        module_main = Mock(return_value=0)
+
+        with (
+            patch("goldfish.io.bootstrap._svs_finalize"),
+            patch("goldfish.io.bootstrap._during_run_enabled", return_value=True),
+            patch("goldfish.io.bootstrap.time.sleep"),  # Skip 1s delay
+            patch(
+                "goldfish.svs.during_run_monitor.DuringRunMonitor",
+                side_effect=RuntimeError("Failed to import"),
+            ),
+        ):
+            # Should not raise - stage should continue
+            exit_code = run_stage_with_svs(module_main)
+
+        assert exit_code == 0
+        module_main.assert_called_once()
+
+    def test_monitor_stopped_even_on_exception(self) -> None:
+        """Monitor should be stopped in finally even if stage raises."""
+        module_main = Mock(side_effect=RuntimeError("Stage failed"))
+        mock_monitor_instance = Mock()
+
+        with (
+            patch("goldfish.io.bootstrap._svs_finalize"),
+            patch("goldfish.io.bootstrap._during_run_enabled", return_value=True),
+            patch("goldfish.io.bootstrap.time.sleep"),  # Skip 1s delay
+            patch("goldfish.svs.during_run_monitor.DuringRunMonitor", return_value=mock_monitor_instance),
+        ):
+            with pytest.raises(RuntimeError, match="Stage failed"):
+                run_stage_with_svs(module_main)
+
+        mock_monitor_instance.start.assert_called_once()
+        mock_monitor_instance.stop.assert_called_once()
+
+    def test_monitor_stop_error_does_not_mask_exception(self) -> None:
+        """Monitor stop error should not mask stage exception."""
+        module_main = Mock(side_effect=RuntimeError("Original error"))
+        mock_monitor_instance = Mock()
+        mock_monitor_instance.stop.side_effect = RuntimeError("Stop failed")
+
+        with (
+            patch("goldfish.io.bootstrap._svs_finalize"),
+            patch("goldfish.io.bootstrap._during_run_enabled", return_value=True),
+            patch("goldfish.io.bootstrap.time.sleep"),  # Skip 1s delay
+            patch("goldfish.svs.during_run_monitor.DuringRunMonitor", return_value=mock_monitor_instance),
+        ):
+            # Original error should propagate, not stop error
+            with pytest.raises(RuntimeError, match="Original error"):
+                run_stage_with_svs(module_main)

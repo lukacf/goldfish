@@ -7,13 +7,30 @@ Covers:
 4. Robustness against dictionary-based overrides (no sqlite3 crash).
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.models import SignalDef, StageDef, StageRunStatus
+from goldfish.models import SignalDef, StageDef
+from goldfish.state_machine import EventContext, StageEvent, transition
+
+
+def _transition_to_completed(db: Database, stage_run_id: str) -> None:
+    """Transition a stage run to COMPLETED state via state machine (v1.2 lifecycle)."""
+    ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+    transition(db, stage_run_id, StageEvent.BUILD_START, ctx)
+    transition(db, stage_run_id, StageEvent.BUILD_OK, ctx)
+    transition(db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
+    success_ctx = EventContext(timestamp=datetime.now(UTC), source="executor", exit_code=0, exit_code_exists=True)
+    transition(db, stage_run_id, StageEvent.EXIT_SUCCESS, success_ctx)
+    transition(db, stage_run_id, StageEvent.POST_RUN_OK, ctx)
+    # v1.2: Now need USER_FINALIZE to reach COMPLETED
+    finalize_ctx = EventContext(timestamp=datetime.now(UTC), source="mcp_tool")
+    transition(db, stage_run_id, StageEvent.USER_FINALIZE, finalize_ctx)
 
 
 @pytest.fixture
@@ -56,7 +73,7 @@ def test_input_resolution_prioritizes_same_pipeline(test_db, executor):
         version="v1",
         stage_name="preprocess",
     )
-    test_db.update_stage_run_status("stage-old-success", StageRunStatus.COMPLETED)
+    _transition_to_completed(test_db, "stage-old-success")
     test_db.update_run_outcome("stage-old-success", "success")
     test_db.add_signal_with_source("stage-old-success", "data", "directory", "gs://old-success/data")
 
@@ -68,7 +85,7 @@ def test_input_resolution_prioritizes_same_pipeline(test_db, executor):
         stage_name="preprocess",
         pipeline_run_id="prun-other",
     )
-    test_db.update_stage_run_status("stage-new-unreviewed", StageRunStatus.COMPLETED)
+    _transition_to_completed(test_db, "stage-new-unreviewed")
     test_db.add_signal_with_source("stage-new-unreviewed", "data", "directory", "gs://new-unreviewed/data")
 
     # 3. Create a NEW run in the TARGET pipeline
@@ -80,7 +97,7 @@ def test_input_resolution_prioritizes_same_pipeline(test_db, executor):
         stage_name="preprocess",
         pipeline_run_id=pipeline_id,
     )
-    test_db.update_stage_run_status("stage-target-upstream", StageRunStatus.COMPLETED)
+    _transition_to_completed(test_db, "stage-target-upstream")
     test_db.add_signal_with_source("stage-target-upstream", "data", "directory", "gs://target-pipeline/data")
 
     # Define stage that needs this input

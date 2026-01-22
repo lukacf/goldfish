@@ -4,11 +4,37 @@ TDD: Write failing tests first, then implement.
 """
 
 import sqlite3
+from datetime import UTC, datetime
 
 import pytest
 
 from goldfish.db.database import Database
-from goldfish.models import PipelineStatus, StageRunStatus
+from goldfish.models import PipelineStatus
+from goldfish.state_machine import EventContext, StageEvent, transition
+
+
+def _transition_to_completed(db: Database, stage_run_id: str) -> None:
+    """Transition a stage run to COMPLETED state via state machine (v1.2 lifecycle)."""
+    ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+    transition(db, stage_run_id, StageEvent.BUILD_START, ctx)
+    transition(db, stage_run_id, StageEvent.BUILD_OK, ctx)
+    transition(db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
+    success_ctx = EventContext(timestamp=datetime.now(UTC), source="executor", exit_code=0, exit_code_exists=True)
+    transition(db, stage_run_id, StageEvent.EXIT_SUCCESS, success_ctx)
+    transition(db, stage_run_id, StageEvent.POST_RUN_OK, ctx)
+    # v1.2: Now need USER_FINALIZE to reach COMPLETED
+    finalize_ctx = EventContext(timestamp=datetime.now(UTC), source="mcp_tool")
+    transition(db, stage_run_id, StageEvent.USER_FINALIZE, finalize_ctx)
+
+
+def _transition_to_failed(db: Database, stage_run_id: str) -> None:
+    """Transition a stage run to FAILED state via state machine."""
+    ctx = EventContext(timestamp=datetime.now(UTC), source="executor")
+    transition(db, stage_run_id, StageEvent.BUILD_START, ctx)
+    transition(db, stage_run_id, StageEvent.BUILD_OK, ctx)
+    transition(db, stage_run_id, StageEvent.LAUNCH_OK, ctx)
+    fail_ctx = EventContext(timestamp=datetime.now(UTC), source="executor", exit_code=1, exit_code_exists=True)
+    transition(db, stage_run_id, StageEvent.EXIT_FAILURE, fail_ctx)
 
 
 class TestTransactionManagement:
@@ -415,7 +441,7 @@ class TestAttemptGrouping:
         db.create_stage_run("stage-2", "test_ws", "v2", "train")
 
         # Mark run 2 as success
-        db.update_stage_run_status("stage-2", StageRunStatus.COMPLETED)
+        _transition_to_completed(db, "stage-2")
         db.update_run_outcome("stage-2", "success")
 
         # Run 3 should be in attempt 2
@@ -430,7 +456,7 @@ class TestAttemptGrouping:
         self._setup_workspace(db)
 
         db.create_stage_run("stage-1", "test_ws", "v1", "train")
-        db.update_stage_run_status("stage-1", StageRunStatus.COMPLETED)
+        _transition_to_completed(db, "stage-1")
         db.update_run_outcome("stage-1", "bad_results")
 
         # Next run should still be attempt 1
@@ -476,7 +502,7 @@ class TestAttemptGrouping:
         self._setup_workspace(db)
 
         db.create_stage_run("stage-1", "test_ws", "v1", "train")
-        db.update_stage_run_status("stage-1", StageRunStatus.COMPLETED)
+        _transition_to_completed(db, "stage-1")
 
         with pytest.raises(ValueError, match="Invalid outcome"):
             db.update_run_outcome("stage-1", "invalid_value")
@@ -488,13 +514,13 @@ class TestAttemptGrouping:
 
         # Attempt 1: 3 runs, 2 failed, 1 success
         db.create_stage_run("stage-1", "test_ws", "v1", "train")
-        db.update_stage_run_status("stage-1", StageRunStatus.FAILED, error="crash")
+        _transition_to_failed(db, "stage-1")
 
         db.create_stage_run("stage-2", "test_ws", "v2", "train")
-        db.update_stage_run_status("stage-2", StageRunStatus.FAILED, error="crash")
+        _transition_to_failed(db, "stage-2")
 
         db.create_stage_run("stage-3", "test_ws", "v3", "train")
-        db.update_stage_run_status("stage-3", StageRunStatus.COMPLETED)
+        _transition_to_completed(db, "stage-3")
         db.update_run_outcome("stage-3", "success")
 
         # Attempt 2: 1 run, still open
