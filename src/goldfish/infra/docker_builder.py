@@ -28,10 +28,12 @@ logger = logging.getLogger(__name__)
 GOLDFISH_IO_PATH = Path(__file__).parent.parent / "io" / "__init__.py"
 GOLDFISH_METRICS_PATH = Path(__file__).parent.parent / "metrics"
 GOLDFISH_SVS_PATH = Path(__file__).parent.parent / "svs"
+GOLDFISH_CLOUD_PATH = Path(__file__).parent.parent / "cloud"
 # Metrics and SVS depend on validation, errors, and utils modules
 GOLDFISH_VALIDATION_PATH = Path(__file__).parent.parent / "validation.py"
 GOLDFISH_ERRORS_PATH = Path(__file__).parent.parent / "errors.py"
 GOLDFISH_UTILS_PATH = Path(__file__).parent.parent / "utils"
+GOLDFISH_CONFIG_PATH = Path(__file__).parent.parent / "config.py"
 GOLDFISH_RUST_PATH = Path(__file__).parent.parent.parent.parent / "goldfish-rust"
 
 # Default base image when none specified (backwards compatibility)
@@ -283,6 +285,7 @@ CMD ["/bin/bash"]
                 ("metrics", GOLDFISH_METRICS_PATH),
                 ("svs", GOLDFISH_SVS_PATH),
                 ("utils", GOLDFISH_UTILS_PATH),
+                ("cloud", GOLDFISH_CLOUD_PATH),
             ]:
                 if path.exists() and path.is_dir():
                     dest = goldfish_pkg_dest / subpkg
@@ -297,11 +300,13 @@ CMD ["/bin/bash"]
                     dest.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(path, dest / "__init__.py")
 
-            # Copy goldfish.validation and goldfish.errors (top-level modules in goldfish package)
+            # Copy goldfish.validation, goldfish.errors, and goldfish.config (top-level modules)
             if GOLDFISH_VALIDATION_PATH.exists():
                 shutil.copy2(GOLDFISH_VALIDATION_PATH, goldfish_pkg_dest / "validation.py")
             if GOLDFISH_ERRORS_PATH.exists():
                 shutil.copy2(GOLDFISH_ERRORS_PATH, goldfish_pkg_dest / "errors.py")
+            if GOLDFISH_CONFIG_PATH.exists():
+                shutil.copy2(GOLDFISH_CONFIG_PATH, goldfish_pkg_dest / "config.py")
 
             # Generate Dockerfile in build context (not workspace)
             dockerfile_content = self.generate_dockerfile(workspace_dir, base_image=base_image)
@@ -778,6 +783,7 @@ CMD ["/bin/bash"]
             ("metrics", GOLDFISH_METRICS_PATH),
             ("svs", GOLDFISH_SVS_PATH),
             ("utils", GOLDFISH_UTILS_PATH),
+            ("cloud", GOLDFISH_CLOUD_PATH),
         ]:
             if path.exists() and path.is_dir():
                 dest = goldfish_pkg_dest / subpkg
@@ -791,11 +797,13 @@ CMD ["/bin/bash"]
                 dest.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, dest / "__init__.py")
 
-        # Copy goldfish.validation and goldfish.errors
+        # Copy goldfish.validation, goldfish.errors, and goldfish.config (top-level modules)
         if GOLDFISH_VALIDATION_PATH.exists():
             shutil.copy2(GOLDFISH_VALIDATION_PATH, goldfish_pkg_dest / "validation.py")
         if GOLDFISH_ERRORS_PATH.exists():
             shutil.copy2(GOLDFISH_ERRORS_PATH, goldfish_pkg_dest / "errors.py")
+        if GOLDFISH_CONFIG_PATH.exists():
+            shutil.copy2(GOLDFISH_CONFIG_PATH, goldfish_pkg_dest / "config.py")
 
     def _get_previous_version_tag(self, workspace_name: str, _version: str) -> str | None:
         """Get any previous version's registry tag for Docker layer caching.
