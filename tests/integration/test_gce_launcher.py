@@ -287,6 +287,59 @@ def test_launch_simple_with_gpu(mock_build_startup, mock_run_gcloud, mock_tempfi
     assert "--metadata=install-nvidia-driver=True" in gcloud_cmd
 
 
+@patch("goldfish.infra.resource_launcher.wait_for_instance_ready")
+@patch("tempfile.NamedTemporaryFile")
+@patch("goldfish.infra.gce_launcher.run_gcloud")
+@patch("goldfish.infra.gce_launcher.build_startup_script")
+def test_launch_a3_machine_no_accelerator_flag(mock_build_startup, mock_run_gcloud, mock_tempfile, mock_wait, launcher):
+    """Test that A3 machines with integrated H100 GPUs do NOT pass --accelerator.
+
+    A3 machine types (e.g., a3-highgpu-1g) have integrated H100 GPUs as part of
+    the machine definition. Passing --accelerator separately causes an error:
+    "NVIDIA H100 80GB GPUs can only be attached to A3 machine series instances"
+    """
+    # Mock temp file
+    mock_temp = MagicMock()
+    mock_temp.name = "/tmp/startup.sh"
+    mock_tempfile.return_value.__enter__.return_value = mock_temp
+
+    # Mock startup script
+    mock_build_startup.return_value = "#!/bin/bash\necho startup"
+
+    # Mock gcloud success
+    mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
+
+    # Mock wait_for_instance_ready
+    mock_wait.return_value = None
+
+    # Launch with A3 machine type (integrated H100)
+    result = launcher.launch_instance(
+        image_tag="test-image",
+        stage_run_id="h100-run",
+        entrypoint_script="#!/bin/bash\necho test",
+        stage_config={},
+        work_dir=Path("/tmp/work"),
+        machine_type="a3-highgpu-1g",  # A3 machine with integrated H100
+        gpu_type="nvidia-h100-80gb",
+        gpu_count=1,
+        use_capacity_search=False,
+    )
+
+    assert result.instance_name == "h100-run"
+    assert result.zone == "us-central1-a"
+
+    # Verify gcloud was called
+    mock_run_gcloud.assert_called_once()
+    gcloud_cmd = mock_run_gcloud.call_args[0][0]
+
+    # --accelerator should NOT be present for A3 machines
+    assert not any("--accelerator" in str(arg) for arg in gcloud_cmd)
+
+    # But GPU-related flags should still be present
+    assert "--maintenance-policy=TERMINATE" in gcloud_cmd
+    assert "--metadata=install-nvidia-driver=True" in gcloud_cmd
+
+
 @patch("goldfish.infra.gce_launcher.run_gcloud")
 def test_create_disk_basic(mock_run_gcloud, launcher):
     """Test basic disk creation."""

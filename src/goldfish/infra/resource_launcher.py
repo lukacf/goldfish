@@ -559,8 +559,11 @@ class ResourceLauncher:
         accelerator = gpu_info.get("accelerator")
         count = gpu_info.get("count", 0)
         has_gpu = bool(gpu_info.get("type"))
+        machine_type = resource.get("machine_type", "")
 
-        if accelerator and count:
+        # A3 machine types have integrated H100 GPUs - don't pass --accelerator
+        # The GPU is already part of the machine type (e.g., a3-highgpu-1g = 1x H100)
+        if accelerator and count and not machine_type.startswith("a3-"):
             cmd.extend(["--accelerator", f"count={count},type={accelerator}"])
 
         if has_gpu:

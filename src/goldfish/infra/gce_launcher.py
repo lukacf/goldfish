@@ -482,7 +482,10 @@ class GCELauncher:
                 cmd.append(f"--service-account={service_account}")
 
             if gpu_type and gpu_count > 0:
-                cmd.extend(["--accelerator", f"count={gpu_count},type={gpu_type}"])
+                # A3 machine types have integrated H100 GPUs - don't pass --accelerator
+                # The GPU is already part of the machine type (e.g., a3-highgpu-1g = 1x H100)
+                if not machine_type.startswith("a3-"):
+                    cmd.extend(["--accelerator", f"count={gpu_count},type={gpu_type}"])
                 cmd.append("--maintenance-policy=TERMINATE")
                 cmd.append("--restart-on-failure")
                 cmd.append("--metadata=install-nvidia-driver=True")
