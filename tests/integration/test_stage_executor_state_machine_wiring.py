@@ -12,10 +12,32 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from goldfish.cloud.contracts import BackendStatus, RunStatus
 from goldfish.db.database import Database
 from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.models import PipelineDef, SignalDef, StageDef
 from goldfish.state_machine import EventContext, StageEvent, StageState, transition
+
+
+def _create_mock_local_backend() -> MagicMock:
+    """Create a mock run_backend with local backend capabilities."""
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(
+        has_launch_delay=False,
+        supports_gpu=False,
+        supports_spot=False,
+        supports_preemption=True,
+        ack_timeout_seconds=1.0,
+        timeout_becomes_pending=False,
+    )
+    # Default launch return value
+    mock_backend.launch.return_value = MagicMock(
+        stage_run_id="stage-test",
+        backend_type="local",
+        backend_handle="container-123",
+        zone=None,
+    )
+    return mock_backend
 
 
 def _setup_workspace(db: Database, workspace: str = "test_workspace", version: str = "v1") -> None:
@@ -67,6 +89,9 @@ def test_run_stage_emits_build_start_build_ok_and_launch_ok(test_db: Database, t
     config.svs.enabled = False
     config.pre_run_review.enabled = False
 
+    # Inject mock run_backend - _launch_container will call run_backend.launch()
+    mock_backend = _create_mock_local_backend()
+
     executor = StageExecutor(
         db=test_db,
         config=config,
@@ -74,12 +99,10 @@ def test_run_stage_emits_build_start_build_ok_and_launch_ok(test_db: Database, t
         pipeline_manager=pipeline_manager,
         project_root=tmp_path,
         dataset_registry=dataset_registry,
+        run_backend=mock_backend,
     )
 
     executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
-    # Mock the inner local_executor.launch_container, not _launch_container
-    # This allows _launch_container to execute and emit LAUNCH_OK
-    executor.local_executor.launch_container = MagicMock()
 
     info = executor.run_stage(workspace="test_workspace", stage_name="preprocess", reason="Test run", wait=False)
 
@@ -201,6 +224,11 @@ def test_finalize_completed_emits_exit_success_and_post_run_ok(test_db: Database
     config.svs.enabled = False
     config.pre_run_review.enabled = False
 
+    # Inject mock run_backend for protocol-based access
+    mock_backend = _create_mock_local_backend()
+    mock_backend.get_logs.return_value = ""
+    mock_backend.cleanup.return_value = None
+
     executor = StageExecutor(
         db=test_db,
         config=config,
@@ -208,6 +236,7 @@ def test_finalize_completed_emits_exit_success_and_post_run_ok(test_db: Database
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        run_backend=mock_backend,
     )
 
     # Avoid touching real Docker/logs/metrics in this test.
@@ -216,8 +245,7 @@ def test_finalize_completed_emits_exit_success_and_post_run_ok(test_db: Database
     executor._run_post_run_svs_review = MagicMock()
     executor._collect_svs_manifests = MagicMock()
     executor._persist_logs = MagicMock(return_value=None)
-    executor.local_executor.get_container_logs = MagicMock(return_value="")
-    executor.local_executor.remove_container = MagicMock()
+
     # Avoid warning-based POST_RUN_FAIL from auto-results extraction when no experiment record exists.
     with patch("goldfish.jobs.stage_executor.ExperimentRecordManager") as mock_mgr:
         mock_mgr.return_value.extract_auto_results.return_value = None
@@ -281,6 +309,10 @@ class TestStateColumnAsSourceOfTruth:
         config = test_config.model_copy(deep=True)
         config.jobs.backend = "local"
 
+        # Inject mock run_backend for protocol-based status checks
+        mock_backend = _create_mock_local_backend()
+        mock_backend.get_status.return_value = BackendStatus(status=RunStatus.COMPLETED, exit_code=0)
+
         executor = StageExecutor(
             db=test_db,
             config=config,
@@ -288,15 +320,12 @@ class TestStateColumnAsSourceOfTruth:
             pipeline_manager=MagicMock(),
             project_root=tmp_path,
             dataset_registry=None,
+            run_backend=mock_backend,
         )
 
-        # Mock container status to return COMPLETED (container finished)
-        with patch.object(executor.local_executor, "get_container_status") as mock_status:
-            mock_status.return_value = StageState.COMPLETED
-
-            # Mock _finalize_stage_run to track if it gets called
-            with patch.object(executor, "_finalize_stage_run") as mock_finalize:
-                executor.refresh_status_once(run_id)
+        # Mock _finalize_stage_run to track if it gets called
+        with patch.object(executor, "_finalize_stage_run") as mock_finalize:
+            executor.refresh_status_once(run_id)
 
         # The code should NOT call _finalize_stage_run because state=completed (terminal)
         # If code checks status=running, it would incorrectly try to finalize again
@@ -710,6 +739,9 @@ class TestPreGeneratedStageRunId:
         config.svs.enabled = False
         config.pre_run_review.enabled = True  # Enable pre-run review
 
+        # Inject mock run_backend for protocol-based launch
+        mock_backend = _create_mock_local_backend()
+
         executor = StageExecutor(
             db=test_db,
             config=config,
@@ -717,6 +749,7 @@ class TestPreGeneratedStageRunId:
             pipeline_manager=pipeline_manager,
             project_root=tmp_path,
             dataset_registry=dataset_registry,
+            run_backend=mock_backend,
         )
 
         # Mock _perform_pre_run_review to return a review with a warning issue
@@ -741,7 +774,6 @@ class TestPreGeneratedStageRunId:
         with (
             patch.object(executor, "_perform_pre_run_review", return_value=mock_review),
             patch.object(executor, "_build_docker_image", return_value="goldfish-test-v1"),
-            patch.object(executor.local_executor, "launch_container"),
         ):
             # This should NOT raise FK constraint error
             # Previously, this would fail because stage_runs row wasn't created
@@ -812,6 +844,9 @@ class TestPreGeneratedStageRunId:
         config.svs.enabled = False
         config.pre_run_review.enabled = True
 
+        # Inject mock run_backend for protocol-based launch
+        mock_backend = _create_mock_local_backend()
+
         executor = StageExecutor(
             db=test_db,
             config=config,
@@ -819,6 +854,7 @@ class TestPreGeneratedStageRunId:
             pipeline_manager=pipeline_manager,
             project_root=tmp_path,
             dataset_registry=dataset_registry,
+            run_backend=mock_backend,
         )
 
         mock_review = RunReview(
@@ -850,7 +886,6 @@ class TestPreGeneratedStageRunId:
         with (
             patch.object(executor, "_perform_pre_run_review", return_value=mock_review),
             patch.object(executor, "_build_docker_image", return_value="goldfish-test-v1"),
-            patch.object(executor.local_executor, "launch_container"),
         ):
             info = executor.run_stage(
                 workspace="test_workspace",
@@ -945,6 +980,9 @@ class TestPreGeneratedStageRunId:
         config.svs.enabled = False
         config.pre_run_review.enabled = False
 
+        # Inject mock run_backend for protocol-based launch
+        mock_backend = _create_mock_local_backend()
+
         executor = StageExecutor(
             db=test_db,
             config=config,
@@ -952,14 +990,12 @@ class TestPreGeneratedStageRunId:
             pipeline_manager=pipeline_manager,
             project_root=tmp_path,
             dataset_registry=dataset_registry,
+            run_backend=mock_backend,
         )
 
         pre_generated_id = "stage-trans-order"
 
-        with (
-            patch.object(executor, "_build_docker_image", return_value="goldfish-test-v1"),
-            patch.object(executor.local_executor, "launch_container"),
-        ):
+        with patch.object(executor, "_build_docker_image", return_value="goldfish-test-v1"):
             info = executor.run_stage(
                 workspace="test_workspace",
                 stage_name="preprocess",

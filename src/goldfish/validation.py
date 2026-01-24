@@ -1932,6 +1932,30 @@ def validate_instance_name(instance_name: str) -> None:
         )
 
 
+def validate_backend_handle(backend_type: str, backend_handle: str) -> None:
+    """Validate a backend handle based on its type.
+
+    Dispatches to the appropriate validator based on backend_type.
+    This centralizes backend-specific validation logic for use by cancel
+    and other operations that work with stored backend handles.
+
+    Args:
+        backend_type: Backend type ("local" or "gce")
+        backend_handle: Container ID or instance name
+
+    Raises:
+        InvalidContainerIdError: If local backend handle is invalid
+        InvalidInstanceNameError: If GCE backend handle is invalid
+        ValueError: If backend_type is unknown
+    """
+    if backend_type == "local":
+        validate_container_id(backend_handle)
+    elif backend_type == "gce":
+        validate_instance_name(backend_handle)
+    else:
+        raise ValueError(f"Unknown backend type for validation: {backend_type}")
+
+
 def validate_zone(zone: str) -> None:
     """Validate a GCE zone name.
 

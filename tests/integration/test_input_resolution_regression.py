@@ -33,6 +33,27 @@ def _transition_to_completed(db: Database, stage_run_id: str) -> None:
     transition(db, stage_run_id, StageEvent.USER_FINALIZE, finalize_ctx)
 
 
+def _create_mock_local_backend() -> MagicMock:
+    """Create a mock run_backend with local backend capabilities."""
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(
+        has_launch_delay=False,
+        supports_gpu=False,
+        supports_spot=False,
+        supports_preemption=True,
+        ack_timeout_seconds=1.0,
+        timeout_becomes_pending=False,
+    )
+    # Default launch return value
+    mock_backend.launch.return_value = MagicMock(
+        stage_run_id="stage-test",
+        backend_type="local",
+        backend_handle="container-123",
+        zone=None,
+    )
+    return mock_backend
+
+
 @pytest.fixture
 def executor(test_db, test_config, temp_dir):
     """Create a StageExecutor with mocked dependencies."""
@@ -45,6 +66,9 @@ def executor(test_db, test_config, temp_dir):
 
     pipeline_manager = MagicMock()
 
+    # Inject mock run_backend for protocol-based access
+    mock_backend = _create_mock_local_backend()
+
     executor = StageExecutor(
         db=test_db,
         config=test_config,
@@ -52,10 +76,10 @@ def executor(test_db, test_config, temp_dir):
         pipeline_manager=pipeline_manager,
         project_root=Path(temp_dir),
         dataset_registry=MagicMock(),
+        run_backend=mock_backend,
     )
-    # Mock launch bits to avoid real subprocesses
+    # Mock build to avoid real Docker
     executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
-    executor.local_executor.launch_container = MagicMock(return_value="container-1")
 
     return executor
 

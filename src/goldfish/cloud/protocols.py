@@ -185,12 +185,13 @@ class RunBackend(Protocol):
         """
         ...
 
-    def get_logs(self, handle: RunHandle, tail: int = 200) -> str:
+    def get_logs(self, handle: RunHandle, tail: int = 200, since: str | None = None) -> str:
         """Get logs from a run.
 
         Args:
             handle: Run handle
             tail: Number of lines from end (0 for all)
+            since: Only return logs after this timestamp (ISO format or duration)
 
         Returns:
             Log content as string
@@ -216,6 +217,31 @@ class RunBackend(Protocol):
 
         Args:
             handle: Run handle
+        """
+        ...
+
+    def get_zone(self, handle: RunHandle) -> str | None:
+        """Get the zone where a run is executing.
+
+        Args:
+            handle: Run handle
+
+        Returns:
+            Zone string if known, None otherwise.
+        """
+        ...
+
+    def get_output_dir(self, handle: RunHandle) -> Path | None:
+        """Get the local output directory for a run.
+
+        For local backends: returns the temp directory where outputs are written.
+        For cloud backends: returns None (outputs go to cloud storage).
+
+        Args:
+            handle: Run handle
+
+        Returns:
+            Path to output directory, or None if not applicable.
         """
         ...
 

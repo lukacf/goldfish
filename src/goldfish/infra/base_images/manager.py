@@ -46,6 +46,7 @@ from goldfish.infra.profiles import (
 from goldfish.validation import validate_image_type
 
 if TYPE_CHECKING:
+    from goldfish.cloud.protocols import ImageBuilder, ImageRegistry
     from goldfish.db.database import Database
 
 # Directory containing goldfish base image Dockerfiles
@@ -108,6 +109,8 @@ class BaseImageManager:
         project_root: Path,
         config: GoldfishConfig,
         db: Database | None = None,
+        image_builder: ImageBuilder | None = None,
+        image_registry: ImageRegistry | None = None,
     ):
         """Initialize the manager.
 
@@ -115,12 +118,18 @@ class BaseImageManager:
             project_root: Path to the user's project root (where goldfish.yaml lives)
             config: Loaded GoldfishConfig instance
             db: Optional database for persistent build tracking (required for cloud builds)
+            image_builder: Optional ImageBuilder protocol implementation for building images.
+                          When provided, cloud builds use this instead of direct gcloud calls.
+            image_registry: Optional ImageRegistry protocol implementation for registry operations.
+                           When provided, push/check operations use this instead of direct gcloud calls.
         """
         self.project_root = project_root
         self.config = config
         self.project_name = config.project_name
         self.docker_config: DockerConfig = config.docker
         self.db = db
+        self._image_builder: ImageBuilder | None = image_builder
+        self._image_registry: ImageRegistry | None = image_registry
 
         # In-memory build tracking (for local builds without db)
         self._builds: dict[str, BuildStatus] = {}
@@ -379,7 +388,7 @@ class BaseImageManager:
     def _check_registry_image_exists(self, registry_tag: str) -> bool:
         """Check if image exists in registry.
 
-        Uses gcloud to check manifest without pulling.
+        Uses ImageRegistry protocol if available, otherwise falls back to gcloud CLI.
 
         Args:
             registry_tag: Full registry image tag
@@ -387,6 +396,14 @@ class BaseImageManager:
         Returns:
             True if image exists in registry
         """
+        # Use injected registry protocol if available
+        if self._image_registry is not None:
+            try:
+                return self._image_registry.exists(registry_tag)
+            except Exception:
+                return False
+
+        # Fallback to gcloud CLI (legacy path)
         try:
             result = subprocess.run(
                 ["gcloud", "artifacts", "docker", "images", "describe", registry_tag, "--quiet"],
@@ -562,6 +579,98 @@ class BaseImageManager:
             return "Run push to deploy to registry"
         return "Up to date"
 
+    def _build_with_image_builder(
+        self,
+        image_type: str,
+        no_cache: bool,
+        target: str,
+        wait: bool,
+        backend: str = "cloud",
+    ) -> dict[str, Any]:
+        """Build image using injected ImageBuilder protocol.
+
+        Args:
+            image_type: "cpu" or "gpu"
+            no_cache: Force rebuild without Docker cache
+            target: "base" or "project"
+            wait: If True, block until complete
+            backend: "local" or "cloud" (for result reporting)
+
+        Returns:
+            Dict with build_id and status
+        """
+        assert self._image_builder is not None  # Caller must verify
+
+        # Prepare build context and image tags
+        if target == "base":
+            dockerfile_path = self._get_goldfish_base_dockerfile_path(image_type)
+            local_tag = self._get_goldfish_base_local_tag(image_type)
+            try:
+                registry_tag = self._get_goldfish_base_registry_tag(image_type)
+            except RegistryNotConfiguredError:
+                registry_tag = None
+            build_context = BASE_IMAGES_DIR
+        else:
+            dockerfile_content, source_path = self._get_effective_dockerfile(image_type)
+            local_tag = self._get_project_image_tag(image_type, for_registry=False)
+            try:
+                registry_tag = self._get_project_image_tag(image_type, for_registry=True)
+            except RegistryNotConfiguredError:
+                registry_tag = None
+            if source_path:
+                dockerfile_path = source_path
+                build_context = self.project_root
+            else:
+                # Write generated Dockerfile to temp location
+                tmpdir = tempfile.mkdtemp(prefix="goldfish-build-")
+                dockerfile_path = Path(tmpdir) / "Dockerfile"
+                dockerfile_path.write_text(dockerfile_content)
+                build_context = Path(tmpdir)
+
+        target_name = "goldfish base" if target == "base" else "project"
+        # Use local tag for local builds, registry tag for cloud builds (if available)
+        image_tag = registry_tag if backend == "cloud" and registry_tag else local_tag
+
+        if wait:
+            # Synchronous build
+            result_tag = self._image_builder.build(
+                context_path=build_context,
+                dockerfile_path=dockerfile_path,
+                image_tag=image_tag,
+                build_args={},
+                no_cache=no_cache,
+            )
+            return {
+                "build_id": f"build-sync-{uuid.uuid4().hex[:8]}",
+                "status": "completed",
+                "image_type": image_type,
+                "target": target,
+                "backend": backend,
+                "image_tag": result_tag,
+                "registry_tag": registry_tag,
+                "message": f"Successfully built {target_name} {image_type} image: {result_tag}",
+            }
+        else:
+            # Async build
+            build_id = self._image_builder.build_async(
+                context_path=build_context,
+                dockerfile_path=dockerfile_path,
+                image_tag=image_tag,
+                build_args={},
+                no_cache=no_cache,
+            )
+            return {
+                "build_id": build_id,
+                "status": "building",
+                "image_type": image_type,
+                "target": target,
+                "backend": backend,
+                "image_tag": image_tag,
+                "registry_tag": registry_tag,
+                "message": f"Building {target_name} {image_type} image. "
+                f"Use get_build_status('{build_id}') to check progress.",
+            }
+
     def build_image(
         self,
         image_type: str,
@@ -595,10 +704,20 @@ class BaseImageManager:
                 raise CloudBuildNotConfiguredError()
             if not self.config.gce:
                 raise CloudBuildNotConfiguredError()
+
+            # Use injected ImageBuilder protocol if available
+            if self._image_builder is not None:
+                return self._build_with_image_builder(image_type, no_cache, target, wait, backend="cloud")
+
+            # Fallback to gcloud CLI (legacy path)
             return self._build_with_cloud_build(image_type, no_cache, target)
 
         # Local builds require Docker
         self._check_docker_available()
+
+        # Use injected ImageBuilder protocol if available (supports both local and cloud builds)
+        if self._image_builder is not None:
+            return self._build_with_image_builder(image_type, no_cache, target, wait, backend="local")
 
         # Generate build ID
         build_id = f"build-{uuid.uuid4().hex[:8]}"
@@ -860,6 +979,8 @@ class BaseImageManager:
     def push_image(self, image_type: str, target: str = "project") -> dict[str, Any]:
         """Push an image to Artifact Registry.
 
+        Uses ImageRegistry protocol if available, otherwise falls back to gcloud CLI.
+
         Args:
             image_type: "cpu" or "gpu"
             target: "base" for goldfish-base-* or "project" for {project}-*
@@ -885,6 +1006,21 @@ class BaseImageManager:
         if not self._check_local_image_exists(local_tag):
             raise BaseImageNotFoundError(local_tag)
 
+        target_name = "goldfish base" if target == "base" else "project"
+
+        # Use injected registry protocol if available
+        if self._image_registry is not None:
+            self._image_registry.push(local_tag, registry_tag)
+            return {
+                "success": True,
+                "target": target,
+                "image_type": image_type,
+                "local_tag": local_tag,
+                "registry_tag": registry_tag,
+                "message": f"Successfully pushed {target_name} {image_type} image to {registry_tag}",
+            }
+
+        # Fallback to gcloud CLI (legacy path)
         registry_url = self._get_artifact_registry()
 
         # Configure Docker authentication
@@ -921,7 +1057,6 @@ class BaseImageManager:
         if push_result.returncode != 0:
             raise GoldfishError(f"Docker push failed: {push_result.stderr}")
 
-        target_name = "goldfish base" if target == "base" else "project"
         return {
             "success": True,
             "target": target,

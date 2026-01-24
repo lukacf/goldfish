@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import threading
 import time
 from collections.abc import Coroutine
@@ -16,20 +15,18 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from goldfish.cloud.protocols import ObjectStorage, RunBackend, SignalBus
+    from goldfish.cloud.protocols import ImageBuilder, ObjectStorage, RunBackend, SignalBus
 
 import yaml
 
-from goldfish.cloud.contracts import StorageURI
+from goldfish.cloud.contracts import BackendStatus, RunHandle, RunSpec, RunStatus, StorageURI
 from goldfish.cloud.factory import AdapterFactory
 from goldfish.config import GoldfishConfig
 from goldfish.datasets.registry import DatasetRegistry
 from goldfish.db.database import Database
-from goldfish.errors import GoldfishError
+from goldfish.errors import GoldfishError, NotFoundError
 from goldfish.experiment_model.records import ExperimentRecordManager
 from goldfish.infra.docker_builder import DockerBuilder
-from goldfish.infra.gce_launcher import GCELauncher
-from goldfish.infra.local_executor import LocalExecutor
 from goldfish.infra.profiles import ProfileResolver
 from goldfish.models import (
     PipelineDef,
@@ -121,6 +118,7 @@ class StageExecutor:
         storage: "ObjectStorage | None" = None,
         run_backend: "RunBackend | None" = None,
         signal_bus: "SignalBus | None" = None,
+        image_builder: "ImageBuilder | None" = None,
     ):
         self.db = db
         self.config = config
@@ -135,14 +133,6 @@ class StageExecutor:
         # Initialize execution infrastructure
         self.docker_builder = DockerBuilder(config, db=db)
 
-        # Initialize local executor with configurable resource limits
-        # Config values override defaults; None means use LocalExecutor default
-        self.local_executor = LocalExecutor(
-            memory_limit=config.jobs.container_memory if config.jobs.container_memory else "4g",
-            cpu_limit=config.jobs.container_cpus if config.jobs.container_cpus else "2.0",
-            pids_limit=config.jobs.container_pids if config.jobs.container_pids else 100,
-        )
-
         # Initialize profile resolver with global zones support
         profile_overrides = None
         global_zones = None
@@ -154,33 +144,10 @@ class StageExecutor:
             global_zones=global_zones,
         )
 
-        # Initialize GCE launcher with full config
-        gce_bucket = None
-        gce_project = None
-        gce_zone: str | None = None  # No US default - must be configured explicitly
-        gce_zones: list[str] | None = None
-        gce_resources: list[dict[str, Any]] = []
-        gce_gpu_preference = None
-        gce_service_account = None
-
-        if config.gcs:
-            gce_bucket = config.gcs.bucket
-
         # Compute artifact_registry for base image resolution and image pushing
         self.artifact_registry: str | None = None
 
         if config.gce:
-            # Use effective_project_id to support both project_id and project aliases
-            try:
-                gce_project = config.gce.effective_project_id
-            except ValueError:
-                pass  # Neither project_id nor project set, leave as None for gcloud defaults
-            if config.gce.zones:
-                gce_zone = config.gce.zones[0]
-                gce_zones = config.gce.zones  # Pass all zones for multi-zone lookups
-            gce_gpu_preference = config.gce.gpu_preference
-            gce_service_account = config.gce.service_account
-
             # Resolve artifact_registry from config - required for GCE backend
             self.artifact_registry = config.gce.effective_artifact_registry
             if not self.artifact_registry:
@@ -193,7 +160,7 @@ class StageExecutor:
                 )
 
             # Zones are required for GCE backend - no US default
-            if not gce_zones:
+            if not config.gce.zones:
                 raise GoldfishError(
                     "GCE backend requires zones configuration. "
                     "Add to goldfish.yaml:\n"
@@ -203,18 +170,6 @@ class StageExecutor:
                     "Configure zones in regions where you have GPU quota."
                 )
 
-        # GCELauncher is always created but only used when backend="gce"
-        # For local backend, we pass a placeholder zone since it won't be used
-        self.gce_launcher = GCELauncher(
-            project_id=gce_project,
-            zone=gce_zone or "not-configured",  # Placeholder for local backend
-            bucket=gce_bucket,
-            resources=gce_resources,  # Will be set per-stage
-            zones=gce_zones,
-            gpu_preference=gce_gpu_preference,
-            service_account=gce_service_account,
-        )
-
         # Initialize cloud abstraction layer via AdapterFactory
         # This provides protocol-based adapters for storage, compute, and signaling
         self._adapter_factory = AdapterFactory(config)
@@ -223,6 +178,7 @@ class StageExecutor:
         self._storage: ObjectStorage | None = storage
         self._run_backend: RunBackend | None = run_backend
         self._signal_bus: SignalBus | None = signal_bus
+        self._image_builder: ImageBuilder | None = image_builder
 
         # Live metrics sync state (per run)
         self._metrics_sync_state: dict[str, _MetricsSyncState] = {}
@@ -298,6 +254,83 @@ class StageExecutor:
         assert self._signal_bus is not None  # Guaranteed by factory
         return self._signal_bus
 
+    @property
+    def image_builder(self) -> "ImageBuilder":
+        """Get the image builder adapter (lazily initialized or injected)."""
+        if self._image_builder is None:
+            self._image_builder = self._adapter_factory.create_image_builder(db=self.db)
+        assert self._image_builder is not None  # Guaranteed by factory
+        return self._image_builder
+
+    def _get_run_handle(self, stage_run_id: str) -> RunHandle:
+        """Get a RunHandle for a stage run from the database.
+
+        Args:
+            stage_run_id: Stage run ID to get handle for.
+
+        Returns:
+            RunHandle with backend_type, backend_handle, and zone.
+
+        Raises:
+            GoldfishError: If stage run not found.
+        """
+        row = self.db.get_stage_run(stage_run_id)
+        if not row:
+            raise GoldfishError(f"Stage run '{stage_run_id}' not found")
+
+        backend_type = row.get("backend_type") or self.config.jobs.backend
+        backend_handle = row.get("backend_handle") or stage_run_id
+        zone = row.get("instance_zone")
+
+        return RunHandle(
+            stage_run_id=stage_run_id,
+            backend_type=backend_type,
+            backend_handle=backend_handle,
+            zone=zone,
+        )
+
+    def _backend_status_to_stage_state(self, backend_status: BackendStatus) -> StageState | str:
+        """Convert BackendStatus to StageState.
+
+        Args:
+            backend_status: Status from run_backend.get_status()
+
+        Returns:
+            StageState for terminal states, or string status for running/unknown.
+        """
+        status = backend_status.status
+        if status == RunStatus.RUNNING:
+            return StageState.RUNNING
+        elif status == RunStatus.COMPLETED:
+            return StageState.COMPLETED
+        elif status == RunStatus.FAILED:
+            return StageState.FAILED
+        elif status == RunStatus.TERMINATED:
+            return StageState.TERMINATED
+        elif status == RunStatus.CANCELED:
+            return StageState.CANCELED
+        elif status == RunStatus.PREPARING:
+            return StageState.LAUNCHING
+        elif status == RunStatus.PENDING:
+            return StageState.PREPARING  # Map PENDING to PREPARING state
+        else:
+            # Unknown status
+            return "unknown"
+
+    def _get_bucket_uri(self) -> StorageURI | None:
+        """Get StorageURI for the configured GCS bucket.
+
+        Returns:
+            StorageURI pointing to the bucket root, or None if not configured.
+        """
+        if not self.config.gcs or not self.config.gcs.bucket:
+            return None
+        bucket = self.config.gcs.bucket
+        # Handle both "bucket-name" and "gs://bucket-name" formats
+        if bucket.startswith("gs://"):
+            return StorageURI.parse(bucket)
+        return StorageURI("gs", bucket, "")
+
     def run_stage(
         self,
         workspace: str,
@@ -345,8 +378,7 @@ class StageExecutor:
         Returns:
             StageRunInfo with status and review (if review blocked the run)
         """
-        # Ensure GCS is configured and reachable for GCE runs
-        self._ensure_gcs_access(operation="run_stage")
+        # GCS access is validated during storage operations, no pre-check needed
 
         # 1. Auto-version workspace (returns version and git SHA)
         version, git_sha = self._auto_version(workspace, stage_name, reason)
@@ -914,16 +946,17 @@ class StageExecutor:
 
         return get_agent_provider(self.config.svs.agent_provider)
 
-    def _run_post_run_svs_review(self, stage_run_id: str, backend: str) -> None:
+    def _run_post_run_svs_review(self, stage_run_id: str) -> None:
         """Run AI semantic review of stage outputs after completion."""
         # Only run if SVS and AI post-run are enabled
         if not self.config.svs.enabled or not self.config.svs.ai_post_run_enabled:
             return
 
-        # AI review currently only supported for local backend as it needs direct disk access
-        # for reading outputs. GCE support requires downloading full outputs first.
-        if backend != "local":
-            logger.debug(f"Skipping post-run AI review for {stage_run_id}: backend {backend} not yet supported")
+        # AI review needs direct disk access to outputs. For backends with launch delay
+        # (GCE), outputs are in cloud storage and require downloading first.
+        caps = self.run_backend.capabilities
+        if caps.has_launch_delay:
+            logger.debug(f"Skipping post-run AI review for {stage_run_id}: backend requires downloading outputs first")
             return
 
         outputs_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs"
@@ -1436,12 +1469,16 @@ class StageExecutor:
         if not self.config.svs.enabled:
             return
 
-        # Determine outputs directory based on backend
-        if backend == "local":
-            outputs_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs"
-        elif backend == "gce":
-            # For GCE, we need to download the .goldfish directory from GCS
-            if not self.config.gcs or not self.config.gcs.bucket:
+        # Determine outputs directory based on backend capabilities
+        # Backends with launch delay (GCE) store outputs in cloud storage
+        # Backends without launch delay (local) store outputs in local filesystem
+        from goldfish.cloud.contracts import get_capabilities_for_backend
+
+        caps = get_capabilities_for_backend(backend)
+        if caps.has_launch_delay:
+            # Remote backend - download from cloud storage
+            bucket_uri = self._get_bucket_uri()
+            if bucket_uri is None:
                 return
 
             import tempfile
@@ -1450,18 +1487,18 @@ class StageExecutor:
             temp_dir.mkdir(parents=True, exist_ok=True)
 
             # Goldfish manifests are in outputs/.goldfish/
-            bucket = self.config.gcs.bucket
-            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
-            gcs_prefix = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/outputs/.goldfish/"
+            gcs_prefix_uri = bucket_uri.join("runs", stage_run_id, "outputs", ".goldfish")
 
             # We use a simplified approach: just try to download the known manifest files
             for filename in ["svs_stats.json", "svs_findings.json", "svs_findings_during.json"]:
                 dest = temp_dir / ".goldfish" / filename
-                self._download_metrics_from_storage(gcs_prefix + filename, dest)
+                file_uri = gcs_prefix_uri.join(filename)
+                self._download_from_storage(file_uri, dest)
 
             outputs_dir = temp_dir
         else:
-            return
+            # Local backend - outputs are in local filesystem
+            outputs_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs"
 
         # Read manifests using shared logic
         manifest_data = read_svs_manifests(outputs_dir)
@@ -1538,25 +1575,23 @@ class StageExecutor:
 
     def _collect_metrics(self, stage_run_id: str, backend: str) -> None:
         """Collect metrics from JSONL and store in database."""
+        from goldfish.cloud.contracts import get_capabilities_for_backend
         from goldfish.metrics.collector import MetricsCollector
 
         collector = MetricsCollector(self.db)
 
-        # Determine metrics file location based on backend
-        if backend == "local":
-            # For local execution, metrics.jsonl is in the outputs directory
-            metrics_file = (
-                self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs" / ".goldfish" / "metrics.jsonl"
-            )
-        elif backend == "gce":
-            # For GCE, download metrics.jsonl from GCS to local temp
-            if not self.config.gcs or not self.config.gcs.bucket:
+        # Determine metrics file location based on backend capabilities
+        # Backends with launch delay (GCE) store metrics in cloud storage
+        # Backends without launch delay (local) store metrics in local filesystem
+        caps = get_capabilities_for_backend(backend)
+        if caps.has_launch_delay:
+            # Remote backend - download from cloud storage
+            bucket_uri = self._get_bucket_uri()
+            if bucket_uri is None:
                 logger.debug(f"No GCS bucket configured, skipping metrics collection for {stage_run_id}")
                 return
 
-            bucket = self.config.gcs.bucket
-            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
-            gcs_path = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/metrics.jsonl"
+            metrics_uri = bucket_uri.join("runs", stage_run_id, "logs", "metrics.jsonl")
 
             # Download to local temp directory
             import tempfile
@@ -1565,48 +1600,48 @@ class StageExecutor:
             temp_dir.mkdir(parents=True, exist_ok=True)
             metrics_file = temp_dir / "metrics.jsonl"
 
-            if not self._download_metrics_from_storage(gcs_path, metrics_file):
-                logger.debug(f"No metrics file found in GCS for {stage_run_id}")
+            if not self._download_from_storage(metrics_uri, metrics_file):
+                logger.debug(f"No metrics file found in cloud storage for {stage_run_id}")
                 return
         else:
-            logger.warning(f"Unknown backend {backend}, skipping metrics collection")
-            return
+            # Local backend - metrics.jsonl is in the outputs directory
+            metrics_file = (
+                self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs" / ".goldfish" / "metrics.jsonl"
+            )
 
         # Collect metrics from file
         collector.collect_from_file(stage_run_id, metrics_file)
 
-    def _download_metrics_from_storage(self, storage_path: str, destination: Path) -> bool:
-        """Download metrics.jsonl from storage using the storage adapter.
+    def _download_from_storage(self, uri: StorageURI, destination: Path) -> bool:
+        """Download a file from storage using the storage adapter.
 
-        Returns True if download succeeded, False if the object doesn't exist.
+        Args:
+            uri: StorageURI of the file to download
+            destination: Local path to write to
+
+        Returns:
+            True if download succeeded, False if the object doesn't exist.
         """
-        if not storage_path.startswith("gs://"):
-            logger.warning("Invalid storage path: %s", storage_path)
-            return False
-
         try:
-            uri = StorageURI.parse(storage_path)
-            storage = self._adapter_factory.create_storage()
-            if storage.download_to_file(uri, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if self.storage.download_to_file(uri, destination):
                 return True
-            # Fall back to CLI if adapter download returns False (not found)
-            return self._download_metrics_from_storage_cli(storage_path, destination)
+            return False
         except Exception as exc:
-            # Fall back to CLI on any error
-            if self._download_metrics_from_storage_cli(storage_path, destination):
-                return True
-            logger.warning("Failed to download metrics from storage: %s", exc)
+            logger.warning("Failed to download from storage %s: %s", uri, exc)
             return False
 
-    def _ensure_gcs_access(self, operation: str) -> None:
-        """Ensure GCS is accessible for GCE backend operations.
+    def _ensure_storage_access(self, operation: str) -> None:
+        """Ensure storage is accessible for cloud backend operations.
 
-        For GCE backend, validates that GCS is configured and reachable.
-        Uses the storage adapter to check connectivity.
+        For backends with launch delay (GCE), validates that storage is
+        configured and reachable. Uses the storage adapter to check connectivity.
         """
-        if self.config.jobs.backend != "gce":
-            return
-        if not self.config.gcs or not self.config.gcs.bucket:
+        caps = self.run_backend.capabilities
+        if not caps.has_launch_delay:
+            return  # Local backend uses disk, no storage access needed
+        bucket_uri = self._get_bucket_uri()
+        if bucket_uri is None:
             raise GoldfishError(
                 f"GCE backend requires gcs.bucket for {operation}. "
                 "Set gcs.bucket in goldfish.yaml or GOLDFISH_GCS_BUCKET."
@@ -1614,11 +1649,9 @@ class StageExecutor:
         # Use the storage adapter to verify connectivity
         try:
             # Check if we can access the bucket by listing (with empty prefix)
-            storage = self._adapter_factory.create_storage()
-            # For GCS backend, try to list to verify connectivity
             # Use a non-existent prefix to minimize data transfer
-            health_check_uri = StorageURI.parse(f"gs://{self.config.gcs.bucket}/_goldfish_health_check_")
-            list(storage.list_prefix(health_check_uri))
+            health_check_uri = bucket_uri.join("_goldfish_health_check_")
+            list(self.storage.list_prefix(health_check_uri))
         except Exception as exc:
             raise GoldfishError(f"Storage access check failed for {operation}: {exc}") from exc
 
@@ -1642,60 +1675,37 @@ class StageExecutor:
                 self._metrics_sync_state[stage_run_id] = state
             return state
 
-    def _download_metrics_from_storage_cli(self, gcs_path: str, destination: Path) -> bool:
-        """Download metrics.jsonl from GCS using gcloud/gsutil CLI (fallback)."""
-        try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            cmd = ["gcloud", "storage", "cp", gcs_path, str(destination)]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if result.returncode == 0:
-                return True
-        except Exception as exc:
-            logger.debug("gcloud storage cp failed: %s", exc)
-
-        try:
-            cmd = ["gsutil", "cp", gcs_path, str(destination)]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if result.returncode == 0:
-                return True
-        except Exception as exc:
-            logger.debug("gsutil cp failed: %s", exc)
-
-        return False
-
-    def _sync_metrics_file_from_storage(
-        self, storage_path: str, state: _MetricsSyncState
+    def _sync_metrics_file_from_storage_uri(
+        self, uri: StorageURI, state: _MetricsSyncState
     ) -> tuple[Path | None, int, str | None]:
         """Download metrics.jsonl from storage into a local temp file.
 
         Uses the storage adapter to download the complete file.
         The offset tracking is maintained for compatibility but we download
         the full file each time (simpler, works across all storage backends).
+
+        Args:
+            uri: StorageURI pointing to the metrics file
+            state: Sync state object to track offset and temp path
+
+        Returns:
+            Tuple of (local_path, new_offset, warning_message)
         """
         import tempfile
-
-        if not storage_path.startswith("gs://"):
-            logger.warning("Invalid storage path: %s", storage_path)
-            return None, state.offset, "Live metrics sync skipped: invalid storage path."
 
         # Set up local temp path if not already done
         local_path = state.temp_path
         if local_path is None:
-            temp_dir = (
-                Path(tempfile.gettempdir())
-                / "goldfish_metrics_live"
-                / storage_path.replace("gs://", "").replace("/", "_")
-            )
+            # Create a safe temp directory name from the URI
+            safe_name = f"{uri.bucket}_{uri.path}".replace("/", "_")
+            temp_dir = Path(tempfile.gettempdir()) / "goldfish_metrics_live" / safe_name
             temp_dir.mkdir(parents=True, exist_ok=True)
             local_path = temp_dir / "metrics.jsonl"
             state.temp_path = local_path
 
         try:
-            uri = StorageURI.parse(storage_path)
-            storage = self._adapter_factory.create_storage()
-
             # Check if file exists and get its size
-            size = storage.get_size(uri)
+            size = self.storage.get_size(uri)
             if size is None:
                 return None, state.offset, None  # File doesn't exist yet
 
@@ -1710,19 +1720,13 @@ class StageExecutor:
                     local_path.unlink()
 
             # Download the full file (simpler than range downloads, works everywhere)
-            if storage.download_to_file(uri, local_path):
+            if self.storage.download_to_file(uri, local_path):
                 state.offset = size  # Update offset to current size
                 return local_path, state.offset, None
 
-            # Fall back to CLI download
-            if self._download_metrics_from_storage_cli(storage_path, local_path):
-                return local_path, state.offset, None
             return None, state.offset, "Live metrics sync failed: download failed"
 
         except Exception as exc:
-            # Fall back to CLI download on any error
-            if self._download_metrics_from_storage_cli(storage_path, local_path):
-                return local_path, state.offset, None
             logger.warning("Failed to sync metrics from storage: %s", exc)
             return local_path, state.offset, f"Live metrics sync failed: {exc}"
 
@@ -1752,24 +1756,27 @@ class StageExecutor:
             metrics_file: Path | None = None
             start_offset = state.offset
 
-            if backend == "local":
-                metrics_file = (
-                    self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs" / ".goldfish" / "metrics.jsonl"
-                )
-            elif backend == "gce":
-                if not self.config.gcs or not self.config.gcs.bucket:
+            # Use capability-based check for storage location
+            from goldfish.cloud.contracts import get_capabilities_for_backend
+
+            caps = get_capabilities_for_backend(backend)
+            if caps.has_launch_delay:
+                # Remote backend - download from cloud storage
+                bucket_uri = self._get_bucket_uri()
+                if bucket_uri is None:
                     warnings.append(
-                        "Live metrics sync skipped: gcs.bucket not configured for GCE backend.",
+                        "Live metrics sync skipped: gcs.bucket not configured for remote backend.",
                     )
                     return warnings
-                bucket = self.config.gcs.bucket
-                bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
-                gcs_path = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/metrics.jsonl"
-                metrics_file, start_offset, sync_warning = self._sync_metrics_file_from_storage(gcs_path, state)
+                metrics_uri = bucket_uri.join("runs", stage_run_id, "logs", "metrics.jsonl")
+                metrics_file, start_offset, sync_warning = self._sync_metrics_file_from_storage_uri(metrics_uri, state)
                 if sync_warning:
                     warnings.append(sync_warning)
             else:
-                return warnings
+                # Local backend - metrics.jsonl is in the outputs directory
+                metrics_file = (
+                    self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs" / ".goldfish" / "metrics.jsonl"
+                )
 
             if metrics_file is None or not metrics_file.exists():
                 return warnings
@@ -1813,14 +1820,15 @@ class StageExecutor:
             self._svs_sync_state[stage_run_id] = now
 
         backend = row.get("backend_type") or self.config.jobs.backend
-        outputs_dir: Path | None = None
 
-        if backend == "local":
-            outputs_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs"
-            if not outputs_dir.exists():
-                return
-        elif backend == "gce":
-            if not self.config.gcs or not self.config.gcs.bucket:
+        # Use capability-based check for storage location
+        from goldfish.cloud.contracts import get_capabilities_for_backend
+
+        caps = get_capabilities_for_backend(backend)
+        if caps.has_launch_delay:
+            # Remote backend - download from cloud storage
+            bucket_uri = self._get_bucket_uri()
+            if bucket_uri is None:
                 return
 
             import tempfile
@@ -1828,19 +1836,20 @@ class StageExecutor:
             temp_dir = Path(tempfile.gettempdir()) / "goldfish_svs_live" / stage_run_id
             temp_dir.mkdir(parents=True, exist_ok=True)
 
-            bucket = self.config.gcs.bucket
-            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
-            gcs_prefix = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/outputs/.goldfish/"
+            gcs_prefix_uri = bucket_uri.join("runs", stage_run_id, "outputs", ".goldfish")
 
             findings_dest = temp_dir / ".goldfish" / "svs_findings.json"
             stats_dest = temp_dir / ".goldfish" / "svs_stats.json"
             during_dest = temp_dir / ".goldfish" / "svs_findings_during.json"
-            self._download_metrics_from_storage(gcs_prefix + "svs_findings.json", findings_dest)
-            self._download_metrics_from_storage(gcs_prefix + "svs_stats.json", stats_dest)
-            self._download_metrics_from_storage(gcs_prefix + "svs_findings_during.json", during_dest)
+            self._download_from_storage(gcs_prefix_uri.join("svs_findings.json"), findings_dest)
+            self._download_from_storage(gcs_prefix_uri.join("svs_stats.json"), stats_dest)
+            self._download_from_storage(gcs_prefix_uri.join("svs_findings_during.json"), during_dest)
             outputs_dir = temp_dir
         else:
-            return
+            # Local backend - outputs are in local filesystem
+            outputs_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id / "outputs"
+            if not outputs_dir.exists():
+                return
 
         manifest = read_svs_manifests(outputs_dir)
         if not manifest.get("during_run") and not manifest.get("ai_review") and not manifest.get("stats"):
@@ -1941,38 +1950,43 @@ class StageExecutor:
             profile = self.profile_resolver.resolve(profile_name)
             base_image = resolve_base_image(profile, self.artifact_registry)
 
-        # Determine build backend
-        backend = self.config.jobs.backend
-
-        # GCE backend: Use Cloud Build (builds AND pushes in one step)
-        # This ensures linux-native wheels (flash-attn, etc.) install correctly
-        if backend == "gce":
+        # Determine build backend based on capabilities
+        # Backends with launch delay (GCE) require cloud build + artifact registry
+        # Backends without launch delay (local) use local Docker build
+        caps = self.run_backend.capabilities
+        if caps.has_launch_delay:
+            # Remote backend: Use ImageBuilder protocol (CloudBuildImageBuilder for GCE)
+            # This ensures linux-native wheels (flash-attn, etc.) install correctly
             if not self.artifact_registry:
                 raise GoldfishError(
-                    "GCE backend requires artifact_registry. "
+                    "Remote backend requires artifact_registry. "
                     "Set gce.artifact_registry in goldfish.yaml or gce.project_id for auto-generation."
                 )
 
-            # Cloud Build builds directly on linux/amd64 and pushes to Artifact Registry
-            registry_image_tag = self.docker_builder.build_image(
-                workspace_dir=workspace_dir,
-                workspace_name=workspace,
-                version=version,
-                use_cache=True,
-                base_image=base_image,
-                backend="cloud",
-                wait=True,  # Stage execution needs image before launching
-            )
-            return registry_image_tag
+            # Use docker_builder to prepare context, then ImageBuilder for actual build
+            # This delegates Cloud Build logic to the CloudBuildImageBuilder adapter
+            with self.docker_builder.prepare_build_context(workspace_dir, workspace, version, base_image) as (
+                context_path,
+                dockerfile_path,
+                local_tag,
+            ):
+                # ImageBuilder.build() returns registry tag for cloud builds
+                registry_image_tag = self.image_builder.build(
+                    context_path=context_path,
+                    dockerfile_path=dockerfile_path,
+                    image_tag=f"{self.artifact_registry}/{local_tag}",
+                    build_args={"VERSION": version},
+                    no_cache=False,  # Use cache for faster builds
+                )
+                return registry_image_tag
 
-        # Local backend: Build locally
+        # Local backend: Build locally using DockerBuilder
         local_image_tag = self.docker_builder.build_image(
             workspace_dir=workspace_dir,
             workspace_name=workspace,
             version=version,
             use_cache=True,
             base_image=base_image,
-            backend="local",
         )
 
         return local_image_tag
@@ -2237,11 +2251,9 @@ echo "Stage completed successfully"
         }
 
         # Pass GCS bucket for checkpoint API (immediate upload for preemption recovery)
-        if self.config.gcs and self.config.gcs.bucket:
-            bucket = self.config.gcs.bucket
-            if not bucket.startswith("gs://"):
-                bucket = f"gs://{bucket}"
-            goldfish_env["GOLDFISH_GCS_BUCKET"] = bucket
+        bucket_uri = self._get_bucket_uri()
+        if bucket_uri is not None:
+            goldfish_env["GOLDFISH_GCS_BUCKET"] = str(bucket_uri)
 
         # Overdrive defaults: unbuffered stdout + faster metrics flush
         goldfish_env.setdefault("PYTHONUNBUFFERED", os.environ.get("PYTHONUNBUFFERED", "1"))
@@ -2280,99 +2292,121 @@ echo "Stage completed successfully"
         if "GOLDFISH_SVS_AGENT_PROVIDER" in os.environ:
             goldfish_env["GOLDFISH_SVS_AGENT_PROVIDER"] = os.environ["GOLDFISH_SVS_AGENT_PROVIDER"]
 
-        if backend == "local":
-            # Create work directory for this run
+        # Load stage config and resolve profile for resource allocation
+        stage_config_yaml = self._load_stage_config(workspace, stage_name)
+
+        # Apply config_override to stage config for profile resolution
+        if config_override:
+            # Deep merge: config_override takes precedence
+            merged_config = dict(stage_config_yaml)
+            for key, value in config_override.items():
+                if key in merged_config and isinstance(merged_config[key], dict) and isinstance(value, dict):
+                    merged_config[key] = {**merged_config[key], **value}
+                else:
+                    merged_config[key] = value
+            stage_config_yaml = merged_config
+
+        profile = self._resolve_profile_from_config(stage_config_yaml)
+
+        # Merge user-defined environment variables from stage config
+        # Security: GOLDFISH_* vars are set by us, user vars should not override them
+        user_env = stage_config_yaml.get("environment", {})
+        if user_env and isinstance(user_env, dict):
+            for key, value in user_env.items():
+                # Skip Goldfish internal vars - don't let users override them
+                if key.startswith("GOLDFISH_"):
+                    logger.warning(
+                        f"Ignoring user-defined environment variable '{key}' - " "GOLDFISH_* variables are reserved"
+                    )
+                    continue
+                goldfish_env[key] = str(value)
+
+        # Extract resource settings from profile
+        gpu_count = 0
+        gpu_type: str | None = None
+        memory_gb = 4.0
+        cpu_count = 2.0
+        spot = False
+        profile_name = "cpu-small"
+
+        if profile:
+            profile_name = profile.get("name", "cpu-small")
+            gpu_info = profile.get("gpu", {})
+            if gpu_info.get("type") != "none":
+                gpu_type = gpu_info.get("accelerator")  # Use accelerator (e.g., nvidia-h100-80gb)
+                gpu_count = gpu_info.get("count", 0)
+            memory_gb = profile.get("memory_gb", 4.0)
+            cpu_count = profile.get("vcpus", 2.0)
+            # Profile uses preemptible_allowed (GCE terminology), map to spot
+            spot = profile.get("preemptible_allowed", False)
+
+        # Build command from entrypoint
+        entrypoint_script = self._build_entrypoint_script(stage_name, runtime, entrypoint)
+        command = ["sh", "-c", entrypoint_script] if entrypoint_script else None
+
+        # Convert inputs dict to StorageURI dict
+        input_uris: dict[str, StorageURI] = {}
+        for signal_name, path in inputs.items():
+            if isinstance(path, str):
+                if path.startswith("gs://") or path.startswith("file://"):
+                    input_uris[signal_name] = StorageURI.parse(path)
+                else:
+                    # Local path - convert to file:// URI
+                    input_uris[signal_name] = StorageURI("file", "", str(Path(path).resolve()))
+            elif isinstance(path, StorageURI):
+                input_uris[signal_name] = path
+
+        # Build output URI
+        output_uri: StorageURI | None = None
+        bucket_uri = self._get_bucket_uri()
+        if bucket_uri:
+            output_uri = bucket_uri.join("runs", stage_run_id, "outputs")
+        else:
+            # Local backend - use dev_repo path
             run_dir = self.dev_repo / ".goldfish" / "runs" / stage_run_id
             run_dir.mkdir(parents=True, exist_ok=True)
-
-            # Create outputs directory (inputs are mounted directly from source)
             outputs_dir = run_dir / "outputs"
             outputs_dir.mkdir(exist_ok=True)
+            output_uri = StorageURI("file", "", str(outputs_dir.resolve()))
 
-            # Generate entrypoint script
-            entrypoint_script = self._build_entrypoint_script(stage_name, runtime, entrypoint)
+        # Build RunSpec
+        run_spec = RunSpec(
+            stage_run_id=stage_run_id,
+            workspace_name=workspace,
+            stage_name=stage_name,
+            image=image_tag,
+            command=command,
+            env=goldfish_env,
+            profile=profile_name,
+            gpu_count=gpu_count,
+            gpu_type=gpu_type,
+            memory_gb=memory_gb,
+            cpu_count=cpu_count,
+            inputs=input_uris,
+            output_uri=output_uri,
+            spot=spot,
+        )
 
-            # Launch container using LocalExecutor
-            self.local_executor.launch_container(
-                image_tag=image_tag,
-                stage_run_id=stage_run_id,
-                entrypoint_script=entrypoint_script,
-                stage_config=stage_config,
-                work_dir=run_dir,
-                outputs_dir=outputs_dir,
-                goldfish_env=goldfish_env,
-                input_paths=inputs,  # Mount inputs directly from source locations
-            )
+        # Launch via run_backend protocol
+        handle = self.run_backend.launch(run_spec)
 
-            # State machine: LAUNCHING → RUNNING (LAUNCH_OK)
-            # Container launched successfully - transition to RUNNING
-            sm_transition(
-                self.db,
-                stage_run_id,
-                StageEvent.LAUNCH_OK,
-                SMEventContext(timestamp=datetime.now(UTC), source="executor"),
-            )
-
-        elif backend == "gce":
-            # Load stage config and resolve profile
-            stage_config_yaml = self._load_stage_config(workspace, stage_name)
-            profile = self._resolve_profile_from_config(stage_config_yaml)
-
-            # Prepare launch parameters
-            machine_type = "n1-standard-4"
-            gpu_type = None
-            gpu_count = 0
-            zones = None
-            use_capacity_search = False
-
-            if profile:
-                # Use profile for GCE launch
-                machine_type = profile["machine_type"]
-                gpu_info = profile.get("gpu", {})
-                if gpu_info.get("type") != "none":
-                    # Use type (e.g., "h100") not accelerator for filtering
-                    # gce_launcher filters by gpu.type, not accelerator
-                    gpu_type = gpu_info.get("type")
-                    gpu_count = gpu_info.get("count", 0)
-                zones = profile.get("zones")
-                use_capacity_search = True
-
-                # Update GCE launcher with profile as resource
-                self.gce_launcher.resources = [profile]
-
-            # Launch on GCE (gpu_preference from config is passed via GCELauncher init)
-            launch_result = self.gce_launcher.launch_instance(
-                image_tag=image_tag,
-                stage_run_id=stage_run_id,
-                entrypoint_script=self._build_entrypoint_script(stage_name, runtime, entrypoint),
-                stage_config=stage_config,
-                work_dir=self.dev_repo / ".goldfish" / "runs" / stage_run_id,
-                machine_type=machine_type,
-                gpu_type=gpu_type,
-                gpu_count=gpu_count,
-                zones=zones,
-                use_capacity_search=use_capacity_search,
-                goldfish_env=goldfish_env,
-            )
-
-            # Store the zone where the instance was launched for monitoring/cleanup
+        # Store backend handle for monitoring/cleanup (for backends with launch delay)
+        caps = self.run_backend.capabilities
+        if caps.has_launch_delay:
             self.db.set_stage_run_backend(
                 stage_run_id=stage_run_id,
-                backend_type="gce",
-                backend_handle=launch_result.instance_name,
-                instance_zone=launch_result.zone,
+                backend_type=backend,
+                backend_handle=handle.backend_handle,
+                instance_zone=handle.zone,
             )
 
-            # State machine: LAUNCHING → RUNNING (LAUNCH_OK)
-            # Instance is confirmed in RUNNING state (wait_for_instance_ready succeeded)
-            sm_transition(
-                self.db,
-                stage_run_id,
-                StageEvent.LAUNCH_OK,
-                SMEventContext(timestamp=datetime.now(UTC), source="executor"),
-            )
-        else:
-            raise GoldfishError(f"Backend {backend} not supported for launch")
+        # State machine: LAUNCHING → RUNNING (LAUNCH_OK)
+        sm_transition(
+            self.db,
+            stage_run_id,
+            StageEvent.LAUNCH_OK,
+            SMEventContext(timestamp=datetime.now(UTC), source="executor"),
+        )
 
     def _finalize_stage_run(self, stage_run_id: str, backend: str, status: str) -> None:
         """Handle terminal status: record outputs, fetch logs, transition state."""
@@ -2428,11 +2462,14 @@ echo "Stage completed successfully"
             except Exception:
                 tracker = None
 
+        # Use capability-based check for remote storage (GCS)
+        from goldfish.cloud.contracts import get_capabilities_for_backend
+
+        caps = get_capabilities_for_backend(backend)
         gcs_base = None
-        if backend == "gce" and self.config.gcs and self.config.gcs.bucket:
-            bucket = self.config.gcs.bucket
-            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
-            gcs_base = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/outputs"
+        bucket_uri = self._get_bucket_uri()
+        if caps.has_launch_delay and bucket_uri is not None:
+            gcs_base = str(bucket_uri.join("runs", stage_run_id, "outputs"))
 
         if status == StageState.COMPLETED:
             try:
@@ -2465,20 +2502,18 @@ echo "Stage completed successfully"
 
         logs = ""
         try:
-            if backend == "local":
-                logs = self.local_executor.get_container_logs(stage_run_id, tail_lines=STAGE_LOG_TAIL_FOR_FINALIZE)
-            elif backend == "gce":
-                logs = self.gce_launcher.get_instance_logs(stage_run_id, tail_lines=STAGE_LOG_TAIL_FOR_FINALIZE)
-                if not logs:
-                    logs = "[GCE logs unavailable - instance may have been deleted or logs not synced]"
+            handle = self._get_run_handle(stage_run_id)
+            logs = self.run_backend.get_logs(handle, tail=STAGE_LOG_TAIL_FOR_FINALIZE)
+            # Use capability-based message when logs unavailable for remote backends
+            if caps.has_launch_delay and not logs:
+                logs = caps.logs_unavailable_message
         except Exception as e:
             warnings.append(f"LOG_FETCH failed: {e}")
             logs = f"[Error fetching logs: {e}]"
 
-        if backend == "gce" and self.config.gcs and self.config.gcs.bucket:
-            bucket = self.config.gcs.bucket
-            bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
-            log_uri = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/train.log"
+        # Remote backends store logs in cloud storage
+        if caps.has_launch_delay and bucket_uri is not None:
+            log_uri = str(bucket_uri.join("runs", stage_run_id, "logs", "train.log"))
             # Also persist a local copy for quick access/debugging
             if logs is not None:
                 try:
@@ -2487,6 +2522,7 @@ echo "Stage completed successfully"
                     warnings.append("LOG_PERSIST failed")
                     pass
         else:
+            # Local backends persist logs locally
             log_uri = self._persist_logs(stage_run_id, logs) if logs is not None else None
 
         # Collect metrics from JSONL and store in database
@@ -2509,7 +2545,7 @@ echo "Stage completed successfully"
 
         # Run AI semantic review of outputs
         try:
-            self._run_post_run_svs_review(stage_run_id, backend)
+            self._run_post_run_svs_review(stage_run_id)
         except Exception as e:
             warnings.append(f"POST_RUN_REVIEW failed: {e}")
             logger.warning(f"Failed AI post-run review for {stage_run_id}: {e}")
@@ -2602,13 +2638,13 @@ echo "Stage completed successfully"
                     SMEventContext(timestamp=datetime.now(UTC), source="executor"),
                 )
 
-        # Clean up container after finalization (local backend only)
-        if backend == "local":
-            try:
-                self.local_executor.remove_container(stage_run_id)
-            except Exception:
-                warnings.append("CLEANUP failed")
-                pass  # Container may already be removed
+        # Clean up container after finalization
+        try:
+            handle = self._get_run_handle(stage_run_id)
+            self.run_backend.cleanup(handle)
+        except Exception:
+            warnings.append("CLEANUP failed")
+            pass  # Container may already be removed
 
     def wait_for_completion(self, stage_run_id: str, poll_interval: int = 5, timeout: int = 3600) -> str:
         """Wait for stage run to complete.
@@ -2626,81 +2662,65 @@ echo "Stage completed successfully"
         Raises:
             GoldfishError: If timeout exceeded or container not found
         """
-
         backend = self.config.jobs.backend
+        caps = self.run_backend.capabilities
 
         start = time.time()
         last_log: float = 0.0
         not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
 
+        # Get handle for status checks
+        handle = self._get_run_handle(stage_run_id)
+
         while True:
             elapsed = time.time() - start
             if elapsed >= timeout:
                 raise GoldfishError(f"Stage run {stage_run_id} timed out after {timeout} seconds")
-            if backend == "local":
-                status = self.local_executor.get_container_status(stage_run_id)
 
-                if status == StageState.RUNNING:
-                    # Still running - state machine already has state=RUNNING
-                    interval = self._poll_interval(int(elapsed))
-                    time.sleep(interval)
-                    continue
+            # Get status via run_backend protocol
+            try:
+                backend_status = self.run_backend.get_status(handle)
+                status = self._backend_status_to_stage_state(backend_status)
+            except NotFoundError:
+                status = "not_found"
 
-                elif status in (StageState.COMPLETED, StageState.FAILED):
-                    # State machine handles RUNNING → POST_RUN via EXIT_SUCCESS in _finalize_stage_run (v1.2)
-                    self._finalize_stage_run(stage_run_id, backend, status)
-                    return status
+            # Handle common statuses (same for all backends)
+            if status == StageState.RUNNING:
+                interval = self._poll_interval(int(elapsed))
+                time.sleep(interval)
+                continue
 
-                elif status == "not_found":
-                    # Grace period for container startup - Docker may not have created it yet
+            if status in (StageState.COMPLETED, StageState.FAILED):
+                self._finalize_stage_run(stage_run_id, backend, status)
+                return status
+
+            if status == "not_found":
+                # Handle based on backend capabilities
+                if not caps.has_launch_delay:
+                    # Fast backend (local): short grace period for startup
                     if elapsed < 10:
                         time.sleep(0.5)
                         continue
                     raise GoldfishError(f"Container {stage_run_id} not found")
-
                 else:
-                    # Unknown status
-                    raise GoldfishError(f"Unknown container status: {status}")
-
-            elif backend == "gce":
-                status = self.gce_launcher.get_instance_status(stage_run_id)
-
-                if status == StageState.RUNNING:
-                    # Still running - state machine already has state=RUNNING
-                    interval = self._poll_interval(int(elapsed))
-                    time.sleep(interval)
-                    continue
-
-                elif status in (StageState.COMPLETED, StageState.FAILED):
-                    # State machine handles RUNNING → POST_RUN via EXIT_SUCCESS in _finalize_stage_run (v1.2)
-                    self._finalize_stage_run(stage_run_id, backend, status)
-                    return status
-
-                elif status == "not_found":
+                    # Slow backend (GCE): longer timeouts with preemption handling
                     now = time.time()
                     if now - last_log >= 60:
                         logger.info(
-                            f"Instance {stage_run_id} not yet visible in GCE API "
+                            f"Instance {stage_run_id} not yet visible "
                             f"(elapsed: {int(elapsed)}s, may be launching or searching capacity)"
                         )
                         last_log = now
 
-                    # Check state before timeout handling
                     row = self.db.get_stage_run(stage_run_id)
                     state_val = row.get("state") if row else None
+                    instance_ran = state_val == StageState.RUNNING.value
 
-                    # Check if instance ever ran by looking at state or GCS artifacts
-                    # Exit code in GCS proves the instance ran, even if state wasn't updated
-                    exit_result = self.gce_launcher._get_exit_code(stage_run_id)
-                    instance_ran = state_val == StageState.RUNNING.value or exit_result.exists
-
-                    # Use longer timeout for BUILD/LAUNCH phases (GPU provisioning can take 15+ minutes)
-                    launch_timeout = int(os.getenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "1200"))  # 20 min default
-                    # Allow tests/operators to force immediate failure by setting NOT_FOUND timeout to 0.
+                    # Longer timeout for BUILD/LAUNCH phases
+                    launch_timeout = int(os.getenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "1200"))
                     if not_found_timeout <= 0:
                         effective_timeout = 0
                     else:
-                        # In BUILDING/LAUNCHING state and no evidence of running, use longer timeout
                         in_pre_run_state = state_val in (StageState.BUILDING.value, StageState.LAUNCHING.value)
                         effective_timeout = (
                             launch_timeout if in_pre_run_state and not instance_ran else not_found_timeout
@@ -2708,38 +2728,20 @@ echo "Stage completed successfully"
 
                     if elapsed >= effective_timeout:
                         if instance_ran:
-                            # Instance ran and got preempted - finalize based on exit code
-                            exit_code_val = exit_result.code if exit_result.exists else None
                             logger.warning(
-                                f"GCE instance {stage_run_id} disappeared after running "
-                                f"(likely spot preemption), finalizing with exit_code={exit_code_val}"
+                                f"Instance {stage_run_id} disappeared after running "
+                                f"(likely preemption, no exit code found)"
                             )
-                            resolved = (
-                                StageState.COMPLETED
-                                if (exit_result.exists and exit_result.code == 0 and not exit_result.gcs_error)
-                                else StageState.FAILED
-                            )
-                            error_msg = (
-                                f"Instance preempted/terminated unexpectedly (exit_code={exit_code_val})"
-                                if resolved == StageState.FAILED
-                                else None
-                            )
-                            # Update error metadata if needed (state machine handles POST_RUN transition v1.2)
-                            if error_msg:
-                                self.db.update_stage_run_status(
-                                    stage_run_id=stage_run_id,
-                                    error=error_msg,
-                                )
-                            self._finalize_stage_run(stage_run_id, backend, resolved)
-                            return resolved
+                            error_msg = "Instance preempted/terminated unexpectedly (no exit code found)"
+                            self.db.update_stage_run_status(stage_run_id=stage_run_id, error=error_msg)
+                            self._finalize_stage_run(stage_run_id, backend, StageState.FAILED)
+                            return StageState.FAILED
                         else:
-                            # Never ran - mark as terminated via state machine
                             logger.error(
-                                f"GCE instance {stage_run_id} not found after {not_found_timeout}s "
+                                f"Instance {stage_run_id} not found after {not_found_timeout}s "
                                 f"(state={state_val}), marking as terminated"
                             )
                             error_msg = f"Instance not found after {not_found_timeout}s (may have failed to launch)"
-                            # State machine: LAUNCHING → TERMINATED (instance never ran)
                             sm_transition(
                                 self.db,
                                 stage_run_id,
@@ -2760,14 +2762,8 @@ echo "Stage completed successfully"
                     time.sleep(poll_interval)
                     continue
 
-                else:
-                    # Unknown status
-                    raise GoldfishError(f"Unknown instance status: {status}")
-
-            else:
-                raise GoldfishError(f"Backend {backend} not supported for monitoring")
-
-        # Should not reach here
+            # Unknown status
+            raise GoldfishError(f"Unknown status: {status}")
 
     def refresh_status_once(self, stage_run_id: str) -> str | None:
         """Single backend check to advance state/logs/outputs without blocking."""
@@ -2787,90 +2783,66 @@ echo "Stage completed successfully"
     def _refresh_status_once_unlocked(self, stage_run_id: str) -> str | None:
         """Internal implementation of refresh_status_once without locking."""
         backend = self.config.jobs.backend
+        caps = self.run_backend.capabilities
 
-        if backend == "local":
-            status = self.local_executor.get_container_status(stage_run_id)
-            if status == StageState.RUNNING:
-                # State machine already has state=RUNNING, no update needed
-                pass
-            elif status in (StageState.COMPLETED, StageState.FAILED):
-                # Guard against double-finalize by checking state (source of truth)
-                current = self.db.get_stage_run(stage_run_id)
-                current_state = current.get("state") if current else None
-                if current and current_state not in {s.value for s in TERMINAL_STATES}:
-                    # State machine handles RUNNING → POST_RUN in _finalize_stage_run (v1.2)
-                    self._finalize_stage_run(stage_run_id, backend, status)
-            return status
+        # Get status via run_backend protocol
+        try:
+            handle = self._get_run_handle(stage_run_id)
+            backend_status = self.run_backend.get_status(handle)
+            status = self._backend_status_to_stage_state(backend_status)
+        except NotFoundError:
+            status = "not_found"
 
-        if backend == "gce":
-            status = self.gce_launcher.get_instance_status(stage_run_id)
-            if status == StageState.RUNNING:
-                # State machine already has state=RUNNING, no update needed
-                pass
-            elif status in (StageState.COMPLETED, StageState.FAILED):
-                # Guard against double-finalize by checking state (source of truth)
-                current = self.db.get_stage_run(stage_run_id)
-                current_state = current.get("state") if current else None
-                if current and current_state not in {s.value for s in TERMINAL_STATES}:
-                    # State machine handles RUNNING → POST_RUN in _finalize_stage_run (v1.2)
-                    self._finalize_stage_run(stage_run_id, backend, status)
-            elif status == "not_found":
-                row = self.db.get_stage_run(stage_run_id)
-                if not row:
-                    return status
+        # Handle common statuses (same for all backends)
+        if status == StageState.RUNNING:
+            # State machine already has state=RUNNING, no update needed
+            pass
+        elif status in (StageState.COMPLETED, StageState.FAILED):
+            # Guard against double-finalize by checking state (source of truth)
+            current = self.db.get_stage_run(stage_run_id)
+            current_state = current.get("state") if current else None
+            if current and current_state not in {s.value for s in TERMINAL_STATES}:
+                self._finalize_stage_run(stage_run_id, backend, status)
+        elif status == "not_found" and caps.has_launch_delay:
+            # Slow backend: handle not_found with timeout-based recovery
+            row = self.db.get_stage_run(stage_run_id)
+            if not row:
+                return status
 
-                state_val = row.get("state")
-                not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
-                started_at = row.get("started_at")
-                elapsed = float(not_found_timeout)
-                if started_at:
-                    try:
-                        started_dt = datetime.fromisoformat(started_at)
-                        elapsed = (datetime.now(UTC) - started_dt).total_seconds()
-                    except ValueError:
-                        elapsed = float(not_found_timeout)
+            state_val = row.get("state")
+            not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
+            started_at = row.get("started_at")
+            elapsed = float(not_found_timeout)
+            if started_at:
+                try:
+                    started_dt = datetime.fromisoformat(started_at)
+                    elapsed = (datetime.now(UTC) - started_dt).total_seconds()
+                except ValueError:
+                    elapsed = float(not_found_timeout)
 
-                # Check for GCS artifacts - proves instance ran even if state wasn't updated
-                exit_result = self.gce_launcher._get_exit_code(stage_run_id)
-                instance_ran = state_val == StageState.RUNNING.value or exit_result.exists
+            instance_ran = state_val == StageState.RUNNING.value
 
-                # If in build/launch state and no evidence of running, skip recovery
-                in_pre_run_state = state_val in (StageState.BUILDING.value, StageState.LAUNCHING.value)
-                if in_pre_run_state and not instance_ran:
-                    return status
+            # If in build/launch state and no evidence of running, skip recovery
+            in_pre_run_state = state_val in (StageState.BUILDING.value, StageState.LAUNCHING.value)
+            if in_pre_run_state and not instance_ran:
+                return status
 
-                if elapsed < not_found_timeout:
-                    return status
+            if elapsed < not_found_timeout:
+                return status
 
-                # Instance disappeared after timeout - finalize it
-                resolved = (
-                    StageState.COMPLETED
-                    if (exit_result.exists and exit_result.code == 0 and not exit_result.gcs_error)
-                    else StageState.FAILED
-                )
+            # Instance disappeared after timeout - finalize as FAILED
+            current = self.db.get_stage_run(stage_run_id)
+            current_state = current.get("state") if current else None
+            if current and current_state not in {s.value for s in TERMINAL_STATES}:
+                if instance_ran:
+                    error_msg = "Instance preempted/terminated unexpectedly (no exit code found)"
+                else:
+                    error_msg = f"Instance not found after {not_found_timeout}s (may have failed to launch)"
+                self.db.update_stage_run_status(stage_run_id=stage_run_id, error=error_msg)
+                self._finalize_stage_run(stage_run_id, backend, StageState.FAILED)
+            return StageState.FAILED
 
-                # Guard against double-finalize by checking state (source of truth)
-                current = self.db.get_stage_run(stage_run_id)
-                current_state = current.get("state") if current else None
-                if current and current_state not in {s.value for s in TERMINAL_STATES}:
-                    error_msg = None
-                    if resolved == StageState.FAILED:
-                        if instance_ran:
-                            exit_code_val = exit_result.code if exit_result.exists else None
-                            error_msg = f"Instance preempted/terminated unexpectedly (exit_code={exit_code_val})"
-                        else:
-                            error_msg = f"Instance not found after {not_found_timeout}s (may have failed to launch)"
-                    # Update error metadata if needed (state machine handles state in _finalize_stage_run)
-                    if error_msg:
-                        self.db.update_stage_run_status(
-                            stage_run_id=stage_run_id,
-                            error=error_msg,
-                        )
-                    self._finalize_stage_run(stage_run_id, backend, resolved)
-                return resolved
-            return status
-
-        return None
+        return status
 
     # --- Pre-run Review Methods ---
 
@@ -3156,7 +3128,7 @@ echo "Stage completed successfully"
         """List contents (files and folders) of a storage location.
 
         Args:
-            path: Storage location (gs://... or local path)
+            path: Storage location (cloud URI or local path)
             limit: Maximum number of items to return
 
         Returns:
@@ -3165,12 +3137,11 @@ echo "Stage completed successfully"
         if not path:
             return []
 
-        # 1. Cloud Storage Path (gs://)
-        if path.startswith("gs://"):
+        # 1. Cloud Storage Path (parse any supported scheme)
+        if "://" in path and not path.startswith("file://"):
             try:
                 uri = StorageURI.parse(path)
-                storage = self._adapter_factory.create_storage()
-                uris = storage.list_prefix(uri)
+                uris = self.storage.list_prefix(uri)
 
                 # Make paths relative to the prefix
                 results = []
@@ -3181,21 +3152,6 @@ echo "Stage completed successfully"
                         results.append(rel_path)
                 return sorted(results)
             except Exception as e:
-                # Fall back to CLI listing
-                try:
-                    cmd = ["gsutil", "ls", "-r", path]
-                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-                    if proc.returncode == 0:
-                        lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
-                        results = []
-                        for ln in lines:
-                            if ln.startswith(path):
-                                rel = ln[len(path) :].lstrip("/")
-                                if rel:
-                                    results.append(rel)
-                        return sorted(results)[:limit]
-                except Exception:
-                    pass
                 logger.debug(f"Failed to list storage contents for {path}: {e}")
                 return [f"[Error listing storage contents: {e}]"]
 

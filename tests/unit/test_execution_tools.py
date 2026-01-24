@@ -76,7 +76,7 @@ class TestLogsFollowMode:
             patch("goldfish.server_tools.execution_tools._get_stage_executor") as mock_executor,
         ):
             mock_db.get_stage_run.return_value = mock_stage_run
-            mock_executor.return_value.local_executor.get_container_logs.return_value = full_logs
+            mock_executor.return_value.run_backend.get_logs.return_value = full_logs
 
             result = logs("stage-abc123", tail=3, follow=True)
 
@@ -107,14 +107,14 @@ class TestLogsFollowMode:
             patch("goldfish.server_tools.execution_tools._get_stage_executor") as mock_executor,
         ):
             mock_db.get_stage_run.return_value = mock_stage_run
-            mock_executor.return_value.local_executor.get_container_logs.return_value = initial_logs
+            mock_executor.return_value.run_backend.get_logs.return_value = initial_logs
 
             # First call - sets cursor
             result1 = logs("stage-abc123", tail=10, follow=True)
             assert "line1" in result1["logs"]
 
             # Simulate more logs appearing
-            mock_executor.return_value.local_executor.get_container_logs.return_value = updated_logs
+            mock_executor.return_value.run_backend.get_logs.return_value = updated_logs
 
             # Second call - should only return new content
             result2 = logs("stage-abc123", tail=10, follow=True)
@@ -137,7 +137,7 @@ class TestLogsFollowMode:
             patch("goldfish.server_tools.execution_tools._get_stage_executor") as mock_executor,
         ):
             mock_db.get_stage_run.return_value = mock_stage_run
-            mock_executor.return_value.local_executor.get_container_logs.return_value = "logs\n"
+            mock_executor.return_value.run_backend.get_logs.return_value = "logs\n"
 
             # First call sets cursor
             logs("stage-abc123", follow=True)
@@ -164,7 +164,7 @@ class TestLogsFollowMode:
             patch("goldfish.server_tools.execution_tools._get_stage_executor") as mock_executor,
         ):
             mock_db.get_stage_run.return_value = mock_stage_run
-            mock_executor.return_value.local_executor.get_container_logs.return_value = same_logs
+            mock_executor.return_value.run_backend.get_logs.return_value = same_logs
 
             # First call
             logs("stage-abc123", follow=True)
@@ -188,7 +188,7 @@ class TestLogsFollowMode:
             patch("goldfish.server_tools.execution_tools._get_stage_executor") as mock_executor,
         ):
             mock_db.get_stage_run.return_value = mock_stage_run
-            mock_executor.return_value.local_executor.get_container_logs.return_value = full_logs
+            mock_executor.return_value.run_backend.get_logs.return_value = full_logs
 
             # Call without follow
             result = logs("stage-abc123", tail=10)
@@ -216,7 +216,7 @@ class TestLogsFollowMode:
             patch("goldfish.server_tools.execution_tools._get_stage_executor") as mock_executor,
         ):
             mock_db.get_stage_run.return_value = mock_stage_run
-            mock_executor.return_value.local_executor.get_container_logs.return_value = "logs\n"
+            mock_executor.return_value.run_backend.get_logs.return_value = "logs\n"
 
             result = logs("stage-abc123", follow=True)
 
@@ -247,16 +247,16 @@ class TestLogsFollowMode:
             patch("goldfish.server_tools.execution_tools._get_stage_executor") as mock_executor,
         ):
             mock_db.get_stage_run.return_value = mock_stage_run
-            mock_executor.return_value.local_executor.get_container_logs.return_value = logs_v1
+            mock_executor.return_value.run_backend.get_logs.return_value = logs_v1
 
             result1 = logs("stage-abc123", follow=True)
             cursor1 = result1["cursor_position"]
 
-            mock_executor.return_value.local_executor.get_container_logs.return_value = logs_v2
+            mock_executor.return_value.run_backend.get_logs.return_value = logs_v2
             result2 = logs("stage-abc123", follow=True)
             cursor2 = result2["cursor_position"]
 
-            mock_executor.return_value.local_executor.get_container_logs.return_value = logs_v3
+            mock_executor.return_value.run_backend.get_logs.return_value = logs_v3
             result3 = logs("stage-abc123", follow=True)
             cursor3 = result3["cursor_position"]
 
@@ -357,7 +357,7 @@ class TestCursorCleanup:
             patch("goldfish.server_tools.execution_tools._get_stage_executor") as mock_executor,
         ):
             mock_db.get_stage_run.return_value = mock_stage_run
-            mock_executor.return_value.local_executor.get_container_logs.return_value = "log\n"
+            mock_executor.return_value.run_backend.get_logs.return_value = "log\n"
 
             logs("stage-test", follow=True)
 
@@ -397,7 +397,7 @@ class TestCursorCleanup:
             patch("goldfish.server_tools.execution_tools._get_stage_executor") as mock_executor,
         ):
             mock_db.get_stage_run.return_value = mock_stage_run
-            mock_executor.return_value.local_executor.get_container_logs.return_value = full_logs
+            mock_executor.return_value.run_backend.get_logs.return_value = full_logs
 
             errors: list[Exception] = []
 

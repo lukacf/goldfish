@@ -13,6 +13,7 @@ from typing import Any, cast
 
 from pydantic import ValidationError
 
+from goldfish.cloud.contracts import RunHandle
 from goldfish.errors import (
     GoldfishError,
     validate_reason,
@@ -89,13 +90,15 @@ def _overdrive_ack_timeout(row: dict) -> float:
     override = _read_overdrive_ack_timeout()
     if override:
         return override
+    from goldfish.cloud.contracts import get_capabilities_for_backend
+
     backend = row.get("backend_type") or "local"
     state = row.get("state")
-    if backend == "local":
-        return 1.0
-    if backend == "gce" and state == StageState.RUNNING.value:
-        return 4.0
-    return 2.0
+    caps = get_capabilities_for_backend(backend)
+    # Use running timeout if already running, otherwise default
+    if state == StageState.RUNNING.value:
+        return caps.ack_timeout_running_seconds
+    return caps.ack_timeout_seconds
 
 
 def _cleanup_stale_cursors() -> None:
@@ -375,11 +378,16 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
         except Exception:
             pass
 
+        from goldfish.cloud.contracts import get_capabilities_for_backend
+
         state = row.get("state")
-        backend_type = row.get("backend_type")
-        if backend_type == "gce" and state in {StageState.BUILDING.value, StageState.LAUNCHING.value}:
+        backend_type = row.get("backend_type") or "local"
+        caps = get_capabilities_for_backend(backend_type)
+
+        # Check for launch delay states (only backends with has_launch_delay)
+        if caps.has_launch_delay and state in {StageState.BUILDING.value, StageState.LAUNCHING.value}:
             sync_status = "starting"
-        elif backend_type == "gce" and state == StageState.POST_RUN.value:
+        elif caps.has_launch_delay and state == StageState.POST_RUN.value:
             sync_status = "finalizing"
         elif state not in active_states:
             # State changed to terminal after refresh - no longer active
@@ -393,11 +401,16 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
                 sig = MetadataSignal(command="sync", request_id=req_id, payload={"run_id": run_id})
                 target = row.get("backend_handle")
 
-                # If GCE, resolve zone to ensure correct targeting
-                if row.get("backend_type") == "gce" and target:
+                # Resolve zone based on backend's zone_resolution_method
+                if caps.zone_resolution_method == "handle" and target:
                     try:
                         stage_exec = _get_stage_executor()
-                        zone = stage_exec.gce_launcher._find_instance_zone(target)
+                        handle = RunHandle(
+                            stage_run_id=run_id,
+                            backend_type="gce",
+                            backend_handle=target,
+                        )
+                        zone = stage_exec.run_backend.get_zone(handle)
                         if zone:
                             target = f"zones/{zone}/instances/{target}"
                     except Exception as e:
@@ -420,7 +433,8 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
                         break
                     time.sleep(0.1)
 
-                if sync_status == "timeout" and row.get("backend_type") == "gce":
+                # For backends where timeout means "sync pending" (not failure)
+                if sync_status == "timeout" and caps.timeout_becomes_pending:
                     sync_status = "pending"
             except Exception as e:
                 logger.debug(f"Failed to trigger sync signal: {e}")
@@ -801,19 +815,22 @@ def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = 
 
     # Fallback to backend live logs
     if log_content is None:
-        backend = row.get("backend_type") or "local"
-        handle = row.get("backend_handle") or run_id
+        from goldfish.cloud.contracts import RunHandle, get_capabilities_for_backend
+
+        backend_type = row.get("backend_type") or "local"
+        backend_handle = row.get("backend_handle") or run_id
+        caps = get_capabilities_for_backend(backend_type)
         try:
-            if backend == "local":
-                log_content = _get_stage_executor().local_executor.get_container_logs(
-                    handle, tail_lines=tail, since=since
-                )
-            elif backend == "gce":
-                log_content = _get_stage_executor().gce_launcher.get_instance_logs(handle, tail_lines=tail, since=since)
-                if log_content is None:
-                    log_content = "[GCE logs unavailable - not yet synced]"
-            else:
-                log_content = "Logs not available"
+            # Construct handle from DB row for backend lookup
+            handle = RunHandle(
+                stage_run_id=run_id,
+                backend_type=backend_type,
+                backend_handle=backend_handle,
+                zone=row.get("zone"),
+            )
+            log_content = _get_stage_executor().run_backend.get_logs(handle, tail=tail)
+            if log_content is None or log_content == "":
+                log_content = f"[{caps.logs_unavailable_message}]"
         except Exception as e:
             # If backend lookup fails, and run failed, use error field
             # Check state (source of truth), not legacy status

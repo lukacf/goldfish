@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
+from goldfish.cloud.contracts import StorageURI
 from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.state_machine.types import StageState
 
@@ -94,9 +95,9 @@ def test_sync_metrics_if_running_skips_when_locked(test_db, test_config, tmp_pat
     state = executor._get_metrics_sync_state(run_id)
     state.sync_lock.acquire()
     try:
-        executor._sync_metrics_file_from_storage = MagicMock()
+        executor._sync_metrics_file_from_storage_uri = MagicMock()
         executor.sync_metrics_if_running(run_id)
-        executor._sync_metrics_file_from_storage.assert_not_called()
+        executor._sync_metrics_file_from_storage_uri.assert_not_called()
     finally:
         state.sync_lock.release()
 
@@ -104,6 +105,7 @@ def test_sync_metrics_if_running_skips_when_locked(test_db, test_config, tmp_pat
 def test_sync_metrics_file_resets_tempfile_on_zero_offset(test_db, test_config, tmp_path, monkeypatch):
     """Zero-offset sync should reset any stale temp file before appending."""
     run_id = _create_running_stage_run(test_db)
+    mock_storage = MagicMock()
     executor = StageExecutor(
         db=test_db,
         config=test_config,
@@ -111,32 +113,42 @@ def test_sync_metrics_file_resets_tempfile_on_zero_offset(test_db, test_config, 
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        storage=mock_storage,
     )
 
     data = b'{"type": "metric", "name": "loss", "value": 0.1, "timestamp": "2024-01-01T00:00:00Z"}\n'
-    mock_storage = _create_mock_storage(size=len(data), data=data)
+
+    # Configure mock storage behavior
+    mock_storage.get_size = MagicMock(return_value=len(data))
+
+    def _download_to_file(uri, local_path):
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(data)
+        return True
+
+    mock_storage.download_to_file = MagicMock(side_effect=_download_to_file)
 
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
 
     state = executor._get_metrics_sync_state(run_id)
     state.offset = 0
 
-    gcs_path = "gs://bucket/runs/stage-acde123/logs/metrics.jsonl"
-    local_path = (
-        Path(tmp_path) / "goldfish_metrics_live" / gcs_path.replace("gs://", "").replace("/", "_") / "metrics.jsonl"
-    )
+    uri = StorageURI("gs", "bucket", "runs/stage-acde123/logs/metrics.jsonl")
+    # Create a stale temp file with old data
+    safe_name = f"{uri.bucket}_{uri.path}".replace("/", "_")
+    local_path = Path(tmp_path) / "goldfish_metrics_live" / safe_name / "metrics.jsonl"
     local_path.parent.mkdir(parents=True, exist_ok=True)
     local_path.write_text("old\n")
 
-    with patch.object(executor._adapter_factory, "create_storage", return_value=mock_storage):
-        path, _, _ = executor._sync_metrics_file_from_storage(gcs_path, state)
-        assert path == local_path
-        assert local_path.read_bytes() == data
+    path, _, _ = executor._sync_metrics_file_from_storage_uri(uri, state)
+    assert path == local_path
+    assert local_path.read_bytes() == data
 
 
-def test_sync_metrics_file_cli_fallback(test_db, test_config, tmp_path, monkeypatch):
-    """Fallback CLI download should populate local metrics file when storage adapter fails."""
+def test_sync_metrics_file_storage_error_returns_warning(test_db, test_config, tmp_path, monkeypatch):
+    """Storage errors should return warning instead of crashing."""
     run_id = _create_running_stage_run(test_db)
+    mock_storage = MagicMock()
     executor = StageExecutor(
         db=test_db,
         config=test_config,
@@ -144,33 +156,21 @@ def test_sync_metrics_file_cli_fallback(test_db, test_config, tmp_path, monkeypa
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        storage=mock_storage,
     )
 
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
 
-    data = b'{"type": "metric", "name": "loss", "value": 0.2, "timestamp": "2024-01-01T00:00:00Z"}\n'
-    gcs_path = "gs://bucket/runs/stage-acde123/logs/metrics.jsonl"
-    # CLI fallback uses gcs_path.replace("gs://", "").replace("/", "_") for the dir name
-    local_path = (
-        Path(tmp_path) / "goldfish_metrics_live" / gcs_path.replace("gs://", "").replace("/", "_") / "metrics.jsonl"
-    )
-
-    def _fake_cli_download(_gcs: str, destination: Path) -> bool:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(data)
-        return True
-
     # Mock storage that fails
-    mock_storage = _create_mock_storage()
-    mock_storage.get_size.side_effect = Exception("Storage unavailable")
+    mock_storage.get_size = MagicMock(side_effect=Exception("Storage unavailable"))
 
-    with patch.object(executor._adapter_factory, "create_storage", return_value=mock_storage):
-        monkeypatch.setattr(executor, "_download_metrics_from_storage_cli", _fake_cli_download)
+    state = executor._get_metrics_sync_state(run_id)
+    uri = StorageURI("gs", "bucket", "runs/stage-acde123/logs/metrics.jsonl")
 
-        state = executor._get_metrics_sync_state(run_id)
-        path, _, _ = executor._sync_metrics_file_from_storage(gcs_path, state)
-        assert path == local_path
-        assert path.read_bytes() == data
+    path, offset, warning = executor._sync_metrics_file_from_storage_uri(uri, state)
+    # Should return warning, not crash
+    assert warning is not None
+    assert "Storage unavailable" in warning
 
 
 def test_sync_metrics_if_running_warns_missing_gcs_bucket(test_db, test_config, tmp_path):

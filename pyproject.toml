@@ -58,6 +58,7 @@ addopts = "--strict-markers --tb=short"
 markers = [
     "slow: Tests that take more than 10 seconds",
     "deluxe_gce: Deluxe E2E tests with real GCE execution (opt-in, requires cloud resources)",
+    "requires_docker: Tests requiring Docker daemon to be running",
 ]
 
 [tool.coverage.run]

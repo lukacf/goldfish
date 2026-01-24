@@ -90,6 +90,10 @@ class StorageURI:
         if ".." in path or ".." in bucket:
             raise ValueError(f"Path traversal not allowed in URI: {uri}")
 
+        # Validate cloud URIs have non-empty bucket
+        if scheme in ("gs", "s3") and not bucket:
+            raise ValueError(f"Cloud URI must have bucket (got empty bucket in {uri})")
+
         return cls(scheme, bucket, path)
 
     def __str__(self) -> str:
@@ -142,6 +146,9 @@ class RunStatus(Enum):
 
     # Active states
     RUNNING = "running"  # Container/instance is executing
+
+    # Unknown state (API errors, connection issues)
+    UNKNOWN = "unknown"  # Status cannot be determined
 
     # Terminal states (success)
     COMPLETED = "completed"  # Exit code 0
@@ -231,6 +238,72 @@ class BackendCapabilities:
     supports_metrics: bool = False  # Metrics collection during run
     max_run_duration_hours: int | None = None  # None = unlimited
 
+    # Sync behavior - used by callers to adjust timeouts and messaging
+    ack_timeout_seconds: float = 1.0  # Default ACK timeout for sync operations
+    ack_timeout_running_seconds: float = 1.0  # ACK timeout when already running
+    has_launch_delay: bool = False  # Whether backend has delay between launch and running
+    logs_unavailable_message: str = "Logs not available"  # Message when logs can't be fetched
+    timeout_becomes_pending: bool = False  # ACK timeout means "sync pending", not failure
+    status_message_for_preparing: str = "Preparing..."  # Message for PREPARING status
+    zone_resolution_method: str = "config"  # "config" = use config zones, "handle" = use handle.zone
+
+
+# Default capabilities per backend type - used when backend instance not available
+# These MUST match the values set in the actual backend implementations
+_LOCAL_DEFAULT_CAPABILITIES = BackendCapabilities(
+    supports_gpu=False,  # Dynamic, but default False
+    supports_spot=False,
+    supports_preemption=True,
+    supports_preemption_detection=False,  # Dynamic, but default False
+    supports_live_logs=True,
+    supports_metrics=False,
+    max_run_duration_hours=None,
+    ack_timeout_seconds=1.0,
+    ack_timeout_running_seconds=1.0,
+    has_launch_delay=False,
+    logs_unavailable_message="Logs not available",
+    timeout_becomes_pending=False,
+    status_message_for_preparing="Starting container...",
+    zone_resolution_method="config",
+)
+
+_GCE_DEFAULT_CAPABILITIES = BackendCapabilities(
+    supports_gpu=True,
+    supports_spot=True,
+    supports_preemption=True,
+    supports_preemption_detection=True,
+    supports_live_logs=True,
+    supports_metrics=True,
+    max_run_duration_hours=24,
+    ack_timeout_seconds=3.0,
+    ack_timeout_running_seconds=4.0,
+    has_launch_delay=True,
+    logs_unavailable_message="Logs not yet synced from GCE",
+    timeout_becomes_pending=True,
+    status_message_for_preparing="GCE instance provisioning...",
+    zone_resolution_method="handle",
+)
+
+
+def get_capabilities_for_backend(backend_type: str) -> BackendCapabilities:
+    """Get default capabilities for a backend type.
+
+    This is used when we need capabilities based on a stored backend_type
+    string (e.g., from a database row) without access to the actual backend
+    instance.
+
+    Args:
+        backend_type: Backend type string ("local" or "gce")
+
+    Returns:
+        Default BackendCapabilities for that backend type.
+        Returns local defaults for unknown backend types.
+    """
+    if backend_type == "gce":
+        return _GCE_DEFAULT_CAPABILITIES
+    # Default to local capabilities for unknown types
+    return _LOCAL_DEFAULT_CAPABILITIES
+
 
 @dataclass
 class RunSpec:
@@ -253,6 +326,7 @@ class RunSpec:
     # Resources
     profile: str = "cpu-small"  # Resource profile name
     gpu_count: int = 0
+    gpu_type: str | None = None  # GPU type (e.g., "nvidia-tesla-t4", "nvidia-h100-80gb")
     memory_gb: float = 4.0
     cpu_count: float = 2.0
 
@@ -304,9 +378,14 @@ class RunHandle:
         Security: Validates all fields before use to prevent injection
         when handle data comes from untrusted sources (DB, API, etc.).
         """
+        # Validate backend_handle is not None (would become "None" string via str())
+        raw_handle = data.get("backend_handle")
+        if raw_handle is None:
+            raise ValueError("backend_handle cannot be None in RunHandle.from_dict")
+
         stage_run_id = str(data["stage_run_id"])
         backend_type = str(data["backend_type"])
-        backend_handle = str(data["backend_handle"])
+        backend_handle = str(raw_handle)
 
         # Validate to prevent injection attacks via deserialized data
         validate_stage_run_id(stage_run_id)

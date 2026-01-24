@@ -121,7 +121,11 @@ class AdapterFactory:
                     preemption_grace_period_seconds=30,
                     zone_availability={"local-zone-1": True},
                 )
-            return LocalRunBackend(config=config)
+            # Inject storage for GCS input downloads
+            # We know this is a local backend, so create_storage() returns LocalObjectStorage
+            storage = self.create_storage()
+            assert isinstance(storage, LocalObjectStorage), "Local backend requires LocalObjectStorage"
+            return LocalRunBackend(storage=storage, config=config)
 
         elif self._backend_type == "gce":
             from goldfish.cloud.adapters.gcp.run_backend import GCERunBackend
@@ -286,3 +290,35 @@ def get_adapter_factory(config: GoldfishConfig) -> AdapterFactory:
         image_registry = factory.create_image_registry()
     """
     return AdapterFactory(config)
+
+
+def create_backend_for_cleanup(backend_type: str) -> RunBackend:
+    """Create a RunBackend for cleanup operations (terminate/cleanup).
+
+    This factory function creates a minimal RunBackend based on stored backend_type.
+    Used by cancel operations where we only need terminate() capability.
+
+    Unlike AdapterFactory.create_run_backend() which uses config, this creates
+    a backend just for termination based on the stored backend_type in the database.
+
+    Args:
+        backend_type: Backend type string ("local" or "gce").
+
+    Returns:
+        RunBackend implementation that can terminate runs.
+
+    Raises:
+        ValueError: If backend_type is unknown.
+    """
+    if backend_type == "local":
+        return LocalRunBackend()
+
+    elif backend_type == "gce":
+        from goldfish.cloud.adapters.gcp.run_backend import GCERunBackend
+
+        # For cleanup, GCERunBackend needs minimal config
+        # It will use gcloud CLI which handles auth/project from environment
+        return GCERunBackend()
+
+    else:
+        raise ValueError(f"Unknown backend type for cleanup: {backend_type}")

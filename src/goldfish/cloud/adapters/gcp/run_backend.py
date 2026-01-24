@@ -7,7 +7,7 @@ All GCE-specific code is contained in this adapter.
 from __future__ import annotations
 
 import logging
-import tempfile
+import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,6 +21,7 @@ from goldfish.cloud.contracts import (
 from goldfish.errors import CapacityError, LaunchError, NotFoundError
 from goldfish.infra.gce_launcher import GCELauncher
 from goldfish.state_machine.types import StageState
+from goldfish.validation import ValidationError
 
 if TYPE_CHECKING:
     pass
@@ -86,6 +87,14 @@ class GCERunBackend:
             supports_live_logs=True,
             supports_metrics=True,
             max_run_duration_hours=24,
+            # GCE backend sync behavior - network latency, async log sync
+            ack_timeout_seconds=3.0,  # GCE needs longer timeouts due to network latency
+            ack_timeout_running_seconds=4.0,
+            has_launch_delay=True,  # PROVISIONING/STAGING states before RUNNING
+            logs_unavailable_message="Logs not yet synced from GCE",
+            timeout_becomes_pending=True,  # ACK timeout means "sync pending", not failure
+            status_message_for_preparing="GCE instance provisioning...",
+            zone_resolution_method="handle",  # GCE zone comes from handle.zone
         )
 
     def launch(self, spec: RunSpec) -> RunHandle:
@@ -98,13 +107,30 @@ class GCERunBackend:
             Handle to the launched instance.
 
         Raises:
+            ValidationError: If any input has non-GCS (non-gs://) scheme.
             CapacityError: If no capacity available in any zone.
             LaunchError: If instance launch fails.
         """
+        # Validate input schemes - GCE only supports GCS (gs://) inputs
+        # GCELauncher silently skips non-GCS inputs during staging, causing
+        # confusing runtime failures when inputs are missing.
+        for input_name, uri in spec.inputs.items():
+            if uri.scheme != "gs":
+                raise ValidationError(
+                    f"GCE backend only supports GCS (gs://) inputs. "
+                    f"Input '{input_name}' has scheme '{uri.scheme}://'",
+                    value=str(uri),
+                    field=input_name,
+                )
+
         try:
+            # Serialize StorageURIs to strings for GCELauncher
+            # GCELauncher expects inputs as strings (gs://...), not StorageURI objects
+            serialized_inputs = {name: str(uri) for name, uri in spec.inputs.items()}
+
             # Build stage config from spec
             stage_config = {
-                "inputs": spec.inputs,
+                "inputs": serialized_inputs,
                 "compute": {
                     "max_runtime_seconds": spec.timeout_seconds,
                 },
@@ -118,11 +144,12 @@ class GCERunBackend:
             # includes entrypoint_script, work_dir, etc. For protocol compliance,
             # we construct minimal required arguments.
 
-            # Create a minimal work directory
-            work_dir = Path(tempfile.mkdtemp(prefix=f"goldfish-{spec.stage_run_id}-"))
+            # Use dummy work_dir - GCELauncher doesn't actually use it
+            # (all inputs/outputs are handled via GCS)
+            work_dir = Path("/tmp")
 
             # Build entrypoint from command
-            entrypoint_script = " ".join(spec.command) if spec.command else "echo 'No command'"
+            entrypoint_script = shlex.join(spec.command) if spec.command else "echo 'No command'"
 
             # Determine machine type and GPU from spec
             machine_type = "n1-standard-4"  # Default
@@ -131,8 +158,8 @@ class GCERunBackend:
 
             if spec.gpu_count and spec.gpu_count > 0:
                 gpu_count = spec.gpu_count
-                # Map GPU type - GCE uses different naming
-                gpu_type = "nvidia-tesla-t4"  # Default GPU
+                # Use spec.gpu_type if provided, else default to T4
+                gpu_type = spec.gpu_type or "nvidia-tesla-t4"
 
             if spec.cpu_count:
                 # Map CPU count to machine type (approximate)
@@ -209,6 +236,16 @@ class GCERunBackend:
                     return BackendStatus.from_exit_code(exit_result.code)
                 return BackendStatus(status=RunStatus.FAILED, exit_code=1)
             elif status_str == "not_found":
+                # Instance is gone - try to recover exit code from GCS
+                # This handles spot preemption where instance disappears but wrote exit code
+                exit_result = self._launcher._get_exit_code(instance_name)
+                if exit_result.exists and exit_result.code is not None:
+                    # Exit code found - instance ran and terminated
+                    return BackendStatus.from_exit_code(
+                        exit_result.code,
+                        termination_cause="preemption" if exit_result.code != 0 else None,
+                    )
+                # No exit code found - truly not found
                 raise NotFoundError(f"instance:{instance_name}")
             else:
                 # Unknown status - treat as running
@@ -219,16 +256,17 @@ class GCERunBackend:
         except Exception as e:
             if "not found" in str(e).lower():
                 raise NotFoundError(f"instance:{instance_name}") from e
-            # For other errors, return unknown status
+            # For other errors, return unknown status (not RUNNING to avoid stuck runs)
             logger.warning("Error getting status for %s: %s", instance_name, e)
-            return BackendStatus(status=RunStatus.RUNNING)
+            return BackendStatus(status=RunStatus.UNKNOWN, message=str(e))
 
-    def get_logs(self, handle: RunHandle, tail: int = 200) -> str:
+    def get_logs(self, handle: RunHandle, tail: int = 200, since: str | None = None) -> str:
         """Get logs from a GCE instance.
 
         Args:
             handle: Handle to the instance.
             tail: Number of lines from end to return.
+            since: Only return logs after this ISO timestamp.
 
         Returns:
             Log content as string.
@@ -239,44 +277,27 @@ class GCERunBackend:
             return self._launcher.get_instance_logs(
                 instance_name=instance_name,
                 tail_lines=tail if tail > 0 else None,
+                since=since,
             )
         except Exception as e:
             logger.warning("Error getting logs for %s: %s", instance_name, e)
-            return ""
+            return f"[Error fetching logs: {e}]"
 
     def terminate(self, handle: RunHandle) -> None:
         """Terminate a GCE instance.
 
         Sends termination signal. Instance will be deleted.
-        Idempotent: no error if already terminated.
+        Delegates to GCELauncher.delete_instance which handles:
+        - Zone lookup via _find_instance_zone() if needed
+        - Idempotency (no error if already deleted)
+        - Project ID configuration
+        - Proper logging
 
         Args:
             handle: Handle to the instance.
         """
         instance_name = handle.backend_handle
-        zone = handle.zone or self._launcher.default_zone
-
-        try:
-            from goldfish.infra.resource_launcher import run_gcloud
-
-            cmd = [
-                "gcloud",
-                "compute",
-                "instances",
-                "delete",
-                instance_name,
-                f"--zone={zone}",
-                "--quiet",
-            ]
-            if self._project_id:
-                cmd.append(f"--project={self._project_id}")
-
-            run_gcloud(cmd, check=False, project_id=self._project_id)
-            logger.debug("Terminated instance %s in zone %s", instance_name, zone)
-
-        except Exception as e:
-            # Idempotent - ignore errors (instance may already be gone)
-            logger.debug("Error terminating instance %s: %s", instance_name, e)
+        self._launcher.delete_instance(instance_name)
 
     def cleanup(self, handle: RunHandle) -> None:
         """Clean up resources for a terminated instance.
@@ -290,3 +311,36 @@ class GCERunBackend:
         # No additional cleanup needed
         _ = handle  # Acknowledge parameter for protocol compliance
         pass
+
+    def get_zone(self, handle: RunHandle) -> str | None:
+        """Get the zone for a GCE instance.
+
+        Args:
+            handle: Handle to the instance.
+
+        Returns:
+            Zone string if known, None otherwise.
+        """
+        # Prefer zone from handle if available
+        if handle.zone:
+            return handle.zone
+
+        # Fall back to launcher lookup
+        try:
+            return self._launcher._find_instance_zone(handle.backend_handle)
+        except Exception:
+            return None
+
+    def get_output_dir(self, handle: RunHandle) -> Path | None:
+        """Get the output directory for a GCE instance.
+
+        GCE outputs go to GCS, not local paths. This always returns None.
+
+        Args:
+            handle: Handle to the instance.
+
+        Returns:
+            None (GCE uses GCS for outputs).
+        """
+        _ = handle  # Acknowledge parameter for protocol compliance
+        return None

@@ -90,7 +90,8 @@ def test_inspect_run_triggers_sync_when_running():
     mock_bus = MagicMock()
 
     mock_stage_exec = MagicMock()
-    mock_stage_exec.gce_launcher._find_instance_zone.return_value = "us-west1-b"
+    # Mock run_backend.get_zone() which is now used instead of gce_launcher._find_instance_zone
+    mock_stage_exec.run_backend.get_zone.return_value = "us-west1-b"
 
     with (
         patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db),
@@ -141,7 +142,8 @@ def test_inspect_run_pending_when_ack_missing():
     mock_bus.get_ack.return_value = None
 
     mock_stage_exec = MagicMock()
-    mock_stage_exec.gce_launcher._find_instance_zone.return_value = "us-west1-b"
+    # Mock run_backend.get_zone() which is now used instead of gce_launcher._find_instance_zone
+    mock_stage_exec.run_backend.get_zone.return_value = "us-west1-b"
 
     with (
         patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db),
@@ -323,7 +325,8 @@ def test_inspect_run_refetches_row_after_sync():
     mock_bus.get_ack.return_value = "abc12345"
 
     mock_stage_exec = MagicMock()
-    mock_stage_exec.gce_launcher._find_instance_zone.return_value = "us-west1-b"
+    # Mock run_backend.get_zone() which is now used instead of gce_launcher._find_instance_zone
+    mock_stage_exec.run_backend.get_zone.return_value = "us-west1-b"
 
     # Mock UUID to return a known value so ack comparison works
     # uuid.uuid4() returns UUID, str(uuid) is like "abc12345-...", [:8] = "abc12345"

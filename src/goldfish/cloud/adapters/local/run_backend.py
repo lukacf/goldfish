@@ -84,6 +84,14 @@ class LocalRunBackend:
             supports_live_logs=True,
             supports_metrics=False,
             max_run_duration_hours=None,
+            # Sync behavior - local backend is synchronous
+            ack_timeout_seconds=1.0,
+            ack_timeout_running_seconds=1.0,
+            has_launch_delay=False,
+            logs_unavailable_message="Logs not available",
+            timeout_becomes_pending=False,
+            status_message_for_preparing="Starting container...",
+            zone_resolution_method="config",  # Local uses config-defined zones
         )
 
     def _check_nvidia_runtime(self) -> bool:
@@ -263,6 +271,18 @@ class LocalRunBackend:
                 self._preemption_timers[spec.stage_run_id] = timer
 
             return handle
+        except FileNotFoundError as e:
+            raise LaunchError(
+                f"Docker not found: {e}. Is Docker installed?",
+                stage_run_id=spec.stage_run_id,
+                cause="docker_not_found",
+            ) from e
+        except PermissionError as e:
+            raise LaunchError(
+                f"Permission denied accessing Docker: {e}. Check Docker socket permissions.",
+                stage_run_id=spec.stage_run_id,
+                cause="docker_permission_denied",
+            ) from e
         except subprocess.CalledProcessError as e:
             raise LaunchError(
                 f"Failed to launch container: {e.stderr}",
@@ -324,25 +344,47 @@ class LocalRunBackend:
             # Container doesn't exist - raise NotFoundError per protocol
             raise NotFoundError(f"container:{container_id}") from None
 
-    def get_logs(self, handle: RunHandle, tail: int = 200) -> str:
+    def get_logs(self, handle: RunHandle, tail: int = 200, since: str | None = None) -> str:
         """Get logs from a run.
 
         Args:
             handle: Handle to the run.
-            tail: Number of lines to return from the end.
+            tail: Number of lines to return from the end. 0 means all logs.
+            since: Only return logs after this timestamp (ISO format or duration).
 
         Returns:
             Log output as string.
         """
         container_id = handle.backend_handle
 
-        cmd = ["docker", "logs", "--tail", str(tail), container_id]
+        cmd = ["docker", "logs"]
+
+        # tail=0 means "all logs" per protocol, but docker --tail 0 returns NO logs
+        # So we omit --tail entirely when tail=0
+        if tail > 0:
+            cmd.extend(["--tail", str(tail)])
+
+        if since is not None:
+            cmd.extend(["--since", since])
+
+        cmd.append(container_id)
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             return result.stdout + result.stderr
         except subprocess.CalledProcessError:
             return ""
+
+    def get_zone(self, handle: RunHandle) -> str | None:
+        """Get the zone where a run is executing.
+
+        Args:
+            handle: Handle to the run.
+
+        Returns:
+            Zone name, or None if not available.
+        """
+        return handle.zone
 
     def terminate(self, handle: RunHandle) -> None:
         """Terminate a running container.

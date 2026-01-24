@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -314,27 +314,37 @@ class TestCancelBackendCleanup:
 class TestCleanupBackendDirectly:
     """Tests for _cleanup_backend function directly testing each branch."""
 
-    def test_cleanup_backend_local_calls_stop_container(self) -> None:
-        """_cleanup_backend calls LocalExecutor.stop_container for local backend."""
-        # Mock at the source module since imports are inside the function
-        with patch("goldfish.infra.local_executor.LocalExecutor") as mock_executor_class:
-            mock_executor = mock_executor_class.return_value
+    def test_cleanup_backend_local_calls_terminate(self) -> None:
+        """_cleanup_backend calls RunBackend.terminate for local backend via factory."""
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            mock_backend = MagicMock()
+            mock_factory.return_value = mock_backend
 
             _cleanup_backend("stage-123", "local", "container-abc123")
 
-            mock_executor_class.assert_called_once()
-            mock_executor.stop_container.assert_called_once_with("container-abc123")
+            mock_factory.assert_called_once_with("local")
+            mock_backend.terminate.assert_called_once()
+            # Verify the handle passed has correct values
+            call_args = mock_backend.terminate.call_args[0][0]
+            assert call_args.stage_run_id == "stage-123"
+            assert call_args.backend_type == "local"
+            assert call_args.backend_handle == "container-abc123"
 
-    def test_cleanup_backend_gce_calls_delete_instance(self) -> None:
-        """_cleanup_backend calls GCELauncher.delete_instance for GCE backend."""
-        # Mock at the source module since imports are inside the function
-        with patch("goldfish.infra.gce_launcher.GCELauncher") as mock_launcher_class:
-            mock_launcher = mock_launcher_class.return_value
+    def test_cleanup_backend_gce_calls_terminate(self) -> None:
+        """_cleanup_backend calls RunBackend.terminate for GCE backend via factory."""
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            mock_backend = MagicMock()
+            mock_factory.return_value = mock_backend
 
             _cleanup_backend("stage-456", "gce", "instance-xyz789")
 
-            mock_launcher_class.assert_called_once()
-            mock_launcher.delete_instance.assert_called_once_with("instance-xyz789")
+            mock_factory.assert_called_once_with("gce")
+            mock_backend.terminate.assert_called_once()
+            # Verify the handle passed has correct values
+            call_args = mock_backend.terminate.call_args[0][0]
+            assert call_args.stage_run_id == "stage-456"
+            assert call_args.backend_type == "gce"
+            assert call_args.backend_handle == "instance-xyz789"
 
     def test_cleanup_backend_unknown_type_logs_warning(self) -> None:
         """_cleanup_backend logs warning for unknown backend type."""
@@ -379,20 +389,30 @@ class TestCleanupBackendValidation:
             _cleanup_backend("stage-123", "gce", "Instance-Name")
 
     def test_cleanup_backend_local_accepts_valid_container_id(self) -> None:
-        """_cleanup_backend accepts valid container ID."""
-        with patch("goldfish.infra.local_executor.LocalExecutor") as mock_executor_class:
-            mock_executor = mock_executor_class.return_value
+        """_cleanup_backend accepts valid container ID via factory."""
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            mock_backend = MagicMock()
+            mock_factory.return_value = mock_backend
             # Valid 12-char hex container ID
             _cleanup_backend("stage-123", "local", "abc123def456")
-            mock_executor.stop_container.assert_called_once_with("abc123def456")
+            mock_factory.assert_called_once_with("local")
+            mock_backend.terminate.assert_called_once()
+            # Verify the handle passed has correct container ID
+            call_args = mock_backend.terminate.call_args[0][0]
+            assert call_args.backend_handle == "abc123def456"
 
     def test_cleanup_backend_gce_accepts_valid_instance_name(self) -> None:
-        """_cleanup_backend accepts valid GCE instance name."""
-        with patch("goldfish.infra.gce_launcher.GCELauncher") as mock_launcher_class:
-            mock_launcher = mock_launcher_class.return_value
+        """_cleanup_backend accepts valid GCE instance name via factory."""
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            mock_backend = MagicMock()
+            mock_factory.return_value = mock_backend
             # Valid lowercase instance name
             _cleanup_backend("stage-123", "gce", "goldfish-stage-abc123")
-            mock_launcher.delete_instance.assert_called_once_with("goldfish-stage-abc123")
+            mock_factory.assert_called_once_with("gce")
+            mock_backend.terminate.assert_called_once()
+            # Verify the handle passed has correct instance name
+            call_args = mock_backend.terminate.call_args[0][0]
+            assert call_args.backend_handle == "goldfish-stage-abc123"
 
 
 class TestCancelReasonValidation:
