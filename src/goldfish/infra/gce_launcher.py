@@ -192,6 +192,18 @@ class GCELauncher:
                 if env_name.replace("_", "").isalnum():
                     env_map[env_name] = str(env_value)
 
+        # For GPU workloads, set LD_LIBRARY_PATH so FA3 can find libcuda.so at import time
+        # This must be a Docker env var (-e flag), not exported in shell, because Python
+        # loads the FA3 .so file at import time before any shell commands run
+        #
+        # Critical: /tmp/cuda-symlinks MUST come first because:
+        # 1. NVIDIA mounts libcuda.so.1 (with version) at runtime
+        # 2. FA3 wheel needs libcuda.so (without version) - hardcoded in DT_NEEDED
+        # 3. We create a symlink libcuda.so -> libcuda.so.1 in /tmp/cuda-symlinks
+        # 4. goldfish user can't write to /usr/lib, so symlink must be in user-writable dir
+        if gpu_count and gpu_count > 0:
+            env_map["LD_LIBRARY_PATH"] = "/tmp/cuda-symlinks:/usr/lib/x86_64-linux-gnu"
+
         # Build input staging commands
         # Transform gs://bucket/path to /mnt/gcs/path (symlinks on host)
         pre_run_cmds = [
@@ -302,10 +314,12 @@ class GCELauncher:
         # Build startup script with proper orchestration and cost protection
         # For GPU workloads, wrap the command to create libcuda.so symlink at runtime
         # FA3 pre-built wheels expect libcuda.so but nvidia-container-toolkit only mounts libcuda.so.1
+        # CRITICAL: Create symlink in /tmp/cuda-symlinks (user-writable) not /usr/lib (root-only)
         if gpu_count and gpu_count > 0:
             docker_cmd = (
                 "-c '"
-                "ln -sf /usr/lib/x86_64-linux-gnu/libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so 2>/dev/null || true; "
+                "mkdir -p /tmp/cuda-symlinks && "
+                "ln -sf /usr/lib/x86_64-linux-gnu/libcuda.so.1 /tmp/cuda-symlinks/libcuda.so && "
                 "exec /entrypoint.sh'"
             )
         else:
