@@ -147,24 +147,43 @@ class DockerConfig(BaseModel):
     """Docker image customization configuration.
 
     Allows projects to customize Docker base images without editing Goldfish source.
-    Two approaches:
+    Three approaches:
     1. extra_packages: Add pip packages on top of goldfish-base-{cpu,gpu} images
-    2. Custom Dockerfiles: Place Dockerfile.cpu/Dockerfile.gpu in project root
+    2. base_images: Override base image names/URLs per type (cpu, gpu)
+    3. Custom Dockerfiles: Place Dockerfile.base-cpu/Dockerfile.base-gpu in project root
 
     Example goldfish.yaml:
         docker:
+          # Override base images (optional)
+          base_images:
+            gpu: "us-docker.pkg.dev/my-project/repo/my-custom-gpu:v1"
+            cpu: "goldfish-base-cpu"  # Use default with custom version below
+          base_image_version: "v10"  # Override default version for short names
+
+          # Add packages on top of base images
           extra_packages:
             gpu:
               - flash-attn --no-build-isolation
               - triton
             cpu:
               - lightgbm
+
           cloud_build:
             machine_type: E2_HIGHCPU_32
             timeout_minutes: 60
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    # Base image overrides per type (cpu, gpu)
+    # Values can be:
+    # - Short name: "goldfish-base-gpu" (uses artifact_registry + base_image_version)
+    # - Full URL: "us-docker.pkg.dev/project/repo/image:tag" (used as-is)
+    base_images: dict[str, str] = Field(default_factory=dict)
+
+    # Override the default base image version (default: from profiles.py)
+    # Only applies to short names, not full URLs
+    base_image_version: str | None = None
 
     extra_packages: dict[str, list[str]] = Field(default_factory=dict)
     # Keys: "gpu", "cpu"
@@ -494,7 +513,8 @@ class GoldfishConfig(BaseModel):
         # dev_repo_path is stored relative to project_root's parent
         # e.g., if project is /home/user/mlm, dev_repo_path might be "mlm-dev"
         # which resolves to /home/user/mlm-dev
-        return (project_root.parent / self.dev_repo_path).resolve()
+        # NOTE: Must resolve project_root first, otherwise Path('.').parent is '.'
+        return (project_root.resolve().parent / self.dev_repo_path).resolve()
 
 
 def generate_default_config(project_name: str, dev_repo_path: str = "../{project}-dev") -> GoldfishConfig:
