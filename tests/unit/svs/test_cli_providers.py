@@ -1,7 +1,6 @@
 """Unit tests for SVS AI CLI providers.
 
 Tests the mapping of AgentRequest fields to CLI flags for:
-- ClaudeCodeProvider
 - CodexCLIProvider
 - GeminiCLIProvider
 """
@@ -10,74 +9,14 @@ from unittest.mock import MagicMock, patch
 
 from goldfish.svs.agent import (
     AgentRequest,
-    ClaudeCodeProvider,
     CodexCLIProvider,
     GeminiCLIProvider,
     ToolPolicy,
 )
 
 
-class TestClaudeCodeProvider:
-    """Tests for ClaudeCodeProvider CLI mapping."""
-
-    @patch("shutil.which")
-    @patch("subprocess.run")
-    def test_run_maps_basic_fields(self, mock_run, mock_which):
-        """Should map prompt, model, and max_turns to CLI flags."""
-        mock_which.return_value = "/usr/local/bin/claude"
-        mock_run.return_value = MagicMock(returncode=0, stdout="OK", stderr="", text=True)
-
-        provider = ClaudeCodeProvider(binary="/usr/local/bin/claude")
-        request = AgentRequest(
-            prompt="Test prompt",
-            model="opus",
-            max_turns=5,
-            timeout_seconds=60,
-        )
-
-        provider.run(request)
-
-        # Verify command line
-        args, kwargs = mock_run.call_args
-        cmd = args[0]
-        assert "/usr/local/bin/claude" in cmd
-        assert "-p" in cmd
-        assert "Test prompt" in cmd
-        assert "--model" in cmd
-        assert "opus" in cmd
-        assert "--max-turns" in cmd
-        assert "5" in cmd
-        assert kwargs["timeout"] == 60
-
-    @patch("shutil.which")
-    @patch("subprocess.run")
-    def test_run_maps_tool_policy(self, mock_run, mock_which):
-        """Should map ToolPolicy fields to CLI flags."""
-        mock_which.return_value = "claude"
-        mock_run.return_value = MagicMock(returncode=0, stdout="OK", stderr="", text=True)
-
-        provider = ClaudeCodeProvider()
-        policy = ToolPolicy(
-            permission_mode="bypassPermissions",
-            allow_tools=["read_file", "list_directory"],
-            deny_tools=["run_shell_command"],
-            mcp_servers=["github", "google-search"],
-        )
-        request = AgentRequest(prompt="Test", tool_policy=policy)
-
-        provider.run(request)
-
-        cmd = mock_run.call_args[0][0]
-        # Now uses --dangerously-skip-permissions instead of --permission-mode
-        assert "--dangerously-skip-permissions" in cmd
-        assert "--allowed-tools" in cmd
-        assert "read_file" in cmd
-        assert "list_directory" in cmd
-        assert "--disallowed-tools" in cmd
-        assert "run_shell_command" in cmd
-        assert "--mcp-server" in cmd
-        assert "github" in cmd
-        assert "google-search" in cmd
+class TestToolPolicyDefault:
+    """Tests for ToolPolicy defaults."""
 
     def test_tool_policy_default_permission_mode_is_bypass(self):
         """Test that ToolPolicy defaults to bypassPermissions for internal tracking.
@@ -89,113 +28,6 @@ class TestClaudeCodeProvider:
         assert policy.permission_mode == "bypassPermissions", (
             f"ToolPolicy.permission_mode should default to 'bypassPermissions', " f"got '{policy.permission_mode}'"
         )
-
-    @patch("shutil.which")
-    @patch("subprocess.run")
-    def test_cli_error_nonzero_exit_code_logs_warning_and_returns_approved(self, mock_run, mock_which):
-        """Regression test: CLI failures should log warning and return approved (fail-open).
-
-        When Claude CLI exits with non-zero code (e.g., invalid args), we should:
-        1. Log a warning (not silently swallow the error)
-        2. Return 'approved' decision (fail-open, don't block user)
-        3. Include a WARNING finding explaining the failure
-        """
-        mock_which.return_value = "claude"
-        mock_run.return_value = MagicMock(
-            returncode=1,
-            stdout="",
-            stderr="error: unexpected argument '--unknown-flag'",
-            text=True,
-        )
-
-        provider = ClaudeCodeProvider()
-        request = AgentRequest(prompt="Test")
-
-        result = provider.run(request)
-
-        # Should fail-open with approved decision
-        assert result.decision == "approved"
-        # Should include a warning finding about the failure
-        assert len(result.findings) > 0
-        assert any("AI review failed" in f for f in result.findings)
-
-    @patch("shutil.which")
-    @patch("subprocess.run")
-    def test_cli_error_output_starts_with_error_logs_warning(self, mock_run, mock_which):
-        """Regression test: CLI error in output should be detected.
-
-        When stdout starts with 'error:', we should detect this as a CLI failure
-        even if exit code is 0.
-        """
-        mock_which.return_value = "claude"
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="error: invalid API key",
-            stderr="",
-            text=True,
-        )
-
-        provider = ClaudeCodeProvider()
-        request = AgentRequest(prompt="Test")
-
-        result = provider.run(request)
-
-        # Should fail-open with approved decision
-        assert result.decision == "approved"
-        # Should include a warning finding
-        assert len(result.findings) > 0
-        assert any("AI review failed" in f for f in result.findings)
-
-    @patch("shutil.which")
-    @patch("subprocess.run")
-    def test_cli_retry_with_fallback_model_on_api_error(self, mock_run, mock_which):
-        """Should retry with fallback model when API error is returned."""
-        mock_which.return_value = "claude"
-        mock_run.side_effect = [
-            MagicMock(
-                returncode=0,
-                stdout="API Error: Repeated 529 Overloaded errors",
-                stderr="",
-                text=True,
-            ),
-            MagicMock(returncode=0, stdout="OK", stderr="", text=True),
-        ]
-
-        provider = ClaudeCodeProvider()
-        request = AgentRequest(
-            prompt="Test",
-            context={"fallback_model": "sonnet-4.5"},
-        )
-
-        result = provider.run(request)
-
-        assert result.decision == "approved"
-        assert result.findings == []
-        assert mock_run.call_count == 2
-        second_cmd = mock_run.call_args_list[1][0][0]
-        assert "--model" in second_cmd
-        assert "sonnet-4.5" in second_cmd
-
-    @patch("shutil.which")
-    @patch("subprocess.run")
-    def test_cli_api_error_detected_as_failure(self, mock_run, mock_which):
-        """Should treat API-side error messages as CLI failure (fail-open with warning)."""
-        mock_which.return_value = "claude"
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="API Error: Repeated 529 Overloaded errors",
-            stderr="",
-            text=True,
-        )
-
-        provider = ClaudeCodeProvider()
-        request = AgentRequest(prompt="Test")
-
-        result = provider.run(request)
-
-        assert result.decision == "approved"
-        assert len(result.findings) > 0
-        assert any("AI review failed" in f for f in result.findings)
 
 
 class TestCodexCLIProvider:

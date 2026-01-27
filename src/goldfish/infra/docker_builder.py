@@ -62,7 +62,6 @@ class DockerBuilder:
         if not isinstance(provider, str):
             return []
         provider_map = {
-            "claude_code": "@anthropic-ai/claude-code",
             "codex_cli": "@openai/codex",
             "gemini_cli": "@google/gemini-cli",
         }

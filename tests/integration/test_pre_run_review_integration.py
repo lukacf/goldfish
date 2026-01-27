@@ -26,7 +26,7 @@ from goldfish.models import (
 )
 from goldfish.pre_run_review import PreRunReviewer
 from goldfish.state_machine.types import StageState
-from goldfish.svs.agent import ClaudeCodeProvider
+from goldfish.svs.agent import AnthropicAPIProvider
 from goldfish.svs.config import SVSConfig
 
 if TYPE_CHECKING:
@@ -205,7 +205,7 @@ class TestPreRunReviewWithRunReason:
 
         # Mock API key to bypass early return
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(ClaudeCodeProvider, "run", return_value=mock_result) as mock_run:
+            with patch.object(AnthropicAPIProvider, "run", return_value=mock_result) as mock_run:
                 await reviewer.review(["train"], reason=reason)
 
                 # Verify reason was included in prompt
@@ -480,7 +480,7 @@ class TestReviewTimeoutHandling:
 
         # Mock API key to bypass early return
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(ClaudeCodeProvider, "run", side_effect=slow_run):
+            with patch.object(AnthropicAPIProvider, "run", side_effect=slow_run):
                 result = await reviewer.review(["train"])
 
         # Should approve due to timeout
@@ -508,7 +508,7 @@ class TestReviewTimeoutHandling:
 
         # Mock API key to bypass early return
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(ClaudeCodeProvider, "run", side_effect=RuntimeError("API connection failed")):
+            with patch.object(AnthropicAPIProvider, "run", side_effect=RuntimeError("API connection failed")):
                 result = await reviewer.review(["train"])
 
         # Should approve due to error
@@ -558,7 +558,7 @@ diff --git a/modules/train.py b/modules/train.py
 
         # Mock API key to bypass early return
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(ClaudeCodeProvider, "run", return_value=mock_result) as mock_run:
+            with patch.object(AnthropicAPIProvider, "run", return_value=mock_result) as mock_run:
                 await reviewer.review(["train"], diff_text=diff_text)
                 call_args = mock_run.call_args[0][0]
                 prompt = call_args.context["prompt"]
@@ -593,7 +593,7 @@ diff --git a/modules/train.py b/modules/train.py
 
         # Mock API key to bypass early return
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(ClaudeCodeProvider, "run", return_value=mock_result) as mock_run:
+            with patch.object(AnthropicAPIProvider, "run", return_value=mock_result) as mock_run:
                 await reviewer.review(["train"], diff_text="")
                 call_args = mock_run.call_args[0][0]
                 prompt = call_args.context["prompt"]
@@ -633,7 +633,7 @@ class TestReviewMultipleStages:
 
         # Mock API key to bypass early return
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(ClaudeCodeProvider, "run", return_value=mock_result) as mock_run:
+            with patch.object(AnthropicAPIProvider, "run", return_value=mock_result) as mock_run:
                 await reviewer.review(["preprocess", "train"])
                 call_args = mock_run.call_args[0][0]
                 prompt = call_args.context["prompt"]
