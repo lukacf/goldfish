@@ -45,7 +45,7 @@ FALLBACK_BASE_IMAGE = "python:3.11-slim"
 # CPU: PyTorch 2.9.1 + standard ML stack
 BASE_IMAGE_CPU = "goldfish-base-cpu"
 BASE_IMAGE_GPU = "goldfish-base-gpu"
-BASE_IMAGE_VERSION = "v5"
+BASE_IMAGE_VERSION = "v10"
 
 
 # Built-in resource profiles optimized for ML workloads
@@ -377,7 +377,11 @@ class ProfileResolver:
         return sorted(all_profiles)
 
 
-def resolve_base_image(profile: dict[str, Any], artifact_registry: str | None = None) -> str:
+def resolve_base_image(
+    profile: dict[str, Any],
+    artifact_registry: str | None = None,
+    version: str | None = None,
+) -> str:
     """Resolve the base image for a profile.
 
     Built-in profiles use public images (PyTorch official, GHCR) that require
@@ -386,11 +390,14 @@ def resolve_base_image(profile: dict[str, Any], artifact_registry: str | None = 
     Args:
         profile: Resolved profile dictionary
         artifact_registry: Optional registry URL for custom images
+        version: Optional version override (e.g., "v10"). If not provided,
+                 uses the hardcoded BASE_IMAGE_VERSION constant.
 
     Returns:
         Full image URL ready to use in FROM directive
     """
     base_image: str | None = profile.get("base_image")
+    effective_version = version if version else BASE_IMAGE_VERSION
 
     # No base image specified - use fallback
     if not base_image:
@@ -403,7 +410,7 @@ def resolve_base_image(profile: dict[str, Any], artifact_registry: str | None = 
 
     # Short name (e.g., "goldfish-base-cpu") - needs registry
     if artifact_registry:
-        return f"{artifact_registry}/{base_image}:{BASE_IMAGE_VERSION}"
+        return f"{artifact_registry}/{base_image}:{effective_version}"
 
     # No registry for short name - fall back to appropriate public image
     # This ensures GPU profiles still get a GPU-capable image even without AR configured

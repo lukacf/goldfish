@@ -726,10 +726,13 @@ Goldfish manages **two layers** of Docker images:
 1. **Base images** (`goldfish-base-gpu`, `goldfish-base-cpu`) - foundation with ML libraries + FlashAttention-3
 2. **Project images** (`{project}-gpu`, `{project}-cpu`) - extend base with project-specific packages
 
+**Base image versions are tracked per-project in the database** - no hardcoded version numbers in code.
+
 **Check image status (both layers)**
 ```python
 manage_base_images(action="list")
 # Returns: base_images (goldfish-base-*) and project_images ({project}-*)
+# Shows current version from database for each image type
 ```
 
 **Build/push base images (one-time setup or updates)**
@@ -749,9 +752,27 @@ manage_base_images(action="build", image_type="gpu", target="base", wait=True)
 # Push to Artifact Registry
 manage_base_images(action="push", image_type="gpu", target="base")
 
+# IMPORTANT: After pushing a new base image version, register it in the database:
+# This updates the project's database to use the new version
+manage_base_images(action="set_version", image_type="gpu", version="v11")
+
 # Build goldfish base CPU image (~5 min)
 manage_base_images(action="build", image_type="cpu", target="base", backend="cloud")
 # or wait=True for local
+```
+
+**Version management:**
+```python
+# List version history for an image type
+manage_base_images(action="list_versions", image_type="gpu")
+# Returns: [{version: "v11", is_current: true, created_at: ...}, ...]
+
+# Set a specific version as current (e.g., rollback to older version)
+manage_base_images(action="set_version", image_type="gpu", version="v10")
+
+# Get next version number for a new build
+manage_base_images(action="next_version", image_type="gpu")
+# Returns: "v12" (auto-increments from current max)
 ```
 
 **Customize project images (optional)**
@@ -770,7 +791,7 @@ docker:
 Or create custom Dockerfile in project root:
 ```dockerfile
 # Dockerfile.gpu
-FROM goldfish-base-gpu:v5
+FROM goldfish-base-gpu:v11
 RUN pip install my-custom-package
 ```
 
@@ -784,10 +805,12 @@ manage_base_images(action="push", image_type="gpu", target="project")
 **Key points:**
 - Base GPU image: CUDA 12.8 + PyTorch 2.9.1 + FlashAttention-3 + numpy/pandas/scikit-learn
 - Base CPU image: PyTorch (CPU) + numpy/pandas/scikit-learn
+- **Base image versions tracked in project database** - each project can use different versions
 - `target="base"` builds goldfish-base-*, `target="project"` (default) builds {project}-*
 - `backend="cloud"` recommended for GPU builds (Cloud Build, doesn't tie up local machine)
 - Base images must exist in registry before project images can be built
 - Cloud Build requires `gce.project_id` in goldfish.yaml + Artifact Registry write permission for Cloud Build service account
+- After building/pushing a new base image, use `action="set_version"` to register it in the database
 
 ## Master Tool Reference
 
@@ -929,14 +952,23 @@ manage_base_images(action="push", image_type="gpu", target="project")
 
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
-| `manage_base_images()` | Docker base image management | action, image_type, target, backend |
+| `manage_base_images()` | Docker base image management | action, image_type, target, backend, version |
 | `get_build_status()` | Poll image build progress | build_id |
+
+**`manage_base_images` actions:**
+- `action="list"` - show image status (both base and project layers)
+- `action="build"` - build an image
+- `action="push"` - push image to Artifact Registry
+- `action="set_version"` - register/set current base image version in database
+- `action="list_versions"` - list version history for an image type
+- `action="next_version"` - get next auto-incremented version number
 
 **`manage_base_images` parameters:**
 - `target="base"` - goldfish-base-{cpu,gpu} images (foundation)
 - `target="project"` (default) - {project}-{cpu,gpu} images (customized)
 - `backend="local"` (default) - build using local Docker daemon
 - `backend="cloud"` - build using Google Cloud Build (recommended for GPU images)
+- `version` - version string for set_version action (e.g., "v11")
 
 ### Backup
 

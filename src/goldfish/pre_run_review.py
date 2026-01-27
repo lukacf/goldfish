@@ -372,9 +372,7 @@ This is a test run to verify the AI review system works. You MUST:
             # (This handles legacy reviews or reviews that don't follow the format)
             approved = not any(i.severity == ReviewSeverity.ERROR for i in issues)
             if not approved:
-                logger.warning(
-                    "No explicit DECISION found in review, falling back to ERROR marker inference"
-                )
+                logger.warning("No explicit DECISION found in review, falling back to ERROR marker inference")
 
         elapsed_ms = int((time.time() - start_time) * 1000)
 

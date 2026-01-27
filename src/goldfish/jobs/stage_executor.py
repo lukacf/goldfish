@@ -1939,16 +1939,25 @@ class StageExecutor:
 
         Returns image tag (local for local backend, registry for GCE backend).
         """
-        from goldfish.infra.profiles import resolve_base_image
+        from goldfish.infra.profiles import BASE_IMAGE_CPU, BASE_IMAGE_GPU, resolve_base_image
 
         # Get workspace directory
         workspace_dir = self.workspace_manager.get_workspace_path(workspace)
 
         # Resolve base image from profile using pre-computed artifact_registry
+        # Get version from database if available (per-project tracking)
         base_image = None
         if profile_name:
             profile = self.profile_resolver.resolve(profile_name)
-            base_image = resolve_base_image(profile, self.artifact_registry)
+            # Determine image type from profile to get version from DB
+            profile_base_image = profile.get("base_image")
+            base_image_version = None
+            if profile_base_image in (BASE_IMAGE_GPU, BASE_IMAGE_CPU):
+                image_type = "gpu" if profile_base_image == BASE_IMAGE_GPU else "cpu"
+                version_info = self.db.get_current_base_image_version(image_type)
+                if version_info:
+                    base_image_version = str(version_info["version"])
+            base_image = resolve_base_image(profile, self.artifact_registry, base_image_version)
 
         # Determine build backend based on capabilities
         # Backends with launch delay (GCE) require cloud build + artifact registry

@@ -5050,6 +5050,121 @@ class Database:
             return cursor.rowcount > 0
 
     # =========================================================================
+    # Base Image Version Tracking
+    # =========================================================================
+
+    def set_base_image_version(
+        self,
+        image_type: str,
+        version: str,
+        registry_tag: str,
+        build_id: str | None = None,
+    ) -> None:
+        """Set a new base image version as current.
+
+        This creates a new version record and marks it as current,
+        unmarking any previous current version for this image type.
+
+        Args:
+            image_type: "cpu" or "gpu"
+            version: Version string (e.g., "v10")
+            registry_tag: Full registry tag (e.g., "us-docker.pkg.dev/.../goldfish-base-gpu:v10")
+            build_id: Optional FK to docker_builds.id
+        """
+        with self._conn() as conn:
+            # First, unmark all existing versions as not current
+            conn.execute(
+                """
+                UPDATE base_image_versions
+                SET is_current = 0
+                WHERE image_type = ? AND is_current = 1
+                """,
+                (image_type,),
+            )
+
+            # Insert new version as current (or update if version already exists)
+            conn.execute(
+                """
+                INSERT INTO base_image_versions (image_type, version, registry_tag, is_current, build_id)
+                VALUES (?, ?, ?, 1, ?)
+                ON CONFLICT(image_type, version) DO UPDATE SET
+                    registry_tag = excluded.registry_tag,
+                    is_current = 1,
+                    build_id = excluded.build_id
+                """,
+                (image_type, version, registry_tag, build_id),
+            )
+
+    def get_current_base_image_version(self, image_type: str) -> dict[str, Any] | None:
+        """Get the current base image version for an image type.
+
+        Args:
+            image_type: "cpu" or "gpu"
+
+        Returns:
+            Dict with version info if found, None otherwise.
+            Keys: image_type, version, registry_tag, is_current, build_id, created_at
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT image_type, version, registry_tag, is_current, build_id, created_at
+                FROM base_image_versions
+                WHERE image_type = ? AND is_current = 1
+                """,
+                (image_type,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_base_image_versions(self, image_type: str) -> list[dict[str, Any]]:
+        """List all base image versions for an image type.
+
+        Args:
+            image_type: "cpu" or "gpu"
+
+        Returns:
+            List of version dicts, ordered by id descending (newest first)
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT image_type, version, registry_tag, is_current, build_id, created_at
+                FROM base_image_versions
+                WHERE image_type = ?
+                ORDER BY id DESC
+                """,
+                (image_type,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_next_base_image_version(self, image_type: str) -> str:
+        """Get the next version string for a new base image build.
+
+        Finds the maximum existing version number and increments it.
+        If no versions exist, returns "v1".
+
+        Args:
+            image_type: "cpu" or "gpu"
+
+        Returns:
+            Version string (e.g., "v1", "v11")
+        """
+        with self._conn() as conn:
+            # Extract numeric part from version strings like "v10" and find max
+            row = conn.execute(
+                """
+                SELECT MAX(CAST(SUBSTR(version, 2) AS INTEGER)) as max_num
+                FROM base_image_versions
+                WHERE image_type = ? AND version LIKE 'v%'
+                """,
+                (image_type,),
+            ).fetchone()
+
+            if row and row["max_num"] is not None:
+                return f"v{row['max_num'] + 1}"
+            return "v1"
+
+    # =========================================================================
     # Backup History CRUD
     # =========================================================================
 

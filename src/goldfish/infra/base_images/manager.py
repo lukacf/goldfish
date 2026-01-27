@@ -192,6 +192,7 @@ class BaseImageManager:
         """Get the goldfish base image tag to use as FROM.
 
         Uses registry image if configured, otherwise public fallback.
+        Uses database version if available, otherwise hardcoded constant.
 
         Args:
             image_type: "cpu" or "gpu"
@@ -200,11 +201,12 @@ class BaseImageManager:
             Full base image tag for FROM directive
         """
         base_name = BASE_IMAGE_GPU if image_type == "gpu" else BASE_IMAGE_CPU
+        version = self._get_base_image_version(image_type)
 
         # Try to use registry base image
         try:
             registry = self._get_artifact_registry()
-            return f"{registry}/{base_name}:{BASE_IMAGE_VERSION}"
+            return f"{registry}/{base_name}:{version}"
         except RegistryNotConfiguredError:
             # Fall back to public images
             if image_type == "gpu":
@@ -226,6 +228,24 @@ class BaseImageManager:
         """
         return BASE_IMAGES_DIR / f"Dockerfile.{image_type}"
 
+    def _get_base_image_version(self, image_type: str) -> str:
+        """Get the current base image version for an image type.
+
+        Checks database first (per-project tracking), falls back to hardcoded constant.
+
+        Args:
+            image_type: "cpu" or "gpu"
+
+        Returns:
+            Version string (e.g., "v10")
+        """
+        if self.db is not None:
+            version_info = self.db.get_current_base_image_version(image_type)
+            if version_info is not None:
+                return str(version_info["version"])
+        # Fall back to hardcoded constant
+        return BASE_IMAGE_VERSION
+
     def _get_goldfish_base_local_tag(self, image_type: str) -> str:
         """Get local tag for goldfish base image.
 
@@ -236,7 +256,8 @@ class BaseImageManager:
             Tag like "goldfish-base-gpu:v4"
         """
         base_name = BASE_IMAGE_GPU if image_type == "gpu" else BASE_IMAGE_CPU
-        return f"{base_name}:{BASE_IMAGE_VERSION}"
+        version = self._get_base_image_version(image_type)
+        return f"{base_name}:{version}"
 
     def _get_goldfish_base_registry_tag(self, image_type: str) -> str:
         """Get registry tag for goldfish base image.
@@ -252,7 +273,8 @@ class BaseImageManager:
         """
         registry = self._get_artifact_registry()
         base_name = BASE_IMAGE_GPU if image_type == "gpu" else BASE_IMAGE_CPU
-        return f"{registry}/{base_name}:{BASE_IMAGE_VERSION}"
+        version = self._get_base_image_version(image_type)
+        return f"{registry}/{base_name}:{version}"
 
     def _check_goldfish_base_exists_in_registry(self, image_type: str) -> bool:
         """Check if goldfish base image exists in registry.
