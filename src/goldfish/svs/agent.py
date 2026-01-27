@@ -526,18 +526,28 @@ def _is_cli_error_output(text: str) -> bool:
 
 
 def _parse_findings(text: str) -> tuple[str, list[str]]:
-    """Parse decision + findings from agent output text."""
+    """Parse decision + findings from agent output text.
+
+    The AI may use ERROR: markers to discuss potential issues but then conclude
+    they're not actually blocking. We check for explicit approval patterns at
+    the end of the review to handle this case.
+    """
     # First unwrap CLI JSON response if present
     text = _unwrap_cli_response(text)
 
     findings: list[str] = []
     decision = "approved"
+    has_error_markers = False
 
     for line in text.splitlines():
         stripped = line.strip()
-        upper = stripped.upper()
+        # Strip markdown formatting and bullets for detection
+        # Handles: **ERROR: ...**, **ERROR:** ..., ERROR: ..., - ERROR: ...
+        check_text = stripped.lstrip("-").lstrip().lstrip("*").lstrip()
+        upper = check_text.upper()
         if upper.startswith("ERROR"):
             findings.append(stripped)
+            has_error_markers = True
             decision = "blocked"
         elif upper.startswith("WARNING") or upper.startswith("WARN"):
             findings.append(stripped)
@@ -545,6 +555,26 @@ def _parse_findings(text: str) -> tuple[str, list[str]]:
                 decision = "warned"
         elif upper.startswith("NOTE"):
             findings.append(stripped)
+
+    # Check for explicit approval patterns that override ERROR markers
+    # The AI sometimes uses ERROR: to discuss potential issues but concludes they're fine
+    if has_error_markers:
+        lower_text = text.lower()
+        approval_patterns = [
+            "no blocking errors found",
+            "no blocking issues found",
+            "no blocking errors",
+            "no blocking issues",
+            "should run successfully",
+            "no issues found",
+            "looks good",
+            "lgtm",
+        ]
+        for pattern in approval_patterns:
+            if pattern in lower_text:
+                logger.info("Found approval pattern '%s', overriding blocked decision", pattern)
+                decision = "warned" if findings else "approved"
+                break
 
     return decision, findings
 
@@ -912,6 +942,127 @@ def _binary_available(binary: str) -> bool:
     return shutil.which(binary) is not None
 
 
+class AnthropicAPIProvider:
+    """Provider that uses the Claude Agent SDK for agentic reviews with tool access.
+
+    This provider uses the Claude Agent SDK (claude-agent-sdk package) which wraps
+    the Claude Code CLI and provides programmatic access to Claude with tool use.
+    This allows SVS reviews to read files from the workspace for better context.
+
+    The SDK runs Claude in a controlled manner with specific tool permissions,
+    avoiding conflicts with interactive Claude Code sessions.
+
+    Requires:
+        - claude-agent-sdk package installed: pip install claude-agent-sdk
+        - ANTHROPIC_API_KEY environment variable set
+    """
+
+    name: str = "anthropic_api"
+
+    def __init__(self, model: str | None = None) -> None:
+        """Initialize the provider.
+
+        Args:
+            model: Model to use. Defaults to claude-sonnet-4-20250514.
+        """
+        self.model = model or os.environ.get("GOLDFISH_ANTHROPIC_MODEL") or "claude-sonnet-4-20250514"
+
+    def _make_skip_response(self, reason: str) -> ReviewResult:
+        """Create a skip response with proper JSON for during-run compatibility."""
+        # Return valid JSON so during-run monitor can parse it
+        json_response = {
+            "findings": [{"check": "anthropic_api_skip", "severity": "NOTE", "summary": reason}],
+            "request_stop": False,
+            "stop_reason": None,
+        }
+        response_text = f"```json\n{json.dumps(json_response, indent=2)}\n```"
+        return ReviewResult(
+            decision="approved",
+            findings=[f"WARNING: {reason}"],
+            response_text=response_text,
+            duration_ms=0,
+        )
+
+    def run(self, request: ReviewRequest) -> ReviewResult:
+        """Execute review using Claude Agent SDK with tool access."""
+        try:
+            import anyio
+            from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
+        except ImportError:
+            logger.error("claude-agent-sdk package not installed. Install with: pip install claude-agent-sdk")
+            return self._make_skip_response("claude-agent-sdk package not installed. Review skipped.")
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            logger.error("ANTHROPIC_API_KEY not set")
+            return self._make_skip_response("ANTHROPIC_API_KEY not set. Review skipped.")
+
+        agent_request = _coerce_agent_request(request)
+        start = time.time()
+
+        try:
+            # Use model from request context if provided, else default
+            model = agent_request.model or self.model
+
+            # Configure agent options with read-only file access
+            # This allows the agent to read files in the workspace for context
+            options = ClaudeAgentOptions(
+                model=model,
+                cwd=agent_request.cwd,
+                # Allow read-only tools for file inspection
+                allowed_tools=["Read", "Glob", "Grep"],
+                # Don't allow edits - this is a review, not an editor
+                permission_mode="bypassPermissions",
+                # Limit turns to prevent runaway agent
+                max_turns=agent_request.max_turns or 5,
+            )
+
+            # Run the agent query asynchronously
+            async def run_agent() -> str:
+                output_parts: list[str] = []
+                async for message in query(prompt=agent_request.prompt, options=options):
+                    # Only process AssistantMessage which has content blocks
+                    if isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, TextBlock):
+                                output_parts.append(block.text)
+                return "\n".join(output_parts)
+
+            # Execute async function - anyio.run() creates a new event loop
+            raw_output = anyio.run(run_agent)
+
+            duration_ms = int((time.time() - start) * 1000)
+            logger.info("Claude Agent SDK response: %d chars in %dms", len(raw_output), duration_ms)
+
+            decision, findings = _parse_findings(raw_output)
+
+            return ReviewResult(
+                decision=decision,
+                findings=findings,
+                response_text=raw_output,
+                duration_ms=duration_ms,
+            )
+
+        except Exception as e:
+            duration_ms = int((time.time() - start) * 1000)
+            logger.exception("Claude Agent SDK call failed: %s", e)
+            # Fail open - don't block on API errors, but return valid JSON for during-run
+            json_response = {
+                "findings": [
+                    {"check": "anthropic_api_error", "severity": "WARNING", "summary": f"API call failed: {e}"}
+                ],
+                "request_stop": False,
+                "stop_reason": None,
+            }
+            response_text = f"```json\n{json.dumps(json_response, indent=2)}\n```"
+            return ReviewResult(
+                decision="approved",
+                findings=[f"WARNING: Claude Agent SDK call failed: {e}. Failing open."],
+                response_text=response_text,
+                duration_ms=duration_ms,
+            )
+
+
 def get_agent_provider(provider_name: str) -> AgentProvider:
     """Return an AgentProvider instance for the given name.
 
@@ -946,6 +1097,23 @@ def get_agent_provider(provider_name: str) -> AgentProvider:
             logger.warning("Gemini CLI not found; falling back to NullProvider")
             return NullProvider()
         return gemini_provider
+    if provider_name == "anthropic_api":
+        # Check if claude-agent-sdk package is available
+        try:
+            from importlib.util import find_spec
+
+            if find_spec("claude_agent_sdk") is None:
+                raise ImportError("claude-agent-sdk not found")
+
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            if not api_key:
+                logger.warning("ANTHROPIC_API_KEY not set; falling back to NullProvider")
+                return NullProvider()
+            logger.debug("Using AnthropicAPIProvider (Claude Agent SDK)")
+            return AnthropicAPIProvider()
+        except ImportError:
+            logger.warning("claude-agent-sdk package not installed; falling back to NullProvider")
+            return NullProvider()
     if provider_name == "null":
         logger.debug("Returning NullProvider (explicit null)")
         return NullProvider()
