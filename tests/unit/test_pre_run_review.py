@@ -10,8 +10,25 @@ import pytest
 from goldfish.config import PreRunReviewConfig
 from goldfish.models import ReviewIssue, ReviewSeverity, RunReason, RunReview
 from goldfish.pre_run_review import PreRunReviewer, review_before_run
-from goldfish.svs.agent import ClaudeCodeProvider
+from goldfish.svs.agent import ReviewRequest, ReviewResult
 from goldfish.svs.config import SVSConfig
+
+
+class MockAgentProvider:
+    """Mock provider for testing that captures calls and returns configured results."""
+
+    name = "mock"
+
+    def __init__(self, result: ReviewResult | None = None, side_effect: Exception | None = None):
+        self.result = result or ReviewResult(decision="approved", response_text="OK")
+        self.side_effect = side_effect
+        self.call_args: ReviewRequest | None = None
+
+    def run(self, request: ReviewRequest) -> ReviewResult:
+        self.call_args = request
+        if self.side_effect:
+            raise self.side_effect
+        return self.result
 
 
 class TestPreRunReviewerParseReview:
@@ -222,98 +239,75 @@ class TestPreRunReviewerReview:
         )
 
     @pytest.mark.asyncio
-    async def test_review_skipped_when_no_api_key(self, reviewer: PreRunReviewer) -> None:
-        """Review is skipped when no provider is correctly configured."""
-        # Refactored to test failure handling in AgentProvider.run
-        from goldfish.svs.agent import AgentResult
+    async def test_review_fallback_to_null_provider(self, reviewer: PreRunReviewer) -> None:
+        """Review falls back to NullProvider when no provider is available."""
+        from goldfish.svs.agent import NullProvider, ReviewResult
 
-        mock_result = AgentResult(
+        # Create a mock provider that returns a specific result
+        mock_provider = NullProvider()
+        mock_result = ReviewResult(
             decision="approved",
             findings=[],
-            raw_output="Review skipped: provider not configured",
+            response_text="NullProvider: approved for pre_run review\n",
         )
-        with patch.object(ClaudeCodeProvider, "run", return_value=mock_result):
-            with patch.dict("os.environ", {}, clear=True):
-                # Clear the API key (which is used by providers, not PreRunReviewer anymore)
-                review = await reviewer.review(["train"])
-                assert review.approved is True
-                # The raw_output from agent becomes full_review
-                assert "skipped" in review.full_review.lower()
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            review = await reviewer.review(["train"])
+            assert review.approved is True
+            # NullProvider returns approved immediately
+            assert "nullprovider" in review.full_review.lower()
 
     @pytest.mark.asyncio
     async def test_review_success_no_issues(self, reviewer: PreRunReviewer) -> None:
         """Successful review with no issues."""
-        from goldfish.svs.agent import AgentResult
-
-        mock_result = AgentResult(
-            decision="approved",
-            findings=[],
-            raw_output="## train\nNo issues found.",
-        )
-        # In PreRunReviewer.review(), the agent is retrieved via _get_agent()
-        # and called via loop.run_in_executor(None, agent.run, request)
-        with patch.object(ClaudeCodeProvider, "run", return_value=mock_result):
-            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-                review = await reviewer.review(["train"])
-                assert review.approved is True
-                assert len(review.issues) == 0
-                assert "no issues" in review.summary.lower()
+        mock_provider = MockAgentProvider(ReviewResult(decision="approved", response_text="## train\nNo issues found."))
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            review = await reviewer.review(["train"])
+            assert review.approved is True
+            assert len(review.issues) == 0
+            assert "no issues" in review.summary.lower()
 
     @pytest.mark.asyncio
     async def test_review_uses_review_result_response_text(self, reviewer: PreRunReviewer) -> None:
         """Review should use ReviewResult.response_text when provided."""
-        from goldfish.svs.agent import ReviewResult
-
-        mock_result = ReviewResult(
-            decision="approved",
-            findings=[],
-            response_text="## train\nNo issues found.",
-        )
-        with patch.object(ClaudeCodeProvider, "run", return_value=mock_result):
-            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-                review = await reviewer.review(["train"])
-                assert review.full_review.startswith("## train")
+        mock_provider = MockAgentProvider(ReviewResult(decision="approved", response_text="## train\nNo issues found."))
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            review = await reviewer.review(["train"])
+            assert review.full_review.startswith("## train")
 
     @pytest.mark.asyncio
     async def test_review_with_errors_not_approved(self, reviewer: PreRunReviewer) -> None:
         """Review with errors is not approved."""
-        from goldfish.svs.agent import AgentResult
-
-        mock_result = AgentResult(
-            decision="blocked",
-            findings=["ERROR: train.py:10 - Missing import"],
-            raw_output="## train\nERROR: train.py:10 - Missing import statement\nWARNING: train.py:20 - Unused variable",
+        mock_provider = MockAgentProvider(
+            ReviewResult(
+                decision="blocked",
+                response_text="## train\nERROR: train.py:10 - Missing import statement\nWARNING: train.py:20 - Unused variable",
+            )
         )
-        with patch.object(ClaudeCodeProvider, "run", return_value=mock_result):
-            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-                review = await reviewer.review(["train"])
-                assert review.approved is False
-                assert len(review.issues) == 2
-                assert "error" in review.summary.lower()
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            review = await reviewer.review(["train"])
+            assert review.approved is False
+            assert len(review.issues) == 2
+            assert "error" in review.summary.lower()
 
     @pytest.mark.asyncio
     async def test_review_with_warnings_approved(self, reviewer: PreRunReviewer) -> None:
         """Review with only warnings is approved."""
-        from goldfish.svs.agent import AgentResult
-
-        mock_result = AgentResult(
-            decision="warned",
-            findings=["WARNING: train.py - error handling"],
-            raw_output="## train\nWARNING: train.py - Consider adding error handling\nNOTE: Could use type hints",
+        mock_provider = MockAgentProvider(
+            ReviewResult(
+                decision="warned",
+                response_text="## train\nWARNING: train.py - Consider adding error handling\nNOTE: Could use type hints",
+            )
         )
-        with patch.object(ClaudeCodeProvider, "run", return_value=mock_result):
-            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-                review = await reviewer.review(["train"])
-                assert review.approved is True
-                assert len(review.issues) == 2
-                assert "warning" in review.summary.lower()
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            review = await reviewer.review(["train"])
+            assert review.approved is True
+            assert len(review.issues) == 2
+            assert "warning" in review.summary.lower()
 
     @pytest.mark.asyncio
     async def test_review_includes_reason(self, reviewer: PreRunReviewer) -> None:
         """Review includes RunReason in context."""
-        from goldfish.svs.agent import AgentResult
-
-        mock_result = AgentResult(decision="approved", raw_output="## train\nNo issues found.")
+        mock_provider = MockAgentProvider(ReviewResult(decision="approved", response_text="## train\nNo issues found."))
         reason = RunReason(
             description="Test run",
             hypothesis="Test hypothesis",
@@ -321,33 +315,26 @@ class TestPreRunReviewerReview:
             min_result="Test min",
             goal="Test goal",
         )
-        with patch.object(ClaudeCodeProvider, "run", return_value=mock_result) as mock_run:
-            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-                await reviewer.review(["train"], reason=reason)
-                # Verify reason was included in the request context or prompt
-                call_args = mock_run.call_args[0][0]
-                # ReviewRequest has context
-                assert "Test hypothesis" in call_args.context["prompt"]
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            await reviewer.review(["train"], reason=reason)
+            # Verify reason was included in the request context or prompt
+            assert mock_provider.call_args is not None
+            assert "Test hypothesis" in mock_provider.call_args.context["prompt"]
 
     @pytest.mark.asyncio
     async def test_review_includes_diff(self, reviewer: PreRunReviewer) -> None:
         """Review includes diff text."""
-        from goldfish.svs.agent import AgentResult
-
-        mock_result = AgentResult(decision="approved", raw_output="## train\nNo issues found.")
+        mock_provider = MockAgentProvider(ReviewResult(decision="approved", response_text="## train\nNo issues found."))
         diff_text = "+def new_function():\n+    pass"
-        with patch.object(ClaudeCodeProvider, "run", return_value=mock_result) as mock_run:
-            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-                await reviewer.review(["train"], diff_text=diff_text)
-                call_args = mock_run.call_args[0][0]
-                assert diff_text in call_args.context["prompt"]
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            await reviewer.review(["train"], diff_text=diff_text)
+            assert mock_provider.call_args is not None
+            assert diff_text in mock_provider.call_args.context["prompt"]
 
     @pytest.mark.asyncio
     async def test_review_includes_input_resolution(self, reviewer: PreRunReviewer) -> None:
         """Review includes resolved input context."""
-        from goldfish.svs.agent import AgentResult
-
-        mock_result = AgentResult(decision="approved", raw_output="## train\nNo issues found.")
+        mock_provider = MockAgentProvider(ReviewResult(decision="approved", response_text="## train\nNo issues found."))
         input_context = [
             {
                 "input": "tokens",
@@ -362,21 +349,18 @@ class TestPreRunReviewerReview:
                 "consumer_stage": "train",
             }
         ]
-        with patch.object(ClaudeCodeProvider, "run", return_value=mock_result) as mock_run:
-            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-                await reviewer.review(["train"], input_context=input_context)
-                call_args = mock_run.call_args[0][0]
-                prompt = call_args.context["prompt"]
-                assert "Input Resolution" in prompt
-                assert "stage-old" in prompt
-                assert "stage-new" in prompt
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            await reviewer.review(["train"], input_context=input_context)
+            assert mock_provider.call_args is not None
+            prompt = mock_provider.call_args.context["prompt"]
+            assert "Input Resolution" in prompt
+            assert "stage-old" in prompt
+            assert "stage-new" in prompt
 
     @pytest.mark.asyncio
     async def test_review_blocks_stale_inputs(self, reviewer: PreRunReviewer) -> None:
         """Review blocks when newer upstream run is still running."""
-        from goldfish.svs.agent import AgentResult
-
-        mock_result = AgentResult(decision="approved", raw_output="## train\nNo issues found.")
+        mock_provider = MockAgentProvider(ReviewResult(decision="approved", response_text="## train\nNo issues found."))
         input_context = [
             {
                 "input": "tokens",
@@ -391,21 +375,20 @@ class TestPreRunReviewerReview:
                 "consumer_stage": "train",
             }
         ]
-        with patch.object(ClaudeCodeProvider, "run", return_value=mock_result):
-            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-                review = await reviewer.review(["train"], input_context=input_context)
-                assert review.approved is False
-                assert any(issue.severity == ReviewSeverity.ERROR for issue in review.issues)
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            review = await reviewer.review(["train"], input_context=input_context)
+            assert review.approved is False
+            assert any(issue.severity == ReviewSeverity.ERROR for issue in review.issues)
 
     @pytest.mark.asyncio
     async def test_review_handles_exception(self, reviewer: PreRunReviewer) -> None:
         """Review handles Claude API exceptions gracefully."""
-        with patch.object(ClaudeCodeProvider, "run", side_effect=RuntimeError("API error")):
-            with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-                review = await reviewer.review(["train"])
-                # Should not block on failure
-                assert review.approved is True
-                assert "failed" in review.summary.lower()
+        mock_provider = MockAgentProvider(side_effect=RuntimeError("API error"))
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            review = await reviewer.review(["train"])
+            # Should not block on failure
+            assert review.approved is True
+            assert "failed" in review.summary.lower()
 
 
 class TestReviewBeforeRunFunction:
@@ -635,20 +618,17 @@ class TestSecurityFeatures:
     @pytest.mark.asyncio
     async def test_total_context_size_enforced(self, reviewer: PreRunReviewer) -> None:
         """Total context size limit should be enforced by truncation."""
-        from goldfish.svs.agent import AgentResult
-
         # Create large prompt context by mocking a file read
         mock_large_yaml = "stages: " + ("A" * 600_000)
 
-        mock_result = AgentResult(decision="approved", raw_output="OK")
+        mock_provider = MockAgentProvider(ReviewResult(decision="approved", response_text="OK"))
 
         with patch.object(reviewer, "_read_pipeline_yaml", return_value=mock_large_yaml):
-            with patch.object(ClaudeCodeProvider, "run", return_value=mock_result) as mock_run:
-                with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-                    await reviewer.review(["train"])
-                    call_args = mock_run.call_args[0][0]
-                    assert len(call_args.context["prompt"]) <= 500_000 + 1000  # Allow some overhead
-                    assert "truncated" in call_args.context["prompt"]
+            with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+                await reviewer.review(["train"])
+                assert mock_provider.call_args is not None
+                assert len(mock_provider.call_args.context["prompt"]) <= 500_000 + 1000  # Allow some overhead
+                assert "truncated" in mock_provider.call_args.context["prompt"]
 
 
 class TestParsingRobustness:
@@ -728,3 +708,219 @@ Error: train.py:2 - title case error
         assert issues[0].severity == ReviewSeverity.ERROR
         assert issues[1].severity == ReviewSeverity.WARNING
         assert issues[2].severity == ReviewSeverity.NOTE
+
+
+class TestExplicitDecisionParsing:
+    """Tests for explicit DECISION directive parsing."""
+
+    @pytest.fixture
+    def reviewer(self, tmp_path: Path) -> PreRunReviewer:
+        """Create a reviewer instance."""
+        workspace_path = tmp_path / "workspace"
+        workspace_path.mkdir()
+        config = PreRunReviewConfig()
+        svs_config = SVSConfig()
+        return PreRunReviewer(
+            config=config,
+            svs_config=svs_config,
+            workspace_path=workspace_path,
+            dev_repo_path=tmp_path / "dev",
+        )
+
+    def test_parse_explicit_approve(self, reviewer: PreRunReviewer) -> None:
+        """Parse explicit DECISION: APPROVE directive."""
+        review_text = """## train
+No issues found.
+
+DECISION: APPROVE
+"""
+        decision = reviewer._parse_explicit_decision(review_text)
+        assert decision == "approve"
+
+    def test_parse_explicit_block(self, reviewer: PreRunReviewer) -> None:
+        """Parse explicit DECISION: BLOCK directive."""
+        review_text = """## train
+ERROR: train.py:10 - Missing import
+
+DECISION: BLOCK
+"""
+        decision = reviewer._parse_explicit_decision(review_text)
+        assert decision == "block"
+
+    def test_parse_explicit_decision_case_insensitive(self, reviewer: PreRunReviewer) -> None:
+        """Parse decision directive case-insensitively."""
+        review_text = """## train
+decision: approve
+"""
+        decision = reviewer._parse_explicit_decision(review_text)
+        assert decision == "approve"
+
+        review_text2 = """## train
+Decision: Block
+"""
+        decision2 = reviewer._parse_explicit_decision(review_text2)
+        assert decision2 == "block"
+
+    def test_parse_explicit_decision_with_trailing_content(self, reviewer: PreRunReviewer) -> None:
+        """Parse decision with trailing text or punctuation."""
+        review_text = """## train
+DECISION: APPROVE - no blocking issues found
+"""
+        decision = reviewer._parse_explicit_decision(review_text)
+        assert decision == "approve"
+
+    def test_parse_explicit_decision_none_when_missing(self, reviewer: PreRunReviewer) -> None:
+        """Return None when no explicit decision directive present."""
+        review_text = """## train
+No issues found. Looks good!
+"""
+        decision = reviewer._parse_explicit_decision(review_text)
+        assert decision is None
+
+    def test_parse_explicit_decision_ignores_embedded_decision(self, reviewer: PreRunReviewer) -> None:
+        """Ignore 'decision' word when not at start of line."""
+        review_text = """## train
+The decision should be to approve this code.
+I recommend the decision: approve approach.
+"""
+        decision = reviewer._parse_explicit_decision(review_text)
+        # Should still find the second line since it starts with "decision:"
+        # Actually the second line starts with "I recommend" - let me re-check
+        # The method looks for lines starting with "DECISION:" - the second line doesn't start with that
+        assert decision is None
+
+    @pytest.mark.asyncio
+    async def test_explicit_approve_overrides_error_markers(self, tmp_path: Path) -> None:
+        """Explicit APPROVE decision overrides ERROR markers in text."""
+        workspace_path = tmp_path / "workspace"
+        workspace_path.mkdir()
+        (workspace_path / "pipeline.yaml").write_text("stages:\n  - name: train")
+        (workspace_path / "modules").mkdir()
+        (workspace_path / "modules" / "train.py").write_text("def run(): pass")
+
+        config = PreRunReviewConfig()
+        svs_config = SVSConfig()
+        reviewer = PreRunReviewer(
+            config=config,
+            svs_config=svs_config,
+            workspace_path=workspace_path,
+            dev_repo_path=tmp_path / "dev",
+        )
+
+        # Simulate AI discussing potential issues but ultimately approving
+        mock_provider = MockAgentProvider(
+            ReviewResult(
+                decision="approved",
+                response_text="""## train
+I analyzed the code and found some potential concerns:
+
+ERROR: train.py:10 - This could be an issue, but upon closer inspection it's fine
+because the variable is defined in the __init__ method.
+
+No blocking issues found.
+
+DECISION: APPROVE
+""",
+            )
+        )
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            review = await reviewer.review(["train"])
+            # Explicit APPROVE should override the ERROR marker
+            assert review.approved is True
+
+    @pytest.mark.asyncio
+    async def test_explicit_block_respected(self, tmp_path: Path) -> None:
+        """Explicit BLOCK decision is respected."""
+        workspace_path = tmp_path / "workspace"
+        workspace_path.mkdir()
+        (workspace_path / "pipeline.yaml").write_text("stages:\n  - name: train")
+        (workspace_path / "modules").mkdir()
+        (workspace_path / "modules" / "train.py").write_text("def run(): pass")
+
+        config = PreRunReviewConfig()
+        svs_config = SVSConfig()
+        reviewer = PreRunReviewer(
+            config=config,
+            svs_config=svs_config,
+            workspace_path=workspace_path,
+            dev_repo_path=tmp_path / "dev",
+        )
+
+        mock_provider = MockAgentProvider(
+            ReviewResult(
+                decision="blocked",
+                response_text="""## train
+ERROR: train.py:10 - Critical issue that will cause runtime failure
+
+DECISION: BLOCK
+""",
+            )
+        )
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            review = await reviewer.review(["train"])
+            assert review.approved is False
+
+    @pytest.mark.asyncio
+    async def test_fallback_to_error_markers_when_no_explicit_decision(self, tmp_path: Path) -> None:
+        """Fall back to ERROR marker inference when no explicit decision."""
+        workspace_path = tmp_path / "workspace"
+        workspace_path.mkdir()
+        (workspace_path / "pipeline.yaml").write_text("stages:\n  - name: train")
+        (workspace_path / "modules").mkdir()
+        (workspace_path / "modules" / "train.py").write_text("def run(): pass")
+
+        config = PreRunReviewConfig()
+        svs_config = SVSConfig()
+        reviewer = PreRunReviewer(
+            config=config,
+            svs_config=svs_config,
+            workspace_path=workspace_path,
+            dev_repo_path=tmp_path / "dev",
+        )
+
+        # No explicit DECISION directive - should fall back to ERROR markers
+        mock_provider = MockAgentProvider(
+            ReviewResult(
+                decision="blocked",
+                response_text="""## train
+ERROR: train.py:10 - Missing import statement
+""",
+            )
+        )
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            review = await reviewer.review(["train"])
+            # Should be blocked because ERROR marker present and no explicit decision
+            assert review.approved is False
+
+    @pytest.mark.asyncio
+    async def test_no_errors_and_no_explicit_decision_approves(self, tmp_path: Path) -> None:
+        """Approve when no errors and no explicit decision."""
+        workspace_path = tmp_path / "workspace"
+        workspace_path.mkdir()
+        (workspace_path / "pipeline.yaml").write_text("stages:\n  - name: train")
+        (workspace_path / "modules").mkdir()
+        (workspace_path / "modules" / "train.py").write_text("def run(): pass")
+
+        config = PreRunReviewConfig()
+        svs_config = SVSConfig()
+        reviewer = PreRunReviewer(
+            config=config,
+            svs_config=svs_config,
+            workspace_path=workspace_path,
+            dev_repo_path=tmp_path / "dev",
+        )
+
+        # No explicit DECISION and no ERROR markers
+        mock_provider = MockAgentProvider(
+            ReviewResult(
+                decision="approved",
+                response_text="""## train
+WARNING: train.py - Consider adding type hints
+NOTE: Code looks clean overall
+""",
+            )
+        )
+        with patch("goldfish.pre_run_review.get_agent_provider", return_value=mock_provider):
+            review = await reviewer.review(["train"])
+            # Should be approved - only warnings and notes
+            assert review.approved is True
