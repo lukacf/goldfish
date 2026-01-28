@@ -78,3 +78,4 @@ src/goldfish/infra/base_images/fa3_wheel/
 # Local simulation files
 .local_metadata.json
 .local_gcs/
+.rct/
