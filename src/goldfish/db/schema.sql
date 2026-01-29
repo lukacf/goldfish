@@ -625,3 +625,27 @@ CREATE TABLE IF NOT EXISTS base_image_versions (
 CREATE INDEX IF NOT EXISTS idx_base_image_versions_type ON base_image_versions(image_type);
 CREATE INDEX IF NOT EXISTS idx_base_image_versions_current ON base_image_versions(image_type, is_current)
     WHERE is_current = 1;
+
+
+-- =============================================================================
+-- Project Image Version Tracking (per-project)
+-- =============================================================================
+
+-- Project image versions (tracks {project}-{cpu,gpu} versions per project)
+-- Unlike base_image_versions which track goldfish-base-*, this tracks project-specific images
+CREATE TABLE IF NOT EXISTS project_image_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_name TEXT NOT NULL,               -- Project name (e.g., "mlm", "celm")
+    image_type TEXT NOT NULL,                 -- "cpu" or "gpu"
+    version TEXT NOT NULL,                    -- "v1", "v2", etc.
+    registry_tag TEXT NOT NULL,               -- Full registry tag (e.g., "us-docker.pkg.dev/.../mlm-gpu:v1")
+    is_current INTEGER NOT NULL DEFAULT 0,    -- 1 if this is the current version to use
+    build_id TEXT,                            -- FK to docker_builds.id (if built via goldfish)
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(project_name, image_type, version),
+    FOREIGN KEY (build_id) REFERENCES docker_builds(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_image_versions_project_type ON project_image_versions(project_name, image_type);
+CREATE INDEX IF NOT EXISTS idx_project_image_versions_current ON project_image_versions(project_name, image_type, is_current)
+    WHERE is_current = 1;

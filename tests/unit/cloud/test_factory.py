@@ -6,13 +6,14 @@ Tests that the factory correctly creates and wires up adapters.
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from goldfish.cloud.adapters.local.run_backend import LocalRunBackend
 from goldfish.cloud.adapters.local.storage import LocalObjectStorage
 from goldfish.cloud.factory import AdapterFactory
-from goldfish.config import GoldfishConfig, JobsConfig
+from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
 
 
 @pytest.fixture
@@ -111,3 +112,147 @@ class TestAdapterFactoryCreateSignalBus:
 
         # The returned signal_bus should be directly usable as a MetadataBus
         assert isinstance(signal_bus, MetadataBus)
+
+
+class TestAdapterFactoryGCERunBackend:
+    """Tests for GCE backend creation.
+
+    Tests that the factory correctly creates GCERunBackend with proper config.
+    Resource building is tested in run_backend tests since it's now internal
+    to GCERunBackend (proper abstraction - factory doesn't know about profiles).
+    """
+
+    @pytest.fixture
+    def gce_config(self) -> GoldfishConfig:
+        """Create a config with GCE backend."""
+        return GoldfishConfig(
+            project_name="test-project",
+            dev_repo_path="test-dev",
+            jobs=JobsConfig(backend="gce"),
+            gce=GCEConfig(
+                project="test-gcp-project",
+                zones=["us-central1-a", "us-central1-b"],
+            ),
+            gcs=GCSConfig(bucket="test-bucket"),
+        )
+
+    def test_factory_creates_gce_run_backend_for_gce_config(self, gce_config: GoldfishConfig) -> None:
+        """Factory creates GCERunBackend when backend is 'gce'."""
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher"):
+            factory = AdapterFactory(gce_config)
+            backend = factory.create_run_backend()
+
+            from goldfish.cloud.adapters.gcp.run_backend import GCERunBackend
+
+            assert isinstance(backend, GCERunBackend)
+
+    def test_factory_passes_zones_to_gce_backend(self, gce_config: GoldfishConfig) -> None:
+        """Factory passes zones from config to GCERunBackend.
+
+        Zones are used for:
+        1. Multi-zone capacity search
+        2. Global zones override for profiles (via GCERunBackend internal logic)
+        """
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher") as mock_launcher_class:
+            factory = AdapterFactory(gce_config)
+            factory.create_run_backend()
+
+            mock_launcher_class.assert_called_once()
+            call_kwargs = mock_launcher_class.call_args.kwargs
+            assert call_kwargs["zones"] == ["us-central1-a", "us-central1-b"]
+
+    def test_factory_passes_project_to_gce_backend(self, gce_config: GoldfishConfig) -> None:
+        """Factory passes project from config to GCERunBackend."""
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher") as mock_launcher_class:
+            factory = AdapterFactory(gce_config)
+            factory.create_run_backend()
+
+            call_kwargs = mock_launcher_class.call_args.kwargs
+            assert call_kwargs["project_id"] == "test-gcp-project"
+
+
+class TestGetCapabilitiesForBackend:
+    """Tests for get_capabilities_for_backend function.
+
+    This function is used when we need capabilities based on a stored backend_type
+    string (e.g., from a database row) without access to the actual backend instance.
+    """
+
+    def test_returns_local_capabilities_for_local_backend(self) -> None:
+        """get_capabilities_for_backend returns local defaults for 'local' backend."""
+        from goldfish.cloud.adapters.local.run_backend import LOCAL_DEFAULT_CAPABILITIES
+        from goldfish.cloud.contracts import BackendCapabilities
+        from goldfish.cloud.factory import get_capabilities_for_backend
+
+        caps = get_capabilities_for_backend("local")
+
+        assert isinstance(caps, BackendCapabilities)
+        assert caps == LOCAL_DEFAULT_CAPABILITIES
+        # Verify key local-specific values
+        assert caps.has_launch_delay is False
+        assert caps.timeout_becomes_pending is False
+        assert caps.zone_resolution_method == "config"
+
+    def test_returns_gce_capabilities_for_gce_backend(self) -> None:
+        """get_capabilities_for_backend returns GCE defaults for 'gce' backend."""
+        from goldfish.cloud.adapters.gcp.run_backend import GCE_DEFAULT_CAPABILITIES
+        from goldfish.cloud.contracts import BackendCapabilities
+        from goldfish.cloud.factory import get_capabilities_for_backend
+
+        caps = get_capabilities_for_backend("gce")
+
+        assert isinstance(caps, BackendCapabilities)
+        assert caps == GCE_DEFAULT_CAPABILITIES
+        # Verify key GCE-specific values
+        assert caps.has_launch_delay is True
+        assert caps.timeout_becomes_pending is True
+        assert caps.zone_resolution_method == "handle"
+
+    def test_returns_local_capabilities_for_unknown_backend(self) -> None:
+        """get_capabilities_for_backend returns local defaults for unknown backends."""
+        from goldfish.cloud.adapters.local.run_backend import LOCAL_DEFAULT_CAPABILITIES
+        from goldfish.cloud.factory import get_capabilities_for_backend
+
+        caps = get_capabilities_for_backend("unknown_backend")
+
+        assert caps == LOCAL_DEFAULT_CAPABILITIES
+
+    def test_gce_capabilities_use_provider_agnostic_strings(self) -> None:
+        """GCE capabilities should not contain GCP-specific terminology.
+
+        This is a regression test for the abstraction violation fix.
+        User-facing strings should be provider-agnostic.
+        """
+        from goldfish.cloud.factory import get_capabilities_for_backend
+
+        caps = get_capabilities_for_backend("gce")
+
+        # Should NOT contain "GCE" or "GCP" in user-facing messages
+        assert "GCE" not in caps.logs_unavailable_message
+        assert "GCP" not in caps.logs_unavailable_message
+        assert "GCE" not in caps.status_message_for_preparing
+        assert "GCP" not in caps.status_message_for_preparing
+
+    def test_local_capabilities_match_adapter_defaults(self) -> None:
+        """Local capabilities from factory should match adapter's static defaults.
+
+        This ensures consistency between the factory function and the adapter module.
+        """
+        from goldfish.cloud.adapters.local.run_backend import LOCAL_DEFAULT_CAPABILITIES
+        from goldfish.cloud.factory import get_capabilities_for_backend
+
+        caps = get_capabilities_for_backend("local")
+
+        assert caps == LOCAL_DEFAULT_CAPABILITIES
+
+    def test_gce_capabilities_match_adapter_defaults(self) -> None:
+        """GCE capabilities from factory should match adapter's static defaults.
+
+        This ensures consistency between the factory function and the adapter module.
+        """
+        from goldfish.cloud.adapters.gcp.run_backend import GCE_DEFAULT_CAPABILITIES
+        from goldfish.cloud.factory import get_capabilities_for_backend
+
+        caps = get_capabilities_for_backend("gce")
+
+        assert caps == GCE_DEFAULT_CAPABILITIES

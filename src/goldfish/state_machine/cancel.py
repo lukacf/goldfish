@@ -19,7 +19,6 @@ from goldfish.state_machine.types import (
 )
 from goldfish.state_machine.utils import format_transition_result
 from goldfish.validation import (
-    validate_backend_handle,
     validate_stage_run_id,
 )
 
@@ -116,24 +115,26 @@ def _cleanup_backend(run_id: str, backend_type: str, backend_handle: str) -> Non
     """
     # Import here to avoid circular dependencies
     from goldfish.cloud.contracts import RunHandle
-    from goldfish.cloud.factory import create_backend_for_cleanup
+    from goldfish.cloud.factory import create_backend_for_cleanup, validate_backend_handle
 
-    # Validate inputs at the security boundary before subprocess calls
+    # Delegate to adapter via factory - all backend logic is in the adapter
     try:
-        validate_backend_handle(backend_type, backend_handle)
+        backend = create_backend_for_cleanup(backend_type)
     except ValueError:
         logger.warning("Unknown backend type %s for run %s", backend_type, run_id)
         return
 
-    # Create handle and use protocol for termination
-    handle = RunHandle(
-        stage_run_id=run_id,
-        backend_type=backend_type,
-        backend_handle=backend_handle,
+    # Validate at the boundary using backend-aware rules.
+    validate_backend_handle(backend_type, backend_handle)
+
+    handle = RunHandle.from_dict(
+        {
+            "stage_run_id": run_id,
+            "backend_type": backend_type,
+            "backend_handle": backend_handle,
+        }
     )
 
-    # Delegate to adapter via factory - all backend logic is in the adapter
-    backend = create_backend_for_cleanup(backend_type)
     backend.terminate(handle)
     logger.info("Terminated %s resource %s for run %s", backend_type, backend_handle, run_id)
 

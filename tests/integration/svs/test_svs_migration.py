@@ -8,8 +8,6 @@ TDD: Write failing tests first, then implement.
 
 import sqlite3
 
-import pytest
-
 from goldfish.db.database import Database
 
 
@@ -175,7 +173,6 @@ class TestMigrationIdempotency:
         assert result[0] == "Test"
 
 
-@pytest.mark.skip(reason="Migration tests require complete old schema - too fragile to maintain")
 class TestExistingDatabaseMigration:
     """Tests that SVS columns are added to existing databases."""
 
@@ -188,6 +185,24 @@ class TestExistingDatabaseMigration:
         """
         conn.executescript(
             """
+            CREATE TABLE workspace_lineage (
+                workspace_name TEXT PRIMARY KEY,
+                parent_workspace TEXT,
+                parent_version TEXT,
+                created_at TEXT NOT NULL,
+                description TEXT
+            );
+
+            CREATE TABLE workspace_versions (
+                workspace_name TEXT,
+                version TEXT,
+                git_tag TEXT NOT NULL,
+                git_sha TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                PRIMARY KEY (workspace_name, version)
+            );
+
             CREATE TABLE stage_runs (
                 id TEXT PRIMARY KEY,
                 workspace_name TEXT NOT NULL,

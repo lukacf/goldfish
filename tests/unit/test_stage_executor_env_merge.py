@@ -320,3 +320,144 @@ batch_size: 32
     ), f"config_override with h100-spot should set gpu_type=nvidia-h100-80gb, got {run_spec.gpu_type}"
     assert run_spec.spot is True, "h100-spot profile should set spot=True"
     assert run_spec.profile == "h100-spot", f"profile should be h100-spot, got {run_spec.profile}"
+
+
+def test_launch_container_timeout_flows_through_runspec(test_db, test_config, tmp_path) -> None:
+    """Stage config compute.max_runtime_seconds should flow through RunSpec.timeout_seconds.
+
+    This ensures the timeout value from stage config is properly passed through the
+    cloud abstraction layer via RunSpec, rather than being accessed directly from
+    stage_config dict which bypasses the abstraction.
+
+    Regression test for timeout_seconds not flowing through RunSpec.
+    """
+    config = test_config.model_copy(deep=True)
+    config.jobs.backend = "local"
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    dev_repo = config.get_dev_repo_path(project_root)
+    dev_repo.mkdir(parents=True, exist_ok=True)
+
+    workspace_path = project_root / "workspaces" / "test_ws"
+    workspace_path.mkdir(parents=True)
+    configs_dir = workspace_path / "configs"
+    configs_dir.mkdir()
+
+    # Stage config with max_runtime_seconds
+    stage_config_yaml = configs_dir / "train.yaml"
+    stage_config_yaml.write_text("""
+compute:
+  profile: cpu-small
+  max_runtime_seconds: 7200
+""")
+
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(supports_gpu=False, supports_spot=False)
+    mock_backend.launch.return_value = RunHandle(
+        stage_run_id="stage-timeout123",
+        backend_type="local",
+        backend_handle="container-123",
+        zone="local-zone-1",
+    )
+
+    mock_workspace_manager = MagicMock()
+    mock_workspace_manager.get_workspace_path.return_value = workspace_path
+
+    executor = StageExecutor(
+        db=test_db,
+        config=config,
+        workspace_manager=mock_workspace_manager,
+        pipeline_manager=MagicMock(),
+        project_root=project_root,
+        dataset_registry=None,
+        run_backend=mock_backend,
+    )
+
+    executor._launch_container(
+        stage_run_id="stage-timeout123",
+        workspace="test_ws",
+        stage_name="train",
+        image_tag="goldfish-test:latest",
+        inputs={},
+        input_configs={},
+        output_configs={},
+        user_config={},
+        git_sha=None,
+    )
+
+    mock_backend.launch.assert_called_once()
+    run_spec = mock_backend.launch.call_args[0][0]
+
+    # timeout_seconds should be set from compute.max_runtime_seconds
+    assert (
+        run_spec.timeout_seconds == 7200
+    ), f"RunSpec.timeout_seconds should be 7200 from stage config, got {run_spec.timeout_seconds}"
+
+
+def test_launch_container_timeout_none_when_not_specified(test_db, test_config, tmp_path) -> None:
+    """RunSpec.timeout_seconds should be None when compute.max_runtime_seconds is not specified.
+
+    This ensures we don't accidentally set a default timeout when one isn't configured.
+    """
+    config = test_config.model_copy(deep=True)
+    config.jobs.backend = "local"
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    dev_repo = config.get_dev_repo_path(project_root)
+    dev_repo.mkdir(parents=True, exist_ok=True)
+
+    workspace_path = project_root / "workspaces" / "test_ws"
+    workspace_path.mkdir(parents=True)
+    configs_dir = workspace_path / "configs"
+    configs_dir.mkdir()
+
+    # Stage config WITHOUT max_runtime_seconds
+    stage_config_yaml = configs_dir / "train.yaml"
+    stage_config_yaml.write_text("""
+compute:
+  profile: cpu-small
+""")
+
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(supports_gpu=False, supports_spot=False)
+    mock_backend.launch.return_value = RunHandle(
+        stage_run_id="stage-notimeout",
+        backend_type="local",
+        backend_handle="container-123",
+        zone="local-zone-1",
+    )
+
+    mock_workspace_manager = MagicMock()
+    mock_workspace_manager.get_workspace_path.return_value = workspace_path
+
+    executor = StageExecutor(
+        db=test_db,
+        config=config,
+        workspace_manager=mock_workspace_manager,
+        pipeline_manager=MagicMock(),
+        project_root=project_root,
+        dataset_registry=None,
+        run_backend=mock_backend,
+    )
+
+    executor._launch_container(
+        stage_run_id="stage-notimeout",
+        workspace="test_ws",
+        stage_name="train",
+        image_tag="goldfish-test:latest",
+        inputs={},
+        input_configs={},
+        output_configs={},
+        user_config={},
+        git_sha=None,
+    )
+
+    mock_backend.launch.assert_called_once()
+    run_spec = mock_backend.launch.call_args[0][0]
+
+    # timeout_seconds should be None when not specified
+    assert (
+        run_spec.timeout_seconds is None
+    ), f"RunSpec.timeout_seconds should be None when not configured, got {run_spec.timeout_seconds}"

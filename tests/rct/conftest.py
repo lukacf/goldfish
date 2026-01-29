@@ -44,11 +44,12 @@ def pytest_collection_modifyitems(config, items):
     if config.getoption("--rct"):
         return
 
-    skip_rct = pytest.mark.skip(reason="RCT tests require --rct flag")
-    for item in items:
-        # Check for explicit @pytest.mark.rct marker, not directory name in keywords
-        if item.get_closest_marker("rct") is not None:
-            item.add_marker(skip_rct)
+    deselected = [item for item in items if item.get_closest_marker("rct") is not None]
+    if not deselected:
+        return
+    for item in deselected:
+        items.remove(item)
+    config.hook.pytest_deselected(items=deselected)
 
 
 @pytest.fixture(scope="session")

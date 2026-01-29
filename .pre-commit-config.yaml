@@ -14,6 +14,8 @@ repos:
       - id: mypy
         args: [--install-types, --non-interactive, --follow-imports=silent]
         files: ^src/goldfish/
+        additional_dependencies:
+          - pydantic>=2
 
   # Gitleaks: Prevent secrets from being committed
   - repo: https://github.com/gitleaks/gitleaks

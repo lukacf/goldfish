@@ -9,6 +9,8 @@ Composable functions that build shell script fragments for:
 - Self-deletion and watchdog timeout for cost protection
 """
 
+from __future__ import annotations
+
 import shlex
 from collections.abc import Mapping, Sequence
 from pathlib import Path

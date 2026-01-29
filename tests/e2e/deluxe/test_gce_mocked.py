@@ -31,7 +31,7 @@ class TestGCEBackendAdapterConformance:
         """GCERunBackend exposes capabilities property."""
         from goldfish.cloud.adapters.gcp.run_backend import GCERunBackend
 
-        with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher"):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher"):
             backend = GCERunBackend(
                 project_id="test-project",
                 zones=["us-central1-a"],
@@ -55,7 +55,7 @@ class TestGCEBackendAdapterConformance:
             zone="us-central1-a",
         )
 
-        with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher", return_value=mock_launcher):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher", return_value=mock_launcher):
             backend = GCERunBackend(
                 project_id="test-project",
                 zones=["us-central1-a"],
@@ -88,7 +88,7 @@ class TestGCEBackendAdapterConformance:
         mock_launcher = MagicMock()
         mock_launcher.get_instance_status.return_value = StageState.RUNNING
 
-        with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher", return_value=mock_launcher):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher", return_value=mock_launcher):
             backend = GCERunBackend(
                 project_id="test-project",
                 zones=["us-central1-a"],
@@ -115,7 +115,7 @@ class TestGCEBackendAdapterConformance:
         mock_launcher = MagicMock()
         mock_launcher.get_instance_status.return_value = StageState.COMPLETED
 
-        with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher", return_value=mock_launcher):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher", return_value=mock_launcher):
             backend = GCERunBackend(
                 project_id="test-project",
                 zones=["us-central1-a"],
@@ -140,7 +140,7 @@ class TestGCEBackendAdapterConformance:
         mock_launcher = MagicMock()
         mock_launcher.get_instance_logs.return_value = "Log line 1\nLog line 2\n"
 
-        with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher", return_value=mock_launcher):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher", return_value=mock_launcher):
             backend = GCERunBackend(
                 project_id="test-project",
                 zones=["us-central1-a"],
@@ -241,7 +241,7 @@ class TestAdapterFactoryIntegration:
 
         factory = AdapterFactory(config)
 
-        with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher"):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher"):
             backend = factory.create_run_backend()
             assert isinstance(backend, GCERunBackend)
 
@@ -338,7 +338,7 @@ class TestStageExecutorCloudIntegration:
         workspace_manager = WorkspaceManager(config=config, project_root=project_root, db=db)
         pipeline_manager = PipelineManager(db=db, workspace_manager=workspace_manager)
 
-        with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher"):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher"):
             with patch("goldfish.cloud.adapters.gcp.storage.storage.Client"):
                 executor = StageExecutor(
                     db=db,

@@ -1443,12 +1443,12 @@ def validate_artifact_uri(artifact_uri: str) -> None:
     """Validate an artifact URI from job output.
 
     Artifact URIs must:
-    - Start with gs:// (Google Cloud Storage only)
+    - Use a valid StorageURI (e.g., scheme://bucket/path or file://absolute/path)
     - Not contain path traversal patterns
-    - Not reference unexpected buckets via traversal
+    - Not reference unexpected buckets via traversal (e.g., bucket/..)
 
     Args:
-        artifact_uri: The artifact URI to validate (e.g., "gs://bucket/path/")
+        artifact_uri: The artifact URI to validate (e.g., "s3://bucket/path/")
 
     Raises:
         InvalidArtifactUriError: If validation fails
@@ -1456,13 +1456,14 @@ def validate_artifact_uri(artifact_uri: str) -> None:
     if not artifact_uri:
         raise InvalidArtifactUriError(artifact_uri, "artifact URI cannot be empty")
 
-    # Must be GCS URI
-    if not artifact_uri.startswith("gs://"):
-        raise InvalidArtifactUriError(artifact_uri, "artifact URI must start with gs://")
+    from goldfish.cloud.contracts import StorageURI
 
-    # Check for path traversal (just ".." - gs:// contains // which is fine)
-    if ".." in artifact_uri:
-        raise InvalidArtifactUriError(artifact_uri, "cannot contain path traversal")
+    try:
+        StorageURI.parse(artifact_uri)
+    except ValueError as e:
+        raise InvalidArtifactUriError(artifact_uri, str(e)) from e
+
+    # StorageURI.parse() enforces scheme presence and blocks path traversal.
 
 
 # ============== CONFIG FIELD SUGGESTIONS ==============
@@ -1932,30 +1933,6 @@ def validate_instance_name(instance_name: str) -> None:
         )
 
 
-def validate_backend_handle(backend_type: str, backend_handle: str) -> None:
-    """Validate a backend handle based on its type.
-
-    Dispatches to the appropriate validator based on backend_type.
-    This centralizes backend-specific validation logic for use by cancel
-    and other operations that work with stored backend handles.
-
-    Args:
-        backend_type: Backend type ("local" or "gce")
-        backend_handle: Container ID or instance name
-
-    Raises:
-        InvalidContainerIdError: If local backend handle is invalid
-        InvalidInstanceNameError: If GCE backend handle is invalid
-        ValueError: If backend_type is unknown
-    """
-    if backend_type == "local":
-        validate_container_id(backend_handle)
-    elif backend_type == "gce":
-        validate_instance_name(backend_handle)
-    else:
-        raise ValueError(f"Unknown backend type for validation: {backend_type}")
-
-
 def validate_zone(zone: str) -> None:
     """Validate a GCE zone name.
 
@@ -2106,7 +2083,7 @@ def validate_env_value(key: str, value: str) -> None:
     """Validate an environment variable value.
 
     Environment variable values must not contain:
-    - Shell metacharacters that could enable injection
+    - Control characters that can break argument parsing
     - Newlines (could break -e argument parsing)
 
     Args:
@@ -2118,6 +2095,17 @@ def validate_env_value(key: str, value: str) -> None:
     """
     if len(value) > 32768:
         raise InvalidEnvValueError(key, value[:50] + "...", "env value too long (max 32KB)")
+
+    # Disallow control characters that can break CLI argument parsing.
+    # Note: JSON produced by json.dumps() uses escape sequences (e.g., "\\n"), not literal newlines.
+    for char in ("\n", "\r", "\t", "\x00"):
+        if char in value:
+            raise InvalidEnvValueError(key, value[:50], f"contains invalid character: '{char}'")
+
+    # Internal Goldfish env vars can safely contain JSON payloads, which include characters like
+    # braces and quotes. These values are passed as subprocess args (not via a shell).
+    if key.startswith("GOLDFISH_"):
+        return
 
     # Check for dangerous characters
     dangerous = _contains_dangerous_chars(value)

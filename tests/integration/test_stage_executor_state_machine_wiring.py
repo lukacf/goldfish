@@ -247,7 +247,7 @@ def test_finalize_completed_emits_exit_success_and_post_run_ok(test_db: Database
     executor._persist_logs = MagicMock(return_value=None)
 
     # Avoid warning-based POST_RUN_FAIL from auto-results extraction when no experiment record exists.
-    with patch("goldfish.jobs.stage_executor.ExperimentRecordManager") as mock_mgr:
+    with patch("goldfish.jobs._stage_executor_impl.ExperimentRecordManager") as mock_mgr:
         mock_mgr.return_value.extract_auto_results.return_value = None
         executor._finalize_stage_run(run_id, backend="local", status=StageState.COMPLETED)
 

@@ -726,7 +726,11 @@ Goldfish manages **two layers** of Docker images:
 1. **Base images** (`goldfish-base-gpu`, `goldfish-base-cpu`) - foundation with ML libraries + FlashAttention-3
 2. **Project images** (`{project}-gpu`, `{project}-cpu`) - extend base with project-specific packages
 
-**Base image versions are tracked per-project in the database** - no hardcoded version numbers in code.
+**Image version resolution:**
+- **Base images**: config → DB → default (v10). Always have a fallback since Goldfish ships them.
+- **Project images**: config → DB → **None**. No default - they're user-built, not Goldfish-shipped.
+
+**Database is required for project image builds** - version tracking ensures reproducibility.
 
 **Check image status (both layers)**
 ```python
@@ -805,7 +809,8 @@ manage_base_images(action="push", image_type="gpu", target="project")
 **Key points:**
 - Base GPU image: CUDA 12.8 + PyTorch 2.9.1 + FlashAttention-3 + numpy/pandas/scikit-learn
 - Base CPU image: PyTorch (CPU) + numpy/pandas/scikit-learn
-- **Base image versions tracked in project database** - each project can use different versions
+- **Base image versions**: tracked in DB, fallback to v10 if not set
+- **Project image versions**: tracked in DB, **no default** - must build before running
 - `target="base"` builds goldfish-base-*, `target="project"` (default) builds {project}-*
 - `backend="cloud"` recommended for GPU builds (Cloud Build, doesn't tie up local machine)
 - Base images must exist in registry before project images can be built

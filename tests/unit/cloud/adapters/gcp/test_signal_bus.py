@@ -12,8 +12,8 @@ class TestGCPSignalBusExport:
 
     def test_gcp_signal_bus_is_gcp_metadata_bus(self):
         """GCPSignalBus is the same class as GCPMetadataBus."""
+        from goldfish.cloud.adapters.gcp.metadata_bus import GCPMetadataBus
         from goldfish.cloud.adapters.gcp.signal_bus import GCPSignalBus
-        from goldfish.infra.metadata.gcp import GCPMetadataBus
 
         assert GCPSignalBus is GCPMetadataBus
 

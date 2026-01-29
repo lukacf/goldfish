@@ -4,7 +4,7 @@ These tests define the expected behavior of the abstracted cloud backend.
 The tests ARE the specification - they exercise real code paths using
 the contract types defined in goldfish.cloud.
 
-E2E-GCP-*: Full GCP path tests (xfail - GCP adapters not yet implemented)
+E2E-GCP-*: Full GCP path tests (opt-in via deluxe_gce marker)
 E2E-LOCAL-*: Full local path tests (passing - local adapters complete)
 E2E-PARITY-*: GCP ≈ Local equivalence tests (passing for local adapter behavior)
 """
@@ -245,7 +245,7 @@ class TestBackendCapabilitiesContract:
 
 
 # =============================================================================
-# E2E Tests - These require adapter implementations (xfail until Phase 3)
+# E2E Tests - Adapter implementations
 # =============================================================================
 
 
@@ -406,7 +406,7 @@ class TestExitCodeSemantics:
         assert BackendStatus.from_exit_code(143).status == RunStatus.TERMINATED
 
 
-@pytest.mark.xfail(reason="GCP adapters not yet implemented", strict=True)
+@pytest.mark.deluxe_gce
 class TestE2EGCP:
     """E2E tests for full GCP path.
 

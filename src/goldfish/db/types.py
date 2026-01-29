@@ -86,6 +86,19 @@ class WorkspaceGoalRow(TypedDict):
     updated_at: str
 
 
+class WorkspaceRow(TypedDict):
+    """Row representing a workspace for store protocols.
+
+    This is a minimal, protocol-facing view that can be backed by one or more
+    tables (e.g., workspace_lineage + workspace_goals) in different DB backends.
+    """
+
+    workspace_name: str
+    goal: str
+    created_at: str
+    updated_at: str
+
+
 class StageVersionRow(TypedDict):
     """Row from the stage_versions table.
 
@@ -101,6 +114,18 @@ class StageVersionRow(TypedDict):
     git_sha: str
     config_hash: str
     created_at: str
+
+
+class StageRunRow(TypedDict):
+    """Row from the stage_runs table (minimal protocol-facing view)."""
+
+    id: str
+    workspace_name: str
+    version: str
+    stage_name: str
+    status: str
+    started_at: str
+    completed_at: str | None
 
 
 class MetricRow(TypedDict):

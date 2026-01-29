@@ -19,14 +19,33 @@ from goldfish.cloud.contracts import (
     RunStatus,
 )
 from goldfish.errors import CapacityError, LaunchError, NotFoundError
-from goldfish.infra.gce_launcher import GCELauncher
 from goldfish.state_machine.types import StageState
 from goldfish.validation import ValidationError
 
 if TYPE_CHECKING:
-    pass
+    from goldfish.cloud.adapters.gcp.gce_launcher import GCELauncher
 
 logger = logging.getLogger(__name__)
+
+
+# Default capabilities for GCE backend - used when backend instance not available
+# These values match the defaults returned by GCERunBackend.capabilities property.
+GCE_DEFAULT_CAPABILITIES = BackendCapabilities(
+    supports_gpu=True,
+    supports_spot=True,
+    supports_preemption=True,
+    supports_preemption_detection=True,
+    supports_live_logs=True,
+    supports_metrics=True,
+    max_run_duration_hours=24,
+    ack_timeout_seconds=3.0,
+    ack_timeout_running_seconds=4.0,
+    has_launch_delay=True,
+    logs_unavailable_message="Logs not yet synced from instance",
+    timeout_becomes_pending=True,
+    status_message_for_preparing="Instance provisioning...",
+    zone_resolution_method="handle",
+)
 
 
 class GCERunBackend:
@@ -35,6 +54,8 @@ class GCERunBackend:
     Wraps GCELauncher to provide a protocol-compatible interface.
     This adapter enables using GCE compute through the cloud abstraction layer.
     """
+
+    _launcher: GCELauncher
 
     def __init__(
         self,
@@ -48,12 +69,21 @@ class GCERunBackend:
 
         Args:
             project_id: GCP project ID (uses default if None)
-            zones: List of zones for capacity search
+            zones: List of zones for capacity search (also used as global_zones for profiles)
             bucket: GCS bucket for logs/artifacts
             gpu_preference: Ordered list of preferred GPU types
             service_account: Service account email for instances
         """
         default_zone = zones[0] if zones else "us-central1-a"
+
+        # Build resources from profiles for capacity search.
+        # Resources are profile dicts containing machine_type, zones, gpu config.
+        # GCELauncher uses these for multi-zone capacity search.
+        resources = self._build_resources_from_profiles(global_zones=zones)
+
+        # Import here to keep adapter imports lazy (gce_launcher has server-side deps)
+        from goldfish.cloud.adapters.gcp.gce_launcher import GCELauncher
+
         self._launcher = GCELauncher(
             project_id=project_id,
             zone=default_zone,
@@ -61,10 +91,37 @@ class GCERunBackend:
             zones=zones,
             gpu_preference=gpu_preference,
             service_account=service_account,
+            resources=resources,
         )
         self._project_id = project_id
         self._zones = zones or [default_zone]
         self._bucket = bucket
+
+    def _build_resources_from_profiles(self, global_zones: list[str] | None = None) -> list[dict]:
+        """Build resources list from profile definitions.
+
+        Resources are used by GCELauncher for capacity search across zones.
+        Each resource contains machine_type, zones, gpu config needed for launch.
+
+        Args:
+            global_zones: Optional zones override to apply to all profiles.
+
+        Returns:
+            List of profile dicts ready for GCELauncher.
+        """
+        from goldfish.cloud.adapters.gcp.profiles import ProfileResolver
+
+        resolver = ProfileResolver(global_zones=global_zones)
+        resources: list[dict] = []
+
+        for profile_name in resolver.list_profiles():
+            try:
+                profile = resolver.resolve(profile_name)
+                resources.append(profile)
+            except Exception as e:
+                logger.warning("Failed to resolve profile '%s': %s", profile_name, e)
+
+        return resources
 
     @property
     def capabilities(self) -> BackendCapabilities:
@@ -91,10 +148,10 @@ class GCERunBackend:
             ack_timeout_seconds=3.0,  # GCE needs longer timeouts due to network latency
             ack_timeout_running_seconds=4.0,
             has_launch_delay=True,  # PROVISIONING/STAGING states before RUNNING
-            logs_unavailable_message="Logs not yet synced from GCE",
+            logs_unavailable_message="Logs not yet synced from instance",
             timeout_becomes_pending=True,  # ACK timeout means "sync pending", not failure
-            status_message_for_preparing="GCE instance provisioning...",
-            zone_resolution_method="handle",  # GCE zone comes from handle.zone
+            status_message_for_preparing="Instance provisioning...",
+            zone_resolution_method="handle",  # Zone comes from handle.zone
         )
 
     def launch(self, spec: RunSpec) -> RunHandle:
@@ -149,10 +206,24 @@ class GCERunBackend:
             work_dir = Path("/tmp")
 
             # Build entrypoint from command
-            entrypoint_script = shlex.join(spec.command) if spec.command else "echo 'No command'"
+            # GCE writes the script to /mnt/entrypoint.sh and runs via /bin/bash.
+            # If command is ["sh", "-c", script], extract just the script to avoid
+            # double-wrapping (bash running sh -c '...' which fails on pipefail).
+            if spec.command and len(spec.command) == 3 and spec.command[:2] == ["sh", "-c"]:
+                entrypoint_script = spec.command[2]
+            elif spec.command:
+                entrypoint_script = shlex.join(spec.command)
+            else:
+                entrypoint_script = "echo 'No command'"
 
             # Determine machine type and GPU from spec
-            machine_type = "n1-standard-4"  # Default
+            # CRITICAL: Use machine_type from profile (via RunSpec) for correct GPU/machine pairing.
+            # H100 GPUs require A3 machines (a3-highgpu-1g), A100s require A2 (a2-highgpu-1g).
+            # Hardcoding n1-standard-X causes GPU launches to fail.
+            machine_type = spec.machine_type
+            if not machine_type:
+                # Fallback: no profile specified, use GCE default
+                machine_type = "n1-standard-4"
             gpu_type = None
             gpu_count = 0
 
@@ -160,17 +231,6 @@ class GCERunBackend:
                 gpu_count = spec.gpu_count
                 # Use spec.gpu_type if provided, else default to T4
                 gpu_type = spec.gpu_type or "nvidia-tesla-t4"
-
-            if spec.cpu_count:
-                # Map CPU count to machine type (approximate)
-                if spec.cpu_count <= 2:
-                    machine_type = "n1-standard-2"
-                elif spec.cpu_count <= 4:
-                    machine_type = "n1-standard-4"
-                elif spec.cpu_count <= 8:
-                    machine_type = "n1-standard-8"
-                else:
-                    machine_type = "n1-standard-16"
 
             result = self._launcher.launch_instance(
                 image_tag=spec.image,

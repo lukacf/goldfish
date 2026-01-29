@@ -46,6 +46,15 @@ def temp_project_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def test_db(tmp_path: Path):
+    """Create a test database."""
+    from goldfish.db.database import Database
+
+    db_path = tmp_path / ".goldfish" / "goldfish.db"
+    return Database(db_path)
+
+
+@pytest.fixture
 def mock_image_builder() -> Any:
     """Create a mock ImageBuilder."""
     builder = create_autospec(ImageBuilder, instance=True)
@@ -106,12 +115,15 @@ class TestBaseImageManagerWithProtocols:
         temp_project_root: Path,
         mock_config: GoldfishConfig,
         mock_image_builder: MagicMock,
+        test_db,
     ) -> None:
         """build_image should use injected ImageBuilder instead of subprocess."""
+        # Database is required for project image builds (version tracking)
         manager = BaseImageManager(
             temp_project_root,
             mock_config,
             image_builder=mock_image_builder,
+            db=test_db,
         )
 
         result = manager.build_image("gpu", wait=True)
@@ -127,12 +139,15 @@ class TestBaseImageManagerWithProtocols:
         temp_project_root: Path,
         mock_config: GoldfishConfig,
         mock_image_builder: MagicMock,
+        test_db,
     ) -> None:
         """build_image with wait=False should use ImageBuilder.build_async."""
+        # Database is required for project image builds (version tracking)
         manager = BaseImageManager(
             temp_project_root,
             mock_config,
             image_builder=mock_image_builder,
+            db=test_db,
         )
 
         result = manager.build_image("gpu", wait=False)
@@ -147,16 +162,21 @@ class TestBaseImageManagerWithProtocols:
         mock_config_with_gce: GoldfishConfig,
         mock_image_builder: MagicMock,
         mock_image_registry: MagicMock,
+        test_db,
     ) -> None:
         """push_image should use injected ImageRegistry instead of subprocess."""
         # Mock local image exists check
         mock_image_registry.exists.return_value = True
+
+        # Set up a project image version so we get past the "no version" check
+        test_db.set_project_image_version("test-project", "gpu", "v1", "tag1")
 
         manager = BaseImageManager(
             temp_project_root,
             mock_config_with_gce,
             image_builder=mock_image_builder,
             image_registry=mock_image_registry,
+            db=test_db,
         )
 
         # Mock the local image check

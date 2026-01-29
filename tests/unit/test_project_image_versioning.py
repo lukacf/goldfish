@@ -293,9 +293,7 @@ class TestManagerUsesProjectDatabase:
         assert registry_tag is not None, "Expected registry_tag, got None"
         assert ":v7" in registry_tag, f"Expected ':v7' in '{registry_tag}'"
 
-    def test_project_image_returns_none_when_no_db(
-        self, tmp_path: Path, mock_config_with_gce: GoldfishConfig
-    ) -> None:
+    def test_project_image_returns_none_when_no_db(self, tmp_path: Path, mock_config_with_gce: GoldfishConfig) -> None:
         """Manager should return None when no DB provided.
 
         Project images are user-built, not Goldfish-shipped. There is NO default.

@@ -228,7 +228,6 @@ extra_packages: []
 class TestStageConfigValidation:
     """Test stage config (configs/train.yaml) validation."""
 
-    @pytest.mark.skip(reason="Stage config validation not yet implemented")
     def test_catches_unknown_stage_config_field(self, e2e_setup):
         """Unknown stage config fields like 'freeze_backone' should be caught."""
         manager = e2e_setup["manager"]
@@ -238,7 +237,7 @@ class TestStageConfigValidation:
         manager.create_workspace(
             name="config-test", goal="Test config validation", reason="Testing stage config validation"
         )
-        manager.mount(workspace="config-test", slot="w1", reason="Testing config")
+        manager.mount(workspace="config-test", slot="w1", reason="Testing config validation")
 
         slot_path = project_root / "workspaces" / "w1"
 

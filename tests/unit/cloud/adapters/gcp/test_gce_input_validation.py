@@ -19,7 +19,7 @@ from goldfish.validation import ValidationError
 @pytest.fixture
 def mock_launcher():
     """Create a mock GCELauncher."""
-    with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher") as mock_class:
+    with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher") as mock_class:
         mock_instance = MagicMock()
         mock_class.return_value = mock_instance
         mock_instance.default_zone = "us-central1-a"

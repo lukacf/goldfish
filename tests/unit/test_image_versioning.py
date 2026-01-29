@@ -124,18 +124,14 @@ class TestImageVersionDataclass:
 class TestImageVersionResolverConstructor:
     """Tests for ImageVersionResolver initialization."""
 
-    def test_constructor_accepts_config_and_db(
-        self, mock_config_no_version: GoldfishConfig, test_db
-    ) -> None:
+    def test_constructor_accepts_config_and_db(self, mock_config_no_version: GoldfishConfig, test_db) -> None:
         """ImageVersionResolver should accept config and optional db."""
         from goldfish.cloud.image_versions import ImageVersionResolver
 
         resolver = ImageVersionResolver(mock_config_no_version, test_db)
         assert resolver is not None
 
-    def test_constructor_accepts_config_only(
-        self, mock_config_no_version: GoldfishConfig
-    ) -> None:
+    def test_constructor_accepts_config_only(self, mock_config_no_version: GoldfishConfig) -> None:
         """ImageVersionResolver should work without db."""
         from goldfish.cloud.image_versions import ImageVersionResolver
 
@@ -158,9 +154,7 @@ class TestBaseImageVersionPrecedence:
     3. Default constant (BASE_IMAGE_VERSION_DEFAULT)
     """
 
-    def test_get_version_config_overrides_db(
-        self, test_db, mock_config_with_version: GoldfishConfig
-    ) -> None:
+    def test_get_version_config_overrides_db(self, test_db, mock_config_with_version: GoldfishConfig) -> None:
         """Config base_image_version should take precedence over DB version.
 
         When both config and DB have a version, config should win.
@@ -169,23 +163,18 @@ class TestBaseImageVersionPrecedence:
         from goldfish.cloud.image_versions import ImageVersionResolver
 
         # Set a version in DB
-        test_db.set_base_image_version(
-            "gpu", "v15", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v15"
-        )
+        test_db.set_base_image_version("gpu", "v15", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v15")
 
         resolver = ImageVersionResolver(mock_config_with_version, test_db)
 
         # get_version should return config version (v99), not DB (v15)
         result = resolver.get_version(image_type="gpu", image_layer="base")
         assert result.version == "v99", (
-            f"Expected config version 'v99' to override DB version 'v15', "
-            f"but got '{result.version}'"
+            f"Expected config version 'v99' to override DB version 'v15', " f"but got '{result.version}'"
         )
         assert result.source == "config"
 
-    def test_get_version_db_when_no_config(
-        self, test_db, mock_config_no_version: GoldfishConfig
-    ) -> None:
+    def test_get_version_db_when_no_config(self, test_db, mock_config_no_version: GoldfishConfig) -> None:
         """DB version should be used when no config override is set.
 
         When config.docker.base_image_version is None, fall back to DB.
@@ -193,23 +182,18 @@ class TestBaseImageVersionPrecedence:
         from goldfish.cloud.image_versions import ImageVersionResolver
 
         # Set a version in DB
-        test_db.set_base_image_version(
-            "gpu", "v15", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v15"
-        )
+        test_db.set_base_image_version("gpu", "v15", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v15")
 
         resolver = ImageVersionResolver(mock_config_no_version, test_db)
 
         # Should use v15 from DB
         result = resolver.get_version(image_type="gpu", image_layer="base")
         assert result.version == "v15", (
-            f"Expected DB version 'v15' when no config override, "
-            f"but got '{result.version}'"
+            f"Expected DB version 'v15' when no config override, " f"but got '{result.version}'"
         )
         assert result.source == "database"
 
-    def test_get_version_default_fallback(
-        self, test_db, mock_config_no_version: GoldfishConfig
-    ) -> None:
+    def test_get_version_default_fallback(self, test_db, mock_config_no_version: GoldfishConfig) -> None:
         """Default constant should be used when neither config nor DB has version.
 
         When config.docker.base_image_version is None AND DB has no version,
@@ -231,9 +215,7 @@ class TestBaseImageVersionPrecedence:
         )
         assert result.source == "default"
 
-    def test_get_version_default_when_no_db(
-        self, mock_config_no_version: GoldfishConfig
-    ) -> None:
+    def test_get_version_default_when_no_db(self, mock_config_no_version: GoldfishConfig) -> None:
         """Default constant should be used when DB is not provided.
 
         Some code paths may not have access to DB. Should still work.
@@ -249,8 +231,7 @@ class TestBaseImageVersionPrecedence:
         # Should use default constant
         result = resolver.get_version(image_type="gpu", image_layer="base")
         assert result.version == BASE_IMAGE_VERSION_DEFAULT, (
-            f"Expected default version '{BASE_IMAGE_VERSION_DEFAULT}' when no DB, "
-            f"but got '{result.version}'"
+            f"Expected default version '{BASE_IMAGE_VERSION_DEFAULT}' when no DB, " f"but got '{result.version}'"
         )
         assert result.source == "default"
 
@@ -266,15 +247,11 @@ class TestImageTypeResolution:
     Verifies the method works correctly for both CPU and GPU image types.
     """
 
-    def test_get_version_cpu_image_type(
-        self, test_db, mock_config_no_version: GoldfishConfig
-    ) -> None:
+    def test_get_version_cpu_image_type(self, test_db, mock_config_no_version: GoldfishConfig) -> None:
         """get_version should work for CPU image type."""
         from goldfish.cloud.image_versions import ImageVersionResolver
 
-        test_db.set_base_image_version(
-            "cpu", "v20", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-cpu:v20"
-        )
+        test_db.set_base_image_version("cpu", "v20", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-cpu:v20")
 
         resolver = ImageVersionResolver(mock_config_no_version, test_db)
 
@@ -282,15 +259,11 @@ class TestImageTypeResolution:
         assert result.version == "v20"
         assert result.source == "database"
 
-    def test_get_version_gpu_image_type(
-        self, test_db, mock_config_no_version: GoldfishConfig
-    ) -> None:
+    def test_get_version_gpu_image_type(self, test_db, mock_config_no_version: GoldfishConfig) -> None:
         """get_version should work for GPU image type."""
         from goldfish.cloud.image_versions import ImageVersionResolver
 
-        test_db.set_base_image_version(
-            "gpu", "v25", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v25"
-        )
+        test_db.set_base_image_version("gpu", "v25", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v25")
 
         resolver = ImageVersionResolver(mock_config_no_version, test_db)
 
@@ -298,18 +271,12 @@ class TestImageTypeResolution:
         assert result.version == "v25"
         assert result.source == "database"
 
-    def test_get_version_independent_types(
-        self, test_db, mock_config_no_version: GoldfishConfig
-    ) -> None:
+    def test_get_version_independent_types(self, test_db, mock_config_no_version: GoldfishConfig) -> None:
         """CPU and GPU versions should be resolved independently."""
         from goldfish.cloud.image_versions import ImageVersionResolver
 
-        test_db.set_base_image_version(
-            "cpu", "v10", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-cpu:v10"
-        )
-        test_db.set_base_image_version(
-            "gpu", "v15", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v15"
-        )
+        test_db.set_base_image_version("cpu", "v10", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-cpu:v10")
+        test_db.set_base_image_version("gpu", "v15", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v15")
 
         resolver = ImageVersionResolver(mock_config_no_version, test_db)
 
@@ -329,15 +296,11 @@ class TestImageLayerResolution:
     "project" images (project-specific images built on top of base).
     """
 
-    def test_get_version_base_image_layer(
-        self, test_db, mock_config_no_version: GoldfishConfig
-    ) -> None:
+    def test_get_version_base_image_layer(self, test_db, mock_config_no_version: GoldfishConfig) -> None:
         """get_version should work for 'base' image layer."""
         from goldfish.cloud.image_versions import ImageVersionResolver
 
-        test_db.set_base_image_version(
-            "gpu", "v12", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v12"
-        )
+        test_db.set_base_image_version("gpu", "v12", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v12")
 
         resolver = ImageVersionResolver(mock_config_no_version, test_db)
 
@@ -345,9 +308,7 @@ class TestImageLayerResolution:
         result = resolver.get_version(image_type="gpu", image_layer="base")
         assert result.version == "v12"
 
-    def test_get_version_project_image_layer(
-        self, test_db, mock_config_no_version: GoldfishConfig
-    ) -> None:
+    def test_get_version_project_image_layer(self, test_db, mock_config_no_version: GoldfishConfig) -> None:
         """get_version should work for 'project' image layer.
 
         Project images have their own version tracking separate from base images.
@@ -387,15 +348,11 @@ class TestImageLayerResolution:
             "NOT a hardcoded default. Project images are user-built."
         )
 
-    def test_get_version_defaults_to_base_layer(
-        self, test_db, mock_config_no_version: GoldfishConfig
-    ) -> None:
+    def test_get_version_defaults_to_base_layer(self, test_db, mock_config_no_version: GoldfishConfig) -> None:
         """get_version should default to 'base' layer if not specified."""
         from goldfish.cloud.image_versions import ImageVersionResolver
 
-        test_db.set_base_image_version(
-            "gpu", "v12", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v12"
-        )
+        test_db.set_base_image_version("gpu", "v12", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v12")
 
         resolver = ImageVersionResolver(mock_config_no_version, test_db)
 
@@ -412,15 +369,11 @@ class TestImageLayerResolution:
 class TestRegistryTagGeneration:
     """Tests for registry_tag field in ImageVersion."""
 
-    def test_get_version_includes_registry_tag(
-        self, test_db, mock_config_no_version: GoldfishConfig
-    ) -> None:
+    def test_get_version_includes_registry_tag(self, test_db, mock_config_no_version: GoldfishConfig) -> None:
         """ImageVersion should include full registry_tag when registry is configured."""
         from goldfish.cloud.image_versions import ImageVersionResolver
 
-        test_db.set_base_image_version(
-            "gpu", "v15", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v15"
-        )
+        test_db.set_base_image_version("gpu", "v15", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v15")
 
         resolver = ImageVersionResolver(mock_config_no_version, test_db)
 
@@ -436,9 +389,7 @@ class TestRegistryTagGeneration:
         from goldfish.cloud.image_versions import ImageVersionResolver
 
         # DB has v15, but config has v99
-        test_db.set_base_image_version(
-            "gpu", "v15", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v15"
-        )
+        test_db.set_base_image_version("gpu", "v15", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v15")
 
         resolver = ImageVersionResolver(mock_config_with_version, test_db)
 
@@ -489,9 +440,7 @@ class TestResolveBaseImageIntegration:
         # Pass explicit version
         result = resolve_base_image(profile, artifact_registry=registry, version="v50")
 
-        assert ":v50" in result, (
-            f"Expected resolved image to use version 'v50', but got '{result}'"
-        )
+        assert ":v50" in result, f"Expected resolved image to use version 'v50', but got '{result}'"
         assert result == f"{registry}/goldfish-base-gpu:v50"
 
 
@@ -545,9 +494,7 @@ class TestProjectImageVersionsDatabase:
 
     def test_set_project_image_version(self, test_db) -> None:
         """Should be able to set a project image version."""
-        test_db.set_project_image_version(
-            "test-project", "gpu", "v1", "registry/test-project-gpu:v1"
-        )
+        test_db.set_project_image_version("test-project", "gpu", "v1", "registry/test-project-gpu:v1")
 
         result = test_db.get_current_project_image_version("test-project", "gpu")
         assert result is not None
@@ -574,9 +521,7 @@ class TestProjectImageVersionsDatabase:
         assert gpu_result["version"] == "v3"
         assert cpu_result["version"] == "v1"
 
-    def test_get_current_project_image_version_returns_none_when_empty(
-        self, test_db
-    ) -> None:
+    def test_get_current_project_image_version_returns_none_when_empty(self, test_db) -> None:
         """Should return None for unknown image type."""
         result = test_db.get_current_project_image_version("test-project", "gpu")
         assert result is None

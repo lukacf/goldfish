@@ -7,6 +7,20 @@ GCE machine types, zones, and disk configurations from Claude.
 from copy import deepcopy
 from typing import Any
 
+# ===========================================================================
+# Image Constants - imported from cloud.image_versions (single source of truth)
+# ===========================================================================
+# NOTE: These are re-exported here for backward compatibility only.
+# New code should import directly from goldfish.cloud.image_versions
+from goldfish.cloud.image_versions import (
+    BASE_IMAGE_CPU,
+    BASE_IMAGE_GPU,
+    BASE_IMAGE_VERSION_DEFAULT,
+    FALLBACK_BASE_IMAGE,
+    PUBLIC_BASE_IMAGE_CPU,
+    PUBLIC_BASE_IMAGE_GPU,
+)
+
 
 class ProfileNotFoundError(Exception):
     """Raised when a profile name is not found."""
@@ -30,19 +44,6 @@ class ProfileValidationError(Exception):
 # the public Jupyter CUDA image (which lacks nvrtc for Flash Attention JIT).
 
 # ===========================================================================
-# Image Constants - imported from cloud.image_versions (single source of truth)
-# ===========================================================================
-# NOTE: These are re-exported here for backward compatibility only.
-# New code should import directly from goldfish.cloud.image_versions
-from goldfish.cloud.image_versions import (
-    BASE_IMAGE_CPU,
-    BASE_IMAGE_GPU,
-    BASE_IMAGE_VERSION_DEFAULT,
-    FALLBACK_BASE_IMAGE,
-    PUBLIC_BASE_IMAGE_CPU,
-    PUBLIC_BASE_IMAGE_GPU,
-)
-
 # Backward compat alias - new code should use BASE_IMAGE_VERSION_DEFAULT
 BASE_IMAGE_VERSION = BASE_IMAGE_VERSION_DEFAULT
 

@@ -68,6 +68,7 @@ class ImageVersion:
         source: Where the version came from ("config", "database", "default")
         registry_tag: Full registry tag if available, None for defaults
     """
+
     version: str
     source: str  # "config", "database", "default"
     registry_tag: str | None
@@ -197,7 +198,7 @@ class ImageVersionResolver:
             ImageVersion for project image, or None if not yet built
         """
         # Priority 1: Config override
-        config_version = getattr(self.config.docker, 'project_image_version', None)
+        config_version = getattr(self.config.docker, "project_image_version", None)
         if config_version:
             return ImageVersion(
                 version=config_version,

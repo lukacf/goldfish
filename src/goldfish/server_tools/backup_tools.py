@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from goldfish.cloud.contracts import StorageURI
 from goldfish.server_core import (
     _get_config,
     _get_db,
@@ -51,7 +52,13 @@ def _get_backup_manager() -> BackupManager | None:
     db_path = dev_repo / ".goldfish" / "goldfish.db"
 
     # Backup bucket: use GCS bucket with "backups/" prefix
-    gcs_bucket = f"gs://{config.gcs.bucket}/backups"
+    bucket = config.gcs.bucket
+    try:
+        bucket_root = StorageURI.parse(bucket)
+    except ValueError:
+        bucket_root = StorageURI("gs", bucket, "")
+    bucket_root = StorageURI(bucket_root.scheme, bucket_root.bucket, "")
+    gcs_bucket = str(bucket_root.join("backups")).rstrip("/")
 
     _backup_manager = BackupManager(
         db=_get_db(),

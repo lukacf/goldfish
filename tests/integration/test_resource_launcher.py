@@ -4,14 +4,14 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from goldfish.errors import GoldfishError
-from goldfish.infra.resource_launcher import (
+from goldfish.cloud.adapters.gcp.resource_launcher import (
     CAPACITY_PATTERNS,
     CapacityError,
     ResourceLauncher,
     mode_order,
     order_resources,
 )
+from goldfish.errors import GoldfishError
 
 
 def test_capacity_error_patterns():
@@ -71,6 +71,105 @@ def test_order_resources_force_gpu_missing():
 
     with pytest.raises(GoldfishError, match="not present in resource catalog"):
         order_resources(resources, gpu_preference=[], force_gpu="v100")
+
+
+def test_order_resources_force_gpu_by_accelerator():
+    """REGRESSION: force_gpu should match against gpu.accelerator, not just gpu.type.
+
+    Bug: gce_launcher passes the accelerator name (e.g., "nvidia-h100-80gb") as force_gpu,
+    but order_resources() groups by gpu.type (e.g., "h100"). The mismatch caused
+    "force_gpu=nvidia-h100-80gb not present in resource catalog" error.
+
+    Fix: order_resources should check both gpu.type AND gpu.accelerator when matching.
+    """
+    resources = [
+        {
+            "name": "h100-spot",
+            "gpu": {
+                "type": "h100",
+                "accelerator": "nvidia-h100-80gb",
+                "count": 1,
+            },
+        },
+        {
+            "name": "a100-spot",
+            "gpu": {
+                "type": "a100",
+                "accelerator": "nvidia-tesla-a100",
+                "count": 1,
+            },
+        },
+        {
+            "name": "cpu-small",
+            "gpu": {
+                "type": "none",
+                "accelerator": None,
+                "count": 0,
+            },
+        },
+    ]
+
+    # Force using accelerator name (as passed by gce_launcher)
+    ordered = order_resources(resources, gpu_preference=[], force_gpu="nvidia-h100-80gb")
+
+    assert len(ordered) == 1
+    assert ordered[0]["name"] == "h100-spot"
+
+
+def test_order_resources_force_gpu_by_accelerator_a100():
+    """Verify A100 filtering also works with accelerator name."""
+    resources = [
+        {
+            "name": "h100-spot",
+            "gpu": {
+                "type": "h100",
+                "accelerator": "nvidia-h100-80gb",
+                "count": 1,
+            },
+        },
+        {
+            "name": "a100-spot",
+            "gpu": {
+                "type": "a100",
+                "accelerator": "nvidia-tesla-a100",
+                "count": 1,
+            },
+        },
+    ]
+
+    # Force using A100 accelerator name
+    ordered = order_resources(resources, gpu_preference=[], force_gpu="nvidia-tesla-a100")
+
+    assert len(ordered) == 1
+    assert ordered[0]["name"] == "a100-spot"
+
+
+def test_order_resources_force_gpu_still_works_with_short_type():
+    """Ensure backward compatibility: force_gpu with short type still works."""
+    resources = [
+        {
+            "name": "h100-spot",
+            "gpu": {
+                "type": "h100",
+                "accelerator": "nvidia-h100-80gb",
+                "count": 1,
+            },
+        },
+        {
+            "name": "a100-spot",
+            "gpu": {
+                "type": "a100",
+                "accelerator": "nvidia-tesla-a100",
+                "count": 1,
+            },
+        },
+    ]
+
+    # Force using short type name (backward compatibility)
+    ordered = order_resources(resources, gpu_preference=[], force_gpu="h100")
+
+    assert len(ordered) == 1
+    assert ordered[0]["name"] == "h100-spot"
 
 
 def test_mode_order_spot_first():
@@ -153,9 +252,9 @@ def test_resource_launcher_init_filters_resources():
     assert launcher.ordered_resources[1]["name"] == "cpu-resource"
 
 
-@patch("goldfish.infra.resource_launcher.wait_for_instance_ready")
-@patch("goldfish.infra.resource_launcher.run_gcloud")
-@patch("goldfish.infra.resource_launcher.tempfile.NamedTemporaryFile")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.wait_for_instance_ready")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.tempfile.NamedTemporaryFile")
 def test_resource_launcher_launch_success(mock_tempfile, mock_run_gcloud, mock_wait):
     """Test successful launch with capacity search."""
     # Mock temp file for startup script
@@ -197,9 +296,110 @@ def test_resource_launcher_launch_success(mock_tempfile, mock_run_gcloud, mock_w
     assert "instance_create_sec" in result.timings
 
 
-@patch("goldfish.infra.resource_launcher.wait_for_instance_ready")
-@patch("goldfish.infra.resource_launcher.run_gcloud")
-@patch("goldfish.infra.resource_launcher.tempfile.NamedTemporaryFile")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.wait_for_instance_ready")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.tempfile.NamedTemporaryFile")
+def test_resource_launcher_uses_profile_boot_image(mock_tempfile, mock_run_gcloud, mock_wait):
+    """REGRESSION: Boot image must always be specified to ensure bash is available.
+
+    Bug: When boot_disk didn't have image or image_family, the gcloud command
+    would have no --image* argument. GCE would use the project default, which
+    could be a minimal COS image without bash. Startup scripts use bash features
+    (set -o pipefail) and would fail with "sh: Illegal option -o pipefail".
+
+    Fix: All GCP profiles must specify image_family and image_project in boot_disk.
+    """
+    mock_temp = MagicMock()
+    mock_temp.name = "/tmp/startup.sh"
+    mock_tempfile.return_value.__enter__.return_value = mock_temp
+    mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
+    mock_wait.return_value = None
+
+    # Resource WITH image_family (as all profiles should have)
+    resources = [
+        {
+            "name": "h100-spot",
+            "machine_type": "a3-highgpu-1g",
+            "zones": ["us-central1-a"],
+            "gpu": {"type": "h100", "accelerator": "nvidia-h100-80gb", "count": 1},
+            "preemptible_allowed": True,
+            "on_demand_allowed": False,
+            "boot_disk": {
+                "size_gb": 600,
+                "type": "hyperdisk-balanced",
+                "image_family": "debian-12",
+                "image_project": "debian-cloud",
+            },
+        },
+    ]
+
+    launcher = ResourceLauncher(
+        resources=resources,
+        gpu_preference=["h100"],
+    )
+
+    launcher.launch(
+        instance_name="test-instance",
+        startup_script="#!/bin/bash\nset -euxo pipefail\necho test",
+    )
+
+    # Verify gcloud was called with boot image from profile
+    cmd = mock_run_gcloud.call_args[0][0]
+    assert "--image-family=debian-12" in cmd, (
+        "Boot image must be specified to ensure bash is available. "
+        "Without it, GCE may use COS which lacks bash, causing startup script failure."
+    )
+    assert "--image-project=debian-cloud" in cmd
+
+
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.wait_for_instance_ready")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.tempfile.NamedTemporaryFile")
+def test_resource_launcher_respects_custom_boot_image(mock_tempfile, mock_run_gcloud, mock_wait):
+    """Profiles can override the default boot image."""
+    mock_temp = MagicMock()
+    mock_temp.name = "/tmp/startup.sh"
+    mock_tempfile.return_value.__enter__.return_value = mock_temp
+    mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
+    mock_wait.return_value = None
+
+    # Resource with custom image_family
+    resources = [
+        {
+            "name": "custom-resource",
+            "machine_type": "n1-standard-4",
+            "zones": ["us-central1-a"],
+            "gpu": {},
+            "preemptible_allowed": True,
+            "on_demand_allowed": True,
+            "boot_disk": {
+                "size_gb": 100,
+                "type": "pd-ssd",
+                "image_family": "ubuntu-2204-lts",
+                "image_project": "ubuntu-os-cloud",
+            },
+        },
+    ]
+
+    launcher = ResourceLauncher(
+        resources=resources,
+        gpu_preference=["none"],
+    )
+
+    launcher.launch(
+        instance_name="test-instance",
+        startup_script="#!/bin/bash\necho test",
+    )
+
+    # Verify custom image is used
+    cmd = mock_run_gcloud.call_args[0][0]
+    assert "--image-family=ubuntu-2204-lts" in cmd
+    assert "--image-project=ubuntu-os-cloud" in cmd
+
+
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.wait_for_instance_ready")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.tempfile.NamedTemporaryFile")
 def test_resource_launcher_launch_sets_service_account(mock_tempfile, mock_run_gcloud, mock_wait):
     """Should set service account on instance creation when configured."""
     mock_temp = MagicMock()
@@ -237,10 +437,10 @@ def test_resource_launcher_launch_sets_service_account(mock_tempfile, mock_run_g
     assert "--service-account=svc@test.iam.gserviceaccount.com" in cmd
 
 
-@patch("goldfish.infra.resource_launcher.wait_for_instance_ready")
-@patch("goldfish.infra.resource_launcher.run_gcloud")
-@patch("goldfish.infra.resource_launcher.tempfile.NamedTemporaryFile")
-@patch("goldfish.infra.resource_launcher.time.time")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.wait_for_instance_ready")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.tempfile.NamedTemporaryFile")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.time.time")
 def test_resource_launcher_retry_on_capacity_error(mock_time, mock_tempfile, mock_run_gcloud, mock_wait):
     """Test that launcher retries on capacity errors."""
     # Mock temp file
@@ -291,8 +491,8 @@ def test_resource_launcher_retry_on_capacity_error(mock_time, mock_tempfile, moc
     assert result.attempt_log[1]["status"] == "success"
 
 
-@patch("goldfish.infra.resource_launcher.run_gcloud")
-@patch("goldfish.infra.resource_launcher.tempfile.NamedTemporaryFile")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.tempfile.NamedTemporaryFile")
 def test_resource_launcher_timeout_exceeded(mock_tempfile, mock_run_gcloud):
     """Test that launcher fails after timeout."""
     # Mock temp file

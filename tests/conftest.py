@@ -43,6 +43,53 @@ def pytest_configure(config: pytest.Config) -> None:
         os.environ.pop(var, None)
 
 
+def _docker_available() -> bool:
+    """Return True when Docker is installed and the daemon is responsive."""
+    if not shutil.which("docker"):
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def _deluxe_enabled() -> bool:
+    """Return True when deluxe tests are enabled via environment variable."""
+    return os.environ.get("GOLDFISH_DELUXE_TEST_ENABLED", "0") == "1"
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Deselect opt-in tests unless their requirements are met."""
+    docker_available = _docker_available()
+    deluxe_enabled = _deluxe_enabled()
+
+    selected: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
+    for item in items:
+        is_deluxe = item.get_closest_marker("deluxe_gce") is not None or "tests/e2e/deluxe/" in item.nodeid
+        requires_docker = item.get_closest_marker("requires_docker") is not None
+
+        if is_deluxe and not deluxe_enabled:
+            deselected.append(item)
+        elif requires_docker and not docker_available:
+            deselected.append(item)
+        else:
+            selected.append(item)
+
+    if not deselected:
+        return
+
+    items[:] = selected
+    config.hook.pytest_deselected(items=deselected)
+
+
 @pytest.fixture
 def temp_dir() -> Generator[Path, None, None]:
     """Create a temporary directory that's cleaned up after the test."""

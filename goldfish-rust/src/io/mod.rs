@@ -475,7 +475,7 @@ fn save_csv(path: &Path, df: &mut polars::prelude::DataFrame) -> Result<()> {
     // Use 64KB buffer for significantly faster writes on large DataFrames
     let buf_writer = std::io::BufWriter::with_capacity(64 * 1024, file);
     let mut writer = CsvWriter::new(buf_writer);
-    writer.finish(df).map_err(|e| IoError::CsvError(e))?;
+    writer.finish(df).map_err(IoError::CsvError)?;
     Ok(())
 }
 

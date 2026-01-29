@@ -22,7 +22,6 @@ if TYPE_CHECKING:
 # Validators for from_dict security (must be runtime imports, not TYPE_CHECKING)
 from goldfish.validation import (
     validate_container_id,  # noqa: E402
-    validate_instance_name,  # noqa: E402
     validate_stage_run_id,  # noqa: E402
 )
 
@@ -30,12 +29,12 @@ from goldfish.validation import (
 class StorageURI:
     """Provider-agnostic storage URI.
 
-    Abstracts gs://, s3://, file:// URIs into a common interface.
+    Abstracts storage URIs (cloud + local) into a common interface.
     Based on RCT-GCS-1 observations: URIs are (scheme, bucket, path) tuples.
 
     Examples:
-        gs://my-bucket/path/to/file.txt -> StorageURI("gs", "my-bucket", "path/to/file.txt")
-        s3://my-bucket/path/to/file.txt -> StorageURI("s3", "my-bucket", "path/to/file.txt")
+        StorageURI("gs", "my-bucket", "path/to/file.txt")
+        StorageURI("s3", "my-bucket", "path/to/file.txt")
         file:///local/path/file.txt -> StorageURI("file", "", "/local/path/file.txt")
     """
 
@@ -60,7 +59,7 @@ class StorageURI:
         """Parse a URI string into StorageURI.
 
         Args:
-            uri: Full URI string (e.g., "gs://bucket/path")
+            uri: Full URI string (e.g., "s3://bucket/path" or "file:///tmp/x")
 
         Returns:
             Parsed StorageURI
@@ -248,63 +247,6 @@ class BackendCapabilities:
     zone_resolution_method: str = "config"  # "config" = use config zones, "handle" = use handle.zone
 
 
-# Default capabilities per backend type - used when backend instance not available
-# These MUST match the values set in the actual backend implementations
-_LOCAL_DEFAULT_CAPABILITIES = BackendCapabilities(
-    supports_gpu=False,  # Dynamic, but default False
-    supports_spot=False,
-    supports_preemption=True,
-    supports_preemption_detection=False,  # Dynamic, but default False
-    supports_live_logs=True,
-    supports_metrics=False,
-    max_run_duration_hours=None,
-    ack_timeout_seconds=1.0,
-    ack_timeout_running_seconds=1.0,
-    has_launch_delay=False,
-    logs_unavailable_message="Logs not available",
-    timeout_becomes_pending=False,
-    status_message_for_preparing="Starting container...",
-    zone_resolution_method="config",
-)
-
-_GCE_DEFAULT_CAPABILITIES = BackendCapabilities(
-    supports_gpu=True,
-    supports_spot=True,
-    supports_preemption=True,
-    supports_preemption_detection=True,
-    supports_live_logs=True,
-    supports_metrics=True,
-    max_run_duration_hours=24,
-    ack_timeout_seconds=3.0,
-    ack_timeout_running_seconds=4.0,
-    has_launch_delay=True,
-    logs_unavailable_message="Logs not yet synced from GCE",
-    timeout_becomes_pending=True,
-    status_message_for_preparing="GCE instance provisioning...",
-    zone_resolution_method="handle",
-)
-
-
-def get_capabilities_for_backend(backend_type: str) -> BackendCapabilities:
-    """Get default capabilities for a backend type.
-
-    This is used when we need capabilities based on a stored backend_type
-    string (e.g., from a database row) without access to the actual backend
-    instance.
-
-    Args:
-        backend_type: Backend type string ("local" or "gce")
-
-    Returns:
-        Default BackendCapabilities for that backend type.
-        Returns local defaults for unknown backend types.
-    """
-    if backend_type == "gce":
-        return _GCE_DEFAULT_CAPABILITIES
-    # Default to local capabilities for unknown types
-    return _LOCAL_DEFAULT_CAPABILITIES
-
-
 @dataclass
 class RunSpec:
     """Specification for launching a run.
@@ -325,6 +267,7 @@ class RunSpec:
 
     # Resources
     profile: str = "cpu-small"  # Resource profile name
+    machine_type: str | None = None  # Machine type from profile (e.g., "a3-highgpu-1g")
     gpu_count: int = 0
     gpu_type: str | None = None  # GPU type (e.g., "nvidia-tesla-t4", "nvidia-h100-80gb")
     memory_gb: float = 4.0
@@ -390,14 +333,9 @@ class RunHandle:
         # Validate to prevent injection attacks via deserialized data
         validate_stage_run_id(stage_run_id)
 
-        # Validate backend_handle based on backend_type
-        if backend_type == "local":
-            validate_container_id(backend_handle)
-        elif backend_type == "gce":
-            validate_instance_name(backend_handle)
-        # Other backend types may be added; fail-safe is to validate as container_id
-        elif backend_handle:
-            validate_container_id(backend_handle)
+        # Validate backend_handle without branching on backend_type.
+        # Backends may validate more strictly at adapter boundaries.
+        validate_container_id(backend_handle)
 
         return cls(
             stage_run_id=stage_run_id,

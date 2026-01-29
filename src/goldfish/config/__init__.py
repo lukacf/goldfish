@@ -1,6 +1,7 @@
-"""Configuration loading for Goldfish."""
+"""Configuration models and loading for Goldfish."""
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -139,7 +140,7 @@ class CloudBuildConfig(BaseModel):
 
     # FlashAttention-3 wheel from GCS (for GPU base image builds)
     # Pre-built wheel avoids 2+ hour compile time during Docker build
-    # Example: "gs://bucket/wheels/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl"
+    # Example: "<scheme>://bucket/wheels/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl"
     fa3_wheel_gcs: str | None = None
 
 
@@ -152,13 +153,22 @@ class DockerConfig(BaseModel):
     2. base_images: Override base image names/URLs per type (cpu, gpu)
     3. Custom Dockerfiles: Place Dockerfile.base-cpu/Dockerfile.base-gpu in project root
 
+    Version resolution precedence:
+    - BASE images: config -> DB -> default constant (v10)
+    - PROJECT images: config -> DB -> None (no default - user-built)
+
+    Note: Project images have NO default version because they're user-built,
+    not Goldfish-shipped. If no version exists, builds use the next version
+    from the database (v1 for first build, vN+1 for subsequent).
+
     Example goldfish.yaml:
         docker:
           # Override base images (optional)
           base_images:
             gpu: "us-docker.pkg.dev/my-project/repo/my-custom-gpu:v1"
             cpu: "goldfish-base-cpu"  # Use default with custom version below
-          base_image_version: "v10"  # Override default version for short names
+          base_image_version: "v10"    # Override base image version
+          project_image_version: "v3"  # Override project image version
 
           # Add packages on top of base images
           extra_packages:
@@ -181,9 +191,14 @@ class DockerConfig(BaseModel):
     # - Full URL: "us-docker.pkg.dev/project/repo/image:tag" (used as-is)
     base_images: dict[str, str] = Field(default_factory=dict)
 
-    # Override the default base image version (default: from profiles.py)
+    # Override the default base image version (default: v10 from image_versions.py)
     # Only applies to short names, not full URLs
     base_image_version: str | None = None
+
+    # Override the project image version (no default - project images are user-built)
+    # Project images are {project_name}-{cpu,gpu}:{version}
+    # If not set, uses current version from DB (or next version for builds)
+    project_image_version: str | None = None
 
     extra_packages: dict[str, list[str]] = Field(default_factory=dict)
     # Keys: "gpu", "cpu"
@@ -219,8 +234,8 @@ class GCEConfig(BaseModel):
     #     machine_type: "n2-standard-16"
     #     zones: ["us-east1-b"]
     #     ...
-    profile_overrides: dict[str, dict] | None = None
-    profiles: dict[str, dict] | None = None  # Alias for profile_overrides
+    profile_overrides: dict[str, dict[str, object]] | None = None
+    profiles: dict[str, dict[str, object]] | None = None  # Alias for profile_overrides
 
     # Service account (optional)
     service_account: str | None = None
@@ -257,12 +272,12 @@ class GCEConfig(BaseModel):
             return None
 
     @property
-    def effective_profile_overrides(self) -> dict[str, dict] | None:
+    def effective_profile_overrides(self) -> dict[str, dict[str, object]] | None:
         """Get profile overrides from either field."""
         return self.profile_overrides or self.profiles
 
 
-def _get_valid_fields_for_path(loc: tuple | list) -> list[str]:
+def _get_valid_fields_for_path(loc: Sequence[object]) -> list[str]:
     """Get valid field names for a given error location path.
 
     Args:
@@ -346,27 +361,28 @@ class GoldfishConfig(BaseModel):
     def validate_gce_config(self) -> "GoldfishConfig":
         """Validate GCE configuration completeness.
 
-        Warns if GCE backend is enabled but zones aren't configured,
-        which will cause runtime errors when launching instances.
+        Validates/warns about the GCE config section when present.
+
+        Note: Backend selection is handled behind adapter boundaries. Core config
+        should not branch on backend strings (e.g., jobs.backend set to "gce").
         """
-        if self.jobs.backend == "gce":
-            if self.gce is None:
-                logger.warning(
-                    "jobs.backend is 'gce' but no gce config provided. "
-                    "GCE launches will fail. Add gce section to goldfish.yaml."
-                )
-            elif not self.gce.zones and not self.gce.region:
-                logger.warning(
-                    "GCE backend enabled but no zones configured. "
-                    "Add 'zones' to gce config in goldfish.yaml to specify "
-                    "which GCP zones to use for instance launches."
-                )
-            if self.gce and not self.gce.effective_artifact_registry:
-                logger.warning(
-                    "GCE backend enabled but no artifact_registry configured. "
-                    "GPU profiles require artifact_registry for Docker images. "
-                    "Add 'artifact_registry' to gce config in goldfish.yaml."
-                )
+        if self.gce is None:
+            return self
+
+        if not self.gce.zones and not self.gce.region:
+            logger.warning(
+                "gce config provided but no zones configured. "
+                "Add 'zones' or 'region' in goldfish.yaml to specify "
+                "which GCP zones to use for instance launches."
+            )
+
+        if not self.gce.effective_artifact_registry:
+            logger.warning(
+                "gce config provided but no artifact_registry configured. "
+                "GPU profiles require artifact_registry for Docker images. "
+                "Add 'artifact_registry' to gce config in goldfish.yaml."
+            )
+
         return self
 
     @classmethod

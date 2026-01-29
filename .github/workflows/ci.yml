@@ -65,6 +65,32 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+  import-linter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-${{ env.PYTHON_VERSION }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-${{ env.PYTHON_VERSION }}-
+
+      - name: Install dependencies
+        run: |
+          pip install uv
+          uv pip install --system -e ".[test]"
+
+      - name: Run import boundary checks
+        run: make lint-imports
+
   rust-tests:
     runs-on: ubuntu-latest
     steps:
@@ -123,7 +149,7 @@ jobs:
 
   all-tests-passed:
     # Gate job to ensure all tests pass before merge
-    needs: [lint, unit-tests, rust-tests, integration-tests]
+    needs: [lint, unit-tests, import-linter, rust-tests, integration-tests]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -131,6 +157,7 @@ jobs:
         run: |
           if [[ "${{ needs.lint.result }}" != "success" || \
                 "${{ needs.unit-tests.result }}" != "success" || \
+                "${{ needs.import-linter.result }}" != "success" || \
                 "${{ needs.rust-tests.result }}" != "success" || \
                 "${{ needs.integration-tests.result }}" != "success" ]]; then
             echo "One or more required tests failed"

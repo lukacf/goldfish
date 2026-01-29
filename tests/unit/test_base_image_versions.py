@@ -5,9 +5,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from goldfish.cloud.adapters.gcp.profiles import BASE_IMAGE_VERSION
 from goldfish.config import DockerConfig, GoldfishConfig
 from goldfish.infra.base_images.manager import BaseImageManager
-from goldfish.infra.profiles import BASE_IMAGE_VERSION
 
 
 @pytest.fixture

@@ -5,8 +5,8 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
+from goldfish.cloud.adapters.gcp.gce_launcher import GCELauncher
 from goldfish.errors import GoldfishError
-from goldfish.infra.gce_launcher import GCELauncher
 
 
 @pytest.fixture
@@ -31,7 +31,7 @@ def launcher():
                 "name": "gpu-resource",
                 "machine_type": "a2-highgpu-1g",
                 "zones": ["us-central1-a"],
-                "gpu": {"type": "a100", "count": 1},
+                "gpu": {"type": "a100", "accelerator": "nvidia-tesla-a100", "count": 1},
                 "preemptible_allowed": True,
                 "on_demand_allowed": True,
                 "boot_disk": {"size_gb": 100, "type": "pd-ssd"},
@@ -56,7 +56,7 @@ def test_gce_launcher_init():
     assert launcher.service_account == "svc@test.iam.gserviceaccount.com"
 
 
-@patch("goldfish.infra.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
 def test_resolve_service_account_default(mock_run_gcloud):
     """Should derive default compute service account when not provided."""
     launcher = GCELauncher(project_id="test-project")
@@ -83,8 +83,8 @@ def test_gce_launcher_requires_bucket_for_launch(launcher):
         )
 
 
-@patch("goldfish.infra.gce_launcher.ResourceLauncher")
-@patch("goldfish.infra.gce_launcher.build_startup_script")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.ResourceLauncher")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.build_startup_script")
 def test_launch_with_capacity_search(mock_build_startup, mock_resource_launcher_class, launcher):
     """Test launch_instance with capacity search."""
     # Mock startup script builder
@@ -122,8 +122,8 @@ def test_launch_with_capacity_search(mock_build_startup, mock_resource_launcher_
     assert rl_kwargs["service_account"] == "svc@test.iam.gserviceaccount.com"
 
 
-@patch("goldfish.infra.gce_launcher.ResourceLauncher")
-@patch("goldfish.infra.gce_launcher.build_startup_script")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.ResourceLauncher")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.build_startup_script")
 def test_launch_with_goldfish_env_vars(mock_build_startup, mock_resource_launcher_class, launcher):
     """Test launch_instance passes Goldfish environment variables."""
     # Mock startup script builder
@@ -190,10 +190,10 @@ def test_launch_with_goldfish_env_vars(mock_build_startup, mock_resource_launche
     mock_launcher.launch.assert_called_once()
 
 
-@patch("goldfish.infra.resource_launcher.wait_for_instance_ready")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.wait_for_instance_ready")
 @patch("tempfile.NamedTemporaryFile")
-@patch("goldfish.infra.gce_launcher.run_gcloud")
-@patch("goldfish.infra.gce_launcher.build_startup_script")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.build_startup_script")
 def test_launch_simple_no_gpu(mock_build_startup, mock_run_gcloud, mock_tempfile, mock_wait, launcher):
     """Test simple launch without GPU."""
     # Mock temp file
@@ -241,10 +241,10 @@ def test_launch_simple_no_gpu(mock_build_startup, mock_run_gcloud, mock_tempfile
     assert not any("--accelerator" in str(arg) for arg in gcloud_cmd)
 
 
-@patch("goldfish.infra.resource_launcher.wait_for_instance_ready")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.wait_for_instance_ready")
 @patch("tempfile.NamedTemporaryFile")
-@patch("goldfish.infra.gce_launcher.run_gcloud")
-@patch("goldfish.infra.gce_launcher.build_startup_script")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.build_startup_script")
 def test_launch_simple_with_gpu(mock_build_startup, mock_run_gcloud, mock_tempfile, mock_wait, launcher):
     """Test simple launch with GPU."""
     # Mock temp file
@@ -287,10 +287,10 @@ def test_launch_simple_with_gpu(mock_build_startup, mock_run_gcloud, mock_tempfi
     assert "--metadata=install-nvidia-driver=True" in gcloud_cmd
 
 
-@patch("goldfish.infra.resource_launcher.wait_for_instance_ready")
+@patch("goldfish.cloud.adapters.gcp.resource_launcher.wait_for_instance_ready")
 @patch("tempfile.NamedTemporaryFile")
-@patch("goldfish.infra.gce_launcher.run_gcloud")
-@patch("goldfish.infra.gce_launcher.build_startup_script")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.build_startup_script")
 def test_launch_a3_machine_no_accelerator_flag(mock_build_startup, mock_run_gcloud, mock_tempfile, mock_wait, launcher):
     """Test that A3 machines with integrated H100 GPUs do NOT pass --accelerator.
 
@@ -340,7 +340,7 @@ def test_launch_a3_machine_no_accelerator_flag(mock_build_startup, mock_run_gclo
     assert "--metadata=install-nvidia-driver=True" in gcloud_cmd
 
 
-@patch("goldfish.infra.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
 def test_create_disk_basic(mock_run_gcloud, launcher):
     """Test basic disk creation."""
     mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
@@ -360,7 +360,7 @@ def test_create_disk_basic(mock_run_gcloud, launcher):
     assert "--project=test-project" in cmd
 
 
-@patch("goldfish.infra.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
 def test_create_disk_with_snapshot(mock_run_gcloud, launcher):
     """Test disk creation from snapshot."""
     mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
@@ -377,7 +377,7 @@ def test_create_disk_with_snapshot(mock_run_gcloud, launcher):
     assert "--source-snapshot=my-snapshot" in cmd
 
 
-@patch("goldfish.infra.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
 def test_create_hyperdisk(mock_run_gcloud, launcher):
     """Test hyperdisk creation with IOPS/throughput."""
     mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
@@ -395,7 +395,7 @@ def test_create_hyperdisk(mock_run_gcloud, launcher):
     assert "--provisioned-throughput=2400" in cmd
 
 
-@patch("goldfish.infra.gce_launcher.cleanup_disk")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.cleanup_disk")
 def test_delete_disk(mock_cleanup, launcher):
     """Test disk deletion."""
     launcher.delete_disk("test-disk", "us-central1-a")
@@ -403,7 +403,7 @@ def test_delete_disk(mock_cleanup, launcher):
     mock_cleanup.assert_called_once_with("test-disk", "us-central1-a")
 
 
-@patch("goldfish.infra.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
 def test_snapshot_disk(mock_run_gcloud, launcher):
     """Test disk snapshot creation."""
     mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
@@ -420,7 +420,7 @@ def test_snapshot_disk(mock_run_gcloud, launcher):
     assert "--zone=us-central1-a" in cmd
 
 
-@patch("goldfish.infra.gce_launcher.subprocess.run")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.subprocess.run")
 def test_sync_to_gcs_success(mock_run, launcher, tmp_path):
     """Test successful sync to GCS."""
     mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
@@ -440,7 +440,7 @@ def test_sync_to_gcs_success(mock_run, launcher, tmp_path):
     assert "gs://test-bucket/path" in cmd
 
 
-@patch("goldfish.infra.gce_launcher.subprocess.run")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.subprocess.run")
 def test_sync_to_gcs_failure(mock_run, launcher, tmp_path):
     """Test failed sync to GCS."""
     mock_run.return_value = Mock(returncode=1, stdout="", stderr="Permission denied")
@@ -452,7 +452,7 @@ def test_sync_to_gcs_failure(mock_run, launcher, tmp_path):
         launcher.sync_to_gcs(local_dir, "gs://test-bucket/path")
 
 
-@patch("goldfish.infra.gce_launcher.subprocess.run")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.subprocess.run")
 def test_sync_from_gcs_success(mock_run, launcher, tmp_path):
     """Test successful sync from GCS."""
     mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
@@ -472,7 +472,7 @@ def test_sync_from_gcs_success(mock_run, launcher, tmp_path):
     assert str(local_dir) in cmd
 
 
-@patch("goldfish.infra.gce_launcher.subprocess.run")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.subprocess.run")
 def test_sync_from_gcs_failure(mock_run, launcher, tmp_path):
     """Test failed sync from GCS."""
     mock_run.return_value = Mock(returncode=1, stdout="", stderr="Not found")
@@ -481,7 +481,7 @@ def test_sync_from_gcs_failure(mock_run, launcher, tmp_path):
         launcher.sync_from_gcs("gs://test-bucket/missing", tmp_path / "output")
 
 
-@patch("goldfish.infra.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
 def test_get_instance_status_running(mock_run_gcloud, launcher):
     """Test get_instance_status for running instance."""
     mock_run_gcloud.return_value = Mock(returncode=0, stdout="RUNNING\n", stderr="")
@@ -491,8 +491,8 @@ def test_get_instance_status_running(mock_run_gcloud, launcher):
     assert status == "running"
 
 
-@patch("goldfish.infra.gce_launcher.run_gcloud")
-@patch("goldfish.infra.gce_launcher.get_exit_code_gce")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.get_exit_code_gce")
 def test_get_instance_status_completed(mock_get_exit_code, mock_run_gcloud, launcher):
     """Test get_instance_status for completed instance."""
     from goldfish.state_machine.exit_code import ExitCodeResult
@@ -508,8 +508,8 @@ def test_get_instance_status_completed(mock_get_exit_code, mock_run_gcloud, laun
     assert status == "completed"
 
 
-@patch("goldfish.infra.gce_launcher.run_gcloud")
-@patch("goldfish.infra.gce_launcher.get_exit_code_gce")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.get_exit_code_gce")
 def test_get_instance_status_failed(mock_get_exit_code, mock_run_gcloud, launcher):
     """Test get_instance_status for failed instance."""
     from goldfish.state_machine.exit_code import ExitCodeResult
@@ -525,7 +525,7 @@ def test_get_instance_status_failed(mock_get_exit_code, mock_run_gcloud, launche
     assert status == "failed"
 
 
-@patch("goldfish.infra.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
 def test_get_instance_status_not_found(mock_run_gcloud, launcher):
     """Test get_instance_status for non-existent instance."""
     mock_run_gcloud.return_value = Mock(returncode=1, stdout="", stderr="Instance not found")
@@ -535,7 +535,7 @@ def test_get_instance_status_not_found(mock_run_gcloud, launcher):
     assert status == "not_found"
 
 
-@patch("goldfish.infra.gce_launcher.subprocess.Popen")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.subprocess.Popen")
 def test_get_instance_logs_from_gcs(mock_popen, launcher):
     """Test log retrieval from GCS."""
     import io
@@ -570,8 +570,8 @@ def test_get_instance_logs_from_gcs(mock_popen, launcher):
     assert cmd[3] == "gs://test-bucket/runs/test-instance/logs/stdout.log"
 
 
-@patch("goldfish.infra.gce_launcher.subprocess.Popen")
-@patch("goldfish.infra.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.subprocess.Popen")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
 def test_get_instance_logs_fallback_serial(mock_run_gcloud, mock_popen, launcher):
     """Test log retrieval falls back to serial console."""
     # GCS fetch fails
@@ -589,7 +589,7 @@ def test_get_instance_logs_fallback_serial(mock_run_gcloud, mock_popen, launcher
     assert "get-serial-port-output" in cmd
 
 
-@patch("goldfish.infra.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
 def test_stop_instance(mock_run_gcloud, launcher):
     """Test instance stop."""
     mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
@@ -605,7 +605,7 @@ def test_stop_instance(mock_run_gcloud, launcher):
     assert "--zone=us-central1-a" in cmd
 
 
-@patch("goldfish.infra.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
 def test_delete_instance(mock_run_gcloud, launcher):
     """Test instance deletion."""
     mock_run_gcloud.return_value = Mock(returncode=0, stdout="", stderr="")
@@ -620,10 +620,10 @@ def test_delete_instance(mock_run_gcloud, launcher):
     assert "test-instance" in cmd
 
 
-@patch("goldfish.infra.gce_launcher.run_gcloud")
-@patch("goldfish.infra.gce_launcher.get_exit_code_gce")
-@patch("goldfish.infra.gce_launcher.time.time")
-@patch("goldfish.infra.gce_launcher.time.sleep")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.get_exit_code_gce")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.time.time")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.time.sleep")
 def test_wait_for_termination_success(mock_sleep, mock_time, mock_get_exit_code, mock_run_gcloud, launcher):
     """Test wait_for_termination succeeds."""
     from goldfish.state_machine.exit_code import ExitCodeResult
@@ -647,9 +647,9 @@ def test_wait_for_termination_success(mock_sleep, mock_time, mock_get_exit_code,
     assert mock_sleep.call_count == 2  # Slept twice before completion
 
 
-@patch("goldfish.infra.gce_launcher.run_gcloud")
-@patch("goldfish.infra.gce_launcher.time.sleep")
-@patch("goldfish.infra.gce_launcher.time.time")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.time.sleep")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.time.time")
 def test_wait_for_termination_timeout(mock_time, mock_sleep, mock_run_gcloud, launcher):
     """Test wait_for_termination timeout."""
     # Mock time progression that exceeds timeout
@@ -681,8 +681,8 @@ def test_sanitize_name():
     assert GCELauncher._sanitize_name("Test_Run@2024") == "test-run-2024"
 
 
-@patch("goldfish.infra.gce_launcher.ResourceLauncher")
-@patch("goldfish.infra.gce_launcher.build_startup_script")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.ResourceLauncher")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.build_startup_script")
 def test_launch_filters_gpu_resources(mock_build_startup, mock_resource_launcher_class, launcher):
     """Test that GPU filtering works when selecting resources."""
     mock_build_startup.return_value = "#!/bin/bash\necho startup"
@@ -693,14 +693,14 @@ def test_launch_filters_gpu_resources(mock_build_startup, mock_resource_launcher
     mock_launcher.launch.return_value = mock_result
     mock_resource_launcher_class.return_value = mock_launcher
 
-    # Launch with GPU type
+    # Launch with GPU type (must use accelerator name, not short name)
     launcher.launch_instance(
         image_tag="test-image",
         stage_run_id="gpu-run",
         entrypoint_script="#!/bin/bash\necho test",
         stage_config={},
         work_dir=Path("/tmp/work"),
-        gpu_type="a100",
+        gpu_type="nvidia-tesla-a100",  # Accelerator name, not short "a100"
         use_capacity_search=True,
     )
 
@@ -711,7 +711,7 @@ def test_launch_filters_gpu_resources(mock_build_startup, mock_resource_launcher
     # Should only have GPU resource
     assert len(resources) == 1
     assert resources[0]["name"] == "gpu-resource"
-    assert resources[0]["gpu"]["type"] == "a100"
+    assert resources[0]["gpu"]["accelerator"] == "nvidia-tesla-a100"
 
 
 # =============================================================================
@@ -719,8 +719,8 @@ def test_launch_filters_gpu_resources(mock_build_startup, mock_resource_launcher
 # =============================================================================
 
 
-@patch("goldfish.infra.gce_launcher.ResourceLauncher")
-@patch("goldfish.infra.gce_launcher.build_startup_script")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.ResourceLauncher")
+@patch("goldfish.cloud.adapters.gcp.gce_launcher.build_startup_script")
 def test_launch_instance_chown_for_container_user(mock_build_startup, mock_resource_launcher_class, launcher):
     """Regression: pre_run_cmds must chown /mnt/inputs and /mnt/outputs for container user.
 

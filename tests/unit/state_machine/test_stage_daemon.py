@@ -21,7 +21,9 @@ from goldfish.state_machine.types import (
 @pytest.fixture
 def daemon() -> StageDaemon:
     """Create a StageDaemon with mock dependencies for testing."""
-    return StageDaemon(db=MagicMock(), config=MagicMock())
+    mock_config = MagicMock()
+    mock_config.gce = None
+    return StageDaemon(db=MagicMock(), config=mock_config)
 
 
 class TestStageDaemonInit:
@@ -480,7 +482,7 @@ class TestDetermineExitEvents:
 
     def test_running_local_exit_success_emits_exit_success(self, daemon: StageDaemon) -> None:
         """RUNNING local with exit code 0 should emit EXIT_SUCCESS."""
-        from goldfish.state_machine.exit_code import ExitCodeResult
+        from goldfish.cloud.contracts import BackendStatus
 
         run = {
             "id": "stage-123",
@@ -490,8 +492,11 @@ class TestDetermineExitEvents:
             "backend_handle": "container-abc123",
         }
 
+        backend = MagicMock()
+        backend.get_status.return_value = BackendStatus.from_exit_code(0)
+
         with (
-            patch("goldfish.state_machine.stage_daemon.get_exit_code_docker", return_value=ExitCodeResult.from_code(0)),
+            patch.object(daemon, "_get_backend", return_value=backend),
             patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
         ):
             event, ctx = daemon._determine_event(run)
@@ -503,7 +508,7 @@ class TestDetermineExitEvents:
 
     def test_running_local_exit_failure_emits_exit_failure(self, daemon: StageDaemon) -> None:
         """RUNNING local with non-zero exit code should emit EXIT_FAILURE."""
-        from goldfish.state_machine.exit_code import ExitCodeResult
+        from goldfish.cloud.contracts import BackendStatus
 
         run = {
             "id": "stage-123",
@@ -513,8 +518,11 @@ class TestDetermineExitEvents:
             "backend_handle": "container-abc123",
         }
 
+        backend = MagicMock()
+        backend.get_status.return_value = BackendStatus.from_exit_code(2)
+
         with (
-            patch("goldfish.state_machine.stage_daemon.get_exit_code_docker", return_value=ExitCodeResult.from_code(2)),
+            patch.object(daemon, "_get_backend", return_value=backend),
             patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
         ):
             event, ctx = daemon._determine_event(run)
@@ -523,12 +531,11 @@ class TestDetermineExitEvents:
         assert ctx.exit_code == 2
         assert ctx.exit_code_exists is True
 
-    def test_running_gce_exit_success_uses_bucket_and_project_id(self, test_db) -> None:
-        """RUNNING GCE should call get_exit_code_gce with bucket_uri and project_id."""
-        from goldfish.state_machine.exit_code import ExitCodeResult
+    def test_running_gce_exit_success_calls_backend_with_project_id(self, test_db) -> None:
+        """RUNNING GCE should resolve backend using effective_project_id."""
+        from goldfish.cloud.contracts import BackendStatus
 
         mock_config = MagicMock()
-        mock_config.gcs = MagicMock(bucket="my-bucket")
         mock_gce = MagicMock()
         type(mock_gce).effective_project_id = property(lambda self: "my-project")
         mock_config.gce = mock_gce
@@ -542,20 +549,17 @@ class TestDetermineExitEvents:
             "backend_handle": "instance-123",
         }
 
+        backend = MagicMock()
+        backend.get_status.return_value = BackendStatus.from_exit_code(0)
+
         with (
-            patch(
-                "goldfish.state_machine.stage_daemon.get_exit_code_gce",
-                return_value=ExitCodeResult.from_code(0),
-            ) as mock_get,
+            patch.object(daemon, "_get_backend", return_value=backend) as mock_get_backend,
             patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
         ):
             event, _ctx = daemon._determine_event(run)
 
         assert event == StageEvent.EXIT_SUCCESS
-        mock_get.assert_called_once()
-        assert mock_get.call_args.args[0] == "gs://my-bucket"
-        assert mock_get.call_args.args[1] == "stage-123"
-        assert mock_get.call_args.kwargs["project_id"] == "my-project"
+        mock_get_backend.assert_called_once_with("gce", project_id="my-project")
 
 
 class TestCheckTimeout:
@@ -989,7 +993,7 @@ class TestDetermineEventEdgeCases:
 
     def test_determine_event_missing_backend_type_defaults_to_local(self, daemon: StageDaemon) -> None:
         """_determine_event with missing backend_type should default to 'local'."""
-        from goldfish.state_machine.exit_code import ExitCodeResult
+        from goldfish.cloud.contracts import BackendStatus
 
         run = {
             "id": "stage-123",
@@ -999,16 +1003,17 @@ class TestDetermineEventEdgeCases:
             # backend_type is missing - should default to "local"
         }
 
+        backend = MagicMock()
+        backend.get_status.return_value = BackendStatus.from_exit_code(0)
+
         with (
-            patch(
-                "goldfish.state_machine.stage_daemon.get_exit_code_docker", return_value=ExitCodeResult.from_code(0)
-            ) as mock_get,
+            patch.object(daemon, "_get_backend", return_value=backend) as mock_get_backend,
             patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
         ):
             event, _ctx = daemon._determine_event(run)
 
         assert event == StageEvent.EXIT_SUCCESS
-        mock_get.assert_called_once_with("container-abc123")
+        mock_get_backend.assert_called_once_with("local", project_id=None)
 
 
 class TestCheckTimeoutEdgeCases:
@@ -1266,7 +1271,7 @@ class TestEventContextProperties:
 
     def test_exit_event_has_correct_source(self, daemon: StageDaemon) -> None:
         """EventContext should have source='daemon' for daemon-emitted exit events."""
-        from goldfish.state_machine.exit_code import ExitCodeResult
+        from goldfish.cloud.contracts import BackendStatus
 
         run = {
             "id": "stage-123",
@@ -1276,8 +1281,11 @@ class TestEventContextProperties:
             "backend_handle": "container-123",
         }
 
+        backend = MagicMock()
+        backend.get_status.return_value = BackendStatus.from_exit_code(0)
+
         with (
-            patch("goldfish.state_machine.stage_daemon.get_exit_code_docker", return_value=ExitCodeResult.from_code(0)),
+            patch.object(daemon, "_get_backend", return_value=backend),
             patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
         ):
             _event, ctx = daemon._determine_event(run)
@@ -1286,7 +1294,7 @@ class TestEventContextProperties:
 
     def test_exit_event_has_timestamp(self, daemon: StageDaemon) -> None:
         """EventContext should have a timestamp set for exit events."""
-        from goldfish.state_machine.exit_code import ExitCodeResult
+        from goldfish.cloud.contracts import BackendStatus
 
         run = {
             "id": "stage-123",
@@ -1296,8 +1304,11 @@ class TestEventContextProperties:
             "backend_handle": "container-123",
         }
 
+        backend = MagicMock()
+        backend.get_status.return_value = BackendStatus.from_exit_code(0)
+
         with (
-            patch("goldfish.state_machine.stage_daemon.get_exit_code_docker", return_value=ExitCodeResult.from_code(0)),
+            patch.object(daemon, "_get_backend", return_value=backend),
             patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
         ):
             _event, ctx = daemon._determine_event(run)
@@ -1344,265 +1355,3 @@ class TestStateTimeoutsConstant:
 
         for state in TERMINAL_STATES:
             assert state not in STATE_TIMEOUTS, f"Unexpected timeout for terminal state {state}"
-
-
-class TestMetadataPrimaryExitCode:
-    """REGRESSION TESTS for metadata-primary exit code retrieval.
-
-    The daemon should pass instance_name and instance_zone to get_exit_code_gce()
-    to enable metadata-first lookup (fast, reliable, local to instance).
-
-    Bug (2026-01-19): GCS upload of exit_code.txt could fail, causing runs
-    to be marked as TERMINATED even when they completed successfully.
-
-    Fix: Use instance metadata as PRIMARY channel, GCS as fallback.
-    """
-
-    def test_daemon_passes_instance_info_to_get_exit_code_gce(self) -> None:
-        """REGRESSION: Daemon must pass instance_name and instance_zone for metadata lookup."""
-        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
-        from goldfish.state_machine.exit_code import ExitCodeResult
-
-        # Create daemon with GCE config that has zones
-        config = GoldfishConfig(
-            project_name="test-project",
-            dev_repo_path="../test-dev",
-            gce=GCEConfig(project="test-project", zones=["us-central1-a", "us-central1-b"]),
-            gcs=GCSConfig(bucket="test-bucket"),
-            jobs=JobsConfig(backend="gce"),
-        )
-
-        daemon = StageDaemon(db=MagicMock(), config=config)
-        daemon._db.get_stage_run.return_value = {
-            "id": "stage-test-123",
-            "state": StageState.RUNNING.value,
-            "state_entered_at": datetime.now(UTC).isoformat(),
-            "backend_type": "gce",
-            "backend_handle": "instance-abc123",  # GCE instance name
-        }
-
-        run = {
-            "id": "stage-test-123",
-            "state": StageState.RUNNING.value,
-            "state_entered_at": datetime.now(UTC).isoformat(),
-            "backend_type": "gce",
-            "backend_handle": "instance-abc123",  # This should be passed as instance_name
-        }
-
-        captured_kwargs: dict = {}
-
-        def capture_get_exit_code_gce(*args, **kwargs):
-            captured_kwargs.update(kwargs)
-            return ExitCodeResult.from_code(0)
-
-        with (
-            patch(
-                "goldfish.state_machine.stage_daemon.get_exit_code_gce",
-                side_effect=capture_get_exit_code_gce,
-            ),
-            patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
-        ):
-            daemon._determine_event(run)
-
-        # Verify instance info was passed
-        assert (
-            "instance_name" in captured_kwargs
-        ), "Daemon must pass instance_name to get_exit_code_gce for metadata lookup"
-        assert captured_kwargs["instance_name"] == "instance-abc123"
-
-        assert (
-            "instance_zone" in captured_kwargs
-        ), "Daemon must pass instance_zone to get_exit_code_gce for metadata lookup"
-        # First zone from config is used as fallback
-        assert captured_kwargs["instance_zone"] == "us-central1-a"
-
-    def test_daemon_falls_back_gracefully_without_instance_info(self) -> None:
-        """Daemon should still work when instance info is unavailable."""
-        from goldfish.config import GCSConfig, GoldfishConfig, JobsConfig
-        from goldfish.state_machine.exit_code import ExitCodeResult
-
-        # Config without GCE (local backend but somehow running GCE check)
-        config = GoldfishConfig(
-            project_name="test-project",
-            dev_repo_path="../test-dev",
-            gcs=GCSConfig(bucket="test-bucket"),
-            jobs=JobsConfig(backend="gce"),
-            # No gce config - zones will be None
-        )
-
-        daemon = StageDaemon(db=MagicMock(), config=config)
-        daemon._db.get_stage_run.return_value = {
-            "id": "stage-test-456",
-            "state": StageState.RUNNING.value,
-            "state_entered_at": datetime.now(UTC).isoformat(),
-            "backend_type": "gce",
-            "backend_handle": "instance-xyz789",
-        }
-
-        run = {
-            "id": "stage-test-456",
-            "state": StageState.RUNNING.value,
-            "state_entered_at": datetime.now(UTC).isoformat(),
-            "backend_type": "gce",
-            "backend_handle": "instance-xyz789",
-        }
-
-        captured_kwargs: dict = {}
-
-        def capture_get_exit_code_gce(*args, **kwargs):
-            captured_kwargs.update(kwargs)
-            return ExitCodeResult.from_code(0)
-
-        with (
-            patch(
-                "goldfish.state_machine.stage_daemon.get_exit_code_gce",
-                side_effect=capture_get_exit_code_gce,
-            ),
-            patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
-        ):
-            # Should not raise, should fall back to GCS-only
-            daemon._determine_event(run)
-
-        # instance_zone should be None (fallback to GCS)
-        assert captured_kwargs.get("instance_zone") is None
-
-
-class TestZoneTracking:
-    """Tests for zone tracking in stage runs."""
-
-    def test_uses_stored_zone_when_available(self) -> None:
-        """Daemon should use instance_zone from run data when available."""
-        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
-        from goldfish.state_machine.exit_code import ExitCodeResult
-
-        config = GoldfishConfig(
-            project_name="test-project",
-            dev_repo_path="../test-dev",
-            gcs=GCSConfig(bucket="test-bucket"),
-            gce=GCEConfig(
-                project_id="test-project-id",
-                zones=["us-central1-a", "us-central1-b"],  # Config zones
-            ),
-            jobs=JobsConfig(backend="gce"),
-        )
-
-        daemon = StageDaemon(db=MagicMock(), config=config)
-
-        # Run has a stored zone (different from config's first zone)
-        run = {
-            "id": "stage-abc123",
-            "state": StageState.RUNNING.value,
-            "state_entered_at": datetime.now(UTC).isoformat(),
-            "backend_type": "gce",
-            "backend_handle": "instance-abc123",
-            "instance_zone": "europe-west1-b",  # Stored zone - different from config
-        }
-
-        captured_kwargs: dict = {}
-
-        def capture_get_exit_code_gce(*args, **kwargs):
-            captured_kwargs.update(kwargs)
-            return ExitCodeResult.from_code(0)
-
-        with (
-            patch(
-                "goldfish.state_machine.stage_daemon.get_exit_code_gce",
-                side_effect=capture_get_exit_code_gce,
-            ),
-            patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
-        ):
-            daemon._determine_event(run)
-
-        # Should use stored zone, not config's first zone
-        assert captured_kwargs.get("instance_zone") == "europe-west1-b"
-
-    def test_falls_back_to_config_zone_when_not_stored(self) -> None:
-        """Daemon should fall back to config zone for legacy runs without stored zone."""
-        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
-        from goldfish.state_machine.exit_code import ExitCodeResult
-
-        config = GoldfishConfig(
-            project_name="test-project",
-            dev_repo_path="../test-dev",
-            gcs=GCSConfig(bucket="test-bucket"),
-            gce=GCEConfig(
-                project_id="test-project-id",
-                zones=["us-central1-a", "us-central1-b"],
-            ),
-            jobs=JobsConfig(backend="gce"),
-        )
-
-        daemon = StageDaemon(db=MagicMock(), config=config)
-
-        # Legacy run without stored zone
-        run = {
-            "id": "stage-legacy123",
-            "state": StageState.RUNNING.value,
-            "state_entered_at": datetime.now(UTC).isoformat(),
-            "backend_type": "gce",
-            "backend_handle": "instance-legacy123",
-            # No instance_zone - legacy run
-        }
-
-        captured_kwargs: dict = {}
-
-        def capture_get_exit_code_gce(*args, **kwargs):
-            captured_kwargs.update(kwargs)
-            return ExitCodeResult.from_code(0)
-
-        with (
-            patch(
-                "goldfish.state_machine.stage_daemon.get_exit_code_gce",
-                side_effect=capture_get_exit_code_gce,
-            ),
-            patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
-        ):
-            daemon._determine_event(run)
-
-        # Should fall back to first zone from config
-        assert captured_kwargs.get("instance_zone") == "us-central1-a"
-
-    def test_handles_none_instance_zone_explicitly(self) -> None:
-        """Daemon should treat explicit None zone same as missing zone."""
-        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
-        from goldfish.state_machine.exit_code import ExitCodeResult
-
-        config = GoldfishConfig(
-            project_name="test-project",
-            dev_repo_path="../test-dev",
-            gcs=GCSConfig(bucket="test-bucket"),
-            gce=GCEConfig(
-                project_id="test-project-id",
-                zones=["us-west1-a"],
-            ),
-            jobs=JobsConfig(backend="gce"),
-        )
-
-        daemon = StageDaemon(db=MagicMock(), config=config)
-
-        run = {
-            "id": "stage-none123",
-            "state": StageState.RUNNING.value,
-            "state_entered_at": datetime.now(UTC).isoformat(),
-            "backend_type": "gce",
-            "backend_handle": "instance-none123",
-            "instance_zone": None,  # Explicitly None
-        }
-
-        captured_kwargs: dict = {}
-
-        def capture_get_exit_code_gce(*args, **kwargs):
-            captured_kwargs.update(kwargs)
-            return ExitCodeResult.from_code(0)
-
-        with (
-            patch(
-                "goldfish.state_machine.stage_daemon.get_exit_code_gce",
-                side_effect=capture_get_exit_code_gce,
-            ),
-            patch("goldfish.state_machine.stage_daemon.determine_instance_event", return_value=None),
-        ):
-            daemon._determine_event(run)
-
-        # Should fall back to config zone when instance_zone is None
-        assert captured_kwargs.get("instance_zone") == "us-west1-a"

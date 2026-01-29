@@ -1,6 +1,6 @@
 """Local filesystem implementation of ObjectStorage protocol.
 
-Maps gs:// URIs to local filesystem paths for development and testing.
+Maps cloud StorageURIs to local filesystem paths for development and testing.
 Supports configurable simulation controls per LOCAL_PARITY_SPEC.
 """
 
@@ -23,7 +23,7 @@ DEFAULT_SIZE_LIMIT_MB = 5 * 1024  # 5TB, effectively unlimited for local
 class LocalObjectStorage:
     """Local filesystem storage that emulates GCS semantics.
 
-    Maps gs://bucket/path to {root}/bucket/path on the local filesystem.
+    Maps <scheme>://bucket/path to {root}/bucket/path on the local filesystem.
     Supports configurable consistency delay and size limits per LOCAL_PARITY_SPEC.
 
     Consistency delay simulates GCS eventual consistency: reads within N ms

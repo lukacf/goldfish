@@ -124,7 +124,7 @@ def test_gce_backend_capabilities_sync_behavior() -> None:
     from unittest.mock import MagicMock, patch
 
     # Patch the GCELauncher import since it requires GCP credentials
-    with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher") as mock_launcher:
+    with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher") as mock_launcher:
         mock_launcher.return_value = MagicMock()
         from goldfish.cloud.adapters.gcp.run_backend import GCERunBackend
 

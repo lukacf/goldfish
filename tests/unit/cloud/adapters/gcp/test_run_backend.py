@@ -31,7 +31,8 @@ from goldfish.validation import ValidationError
 @pytest.fixture
 def mock_launcher():
     """Create a mock GCELauncher."""
-    with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher") as mock_class:
+    # Patch at the source since GCELauncher is imported locally inside run_backend.__init__
+    with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher") as mock_class:
         mock_instance = MagicMock()
         mock_class.return_value = mock_instance
         mock_instance.default_zone = "us-central1-a"
@@ -90,7 +91,7 @@ class TestGCERunBackendInit:
 
     def test_init_with_all_params_passes_to_launcher(self, mock_launcher):
         """Verify all init params are passed to GCELauncher."""
-        with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher") as mock_class:
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher") as mock_class:
             GCERunBackend(
                 project_id="my-project",
                 zones=["us-east1-a", "us-east1-b"],
@@ -99,18 +100,100 @@ class TestGCERunBackendInit:
                 service_account="sa@proj.iam.gserviceaccount.com",
             )
 
-            mock_class.assert_called_once_with(
-                project_id="my-project",
-                zone="us-east1-a",  # First zone becomes default
-                bucket="my-bucket",
-                zones=["us-east1-a", "us-east1-b"],
-                gpu_preference=["nvidia-a100-80gb"],
-                service_account="sa@proj.iam.gserviceaccount.com",
+            mock_class.assert_called_once()
+            call_kwargs = mock_class.call_args.kwargs
+            assert call_kwargs["project_id"] == "my-project"
+            assert call_kwargs["zone"] == "us-east1-a"  # First zone becomes default
+            assert call_kwargs["bucket"] == "my-bucket"
+            assert call_kwargs["zones"] == ["us-east1-a", "us-east1-b"]
+            assert call_kwargs["gpu_preference"] == ["nvidia-a100-80gb"]
+            assert call_kwargs["service_account"] == "sa@proj.iam.gserviceaccount.com"
+            # Resources are built internally from profiles
+            assert "resources" in call_kwargs
+
+    def test_init_builds_resources_from_profiles(self, mock_launcher):
+        """Verify GCERunBackend builds resources from profiles internally.
+
+        REGRESSION TEST: Without resources, GCELauncher.launch_instance falls back
+        to _launch_simple which doesn't do capacity search across zones. This caused
+        GPU launches to fail when the first zone had no capacity.
+
+        Bug: GCERunBackend didn't build or pass resources, so GCELauncher.resources
+        was always []. Capacity search was disabled.
+
+        Fix: GCERunBackend now builds resources internally from ProfileResolver and
+        passes them to GCELauncher, enabling capacity search.
+        """
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher") as mock_class:
+            GCERunBackend(
+                project_id="test-project",
+                zones=["us-central1-a", "us-central1-b"],
             )
+
+            mock_class.assert_called_once()
+            call_kwargs = mock_class.call_args.kwargs
+            resources = call_kwargs.get("resources")
+
+            # Resources should be built from profiles
+            assert resources is not None, "resources must be passed to GCELauncher"
+            assert isinstance(resources, list), "resources must be a list"
+            assert len(resources) > 0, "resources must not be empty"
+
+            # Verify resources contain profile fields needed for capacity search
+            for resource in resources:
+                assert "machine_type" in resource, f"Resource missing machine_type: {resource.get('name')}"
+                assert "zones" in resource, f"Resource missing zones: {resource.get('name')}"
+
+    def test_init_resources_include_gpu_profiles(self, mock_launcher):
+        """Verify built resources include GPU profiles for H100/A100 capacity search.
+
+        REGRESSION TEST: H100 launches failed because capacity search was disabled.
+        This test verifies GPU profiles are included in resources with correct machine_type.
+        """
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher") as mock_class:
+            GCERunBackend(
+                project_id="test-project",
+                zones=["us-central1-a"],
+            )
+
+            call_kwargs = mock_class.call_args.kwargs
+            resources = call_kwargs.get("resources", [])
+
+            # Find H100 profiles
+            h100_profiles = [r for r in resources if "h100" in r.get("name", "").lower()]
+            assert len(h100_profiles) > 0, "Resources should include H100 profiles"
+
+            # Verify H100 profile has A3 machine_type (not n1-standard-X)
+            for h100 in h100_profiles:
+                assert h100.get("machine_type", "").startswith(
+                    "a3-"
+                ), f"H100 profile must use A3 machine type, got: {h100.get('machine_type')}"
+
+    def test_init_applies_global_zones_to_resources(self, mock_launcher):
+        """Verify global zones are applied to profile resources."""
+        custom_zones = ["europe-west4-a", "europe-west4-b"]
+
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher") as mock_class:
+            GCERunBackend(
+                project_id="test-project",
+                zones=custom_zones,
+            )
+
+            call_kwargs = mock_class.call_args.kwargs
+            resources = call_kwargs.get("resources", [])
+
+            # All resources should have zones matching the global config
+            for resource in resources:
+                resource_zones = resource.get("zones", [])
+                has_custom = any(z in resource_zones for z in custom_zones)
+                assert has_custom, (
+                    f"Resource '{resource.get('name')}' zones {resource_zones} "
+                    f"should include custom zones {custom_zones}"
+                )
 
     def test_init_with_no_zones_uses_default(self, mock_launcher):
         """When no zones specified, default zone is used."""
-        with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher") as mock_class:
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher") as mock_class:
             GCERunBackend(project_id="test")
 
             call_args = mock_class.call_args
@@ -118,7 +201,7 @@ class TestGCERunBackendInit:
 
     def test_init_with_none_params_uses_defaults(self, mock_launcher):
         """Backend can be created with None values for optional params."""
-        with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher"):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher"):
             backend = GCERunBackend()
             assert backend._project_id is None
 
@@ -141,7 +224,7 @@ class TestGCERunBackendCapabilities:
 
     def test_capabilities_supports_gpu_with_zones(self, mock_launcher):
         """GPU support is True when zones are configured (even without gpu_preference)."""
-        with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher"):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher"):
             backend = GCERunBackend(zones=["us-central1-a"])
             caps = backend.capabilities
             assert caps.supports_gpu is True
@@ -153,7 +236,7 @@ class TestGCERunBackendCapabilities:
         The supports_gpu capability reflects what the backend CAN do,
         not what the current run configuration requests.
         """
-        with patch("goldfish.cloud.adapters.gcp.run_backend.GCELauncher"):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher"):
             backend = GCERunBackend()
             backend._zones = []  # No zones configured
             backend._gpu_preference = None  # No GPU preference
@@ -410,29 +493,110 @@ class TestGCERunBackendLaunch:
         assert call_kwargs["gpu_count"] == 0
         assert call_kwargs["gpu_type"] is None
 
-    def test_launch_maps_cpu_count_to_machine_type(self, backend, mock_launcher, sample_run_spec):
-        """Launch maps CPU count to appropriate machine type (CPU-only, no GPU)."""
-        test_cases = [
-            (2, "n1-standard-2"),
-            (4, "n1-standard-4"),
-            (8, "n1-standard-8"),
-            (16, "n1-standard-16"),
-        ]
+    def test_launch_uses_machine_type_from_spec(self, backend, mock_launcher):
+        """Launch uses machine_type from RunSpec when provided.
 
-        for cpu_count, expected_machine_type in test_cases:
-            # Set gpu_count=0 to test CPU-only machine type mapping
-            # (default fixture has gpu_count=1 which triggers GPU mapping)
-            sample_run_spec.gpu_count = 0
-            sample_run_spec.cpu_count = cpu_count
-            mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-                instance_name="goldfish-stage-abc123",
-                zone="us-central1-a",
-            )
+        REGRESSION TEST: H100 GPUs require A3 machines (a3-highgpu-1g), A100s require A2.
+        Previously, run_backend.py hardcoded machine_type=n1-standard-X and ignored the
+        profile's machine_type, causing GPU launches to fail with incompatible machine types.
 
-            backend.launch(sample_run_spec)
+        Bug: Profile specified machine_type: a3-highgpu-1g for H100, but GCE received
+        machine_type=n1-standard-4, causing the launch to fail because H100 GPUs can
+        only be attached to A3 machines.
 
-            call_kwargs = mock_launcher.launch_instance.call_args.kwargs
-            assert call_kwargs["machine_type"] == expected_machine_type
+        Fix: RunSpec now includes machine_type from the resolved profile, and run_backend.py
+        uses spec.machine_type when available instead of hardcoding n1-standard-X.
+        """
+        mock_launcher.launch_instance.return_value = self.MockLaunchResult(
+            instance_name="goldfish-stage-h100test",
+            zone="us-central1-a",
+        )
+
+        # Test H100 profile with A3 machine type
+        spec_h100 = RunSpec(
+            stage_run_id="stage-h100test",
+            workspace_name="test-workspace",
+            stage_name="train",
+            image="gcr.io/test-project/test-image:latest",
+            profile="h100-spot",
+            machine_type="a3-highgpu-1g",  # Critical: machine_type from profile
+            gpu_count=1,
+            gpu_type="nvidia-h100-80gb",
+        )
+
+        backend.launch(spec_h100)
+
+        call_kwargs = mock_launcher.launch_instance.call_args.kwargs
+        # Must use a3-highgpu-1g, not n1-standard-X
+        assert call_kwargs["machine_type"] == "a3-highgpu-1g"
+
+        # Test A100 profile with A2 machine type
+        mock_launcher.launch_instance.return_value = self.MockLaunchResult(
+            instance_name="goldfish-stage-a100test",
+            zone="us-central1-a",
+        )
+
+        spec_a100 = RunSpec(
+            stage_run_id="stage-a100test",
+            workspace_name="test-workspace",
+            stage_name="train",
+            image="gcr.io/test-project/test-image:latest",
+            profile="a100-spot",
+            machine_type="a2-highgpu-1g",  # Critical: machine_type from profile
+            gpu_count=1,
+            gpu_type="nvidia-tesla-a100",
+        )
+
+        backend.launch(spec_a100)
+
+        call_kwargs = mock_launcher.launch_instance.call_args.kwargs
+        assert call_kwargs["machine_type"] == "a2-highgpu-1g"
+
+        # Test CPU profile with n2-standard machine type
+        mock_launcher.launch_instance.return_value = self.MockLaunchResult(
+            instance_name="goldfish-stage-cputest",
+            zone="us-central1-a",
+        )
+
+        spec_cpu = RunSpec(
+            stage_run_id="stage-cputest",
+            workspace_name="test-workspace",
+            stage_name="preprocess",
+            image="gcr.io/test-project/test-image:latest",
+            profile="cpu-small",
+            machine_type="n2-standard-4",  # CPU profile's machine_type
+            gpu_count=0,
+        )
+
+        backend.launch(spec_cpu)
+
+        call_kwargs = mock_launcher.launch_instance.call_args.kwargs
+        assert call_kwargs["machine_type"] == "n2-standard-4"
+
+    def test_launch_fallback_machine_type_without_profile(self, backend, mock_launcher):
+        """Launch falls back to n1-standard-4 when no machine_type specified.
+
+        When RunSpec.machine_type is None (no profile specified), fall back to default.
+        This maintains backward compatibility for simple cases without profiles.
+        """
+        mock_launcher.launch_instance.return_value = self.MockLaunchResult(
+            instance_name="goldfish-stage-abc123",
+            zone="us-central1-a",
+        )
+
+        # No machine_type specified (e.g., no profile in stage config)
+        spec_no_profile = RunSpec(
+            stage_run_id="stage-abc123",
+            workspace_name="test-workspace",
+            stage_name="train",
+            image="gcr.io/test-project/test-image:latest",
+            # machine_type=None (default)
+        )
+
+        backend.launch(spec_no_profile)
+
+        call_kwargs = mock_launcher.launch_instance.call_args.kwargs
+        assert call_kwargs["machine_type"] == "n1-standard-4"  # Fallback default
 
     def test_launch_passes_spot_preference(self, backend, mock_launcher, sample_run_spec):
         """Launch passes spot/preemptible preference."""
@@ -1132,3 +1296,59 @@ class TestGCERunBackendInputSchemeValidation:
 
         with pytest.raises(ValidationError):
             backend.launch(spec)
+
+
+class TestGCERunBackendShCommandExtraction:
+    """Tests for sh -c command extraction.
+
+    REGRESSION: GCE backend was wrapping scripts in 'sh -c' then running via bash,
+    causing 'sh: Illegal option -o pipefail' errors.
+    """
+
+    def test_launch_extracts_script_from_sh_c_command(self, backend, mock_launcher):
+        """REGRESSION: sh -c wrapper should be stripped for GCE.
+
+        Bug: stage_executor creates command=["sh", "-c", script] for local Docker.
+        GCE backend was using shlex.join() -> "sh -c 'script'" then running via bash.
+        This caused bash to run sh -c '#!/bin/bash\\nset -euo pipefail...'
+        which failed because sh doesn't support pipefail.
+
+        Fix: Extract script from ["sh", "-c", script] and pass directly.
+        """
+        script = "#!/bin/bash\nset -euo pipefail\necho hello"
+        spec = RunSpec(
+            stage_run_id="stage-abc123",
+            workspace_name="test-workspace",
+            stage_name="train",
+            image="gcr.io/test-project/test-image:latest",
+            command=["sh", "-c", script],  # Local Docker format
+            inputs={},
+        )
+
+        backend.launch(spec)
+
+        # Verify the script was extracted (not wrapped in sh -c)
+        call_args = mock_launcher.launch_instance.call_args
+        entrypoint_script = call_args.kwargs["entrypoint_script"]
+
+        # Should be the raw script, not "sh -c '...'"
+        assert entrypoint_script == script
+        assert "sh -c" not in entrypoint_script
+
+    def test_launch_preserves_other_command_formats(self, backend, mock_launcher):
+        """Other command formats should use shlex.join as before."""
+        spec = RunSpec(
+            stage_run_id="stage-abc123",
+            workspace_name="test-workspace",
+            stage_name="train",
+            image="gcr.io/test-project/test-image:latest",
+            command=["python", "-m", "train"],
+            inputs={},
+        )
+
+        backend.launch(spec)
+
+        call_args = mock_launcher.launch_instance.call_args
+        entrypoint_script = call_args.kwargs["entrypoint_script"]
+
+        assert entrypoint_script == "python -m train"

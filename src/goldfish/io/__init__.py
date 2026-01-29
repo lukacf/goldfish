@@ -196,15 +196,20 @@ def load_input(name: str, format: str | None = None) -> Any:
                     f"Input '{name}' has unresolved override: {location}. "
                     "This usually means the specified run_id or signal could not be found."
                 )
-            # IMPORTANT: Don't use pathlib.Path() on GCS URIs - it corrupts gs:// to gs:/
-            # GCS URIs should have been staged to /mnt/inputs by the infrastructure layer
-            if isinstance(location, str) and location.startswith("gs://"):
-                raise FileNotFoundError(
-                    f"Input '{name}' not found at /mnt/inputs/{name}. "
-                    f"GCS location {location} was not staged properly. "
-                    "This usually means the GCE staging commands failed. "
-                    "Check the staging_debug.log in the job's logs directory."
-                )
+            # IMPORTANT: Don't use pathlib.Path() on storage URIs - it corrupts URIs with a scheme prefix.
+            # Storage URIs should have been staged to /mnt/inputs by the infrastructure layer.
+            if isinstance(location, str):
+                try:
+                    location_uri = StorageURI.parse(location)
+                except ValueError:
+                    location_uri = None
+                if location_uri is not None and location_uri.scheme == "gs":
+                    raise FileNotFoundError(
+                        f"Input '{name}' not found at /mnt/inputs/{name}. "
+                        f"Storage location {location} was not staged properly. "
+                        "This usually means the staging commands failed. "
+                        "Check the staging_debug.log in the job's logs directory."
+                    )
             input_path = Path(location)
 
     # Auto-load based on format
@@ -679,27 +684,9 @@ def _get_storage_adapter() -> "ObjectStorage":
     if _storage_adapter is not None:
         return _storage_adapter
 
-    backend = os.environ.get("GOLDFISH_STORAGE_BACKEND", "gcs").lower()
+    from goldfish.cloud.factory import create_storage_from_env
 
-    if backend in ("gcs", "gce"):
-        try:
-            from goldfish.cloud.adapters.gcp.storage import GCSStorage
-
-            _storage_adapter = GCSStorage(project=None)
-        except ImportError as e:
-            raise RuntimeError(
-                "google-cloud-storage not installed. "
-                "Add it to your requirements.txt or set GOLDFISH_STORAGE_BACKEND=local"
-            ) from e
-    elif backend == "local":
-        from goldfish.cloud.adapters.local.storage import LocalObjectStorage
-        from goldfish.config import LocalStorageConfig
-
-        root = Path(os.environ.get("GOLDFISH_LOCAL_STORAGE_ROOT", "/tmp/goldfish_storage"))
-        config = LocalStorageConfig(consistency_delay_ms=0, size_limit_mb=None)
-        _storage_adapter = LocalObjectStorage(root=root, config=config)
-    else:
-        raise RuntimeError(f"Unknown storage backend: {backend}. Supported: gcs, local")
+    _storage_adapter = create_storage_from_env()
 
     return _storage_adapter
 
@@ -708,30 +695,22 @@ def _parse_storage_uri(uri: str) -> tuple[str, str]:
     """Parse storage URI into (scheme+bucket, path).
 
     Supports:
-    - gs://bucket/path -> ("gs://bucket", "path")
+    - <scheme>://bucket/path -> ("<scheme>://bucket", "path")
     - file:///path -> ("file://", "/path")
     - s3://bucket/path -> ("s3://bucket", "path") (future)
     """
-    if uri.startswith("gs://"):
-        parts = uri[5:].split("/", 1)
-        bucket = parts[0]
-        path = parts[1] if len(parts) > 1 else ""
-        return f"gs://{bucket}", path
-    elif uri.startswith("file://"):
-        return "file://", uri[7:]
-    elif uri.startswith("s3://"):
-        parts = uri[5:].split("/", 1)
-        bucket = parts[0]
-        path = parts[1] if len(parts) > 1 else ""
-        return f"s3://{bucket}", path
-    else:
-        raise ValueError(f"Invalid storage URI: {uri}")
+    storage_uri = StorageURI.parse(uri)
+    if storage_uri.scheme == "file":
+        return "file://", storage_uri.path
+
+    bucket_uri = str(StorageURI(storage_uri.scheme, storage_uri.bucket, "")).rstrip("/")
+    return bucket_uri, storage_uri.path
 
 
 def _get_storage_bucket() -> str | None:
     """Get storage bucket from environment.
 
-    Returns the full bucket URI (e.g., "gs://my-bucket" or "s3://my-bucket").
+    Returns the full bucket URI (e.g., "<scheme>://my-bucket").
     """
     # Check for generic bucket first
     bucket = os.environ.get("GOLDFISH_STORAGE_BUCKET")
@@ -741,9 +720,12 @@ def _get_storage_bucket() -> str | None:
     # Fall back to GCS-specific for backward compatibility
     gcs_bucket = os.environ.get("GOLDFISH_GCS_BUCKET")
     if gcs_bucket:
-        if gcs_bucket.startswith("gs://"):
-            return gcs_bucket.rstrip("/")
-        return f"gs://{gcs_bucket.rstrip('/')}"
+        try:
+            bucket_root = StorageURI.parse(gcs_bucket)
+        except ValueError:
+            bucket_root = StorageURI("gs", gcs_bucket.rstrip("/"), "")
+        bucket_root = StorageURI(bucket_root.scheme, bucket_root.bucket, "")
+        return str(bucket_root).rstrip("/")
 
     return None
 
@@ -766,7 +748,7 @@ def _upload_file_to_storage(local_path: Path, bucket_uri: str, blob_path: str) -
 
     Args:
         local_path: Local file path to upload
-        bucket_uri: Storage bucket URI (e.g., "gs://bucket" or "s3://bucket")
+        bucket_uri: Storage bucket URI (e.g., "<scheme>://bucket")
         blob_path: Path within the bucket
     """
     storage = _get_storage_adapter()
@@ -892,34 +874,40 @@ def _list_storage_prefix(bucket_uri: str, prefix: str) -> list[str]:
 # Backward compatibility aliases (deprecated - use new names)
 def _upload_file_to_gcs(local_path: Path, bucket_name: str, blob_path: str) -> None:
     """Deprecated: Use _upload_file_to_storage instead."""
-    _upload_file_to_storage(local_path, f"gs://{bucket_name}", blob_path)
+    bucket_uri = str(StorageURI("gs", bucket_name, "")).rstrip("/")
+    _upload_file_to_storage(local_path, bucket_uri, blob_path)
 
 
 def _upload_dir_to_gcs(local_dir: Path, bucket_name: str, blob_prefix: str) -> None:
     """Deprecated: Use _upload_dir_to_storage instead."""
-    _upload_dir_to_storage(local_dir, f"gs://{bucket_name}", blob_prefix)
+    bucket_uri = str(StorageURI("gs", bucket_name, "")).rstrip("/")
+    _upload_dir_to_storage(local_dir, bucket_uri, blob_prefix)
 
 
 def _download_file_from_gcs(bucket_name: str, blob_path: str, local_path: Path) -> bool:
     """Deprecated: Use _download_file_from_storage instead."""
-    return _download_file_from_storage(f"gs://{bucket_name}", blob_path, local_path)
+    bucket_uri = str(StorageURI("gs", bucket_name, "")).rstrip("/")
+    return _download_file_from_storage(bucket_uri, blob_path, local_path)
 
 
 def _download_dir_from_gcs(bucket_name: str, blob_prefix: str, local_dir: Path) -> bool:
     """Deprecated: Use _download_dir_from_storage instead."""
-    return _download_dir_from_storage(f"gs://{bucket_name}", blob_prefix, local_dir)
+    bucket_uri = str(StorageURI("gs", bucket_name, "")).rstrip("/")
+    return _download_dir_from_storage(bucket_uri, blob_prefix, local_dir)
 
 
 def _blob_exists(bucket_name: str, blob_path: str) -> bool:
     """Deprecated: Use _storage_exists instead."""
-    return _storage_exists(f"gs://{bucket_name}", blob_path)
+    bucket_uri = str(StorageURI("gs", bucket_name, "")).rstrip("/")
+    return _storage_exists(bucket_uri, blob_path)
 
 
 def _list_blobs_with_prefix(bucket_name: str, prefix: str) -> list[str]:
     """Deprecated: Use _list_storage_prefix instead."""
-    uris = _list_storage_prefix(f"gs://{bucket_name}", prefix)
+    bucket_uri = str(StorageURI("gs", bucket_name, "")).rstrip("/")
+    uris = _list_storage_prefix(bucket_uri, prefix)
     # Convert full URIs back to blob names for backward compatibility
-    bucket_prefix = f"gs://{bucket_name}/"
+    bucket_prefix = bucket_uri + "/"
     return [uri[len(bucket_prefix) :] if uri.startswith(bucket_prefix) else uri for uri in uris]
 
 
@@ -927,11 +915,16 @@ def _list_blobs_with_prefix(bucket_name: str, prefix: str) -> list[str]:
 def _get_gcs_bucket_name() -> str | None:
     """Deprecated: Use _get_storage_bucket instead.
 
-    Returns just the bucket name (without gs:// prefix) for backward compatibility.
+    Returns just the bucket name (without the scheme prefix) for backward compatibility.
     """
     bucket_uri = _get_storage_bucket()
-    if bucket_uri and bucket_uri.startswith("gs://"):
-        return bucket_uri[5:]
+    if bucket_uri:
+        try:
+            uri = StorageURI.parse(bucket_uri)
+        except ValueError:
+            return None
+        if uri.scheme == "gs" and uri.bucket:
+            return uri.bucket
     return None
 
 
@@ -1020,7 +1013,8 @@ def save_checkpoint(
                     _upload_dir_to_gcs(source_path, bucket_name, blob_prefix)
                 else:
                     _upload_file_to_gcs(source_path, bucket_name, blob_prefix)
-                logger.info(f"Checkpoint '{name}' uploaded to gs://{bucket_name}/{blob_prefix}")
+                bucket_root = StorageURI("gs", bucket_name, "")
+                logger.info("Checkpoint '%s' uploaded to %s", name, bucket_root.join(blob_prefix))
             except Exception as e:
                 raise RuntimeError(f"Checkpoint upload failed: {e}") from e
 

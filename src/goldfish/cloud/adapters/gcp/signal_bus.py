@@ -4,7 +4,7 @@ Re-exports the existing GCPMetadataBus which already implements
 the SignalBus protocol (via MetadataBus base).
 """
 
-from goldfish.infra.metadata.gcp import GCPMetadataBus
+from goldfish.cloud.adapters.gcp.metadata_bus import GCPMetadataBus
 
 # GCPMetadataBus already implements all SignalBus protocol methods:
 # - set_signal(key, signal, target)

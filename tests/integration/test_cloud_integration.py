@@ -24,6 +24,9 @@ Run with:
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+
 import pytest
 
 from goldfish.cloud.contracts import (
@@ -36,6 +39,25 @@ from goldfish.cloud.contracts import (
 from goldfish.cloud.protocols import ObjectStorage, RunBackend, SignalBus
 from goldfish.errors import LaunchError, MetadataSizeLimitError, NotFoundError, StorageError
 from goldfish.infra.metadata.base import MetadataSignal
+
+
+def _docker_available() -> bool:
+    """Return True when the Docker daemon is available and responsive."""
+    if not shutil.which("docker"):
+        return False
+
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
 
 # =============================================================================
 # Protocol Conformance Tests - Verify implementations satisfy protocols
@@ -185,6 +207,11 @@ class TestCPBackend:
     True StageExecutor boundary tests are in TestSystemCPBackend.
     """
 
+    pytestmark = [
+        pytest.mark.requires_docker,
+        pytest.mark.timeout(120),
+    ]
+
     def test_int_backend_1_launch_status_terminate_cycle(self):
         """INT-BACKEND-1: Launch → status → terminate cycle.
 
@@ -196,7 +223,6 @@ class TestCPBackend:
             - terminate() stops the run
             - status() returns TERMINATED
         """
-        import subprocess
         import uuid
 
         from goldfish.cloud.adapters.local.run_backend import LocalRunBackend
@@ -253,6 +279,8 @@ class TestCPBackend:
         When: backend.launch() called
         Then: clear error raised, no orphaned resources
         """
+        from unittest.mock import patch
+
         from goldfish.cloud.adapters.local.run_backend import LocalRunBackend
 
         backend = LocalRunBackend()
@@ -264,9 +292,17 @@ class TestCPBackend:
             image="nonexistent-image-xyz:latest",  # Image doesn't exist
         )
 
-        # Should raise LaunchError
-        with pytest.raises(LaunchError):
-            backend.launch(spec)
+        # Use a mocked docker error to keep this test deterministic under pytest-timeout.
+        with patch(
+            "goldfish.cloud.adapters.local.run_backend.subprocess.run",
+            side_effect=subprocess.CalledProcessError(
+                returncode=125,
+                cmd=["docker", "run"],
+                stderr="pull access denied",
+            ),
+        ):
+            with pytest.raises(LaunchError):
+                backend.launch(spec)
 
     def test_int_backend_logs_retrieval(self):
         """INT-BACKEND: Logs retrievable from running container."""
@@ -464,7 +500,18 @@ class TestCPImage:
         When: builder.build() called
         Then: Image tag returned, verifiable via registry.exists()
         """
+        from unittest.mock import patch
+
         from goldfish.cloud.adapters.local.image import LocalImageBuilder, LocalImageRegistry
+
+        def fake_docker_run(cmd, *args, **kwargs):
+            if cmd[:2] == ["docker", "info"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if cmd[:2] == ["docker", "build"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+            if cmd[:3] == ["docker", "image", "inspect"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+            raise AssertionError(f"Unexpected docker command: {cmd}")
 
         builder = LocalImageBuilder()
         registry = LocalImageRegistry()
@@ -473,18 +520,19 @@ class TestCPImage:
         dockerfile = tmp_path / "Dockerfile"
         dockerfile.write_text("FROM alpine:latest\nRUN echo 'test'\n")
 
-        # Build image
-        image_tag = builder.build(
-            context_path=tmp_path,
-            dockerfile_path=dockerfile,
-            image_tag="test-image-int-1:v1",
-        )
+        with patch("goldfish.cloud.adapters.local.image.subprocess.run", side_effect=fake_docker_run):
+            # Build image
+            image_tag = builder.build(
+                context_path=tmp_path,
+                dockerfile_path=dockerfile,
+                image_tag="test-image-int-1:v1",
+            )
 
-        assert image_tag is not None
-        assert "test-image-int-1" in image_tag
+            assert image_tag is not None
+            assert "test-image-int-1" in image_tag
 
-        # Verify exists through registry
-        assert registry.exists(image_tag)
+            # Verify exists through registry
+            assert registry.exists(image_tag)
 
     def test_int_image_2_registry_resolution(self, tmp_path):
         """INT-IMAGE-2: Registry can verify built images exist.
@@ -493,7 +541,18 @@ class TestCPImage:
         When: registry.exists() called
         Then: Returns True
         """
+        from unittest.mock import patch
+
         from goldfish.cloud.adapters.local.image import LocalImageBuilder, LocalImageRegistry
+
+        def fake_docker_run(cmd, *args, **kwargs):
+            if cmd[:2] == ["docker", "info"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if cmd[:2] == ["docker", "build"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+            if cmd[:3] == ["docker", "image", "inspect"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+            raise AssertionError(f"Unexpected docker command: {cmd}")
 
         builder = LocalImageBuilder()
         registry = LocalImageRegistry()
@@ -502,14 +561,15 @@ class TestCPImage:
         dockerfile = tmp_path / "Dockerfile"
         dockerfile.write_text("FROM alpine:latest\n")
 
-        image_tag = builder.build(
-            context_path=tmp_path,
-            dockerfile_path=dockerfile,
-            image_tag="resolve-test-int-2:v1",
-        )
+        with patch("goldfish.cloud.adapters.local.image.subprocess.run", side_effect=fake_docker_run):
+            image_tag = builder.build(
+                context_path=tmp_path,
+                dockerfile_path=dockerfile,
+                image_tag="resolve-test-int-2:v1",
+            )
 
-        # Verify through registry
-        assert registry.exists(image_tag)
+            # Verify through registry
+            assert registry.exists(image_tag)
 
     def test_int_image_3_build_failure_bad_dockerfile(self, tmp_path):
         """INT-IMAGE-3: Build failure with invalid Dockerfile.
@@ -518,7 +578,16 @@ class TestCPImage:
         When: builder.build() called
         Then: Clear error raised
         """
+        from unittest.mock import patch
+
         from goldfish.cloud.adapters.local.image import ImageBuildError, LocalImageBuilder
+
+        def fake_docker_run(cmd, *args, **kwargs):
+            if cmd[:2] == ["docker", "info"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if cmd[:2] == ["docker", "build"]:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Dockerfile parse error")
+            raise AssertionError(f"Unexpected docker command: {cmd}")
 
         builder = LocalImageBuilder()
 
@@ -526,12 +595,13 @@ class TestCPImage:
         dockerfile = tmp_path / "Dockerfile"
         dockerfile.write_text("INVALID_INSTRUCTION not_valid\n")
 
-        with pytest.raises(ImageBuildError):
-            builder.build(
-                context_path=tmp_path,
-                dockerfile_path=dockerfile,
-                image_tag="bad-build:v1",
-            )
+        with patch("goldfish.cloud.adapters.local.image.subprocess.run", side_effect=fake_docker_run):
+            with pytest.raises(ImageBuildError):
+                builder.build(
+                    context_path=tmp_path,
+                    dockerfile_path=dockerfile,
+                    image_tag="bad-build:v1",
+                )
 
     def test_int_image_4_missing_base_image(self, tmp_path):
         """INT-IMAGE-4: Build failure with missing base image.
@@ -540,7 +610,16 @@ class TestCPImage:
         When: builder.build() called
         Then: Clear error raised
         """
+        from unittest.mock import patch
+
         from goldfish.cloud.adapters.local.image import ImageBuildError, LocalImageBuilder
+
+        def fake_docker_run(cmd, *args, **kwargs):
+            if cmd[:2] == ["docker", "info"]:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if cmd[:2] == ["docker", "build"]:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="pull access denied")
+            raise AssertionError(f"Unexpected docker command: {cmd}")
 
         builder = LocalImageBuilder()
 
@@ -548,12 +627,13 @@ class TestCPImage:
         dockerfile = tmp_path / "Dockerfile"
         dockerfile.write_text("FROM nonexistent-base-image-xyz:latest\n")
 
-        with pytest.raises(ImageBuildError):
-            builder.build(
-                context_path=tmp_path,
-                dockerfile_path=dockerfile,
-                image_tag="missing-base:v1",
-            )
+        with patch("goldfish.cloud.adapters.local.image.subprocess.run", side_effect=fake_docker_run):
+            with pytest.raises(ImageBuildError):
+                builder.build(
+                    context_path=tmp_path,
+                    dockerfile_path=dockerfile,
+                    image_tag="missing-base:v1",
+                )
 
 
 # =============================================================================
@@ -660,6 +740,11 @@ class TestCPBackendFailures:
 
     These tests validate error handling at the compute boundary.
     """
+
+    pytestmark = [
+        pytest.mark.requires_docker,
+        pytest.mark.timeout(120),
+    ]
 
     def test_int_backend_fail_invalid_command(self):
         """INT-BACKEND-FAIL-1: Invalid command fails gracefully.

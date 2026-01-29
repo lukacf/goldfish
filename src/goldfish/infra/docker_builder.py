@@ -273,13 +273,8 @@ CMD ["/bin/bash"]
             dockerfile_path,
             image_tag,
         ):
-            # Build image; force amd64 only when targeting GCE
+            # Build image
             build_cmd = ["docker", "build"]
-            jobs_backend: str | None = (
-                getattr(getattr(self.config, "jobs", None), "backend", None) if self.config else None
-            )
-            if jobs_backend == "gce":
-                build_cmd += ["--platform", "linux/amd64"]
             build_cmd += ["-t", image_tag, "-f", str(dockerfile_path)]
 
             # Pass version as build arg to bust cache on version change

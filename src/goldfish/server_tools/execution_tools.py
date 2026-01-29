@@ -90,7 +90,7 @@ def _overdrive_ack_timeout(row: dict) -> float:
     override = _read_overdrive_ack_timeout()
     if override:
         return override
-    from goldfish.cloud.contracts import get_capabilities_for_backend
+    from goldfish.cloud.factory import get_capabilities_for_backend
 
     backend = row.get("backend_type") or "local"
     state = row.get("state")
@@ -378,7 +378,7 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
         except Exception:
             pass
 
-        from goldfish.cloud.contracts import get_capabilities_for_backend
+        from goldfish.cloud.factory import get_capabilities_for_backend
 
         state = row.get("state")
         backend_type = row.get("backend_type") or "local"
@@ -815,7 +815,8 @@ def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = 
 
     # Fallback to backend live logs
     if log_content is None:
-        from goldfish.cloud.contracts import RunHandle, get_capabilities_for_backend
+        from goldfish.cloud.contracts import RunHandle
+        from goldfish.cloud.factory import get_capabilities_for_backend
 
         backend_type = row.get("backend_type") or "local"
         backend_handle = row.get("backend_handle") or run_id

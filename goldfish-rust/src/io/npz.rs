@@ -46,7 +46,6 @@ impl NpzFile {
     }
 
     /// Get all array names.
-    #[must_use]
     pub fn keys(&self) -> impl Iterator<Item = &String> {
         self.arrays.keys()
     }

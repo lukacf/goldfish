@@ -34,6 +34,27 @@ if TYPE_CHECKING:
     from goldfish.config import LocalComputeConfig
 
 
+# Default capabilities for local backend - used when backend instance not available
+# These values match the defaults returned by LocalRunBackend.capabilities property
+# when no special configuration is applied.
+LOCAL_DEFAULT_CAPABILITIES = BackendCapabilities(
+    supports_gpu=False,  # Dynamic at runtime, but default False
+    supports_spot=False,
+    supports_preemption=True,
+    supports_preemption_detection=False,  # Dynamic at runtime, but default False
+    supports_live_logs=True,
+    supports_metrics=False,
+    max_run_duration_hours=None,
+    ack_timeout_seconds=1.0,
+    ack_timeout_running_seconds=1.0,
+    has_launch_delay=False,
+    logs_unavailable_message="Logs not available",
+    timeout_becomes_pending=False,
+    status_message_for_preparing="Starting container...",
+    zone_resolution_method="config",
+)
+
+
 class LocalRunBackend:
     """Local Docker backend for running stages.
 

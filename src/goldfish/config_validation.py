@@ -3,9 +3,71 @@
 Provides validation for goldfish.yaml, pipeline.yaml, and stage configs.
 """
 
+from dataclasses import dataclass, field
+from difflib import get_close_matches
 from pathlib import Path
 
 import yaml
+
+
+@dataclass
+class StageConfigValidationResult:
+    """Result of validating a single stage config file."""
+
+    valid: bool
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+_DEFAULT_STAGE_CONFIG_FIELDS = {
+    # Common model/training knobs (heuristic; stage configs are intentionally flexible)
+    "freeze_backbone",
+    "learning_rate",
+    "lr",
+    "batch_size",
+    "epochs",
+    "seed",
+    "weight_decay",
+    "dropout",
+    "optimizer",
+    "scheduler",
+}
+
+
+def validate_stage_config(path: Path) -> StageConfigValidationResult:
+    """Validate a stage config YAML for common typos.
+
+    Stage configs are user-defined and intentionally flexible, so this validator
+    is warning-oriented: it flags suspicious keys that look like typos of common
+    fields (e.g., `freeze_backone` vs `freeze_backbone`).
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    try:
+        data = yaml.safe_load(path.read_text())
+    except OSError as exc:
+        return StageConfigValidationResult(valid=False, errors=[str(exc)], warnings=[])
+    except yaml.YAMLError as exc:
+        return StageConfigValidationResult(valid=False, errors=[f"YAML syntax error - {exc}"], warnings=[])
+
+    if data is None:
+        return StageConfigValidationResult(valid=True, errors=[], warnings=[])
+
+    if not isinstance(data, dict):
+        return StageConfigValidationResult(valid=False, errors=["Stage config must be a YAML mapping"], warnings=[])
+
+    for key in data:
+        if not isinstance(key, str):
+            continue
+        if key in _DEFAULT_STAGE_CONFIG_FIELDS:
+            continue
+
+        match = get_close_matches(key, _DEFAULT_STAGE_CONFIG_FIELDS, n=1, cutoff=0.8)
+        if match:
+            warnings.append(f"Unknown field '{key}'. Did you mean '{match[0]}'?")
+
+    return StageConfigValidationResult(valid=len(errors) == 0, errors=errors, warnings=warnings)
 
 
 def validate_project_config(
@@ -65,8 +127,9 @@ def validate_project_config(
             for config_file in configs_dir.glob("*.yaml"):
                 files_checked.append(f"{ws_name}/configs/{config_file.name}")
                 try:
-                    with open(config_file) as f:
-                        yaml.safe_load(f)
+                    result = validate_stage_config(config_file)
+                    errors.extend([f"configs/{config_file.name}: {e}" for e in result.errors])
+                    warnings.extend([f"configs/{config_file.name}: {w}" for w in result.warnings])
                 except yaml.YAMLError as e:
                     errors.append(f"configs/{config_file.name}: YAML syntax error - {e}")
 

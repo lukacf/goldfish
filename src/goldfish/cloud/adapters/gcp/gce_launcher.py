@@ -18,9 +18,9 @@ from datetime import UTC
 from pathlib import Path
 from typing import Any
 
+from goldfish.cloud.adapters.gcp.resource_launcher import ResourceLauncher, cleanup_disk, run_gcloud
+from goldfish.cloud.adapters.gcp.startup_builder import build_startup_script
 from goldfish.errors import GoldfishError
-from goldfish.infra.resource_launcher import ResourceLauncher, cleanup_disk, run_gcloud
-from goldfish.infra.startup_builder import build_startup_script
 from goldfish.state_machine.exit_code import ExitCodeResult, get_exit_code_gce
 from goldfish.state_machine.types import StageState
 
@@ -393,10 +393,12 @@ class GCELauncher:
         Raises:
             GoldfishError: If no capacity found
         """
-        # Filter resources by GPU type
+        # Filter resources by GPU accelerator type (e.g., "nvidia-h100-80gb")
+        # Profile structure: gpu.type = "h100" (short name), gpu.accelerator = "nvidia-h100-80gb" (GCE type)
+        # We compare against accelerator since that's what RunSpec.gpu_type contains.
         if gpu_type:
             filtered_resources = [
-                r for r in self.resources if (r.get("gpu", {}).get("type") or "none").lower() == gpu_type.lower()
+                r for r in self.resources if (r.get("gpu", {}).get("accelerator") or "").lower() == gpu_type.lower()
             ]
         else:
             # No GPU requested - include resources with no GPU or gpu.type="none"
@@ -407,7 +409,7 @@ class GCELauncher:
             ]
 
         if not filtered_resources:
-            raise GoldfishError(f"No resources found for GPU type: {gpu_type or 'none'}")
+            raise GoldfishError(f"No resources found for GPU accelerator: {gpu_type or 'none'}")
 
         # Determine preemptible preference
         # None = default (spot_first), True = force spot, False = force on_demand
@@ -518,7 +520,7 @@ class GCELauncher:
 
             # Wait for instance to be fully ready (RUNNING state)
             # This is required before metadata operations (set_signal) can succeed.
-            from goldfish.infra.resource_launcher import wait_for_instance_ready
+            from goldfish.cloud.adapters.gcp.resource_launcher import wait_for_instance_ready
 
             wait_for_instance_ready(
                 instance_name=instance_name,
@@ -796,9 +798,16 @@ class GCELauncher:
 
         stage_run_id = self._sanitize_name(instance_name)
         try:
+            storage = getattr(self, "_storage", None)
+            if storage is None:
+                from goldfish.cloud.adapters.gcp.storage import GCSStorage
+
+                storage = GCSStorage(project=self.project_id)
+                self._storage = storage
             return get_exit_code_gce(
                 bucket_uri=bucket_uri,
                 stage_run_id=stage_run_id,
+                storage=storage,
                 project_id=self.project_id,
                 max_attempts=max_attempts,
                 retry_delay=retry_delay,
