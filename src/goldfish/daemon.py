@@ -356,6 +356,11 @@ class GoldfishDaemon:
             pipeline_executor=pipeline_executor,
             metadata_bus=metadata_bus,
         )
+        # Set both module-level project root AND context
+        # Some tools use _get_project_root() directly for performance
+        from goldfish.server_core import _set_project_root
+
+        _set_project_root(self.project_root)
         set_context(self.context)
 
         # Start local metadata syncer for Overdrive parity in non-GCE environments
