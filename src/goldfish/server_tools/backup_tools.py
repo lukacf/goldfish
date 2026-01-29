@@ -46,9 +46,9 @@ def _get_backup_manager() -> BackupManager | None:
 
     from goldfish.backup.manager import BackupManager
 
-    # Database path is in the dev repo
+    # Database path is in the dev repo (sibling to project, not subdirectory)
     project_root = _get_project_root()
-    dev_repo = project_root / config.dev_repo_path
+    dev_repo = config.get_dev_repo_path(project_root)
     db_path = dev_repo / ".goldfish" / "goldfish.db"
 
     # Backup bucket: use GCS bucket with "backups/" prefix
