@@ -1971,12 +1971,13 @@ class ExperimentRecordManager:
     ) -> dict[str, Any] | None:
         """Get current best tagged record.
 
-        Looks for tags with the given prefix (default "best-").
+        Looks for tags matching the given prefix (default "best-").
+        Matches both bare prefix (e.g., "best") and prefixed tags (e.g., "best-v1").
         Checks both run_tags and workspace_version_tags for backwards compatibility.
 
         Args:
             workspace_name: Workspace name
-            tag_prefix: Tag name prefix to search for
+            tag_prefix: Tag name prefix to search for (e.g., "best-" matches "best" and "best-v1")
 
         Returns:
             Dict with record_id, tag, metric, value or None
@@ -1986,16 +1987,19 @@ class ExperimentRecordManager:
         tag_name: str | None = None
         record_id: str | None = None
 
+        # Support both bare prefix (e.g., "best") and prefix with suffix (e.g., "best-v1")
+        bare_prefix = tag_prefix.rstrip("-")
+
         with self.db._conn() as conn:
             # First try run_tags
             tag_row = conn.execute(
                 """
                 SELECT tag_name, record_id FROM run_tags
-                WHERE workspace_name = ? AND tag_name LIKE ?
+                WHERE workspace_name = ? AND (tag_name LIKE ? OR tag_name = ?)
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
-                (workspace_name, f"{tag_prefix}%"),
+                (workspace_name, f"{tag_prefix}%", bare_prefix),
             ).fetchone()
 
             if tag_row:
@@ -2009,11 +2013,11 @@ class ExperimentRecordManager:
                     FROM workspace_version_tags vt
                     JOIN experiment_records er
                         ON er.workspace_name = vt.workspace_name AND er.version = vt.version
-                    WHERE vt.workspace_name = ? AND vt.tag_name LIKE ?
+                    WHERE vt.workspace_name = ? AND (vt.tag_name LIKE ? OR vt.tag_name = ?)
                     ORDER BY vt.created_at DESC
                     LIMIT 1
                     """,
-                    (workspace_name, f"{tag_prefix}%"),
+                    (workspace_name, f"{tag_prefix}%", bare_prefix),
                 ).fetchone()
 
                 if version_tag_row:

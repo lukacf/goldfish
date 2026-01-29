@@ -33,6 +33,7 @@ from goldfish.server_core import (
     _get_state_manager,
     _get_state_md,
     _get_workspace_manager,
+    _reset_project_root,
     _set_project_root,
     mcp,
 )
@@ -94,6 +95,9 @@ def configure_server(
         stage_executor: Stage executor instance
         pipeline_executor: Pipeline executor instance
     """
+    # Set module-level project root for tools that need it directly
+    _set_project_root(project_root)
+
     ctx = ServerContext(
         project_root=project_root,
         config=config,
@@ -116,6 +120,7 @@ def reset_server() -> None:
 
     Primarily for testing - clears all global state between tests.
     """
+    _reset_project_root()
     set_context(None)
 
 
