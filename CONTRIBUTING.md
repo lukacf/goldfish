@@ -134,7 +134,8 @@ Use this map to find the right place for your changes:
 | Subsystem | Primary Files | Common Tasks |
 | :--- | :--- | :--- |
 | **MCP Tools** | `src/goldfish/server_tools/` | Add/Modify tools available to AI agents. |
-| **Execution Engine** | `src/goldfish/jobs/stage_executor.py` | Change how Docker images are built or launched. |
+| **Execution Engine** | `src/goldfish/jobs/stage_executor.py` | Change how stages are executed (uses RunBackend protocol). |
+| **Cloud Backends** | `src/goldfish/cloud/adapters/` | Add new compute backends (implement RunBackend, ObjectStorage). See [CLOUD_ABSTRACTION.md](docs/CLOUD_ABSTRACTION.md). |
 | **Validation (SVS)** | `src/goldfish/svs/` | Add new mechanistic checks (entropy, variance, etc.). |
 | **Database** | `src/goldfish/db/database.py` | Update schema or add complex metadata queries. |
 | **Workspace Ops** | `src/goldfish/workspace/manager.py` | Modify how local slots and git branches sync. |

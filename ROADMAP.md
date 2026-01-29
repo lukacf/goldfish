@@ -43,14 +43,21 @@ metrics:
 
 Abstract away cloud provider specifics. Users choose their infrastructure.
 
+**Cloud Abstraction Layer (COMPLETED):**
+The de-googlify refactor (2026-01-24) introduced a protocol-based cloud abstraction:
+- `RunBackend`, `ObjectStorage`, `SignalBus` protocols in `cloud/protocols.py`
+- `BackendCapabilities` for behavior configuration in `cloud/contracts.py`
+- `AdapterFactory` for dependency injection in `cloud/factory.py`
+- See [docs/CLOUD_ABSTRACTION.md](docs/CLOUD_ABSTRACTION.md) for full documentation.
+
 **Backends:**
 | Backend | Status | Use Case |
 |---------|--------|----------|
-| `local` | ✅ Exists | Development, small jobs |
-| `gce` | ✅ Exists | GCP users, GPU workloads |
+| `local` | ✅ Complete | Development, small jobs (LocalRunBackend) |
+| `gce` | ✅ Complete | GCP users, GPU workloads (GCERunBackend) |
 | `kubernetes` | 🔲 New | Enterprise, multi-cloud, on-prem |
-| `aws-batch` | 🔲 New | AWS users |
-| `azure-ml` | 🔲 Future | Azure users |
+| `aws-batch` | 🔲 New | AWS users (implement RunBackend protocol) |
+| `azure-ml` | 🔲 Future | Azure users (implement RunBackend protocol) |
 
 **Configuration:**
 ```yaml
@@ -207,27 +214,24 @@ compute:
 
 ---
 
-### 6. Storage Backend Abstraction
+### 6. Storage Backend Abstraction (COMPLETED)
 
 Support for major cloud storage providers.
 
-**Interface:**
-```python
-class StorageBackend(Protocol):
-    def upload(self, local_path: Path, remote_path: str) -> None: ...
-    def download(self, remote_path: str, local_path: Path) -> None: ...
-    def exists(self, remote_path: str) -> bool: ...
-    def list(self, prefix: str) -> list[str]: ...
-    def delete(self, remote_path: str) -> None: ...
-```
+**ObjectStorage Protocol (COMPLETED):**
+The `ObjectStorage` protocol in `cloud/protocols.py` provides:
+- `put(uri, data)` / `get(uri)` / `exists(uri)` / `delete(uri)`
+- `list_prefix(prefix)` - list objects with given prefix
+- `get_local_path(uri)` - get local path if available
+- Provider-agnostic `StorageURI` addressing (gs://, s3://, file://)
 
 **Backends:**
 | Backend | Status | Notes |
 |---------|--------|-------|
-| `local` | 🔲 New | Filesystem, for development |
-| `gcs` | ✅ Exists | Google Cloud Storage |
-| `s3` | 🔲 New | AWS S3, MinIO |
-| `azure` | 🔲 Future | Azure Blob Storage |
+| `local` | ✅ Complete | LocalObjectStorage (filesystem) |
+| `gcs` | ✅ Complete | GCSStorage (Google Cloud Storage) |
+| `s3` | 🔲 New | Implement ObjectStorage protocol |
+| `azure` | 🔲 Future | Implement ObjectStorage protocol |
 
 ---
 
@@ -377,8 +381,14 @@ Explicitly not building:
 
 ---
 
-## Existing Work
+## Completed Work
 
-- **Cloud abstraction branch**: Remote branch exists with partial GCP abstraction (needs updating)
-- **Current GCE backend**: Production-ready, good reference implementation
-- **Local Docker backend**: Works, needs storage backend integration
+- **Cloud abstraction layer** (2026-01-24): Fully implemented via de-googlify refactor
+  - Protocol-based design: RunBackend, ObjectStorage, SignalBus
+  - BackendCapabilities pattern for behavior configuration
+  - LocalRunBackend and GCERunBackend adapters
+  - LocalObjectStorage and GCSStorage adapters
+  - AdapterFactory for dependency injection
+  - See [docs/CLOUD_ABSTRACTION.md](docs/CLOUD_ABSTRACTION.md)
+- **GCE backend**: Production-ready
+- **Local Docker backend**: Production-ready with storage integration

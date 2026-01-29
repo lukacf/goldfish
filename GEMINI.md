@@ -5,7 +5,7 @@
 - **Isolated Workspaces**: Sandboxed environments for experiments.
 - **Automatic Versioning**: Every run is backed by an immutable git-tagged snapshot (hidden from the agent).
 - **Pipeline Workflows**: YAML-defined DAGs of stages with typed data signals.
-- **Infrastructure Abstraction**: Agents write pure Python; Goldfish handles Docker, GCS, and GCE.
+- **Infrastructure Abstraction**: Agents write pure Python; Goldfish handles Docker, GCS, and GCE via a protocol-based cloud abstraction layer.
 - **Pre-Run Review (SVS)**: Automated code review to catch bugs before execution.
 
 ### Key Technologies
@@ -65,18 +65,19 @@ This project strictly follows TDD. **Write tests BEFORE implementation.**
 - **Database**: Use context managers (`with self.db._conn() as conn:`) for all transactions to ensure auto-commit/rollback.
 - **Error Handling**: Use semantic errors from `src/goldfish/errors.py`. Never expose raw Git or OS errors to the MCP client.
 - **Provenance**: Every `run()` call triggers an automatic sync and commit in the background dev repository before execution.
-- **Security**: 
+- **Security**:
     - Always validate paths using `validate_path_within_root`.
     - Block symlinks to prevent TOCTOU attacks.
     - Sanitize all workspace and version names.
 
-### 4. Six Abstractions
+### 4. Core Abstractions
 1. **Workspaces**: Isolated directories (copy-based mount).
 2. **Versions**: Git tags representing 100% provenance.
 3. **Pipelines**: YAML DAG definitions.
 4. **Stages**: Isolated Python modules running in containers.
 5. **Signals**: Typed data connectors (`npy`, `csv`, `directory`, `file`).
 6. **Pre-Run Review**: AI-driven static analysis (SVS) before execution.
+7. **Cloud Abstraction**: Protocol-based backend interfaces (RunBackend, ObjectStorage).
 
 ---
 
@@ -85,5 +86,18 @@ This project strictly follows TDD. **Write tests BEFORE implementation.**
 - `src/goldfish/jobs/stage_executor.py`: The "engine" - handles sync, versioning, review, and execution.
 - `src/goldfish/db/database.py`: SQLite metadata layer.
 - `src/goldfish/workspace/manager.py`: Workspace lifecycle management.
-- `src/goldfish/infra/`: Execution backends (Docker, GCE).
+- `src/goldfish/cloud/`: Cloud abstraction layer.
+    - `protocols.py`: RunBackend, ObjectStorage, SignalBus interfaces
+    - `contracts.py`: BackendCapabilities, RunSpec, RunHandle
+    - `factory.py`: AdapterFactory for dependency injection
+    - `adapters/local/`: LocalRunBackend (Docker containers)
+    - `adapters/gcp/`: GCERunBackend (GCE instances), GCSStorage
 - `src/goldfish/server_tools/`: Implementation of 40+ MCP tools.
+- `src/goldfish/infra/docker_builder.py`: Docker image building.
+
+---
+
+## Documentation
+- [CLAUDE.md](CLAUDE.md): Complete guide for AI assistants developing on this codebase.
+- [docs/CLOUD_ABSTRACTION.md](docs/CLOUD_ABSTRACTION.md): Cloud backend architecture and extension guide.
+- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md): Installation and first run guide.
