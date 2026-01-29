@@ -324,7 +324,7 @@ if path.is_symlink():
     raise InvalidLogPathError("Symlink detected")
 ```
 
-### 3. Docker Sandboxing (`local_executor.py`)
+### 3. Docker Sandboxing (`cloud/adapters/local/`)
 
 ```python
 # Containers run with:

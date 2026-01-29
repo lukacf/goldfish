@@ -126,7 +126,7 @@ Goal: Fix the critical exit code bug and create the event emission layer that re
 - [ ] `test_exit_code.py`: Test exit code non-zero returns failure with code.
 - [ ] Define `ExitCodeResult` dataclass (exists: bool, code: int | None, gcs_error: bool, error: str | None).
 - [ ] Fix `daemon.py:_get_exit_code()` to return `ExitCodeResult` instead of defaulting to 1.
-- [ ] Fix `gce_launcher.py:_get_exit_code()` to return `ExitCodeResult`.
+- [ ] Fix `cloud/adapters/gcp/gce_launcher.py:_get_exit_code()` to return `ExitCodeResult`.
 - [ ] Update all callers to handle `ExitCodeResult` properly.
 
 ### 4.2 — Event Emission Functions
@@ -306,7 +306,7 @@ Before declaring implementation complete, verify:
 | `src/goldfish/state_machine/migration.py` | Create | Migration script |
 | `src/goldfish/daemon.py` | Rewrite | Event-driven daemon |
 | `src/goldfish/jobs/stage_executor.py` | Modify | Emit events instead of direct updates |
-| `src/goldfish/infra/gce_launcher.py` | Modify | Fix _get_exit_code(), add preemption detection |
+| `src/goldfish/cloud/adapters/gcp/gce_launcher.py` | Modify | Fix _get_exit_code(), add preemption detection |
 | `src/goldfish/db/schema.sql` | Modify | Add new columns and tables |
 | `tests/unit/state_machine/` | Create | Unit test directory |
 | `tests/integration/test_state_machine_e2e.py` | Create | Integration tests |

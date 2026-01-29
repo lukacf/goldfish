@@ -81,7 +81,7 @@ This document specifies a state machine to **replace** the ad-hoc if/then/else s
 
 Existing functions that need to be **fixed or replaced** during implementation:
 - `daemon.py:_get_exit_code()` - returns `1` when file doesn't exist (bug)
-- `gce_launcher.py:_get_exit_code()` - same bug
+- `cloud/adapters/gcp/gce_launcher.py:_get_exit_code()` - same bug
 - `daemon.py:_check_orphaned_runs()` - if/then/else mess to be replaced by event emission
 - `stage_executor.py:refresh_status_once()` - to be rewritten to return events
 
@@ -763,7 +763,7 @@ If a transition fails due to `state_changed`, the caller should:
 ### Current Bug
 
 ```python
-# gce_launcher.py - BROKEN
+# cloud/adapters/gcp/gce_launcher.py - BROKEN
 def _get_exit_code(self, instance_name: str) -> int:
     # ... retry logic ...
     return 1  # Returns 1 when file doesn't exist!
@@ -1716,7 +1716,7 @@ class StageDaemon:
 return 1  # Default to failure if not found  ← BUG
 ```
 
-**gce_launcher.py:738**:
+**cloud/adapters/gcp/gce_launcher.py:786**:
 ```python
 return 1  # Returns 1 when file doesn't exist  ← SAME BUG
 ```
@@ -2141,7 +2141,7 @@ class TestCAS:
 
 ### Phase 1: Foundation (Current)
 - [x] Write spec (this document)
-- [ ] Fix `_get_exit_code()` in BOTH `daemon.py:844` and `gce_launcher.py:738`
+- [ ] Fix `_get_exit_code()` in BOTH `daemon.py:844` and `cloud/adapters/gcp/gce_launcher.py:786`
 - [ ] Write comprehensive test suite (TDD)
 - [ ] Implement state machine core (transitions, CAS, audit)
 - [ ] Write migration script
