@@ -151,6 +151,8 @@ def create_backup(trigger: str = "manual", details: dict | None = None) -> dict:
     Returns:
         dict with backup info or error.
     """
+    import shutil
+
     manager = _get_backup_manager()
     if manager is None:
         return {
@@ -158,13 +160,28 @@ def create_backup(trigger: str = "manual", details: dict | None = None) -> dict:
             "error": "Backups not available - GCS not configured",
         }
 
+    # Pre-check: verify database file exists
+    if not manager.db_path.exists():
+        return {
+            "success": False,
+            "error": f"Database file not found: {manager.db_path}",
+        }
+
+    # Pre-check: verify gsutil is available
+    if shutil.which("gsutil") is None:
+        return {
+            "success": False,
+            "error": "gsutil command not found - install Google Cloud SDK",
+        }
+
     try:
         result = manager.create_backup(trigger=trigger, details=details)
 
         if result is None:
+            # create_backup returns None on gsutil upload failure
             return {
                 "success": False,
-                "error": "Backup failed - check logs for details",
+                "error": f"Backup upload failed - check GCS bucket permissions for {manager.gcs_bucket}",
             }
 
         # Record in audit trail
