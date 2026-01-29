@@ -324,12 +324,10 @@ class SweepBackend(Protocol):
 
 ---
 
-## Out of Scope for 1.0
+## Out-of-scope
 
-Explicitly not building:
+Not now and maybe never:
 
-- **Multi-user / authentication** - Goldfish is single-player
-- **Web dashboard** - Use W&B/MLflow for visualization
 - **Real-time collaboration** - Not the product vision
 - **Model serving** - Different product category
 

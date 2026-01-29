@@ -6,16 +6,18 @@ Quick navigation for developers (human or AI) working on Goldfish.
 
 | Document | Purpose |
 |----------|---------|
-| [README.md](../README.md) | Project overview, quick start, value proposition |
+| [README.md](../README.md) | Project overview, quick start |
 | [GETTING_STARTED.md](GETTING_STARTED.md) | Full installation and first run guide |
+| [GETTING_STARTED_KING.md](GETTING_STARTED_KING.md) | King-specific GCP setup and onboarding |
 | [GCP_SETUP.md](GCP_SETUP.md) | Detailed GCP infrastructure setup |
 
 ## For AI Assistants
 
 | Document | Purpose |
 |----------|---------|
-| [CLAUDE.md](../CLAUDE.md) | Complete development guide - architecture, patterns, commands, security |
-| [GEMINI.md](../GEMINI.md) | Condensed project context for Gemini-based assistants |
+| [CLAUDE.md](../CLAUDE.md) | Complete development guide (canonical) |
+| [AGENTS.md](../AGENTS.md) | Symlink → CLAUDE.md |
+| [GEMINI.md](../GEMINI.md) | Symlink → CLAUDE.md |
 | [llms.txt](../llms.txt) | Machine-readable source file reference |
 | [SKILL.md](../.claude/skills/goldfish-ml/SKILL.md) | MCP tool reference and workflows |
 
@@ -23,11 +25,11 @@ Quick navigation for developers (human or AI) working on Goldfish.
 
 | Document | Purpose |
 |----------|---------|
-| [CLOUD_ABSTRACTION.md](CLOUD_ABSTRACTION.md) | Cloud backend protocols, contracts, and how to add new backends |
-| [svs.md](svs.md) | Semantic Validation System (SVS) - contracts, checks, patterns |
-| [state-machine-spec.md](state-machine-spec.md) | Stage execution state machine specification |
-| [ARCHITECTURE_PROPOSAL.md](ARCHITECTURE_PROPOSAL.md) | Architecture redesign proposal |
-| [ARCHITECTURE_REVIEW.md](ARCHITECTURE_REVIEW.md) | Architecture review discussion |
+| [CLOUD_ABSTRACTION.md](CLOUD_ABSTRACTION.md) | Cloud backend protocols, contracts, adding new backends |
+| [svs.md](svs.md) | Semantic Validation System - contracts, checks, patterns |
+| [state-machine-spec.md](state-machine-spec.md) | Stage execution state machine |
+| [state-machine-spec-formal.md](state-machine-spec-formal.md) | Formal state machine specification |
+| [state-machine-implementation.md](state-machine-implementation.md) | Implementation details |
 
 ## For Contributors
 
@@ -36,13 +38,14 @@ Quick navigation for developers (human or AI) working on Goldfish.
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Development setup, PR process, coding standards |
 | [ROADMAP.md](../ROADMAP.md) | Future features and priorities |
 | [CHANGELOG.md](../CHANGELOG.md) | Version history |
+| [PUBLIC_RELEASE_CHECKLIST.md](PUBLIC_RELEASE_CHECKLIST.md) | Release preparation checklist |
 
-## Implementation Details
+## Other
 
 | Directory | Purpose |
 |-----------|---------|
-| [de-googlify/](de-googlify/) | De-googlify refactor documentation (completed 2026-01-24) |
 | [specs/](specs/) | Detailed specifications |
+| [archive/](archive/) | Archived/historical documentation |
 
 ## Source Code Quick Reference
 
@@ -67,19 +70,4 @@ Quick navigation for developers (human or AI) working on Goldfish.
 ### Tests
 - `tests/unit/` - Fast unit tests (<1s)
 - `tests/integration/` - Integration tests (~2min)
-- `tests/e2e/` - End-to-end tests
 - `tests/e2e/deluxe/` - Real GCE tests
-
----
-
-## Navigation Tips
-
-**Starting from scratch?** Read README.md then GETTING_STARTED.md.
-
-**Developing on Goldfish?** Read CLAUDE.md (comprehensive) or GEMINI.md (condensed).
-
-**Adding a new cloud backend?** Read CLOUD_ABSTRACTION.md.
-
-**Understanding execution flow?** Read state-machine-spec.md and stage_executor.py.
-
-**Understanding data validation?** Read svs.md.
