@@ -18,7 +18,7 @@ import re
 import unicodedata
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote
 
 from goldfish.errors import GoldfishError
@@ -591,7 +591,10 @@ def validate_source_metadata(metadata: dict[str, Any]) -> None:
         )
 
 
-def parse_source_metadata(raw: str | dict[str, Any] | None) -> tuple[dict[str, Any] | None, str]:
+MetadataStatus = Literal["ok", "missing", "invalid", "future"]
+
+
+def parse_source_metadata(raw: str | dict[str, Any] | None) -> tuple[dict[str, Any] | None, MetadataStatus]:
     """Parse metadata from DB and return (metadata, status).
 
     Status values: "ok", "missing", "invalid", "future".
