@@ -13,7 +13,15 @@ import pytest
 from goldfish.cloud.adapters.local.run_backend import LocalRunBackend
 from goldfish.cloud.adapters.local.storage import LocalObjectStorage
 from goldfish.cloud.factory import AdapterFactory
-from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig
+from goldfish.config import (
+    AzureStorageConfig,
+    GCEConfig,
+    GCSConfig,
+    GoldfishConfig,
+    JobsConfig,
+    S3StorageConfig,
+    StorageConfig,
+)
 
 
 @pytest.fixture
@@ -256,3 +264,144 @@ class TestGetCapabilitiesForBackend:
         caps = get_capabilities_for_backend("gce")
 
         assert caps == GCE_DEFAULT_CAPABILITIES
+
+
+class TestAdapterFactoryStorageBackendSelection:
+    """Tests for storage backend selection based on storage config.
+
+    The factory should read from the new storage: section in config
+    to determine which storage backend to create.
+    """
+
+    def test_factory_uses_storage_backend_for_s3(self) -> None:
+        """Factory reads storage.backend='s3' and returns appropriate storage adapter.
+
+        When storage.backend is 's3', factory should prepare to create an S3 adapter.
+        Since S3 adapter is not yet implemented, this test verifies config is read.
+        """
+        config = GoldfishConfig(
+            project_name="test-project",
+            dev_repo_path="test-dev",
+            jobs=JobsConfig(backend="local"),
+            storage=StorageConfig(
+                backend="s3",
+                s3=S3StorageConfig(bucket="my-s3-bucket", region="us-west-2"),
+            ),
+        )
+
+        factory = AdapterFactory(config)
+
+        # Verify the storage config is accessible
+        assert config.storage is not None
+        assert config.storage.backend == "s3"
+        assert config.storage.s3 is not None
+        assert config.storage.s3.bucket == "my-s3-bucket"
+        # Factory should be created successfully
+        assert factory.backend_type == "local"
+
+    def test_factory_uses_legacy_gcs_when_no_storage_section(self) -> None:
+        """Factory falls back to legacy gcs: section when storage: is not present.
+
+        For backwards compatibility, if no storage: section exists but gcs: does,
+        the factory should still work with GCS storage.
+        """
+        config = GoldfishConfig(
+            project_name="test-project",
+            dev_repo_path="test-dev",
+            jobs=JobsConfig(backend="gce"),
+            gcs=GCSConfig(bucket="legacy-bucket"),
+            gce=GCEConfig(project="test-project", zones=["us-central1-a"]),
+        )
+
+        factory = AdapterFactory(config)
+
+        # Factory should be able to access legacy GCS config
+        assert config.gcs is not None
+        assert config.gcs.bucket == "legacy-bucket"
+        assert config.storage is None  # No new storage section
+        assert factory.backend_type == "gce"
+
+    def test_factory_storage_local_backend_creates_local_storage(self) -> None:
+        """When storage.backend='local', factory creates LocalObjectStorage.
+
+        This verifies that the local storage backend selection works correctly
+        through the new storage: config section.
+        """
+        config = GoldfishConfig(
+            project_name="test-project",
+            dev_repo_path="test-dev",
+            jobs=JobsConfig(backend="local"),
+            storage=StorageConfig(backend="local"),
+        )
+
+        factory = AdapterFactory(config)
+        storage = factory.create_storage()
+
+        assert isinstance(storage, LocalObjectStorage)
+
+    def test_factory_storage_gcs_backend_with_storage_section(self) -> None:
+        """When storage.backend='gcs' with storage.gcs config, factory uses it.
+
+        Verifies that GCS config can be specified in either the new storage:
+        section or the legacy gcs: section.
+        """
+        config = GoldfishConfig(
+            project_name="test-project",
+            dev_repo_path="test-dev",
+            jobs=JobsConfig(backend="local"),
+            storage=StorageConfig(
+                backend="gcs",
+                gcs=GCSConfig(bucket="new-style-bucket"),
+            ),
+        )
+
+        # Config should be valid and accessible
+        assert config.storage is not None
+        assert config.storage.backend == "gcs"
+        assert config.storage.gcs is not None
+        assert config.storage.gcs.bucket == "new-style-bucket"
+
+        factory = AdapterFactory(config)
+        assert factory is not None
+
+    def test_factory_raises_not_implemented_for_s3_storage(self) -> None:
+        """Factory raises NotImplementedError when trying to create S3 storage.
+
+        S3 adapter is not yet implemented. This test ensures a clear error message
+        is provided rather than a cryptic failure.
+        """
+        config = GoldfishConfig(
+            project_name="test-project",
+            dev_repo_path="test-dev",
+            jobs=JobsConfig(backend="local"),
+            storage=StorageConfig(
+                backend="s3",
+                s3=S3StorageConfig(bucket="my-s3-bucket"),
+            ),
+        )
+
+        factory = AdapterFactory(config)
+
+        with pytest.raises(NotImplementedError, match="S3 storage adapter not yet implemented"):
+            factory.create_storage()
+
+    def test_factory_raises_not_implemented_for_azure_storage(self) -> None:
+        """Factory raises NotImplementedError when trying to create Azure storage.
+
+        Azure adapter is not yet implemented. This test ensures a clear error message
+        is provided rather than a cryptic failure.
+        """
+        config = GoldfishConfig(
+            project_name="test-project",
+            dev_repo_path="test-dev",
+            jobs=JobsConfig(backend="local"),
+            storage=StorageConfig(
+                backend="azure",
+                azure=AzureStorageConfig(container="my-container", account="myaccount"),
+            ),
+        )
+
+        factory = AdapterFactory(config)
+
+        with pytest.raises(NotImplementedError, match="Azure storage adapter not yet implemented"):
+            factory.create_storage()

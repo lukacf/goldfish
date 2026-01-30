@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -27,6 +28,25 @@ class AuditConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     min_reason_length: int = 15
+
+
+class DefaultsConfig(BaseModel):
+    """Global defaults configuration for stage execution.
+
+    These defaults apply to all stages unless overridden at the stage level.
+
+    Example goldfish.yaml:
+        defaults:
+          timeout_seconds: 7200    # 2 hours
+          log_sync_interval: 15    # Sync logs every 15 seconds
+          backend: gce             # Default compute backend
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    timeout_seconds: int = Field(default=3600, gt=0)  # 1 hour default
+    log_sync_interval: int = Field(default=10, gt=0)  # 10 seconds default
+    backend: Literal["local", "gce", "kubernetes"] = "local"
 
 
 class LocalStorageConfig(BaseModel):
@@ -98,6 +118,79 @@ class GCSConfig(BaseModel):
     artifacts_prefix: str = "artifacts/"
     snapshots_prefix: str = "snapshots/"
     datasets_prefix: str = "datasets/"
+
+
+class S3StorageConfig(BaseModel):
+    """S3 storage configuration.
+
+    For AWS S3 or S3-compatible storage (MinIO, etc).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    bucket: str
+    region: str | None = None
+    endpoint_url: str | None = None  # For S3-compatible (MinIO, etc)
+    sources_prefix: str = "sources/"
+    artifacts_prefix: str = "artifacts/"
+    snapshots_prefix: str = "snapshots/"
+    datasets_prefix: str = "datasets/"
+
+
+class AzureStorageConfig(BaseModel):
+    """Azure Blob storage configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    container: str
+    account: str
+    sources_prefix: str = "sources/"
+    artifacts_prefix: str = "artifacts/"
+    snapshots_prefix: str = "snapshots/"
+    datasets_prefix: str = "datasets/"
+
+
+StorageBackend = Literal["gcs", "s3", "azure", "local"]
+
+
+class StorageConfig(BaseModel):
+    """Unified storage backend configuration.
+
+    Allows selecting between multiple storage backends:
+    - gcs: Google Cloud Storage (default)
+    - s3: AWS S3 or S3-compatible
+    - azure: Azure Blob Storage
+    - local: Local filesystem (for development/testing)
+
+    Example goldfish.yaml:
+        storage:
+          backend: s3
+          s3:
+            bucket: my-bucket
+            region: us-east-1
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    backend: StorageBackend = "gcs"
+    gcs: GCSConfig | None = None
+    s3: S3StorageConfig | None = None
+    azure: AzureStorageConfig | None = None
+
+    @property
+    def effective_bucket(self) -> str | None:
+        """Get the bucket/container name for the active backend.
+
+        Returns:
+            The bucket name for GCS/S3, container for Azure, or None for local.
+        """
+        if self.backend == "gcs" and self.gcs:
+            return self.gcs.bucket
+        if self.backend == "s3" and self.s3:
+            return self.s3.bucket
+        if self.backend == "azure" and self.azure:
+            return self.azure.container
+        return None
 
 
 class PreRunReviewConfig(BaseModel):
@@ -292,8 +385,10 @@ def _get_valid_fields_for_path(loc: Sequence[object]) -> list[str]:
     field_maps = {
         "state_md": list(StateMdConfig.model_fields.keys()),
         "audit": list(AuditConfig.model_fields.keys()),
+        "defaults": list(DefaultsConfig.model_fields.keys()),
         "jobs": list(JobsConfig.model_fields.keys()),
         "gcs": list(GCSConfig.model_fields.keys()),
+        "storage": list(StorageConfig.model_fields.keys()),
         "gce": list(GCEConfig.model_fields.keys()),
         "local": list(LocalConfig.model_fields.keys()),
         "pre_run_review": list(PreRunReviewConfig.model_fields.keys()),
@@ -309,8 +404,10 @@ def _get_valid_fields_for_path(loc: Sequence[object]) -> list[str]:
         "slots",
         "state_md",
         "audit",
+        "defaults",
         "jobs",
         "gcs",
+        "storage",
         "gce",
         "local",
         "pre_run_review",
@@ -347,8 +444,10 @@ class GoldfishConfig(BaseModel):
     slots: list[str] = Field(default_factory=lambda: ["w1", "w2", "w3"])
     state_md: StateMdConfig = Field(default_factory=StateMdConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
+    defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     jobs: JobsConfig = Field(default_factory=JobsConfig)
     gcs: GCSConfig | None = None
+    storage: StorageConfig | None = None
     gce: GCEConfig | None = None
     local: LocalConfig = Field(default_factory=LocalConfig)  # Local simulation config
     pre_run_review: PreRunReviewConfig = Field(default_factory=PreRunReviewConfig)

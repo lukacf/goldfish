@@ -63,41 +63,85 @@ class AdapterFactory:
     def create_storage(self, root: Path | None = None) -> ObjectStorage:
         """Create an ObjectStorage adapter.
 
+        Storage backend selection priority:
+        1. If storage: section exists, use storage.backend
+        2. Otherwise, fall back to jobs.backend for backwards compatibility
+
         Args:
-            root: Root directory for local storage (ignored for GCS).
+            root: Root directory for local storage (ignored for cloud storage).
 
         Returns:
             ObjectStorage implementation for the configured backend.
         """
+        # Check new storage: section first
+        storage_config = self._config.storage
+        if storage_config is not None:
+            return self._create_storage_from_storage_config(storage_config, root)
+
+        # Fall back to legacy behavior based on jobs.backend
+        return self._create_storage_legacy(root)
+
+    def _create_storage_from_storage_config(self, storage_config: Any, root: Path | None = None) -> ObjectStorage:
+        """Create storage adapter from the new storage: config section."""
+        backend = storage_config.backend
+
+        if backend == "local":
+            return self._create_local_storage(root)
+
+        if backend == "gcs":
+            from goldfish.cloud.adapters.gcp.storage import GCSStorage
+
+            # Use project from gce config if available
+            gce_config = self._config.gce
+            project = gce_config.project or gce_config.project_id if gce_config else None
+            return GCSStorage(project=project)
+
+        if backend == "s3":
+            raise NotImplementedError(
+                "S3 storage adapter not yet implemented. " "Use storage.backend='gcs' or 'local' for now."
+            )
+
+        if backend == "azure":
+            raise NotImplementedError(
+                "Azure storage adapter not yet implemented. " "Use storage.backend='gcs' or 'local' for now."
+            )
+
+        raise ValueError(f"Unknown storage backend: {backend}")
+
+    def _create_storage_legacy(self, root: Path | None = None) -> ObjectStorage:
+        """Create storage adapter using legacy jobs.backend selection."""
         if self._backend_type == "local":
-            from goldfish.config import LocalStorageConfig
+            return self._create_local_storage(root)
 
-            # Use config values if available, or defaults
-            local_config = self._config.local
-            if local_config and local_config.storage:
-                storage_config = local_config.storage
-                config = LocalStorageConfig(
-                    consistency_delay_ms=storage_config.consistency_delay_ms,
-                    size_limit_mb=storage_config.size_limit_mb,
-                )
-                storage_root = root or Path(storage_config.root)
-            else:
-                config = LocalStorageConfig(
-                    consistency_delay_ms=0,
-                    size_limit_mb=None,
-                )
-                storage_root = root or Path(".local_gcs")
-            return LocalObjectStorage(root=storage_root, config=config)
-
-        elif self._backend_type == "gce":
+        if self._backend_type == "gce":
             from goldfish.cloud.adapters.gcp.storage import GCSStorage
 
             gce_config = self._config.gce
             project = gce_config.project or gce_config.project_id if gce_config else None
             return GCSStorage(project=project)
 
+        raise ValueError(f"Unknown backend type: {self._backend_type}")
+
+    def _create_local_storage(self, root: Path | None = None) -> LocalObjectStorage:
+        """Create LocalObjectStorage with appropriate configuration."""
+        from goldfish.config import LocalStorageConfig
+
+        # Use config values if available, or defaults
+        local_config = self._config.local
+        if local_config and local_config.storage:
+            local_storage_config = local_config.storage
+            config = LocalStorageConfig(
+                consistency_delay_ms=local_storage_config.consistency_delay_ms,
+                size_limit_mb=local_storage_config.size_limit_mb,
+            )
+            storage_root = root or Path(local_storage_config.root)
         else:
-            raise ValueError(f"Unknown backend type: {self._backend_type}")
+            config = LocalStorageConfig(
+                consistency_delay_ms=0,
+                size_limit_mb=None,
+            )
+            storage_root = root or Path(".local_gcs")
+        return LocalObjectStorage(root=storage_root, config=config)
 
     def create_run_backend(self) -> RunBackend:
         """Create a RunBackend adapter.

@@ -201,6 +201,11 @@ my-ml-project/
 ```yaml
 project_name: my-ml-project
 dev_repo_path: my-ml-project-dev
+
+# Optional: customize defaults
+defaults:
+  timeout_seconds: 3600     # 1 hour stage timeout
+  backend: local            # Use Docker for execution
 ```
 
 ### With GCP
@@ -214,7 +219,35 @@ gcs:
 
 gce:
   project_id: your-project-id
+  zones: ["us-central1-a", "us-central1-b"]
+
+# Optional: customize defaults
+defaults:
+  timeout_seconds: 7200     # 2 hours for GPU training
+  backend: gce              # Use GCE for execution
 ```
+
+### Advanced: Multi-Backend Storage
+
+Configure storage independently of compute (useful for AWS/Azure users):
+
+```yaml
+project_name: my-ml-project
+dev_repo_path: my-ml-project-dev
+
+# New unified storage configuration
+storage:
+  backend: "s3"  # or "gcs", "azure", "local"
+  s3:
+    bucket: "my-ml-artifacts"
+    region: "us-east-1"
+
+# Can still use GCE for compute with S3 for storage
+gce:
+  project_id: your-project-id
+```
+
+> **Note**: S3 and Azure storage adapters are coming soon. GCS and local are fully supported.
 
 ---
 

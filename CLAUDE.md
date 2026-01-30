@@ -246,6 +246,78 @@ self.gce_launcher.launch_instance(...)  # NEVER do this
 3. Register in `cloud/factory.py`
 4. No changes needed in `stage_executor.py` or `execution_tools.py`
 
+### 9. Configuration Flexibility
+
+**Defaults Section** - Global settings for stage execution:
+
+```yaml
+# goldfish.yaml
+defaults:
+  timeout_seconds: 7200    # 2 hours (default: 3600)
+  log_sync_interval: 15    # Sync logs every 15 seconds (default: 10)
+  backend: gce             # Default compute backend: local, gce, kubernetes
+```
+
+**Storage Backend Configuration** - Multi-provider storage support:
+
+```yaml
+# goldfish.yaml
+storage:
+  backend: "gcs"  # or "s3", "azure", "local"
+
+  # GCS configuration (when backend: gcs)
+  gcs:
+    bucket: "my-bucket"
+    sources_prefix: "sources/"
+    artifacts_prefix: "artifacts/"
+
+  # S3 configuration (when backend: s3) - adapter coming soon
+  s3:
+    bucket: "my-bucket"
+    region: "us-east-1"
+    endpoint_url: "http://localhost:9000"  # For MinIO/S3-compatible
+
+  # Azure configuration (when backend: azure) - adapter coming soon
+  azure:
+    container: "my-container"
+    account: "mystorageaccount"
+```
+
+**Backend Selection Priority**:
+1. New `storage:` section takes precedence if present
+2. Falls back to legacy `gcs:` section for backwards compatibility
+3. `AdapterFactory.create_storage()` handles resolution automatically
+
+**Per-Profile Backend Selection** - Different compute backends per profile:
+
+```yaml
+# goldfish.yaml
+gce:
+  project_id: my-project
+  profile_overrides:
+    # GPU workloads on GCE
+    h100-spot:
+      zones: ["us-central1-a"]
+    # CPU workloads could use different config
+    cpu-large:
+      zones: ["us-west1-a", "us-west1-b"]
+```
+
+**Config Model Hierarchy**:
+```
+GoldfishConfig
+├── defaults: DefaultsConfig          # Global execution defaults
+├── storage: StorageConfig | None     # Multi-backend storage (new)
+│   ├── backend: "gcs" | "s3" | "azure" | "local"
+│   ├── gcs: GCSConfig | None
+│   ├── s3: S3StorageConfig | None
+│   └── azure: AzureStorageConfig | None
+├── gcs: GCSConfig | None             # Legacy GCS config (backwards compat)
+├── gce: GCEConfig | None             # GCE compute config
+├── jobs: JobsConfig                  # Job execution settings
+└── local: LocalConfig                # Local backend simulation
+```
+
 ---
 
 ## Critical Patterns
