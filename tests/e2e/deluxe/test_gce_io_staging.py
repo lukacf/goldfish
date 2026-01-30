@@ -15,7 +15,7 @@ import subprocess
 
 import pytest
 
-from tests.e2e.deluxe.conftest import is_dry_run, skip_if_not_enabled
+from .conftest import is_dry_run, skip_if_not_enabled
 
 
 @pytest.mark.deluxe_gce

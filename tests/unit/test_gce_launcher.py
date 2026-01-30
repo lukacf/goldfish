@@ -6,12 +6,11 @@ Includes regression tests for critical bugs:
   gsutil commands, causing all reads to fail silently.
 """
 
-import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from goldfish.infra.gce_launcher import GCELauncher
+from goldfish.cloud.adapters.gcp.gce_launcher import GCELauncher
 from goldfish.state_machine.exit_code import ExitCodeResult
 
 
@@ -21,7 +20,7 @@ class TestBucketUri:
     @pytest.fixture
     def launcher(self):
         """Create a GCE launcher with mocked init."""
-        with patch("goldfish.infra.gce_launcher.GCELauncher.__init__", lambda x, y: None):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher.__init__", lambda x, y: None):
             launcher = GCELauncher(MagicMock())
             launcher.project_id = "test-project"
             return launcher
@@ -53,100 +52,96 @@ class TestGetExitCode:
     @pytest.fixture
     def launcher(self):
         """Create a GCE launcher with mocked config."""
-        with patch("goldfish.infra.gce_launcher.GCELauncher.__init__", lambda x, y: None):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher.__init__", lambda x, y: None):
             launcher = GCELauncher(MagicMock())
             launcher.bucket = "test-bucket"  # Without gs:// prefix
             launcher.project_id = "test-project"
             launcher.config = MagicMock()
+            launcher._storage = MagicMock()
             return launcher
 
     def test_get_exit_code_success_first_try(self, launcher):
         """Should return exit code on first successful attempt."""
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout="0\n",
-                stderr="",
-            )
-            result = launcher._get_exit_code("stage-abc123")
-            assert isinstance(result, ExitCodeResult)
-            assert result.exists is True
-            assert result.code == 0
-            assert result.gcs_error is False
-            assert mock_run.call_count == 1
+        launcher._storage.get.return_value = b"0\n"
+
+        result = launcher._get_exit_code("stage-abc123")
+        assert isinstance(result, ExitCodeResult)
+        assert result.exists is True
+        assert result.code == 0
+        assert result.gcs_error is False
+        assert launcher._storage.get.call_count == 1
 
     def test_get_exit_code_non_zero_exit(self, launcher):
         """Should return non-zero exit code correctly."""
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout="42\n",
-                stderr="",
-            )
-            result = launcher._get_exit_code("stage-abc123")
-            assert result.exists is True
-            assert result.code == 42
-            assert result.gcs_error is False
+        launcher._storage.get.return_value = b"42\n"
+
+        result = launcher._get_exit_code("stage-abc123")
+        assert result.exists is True
+        assert result.code == 42
+        assert result.gcs_error is False
 
     def test_get_exit_code_retry_on_failure(self, launcher):
         """Should retry on gsutil failure and succeed eventually."""
-        with patch("subprocess.run") as mock_run, patch("time.sleep"):
-            # First 2 attempts fail, third succeeds
-            mock_run.side_effect = [
-                subprocess.CalledProcessError(1, "gsutil", stderr="CommandException: No URLs matched"),
-                subprocess.CalledProcessError(1, "gsutil", stderr="CommandException: No URLs matched"),
-                MagicMock(returncode=0, stdout="0\n", stderr=""),
-            ]
+        from goldfish.errors import NotFoundError
+
+        # First 2 attempts miss, third succeeds
+        launcher._storage.get.side_effect = [
+            NotFoundError("gs://test-bucket/runs/stage-abc123/logs/exit_code.txt"),
+            NotFoundError("gs://test-bucket/runs/stage-abc123/logs/exit_code.txt"),
+            b"0\n",
+        ]
+
+        with patch("time.sleep"):
             result = launcher._get_exit_code("stage-abc123", max_attempts=5, retry_delay=0.1)
-            assert result.exists is True
-            assert result.code == 0
-            assert result.gcs_error is False
-            assert mock_run.call_count == 3
+
+        assert result.exists is True
+        assert result.code == 0
+        assert result.gcs_error is False
+        assert launcher._storage.get.call_count == 3
 
     def test_get_exit_code_all_retries_exhausted(self, launcher):
         """Should return exists=False (missing file) after all retries exhausted."""
-        with patch("subprocess.run") as mock_run, patch("time.sleep"):
-            # All attempts fail
-            mock_run.side_effect = subprocess.CalledProcessError(
-                1, "gsutil", stderr="CommandException: No URLs matched"
-            )
+        from goldfish.errors import NotFoundError
+
+        launcher._storage.get.side_effect = NotFoundError("gs://test-bucket/runs/stage-abc123/logs/exit_code.txt")
+
+        with patch("time.sleep"):
             result = launcher._get_exit_code("stage-abc123", max_attempts=3, retry_delay=0.1)
-            assert result.exists is False
-            assert result.code is None
-            assert result.gcs_error is False
-            assert mock_run.call_count == 3
+
+        assert result.exists is False
+        assert result.code is None
+        assert result.gcs_error is False
+        assert launcher._storage.get.call_count == 3
 
     def test_get_exit_code_timeout_retry(self, launcher):
         """Should retry on timeout and succeed eventually."""
-        with patch("subprocess.run") as mock_run, patch("time.sleep"):
-            # First attempt times out, second succeeds
-            mock_run.side_effect = [
-                subprocess.TimeoutExpired("gsutil", 30),
-                MagicMock(returncode=0, stdout="0\n", stderr=""),
-            ]
+        from goldfish.errors import StorageError
+
+        launcher._storage.get.side_effect = [StorageError("Timeout after 30 seconds"), b"0\n"]
+
+        with patch("time.sleep"):
             result = launcher._get_exit_code("stage-abc123", max_attempts=3, retry_delay=0.1)
-            assert result.exists is True
-            assert result.code == 0
-            assert result.gcs_error is False
-            assert mock_run.call_count == 2
+
+        assert result.exists is True
+        assert result.code == 0
+        assert result.gcs_error is False
+        assert launcher._storage.get.call_count == 2
 
     def test_get_exit_code_invalid_content_no_retry(self, launcher):
         """Should not retry on invalid file content (ValueError)."""
-        with patch("subprocess.run") as mock_run, patch("time.sleep") as mock_sleep:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout="not_a_number\n",
-                stderr="",
-            )
+        launcher._storage.get.return_value = b"not_a_number\n"
+
+        with patch("time.sleep") as mock_sleep:
             result = launcher._get_exit_code("stage-abc123", max_attempts=3, retry_delay=0.1)
-            assert result.exists is True
-            assert result.code is None
-            assert result.gcs_error is False
-            assert result.error is not None
-            # Should only try once - invalid content means file exists but is corrupt
-            assert mock_run.call_count == 1
-            # No retries means no sleep calls
-            assert mock_sleep.call_count == 0
+
+        assert result.exists is True
+        assert result.code is None
+        assert result.gcs_error is False
+        assert result.error is not None
+        # Should only try once - invalid content means file exists but is corrupt
+        assert launcher._storage.get.call_count == 1
+        # No retries means no sleep calls
+        assert mock_sleep.call_count == 0
 
     def test_get_exit_code_no_bucket(self, launcher):
         """Should return 0 if no bucket configured."""
@@ -156,45 +151,24 @@ class TestGetExitCode:
         assert result.code == 0
 
     def test_get_exit_code_correct_gcs_path(self, launcher):
-        """Should construct correct GCS path with gs:// prefix and project_id."""
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout="0\n",
-                stderr="",
-            )
-            # launcher.bucket is "test-bucket" (without gs://)
-            # but _get_exit_code should use bucket_uri which adds gs://
-            launcher._get_exit_code("stage-abc123")
-            args = mock_run.call_args[0][0]
-            # Includes -o GSUtil:project_id=... when project_id is set
-            assert args == [
-                "gsutil",
-                "-o",
-                "GSUtil:project_id=test-project",
-                "cat",
-                "gs://test-bucket/runs/stage-abc123/logs/exit_code.txt",
-            ]
+        """Should construct correct storage URI with gs:// prefix."""
+        launcher._storage.get.return_value = b"0\n"
+
+        # launcher.bucket is "test-bucket" (without gs://) but bucket_uri adds it.
+        launcher._get_exit_code("stage-abc123")
+
+        uri = launcher._storage.get.call_args.args[0]
+        assert str(uri) == "gs://test-bucket/runs/stage-abc123/logs/exit_code.txt"
 
     def test_get_exit_code_handles_bucket_with_prefix(self, launcher):
         """Should work correctly when bucket already has gs:// prefix."""
         launcher.bucket = "gs://already-prefixed-bucket"
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout="0\n",
-                stderr="",
-            )
-            launcher._get_exit_code("stage-abc123")
-            args = mock_run.call_args[0][0]
-            # Should NOT double the gs:// prefix, includes project_id option
-            assert args == [
-                "gsutil",
-                "-o",
-                "GSUtil:project_id=test-project",
-                "cat",
-                "gs://already-prefixed-bucket/runs/stage-abc123/logs/exit_code.txt",
-            ]
+        launcher._storage.get.return_value = b"0\n"
+
+        launcher._get_exit_code("stage-abc123")
+
+        uri = launcher._storage.get.call_args.args[0]
+        assert str(uri) == "gs://already-prefixed-bucket/runs/stage-abc123/logs/exit_code.txt"
 
 
 class TestGetInstanceLogs:
@@ -207,7 +181,7 @@ class TestGetInstanceLogs:
     @pytest.fixture
     def launcher(self):
         """Create a GCE launcher with mocked config."""
-        with patch("goldfish.infra.gce_launcher.GCELauncher.__init__", lambda x, y: None):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher.__init__", lambda x, y: None):
             launcher = GCELauncher(MagicMock())
             launcher.bucket = "test-artifacts-bucket"  # Without gs:// prefix (realistic)
             launcher.project_id = "test-project"
@@ -286,11 +260,12 @@ class TestMapGceStatusIntegration:
     @pytest.fixture
     def launcher(self):
         """Create a GCE launcher with realistic bucket config."""
-        with patch("goldfish.infra.gce_launcher.GCELauncher.__init__", lambda x, y: None):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher.__init__", lambda x, y: None):
             launcher = GCELauncher(MagicMock())
             # Realistic bucket name without gs:// prefix (as stored in config)
             launcher.bucket = "test-artifacts-bucket"
             launcher.project_id = "test-project"
+            launcher._storage = MagicMock()
             return launcher
 
     def test_terminated_with_exit_code_zero_returns_completed(self, launcher):
@@ -302,41 +277,24 @@ class TestMapGceStatusIntegration:
         """
         from goldfish.state_machine.types import StageState
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout="0\n",  # Exit code 0 = success
-                stderr="",
-            )
+        launcher._storage.get.return_value = b"0\n"  # Exit code 0 = success
 
-            status = launcher._map_gce_status("TERMINATED", "stage-68043eed")
+        status = launcher._map_gce_status("TERMINATED", "stage-68043eed")
 
-            # Must return COMPLETED, not FAILED
-            assert status == StageState.COMPLETED, f"TERMINATED with exit_code=0 should be COMPLETED, got {status}"
+        # Must return COMPLETED, not FAILED
+        assert status == StageState.COMPLETED, f"TERMINATED with exit_code=0 should be COMPLETED, got {status}"
 
-            # Verify correct GCS path was used (includes project_id option)
-            call_args = mock_run.call_args[0][0]
-            assert call_args == [
-                "gsutil",
-                "-o",
-                "GSUtil:project_id=test-project",
-                "cat",
-                "gs://test-artifacts-bucket/runs/stage-68043eed/logs/exit_code.txt",
-            ]
+        uri = launcher._storage.get.call_args.args[0]
+        assert str(uri) == "gs://test-artifacts-bucket/runs/stage-68043eed/logs/exit_code.txt"
 
     def test_terminated_with_exit_code_nonzero_returns_failed(self, launcher):
         """TERMINATED instance with non-zero exit code should return FAILED."""
         from goldfish.state_machine.types import StageState
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout="1\n",  # Exit code 1 = failure
-                stderr="",
-            )
+        launcher._storage.get.return_value = b"1\n"  # Exit code 1 = failure
 
-            status = launcher._map_gce_status("TERMINATED", "stage-xyz")
-            assert status == StageState.FAILED
+        status = launcher._map_gce_status("TERMINATED", "stage-xyz")
+        assert status == StageState.FAILED
 
 
 class TestGetInstanceLogsRetry:
@@ -349,7 +307,7 @@ class TestGetInstanceLogsRetry:
     @pytest.fixture
     def launcher(self):
         """Create a GCE launcher with mocked config."""
-        with patch("goldfish.infra.gce_launcher.GCELauncher.__init__", lambda x, y: None):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher.__init__", lambda x, y: None):
             launcher = GCELauncher(MagicMock())
             launcher.bucket = "test-bucket"
             launcher.project_id = "test-project"
@@ -363,7 +321,7 @@ class TestGetInstanceLogsRetry:
             patch("subprocess.Popen") as mock_popen,
             patch.object(launcher, "_sanitize_name", return_value="stage-abc"),
             patch.object(launcher, "_find_instance_zone", return_value=None),
-            patch("goldfish.infra.gce_launcher.time.sleep") as mock_sleep,
+            patch("goldfish.cloud.adapters.gcp.gce_launcher.time.sleep") as mock_sleep,
         ):
 
             def make_empty_proc():
@@ -412,7 +370,7 @@ class TestGetInstanceLogsRetry:
             patch("subprocess.Popen") as mock_popen,
             patch.object(launcher, "_sanitize_name", return_value="stage-abc"),
             patch.object(launcher, "_find_instance_zone", return_value=None),
-            patch("goldfish.infra.gce_launcher.time.sleep") as mock_sleep,
+            patch("goldfish.cloud.adapters.gcp.gce_launcher.time.sleep") as mock_sleep,
         ):
 
             def make_proc_with_logs():
@@ -455,7 +413,7 @@ class TestGetInstanceLogsRetry:
             patch("subprocess.Popen") as mock_popen,
             patch.object(launcher, "_sanitize_name", return_value="stage-abc"),
             patch.object(launcher, "_find_instance_zone", return_value=None),
-            patch("goldfish.infra.gce_launcher.time.sleep") as mock_sleep,
+            patch("goldfish.cloud.adapters.gcp.gce_launcher.time.sleep") as mock_sleep,
         ):
 
             def make_empty_proc():
@@ -489,7 +447,7 @@ class TestGetInstanceLogsRetry:
             patch("subprocess.Popen") as mock_popen,
             patch.object(launcher, "_sanitize_name", return_value="stage-abc"),
             patch.object(launcher, "_find_instance_zone", return_value=None),
-            patch("goldfish.infra.gce_launcher.time.sleep") as mock_sleep,
+            patch("goldfish.cloud.adapters.gcp.gce_launcher.time.sleep") as mock_sleep,
         ):
 
             def make_empty_proc():
@@ -530,7 +488,7 @@ class TestInputStagingBucketMatching:
     @pytest.fixture
     def launcher(self):
         """Create a GCE launcher with mocked init."""
-        with patch("goldfish.infra.gce_launcher.GCELauncher.__init__", lambda x, y: None):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher.__init__", lambda x, y: None):
             launcher = GCELauncher(MagicMock())
             launcher.project_id = "test-project"
             launcher.config = MagicMock()
@@ -740,7 +698,7 @@ class TestGCELaunchResult:
 
     def test_gce_launch_result_creation(self):
         """GCELaunchResult should store instance_name and zone."""
-        from goldfish.infra.gce_launcher import GCELaunchResult
+        from goldfish.cloud.adapters.gcp.gce_launcher import GCELaunchResult
 
         result = GCELaunchResult(instance_name="stage-abc123", zone="us-central1-a")
         assert result.instance_name == "stage-abc123"
@@ -748,7 +706,7 @@ class TestGCELaunchResult:
 
     def test_gce_launch_result_different_zones(self):
         """GCELaunchResult should work with various zone formats."""
-        from goldfish.infra.gce_launcher import GCELaunchResult
+        from goldfish.cloud.adapters.gcp.gce_launcher import GCELaunchResult
 
         # Test various zone names
         zones = ["us-central1-a", "europe-west1-b", "asia-east1-c", "us-west1-a"]
@@ -763,7 +721,7 @@ class TestLaunchInstanceReturnsZone:
     @pytest.fixture
     def launcher(self):
         """Create a GCE launcher with mocked init."""
-        with patch("goldfish.infra.gce_launcher.GCELauncher.__init__", lambda x, y: None):
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher.__init__", lambda x, y: None):
             launcher = GCELauncher(MagicMock())
             launcher.project_id = "test-project"
             launcher.bucket = "gs://test-bucket"
@@ -776,11 +734,11 @@ class TestLaunchInstanceReturnsZone:
 
     def test_launch_simple_returns_gce_launch_result(self, launcher):
         """_launch_simple should return GCELaunchResult with zone."""
-        from goldfish.infra.gce_launcher import GCELaunchResult
+        from goldfish.cloud.adapters.gcp.gce_launcher import GCELaunchResult
 
         with (
-            patch("goldfish.infra.gce_launcher.run_gcloud"),
-            patch("goldfish.infra.resource_launcher.wait_for_instance_ready"),
+            patch("goldfish.cloud.adapters.gcp.gce_launcher.run_gcloud"),
+            patch("goldfish.cloud.adapters.gcp.resource_launcher.wait_for_instance_ready"),
         ):
             result = launcher._launch_simple(
                 instance_name="stage-test123",
@@ -799,7 +757,7 @@ class TestLaunchInstanceReturnsZone:
         """_launch_with_capacity_search should return GCELaunchResult with zone."""
         from dataclasses import dataclass
 
-        from goldfish.infra.gce_launcher import GCELaunchResult
+        from goldfish.cloud.adapters.gcp.gce_launcher import GCELaunchResult
 
         @dataclass
         class MockSelection:
@@ -819,7 +777,7 @@ class TestLaunchInstanceReturnsZone:
         ]
 
         with (
-            patch("goldfish.infra.gce_launcher.ResourceLauncher") as MockResourceLauncher,
+            patch("goldfish.cloud.adapters.gcp.gce_launcher.ResourceLauncher") as MockResourceLauncher,
             patch.object(launcher, "_resolve_service_account", return_value=None),
         ):
             mock_launcher_instance = MagicMock()
@@ -839,3 +797,196 @@ class TestLaunchInstanceReturnsZone:
         assert isinstance(result, GCELaunchResult)
         assert result.instance_name == "stage-capacity123"
         assert result.zone == "us-west1-b"
+
+
+class TestCapacitySearchGpuFiltering:
+    """Tests for GPU filtering in capacity search.
+
+    REGRESSION TESTS: Verifies GPU type filtering uses gpu.accelerator field.
+    """
+
+    @pytest.fixture
+    def launcher(self):
+        """Create a GCE launcher with mocked config and resources."""
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher.__init__", lambda x, y: None):
+            launcher = GCELauncher(MagicMock())
+            launcher.bucket = "test-bucket"
+            launcher.project_id = "test-project"
+            launcher.default_zone = "us-central1-a"
+            launcher.zones = ["us-central1-a"]
+            launcher.gpu_preference = ["h100", "a100"]
+            # Resources with proper profile structure
+            launcher.resources = [
+                {
+                    "name": "h100-spot",
+                    "machine_type": "a3-highgpu-1g",
+                    "zones": ["us-central1-a", "us-central1-b"],
+                    "gpu": {
+                        "type": "h100",  # Short name
+                        "accelerator": "nvidia-h100-80gb",  # GCE accelerator type
+                        "count": 1,
+                    },
+                },
+                {
+                    "name": "a100-spot",
+                    "machine_type": "a2-highgpu-1g",
+                    "zones": ["us-central1-a"],
+                    "gpu": {
+                        "type": "a100",
+                        "accelerator": "nvidia-tesla-a100",
+                        "count": 1,
+                    },
+                },
+                {
+                    "name": "cpu-small",
+                    "machine_type": "n2-standard-4",
+                    "zones": ["us-central1-a"],
+                    "gpu": {
+                        "type": "none",
+                        "accelerator": None,
+                        "count": 0,
+                    },
+                },
+            ]
+            return launcher
+
+    def test_capacity_search_filters_by_gpu_accelerator(self, launcher):
+        """REGRESSION: Capacity search must filter by gpu.accelerator, not gpu.type.
+
+        Bug: _launch_with_capacity_search compared gpu.type ("h100") against
+        the passed gpu_type ("nvidia-h100-80gb"). They didn't match, causing
+        "No resources found for GPU type: nvidia-h100-80gb" error.
+
+        Fix: Changed filter to compare against gpu.accelerator field which
+        contains the GCE accelerator type that matches RunSpec.gpu_type.
+        """
+        from dataclasses import dataclass
+
+        @dataclass
+        class MockSelection:
+            zone: str
+
+        @dataclass
+        class MockLaunchResult:
+            instance_name: str
+            selection: MockSelection
+
+        with (
+            patch("goldfish.cloud.adapters.gcp.gce_launcher.ResourceLauncher") as MockResourceLauncher,
+            patch.object(launcher, "_resolve_service_account", return_value=None),
+        ):
+            mock_launcher_instance = MagicMock()
+            mock_launcher_instance.launch.return_value = MockLaunchResult(
+                instance_name="stage-h100test",
+                selection=MockSelection(zone="us-central1-a"),
+            )
+            MockResourceLauncher.return_value = mock_launcher_instance
+
+            # This should NOT raise "No resources found" anymore
+            # gpu_type is the accelerator name, not the short type
+            result = launcher._launch_with_capacity_search(
+                instance_name="stage-h100test",
+                startup_script="#!/bin/bash\necho test",
+                gpu_type="nvidia-h100-80gb",  # Accelerator name from RunSpec.gpu_type
+                zones=["us-central1-a"],
+            )
+
+            # Verify ResourceLauncher was created with the H100 resource
+            MockResourceLauncher.assert_called_once()
+            call_kwargs = MockResourceLauncher.call_args.kwargs
+            resources = call_kwargs.get("resources", [])
+            assert len(resources) == 1, f"Expected 1 H100 resource, got {len(resources)}"
+            assert resources[0]["name"] == "h100-spot"
+
+            # Verify result
+            assert result.instance_name == "stage-h100test"
+
+    def test_capacity_search_filters_a100_by_accelerator(self, launcher):
+        """Verify A100 filtering also works with accelerator name."""
+        from dataclasses import dataclass
+
+        @dataclass
+        class MockSelection:
+            zone: str
+
+        @dataclass
+        class MockLaunchResult:
+            instance_name: str
+            selection: MockSelection
+
+        with (
+            patch("goldfish.cloud.adapters.gcp.gce_launcher.ResourceLauncher") as MockResourceLauncher,
+            patch.object(launcher, "_resolve_service_account", return_value=None),
+        ):
+            mock_launcher_instance = MagicMock()
+            mock_launcher_instance.launch.return_value = MockLaunchResult(
+                instance_name="stage-a100test",
+                selection=MockSelection(zone="us-central1-a"),
+            )
+            MockResourceLauncher.return_value = mock_launcher_instance
+
+            result = launcher._launch_with_capacity_search(
+                instance_name="stage-a100test",
+                startup_script="#!/bin/bash\necho test",
+                gpu_type="nvidia-tesla-a100",  # A100 accelerator name
+                zones=["us-central1-a"],
+            )
+
+            # Verify ResourceLauncher got A100 resource
+            call_kwargs = MockResourceLauncher.call_args.kwargs
+            resources = call_kwargs.get("resources", [])
+            assert len(resources) == 1
+            assert resources[0]["name"] == "a100-spot"
+
+    def test_capacity_search_no_gpu_filters_cpu_resources(self, launcher):
+        """Verify no GPU request filters to CPU-only resources."""
+        from dataclasses import dataclass
+
+        @dataclass
+        class MockSelection:
+            zone: str
+
+        @dataclass
+        class MockLaunchResult:
+            instance_name: str
+            selection: MockSelection
+
+        with (
+            patch("goldfish.cloud.adapters.gcp.gce_launcher.ResourceLauncher") as MockResourceLauncher,
+            patch.object(launcher, "_resolve_service_account", return_value=None),
+        ):
+            mock_launcher_instance = MagicMock()
+            mock_launcher_instance.launch.return_value = MockLaunchResult(
+                instance_name="stage-cputest",
+                selection=MockSelection(zone="us-central1-a"),
+            )
+            MockResourceLauncher.return_value = mock_launcher_instance
+
+            result = launcher._launch_with_capacity_search(
+                instance_name="stage-cputest",
+                startup_script="#!/bin/bash\necho test",
+                gpu_type=None,  # No GPU
+                zones=["us-central1-a"],
+            )
+
+            # Verify ResourceLauncher got CPU resource
+            call_kwargs = MockResourceLauncher.call_args.kwargs
+            resources = call_kwargs.get("resources", [])
+            assert len(resources) == 1
+            assert resources[0]["name"] == "cpu-small"
+
+    def test_capacity_search_raises_on_unknown_gpu_type(self, launcher):
+        """Verify error when no resource matches the GPU type."""
+        from goldfish.errors import GoldfishError
+
+        # No T4 profile in resources
+        with pytest.raises(GoldfishError) as exc_info:
+            launcher._launch_with_capacity_search(
+                instance_name="stage-t4test",
+                startup_script="#!/bin/bash\necho test",
+                gpu_type="nvidia-tesla-t4",  # Not in our resources
+                zones=["us-central1-a"],
+            )
+
+        assert "No resources found" in str(exc_info.value)
+        assert "nvidia-tesla-t4" in str(exc_info.value)

@@ -380,13 +380,13 @@ class TestAgentProviderProtocol:
 class TestGetAgentProviderFallback:
     """Test get_agent_provider fallback when CLI binary is missing."""
 
-    def test_missing_claude_binary_falls_back_to_null(self, monkeypatch):
-        """If Claude CLI binary is missing, get_agent_provider should return NullProvider."""
+    def test_missing_codex_binary_falls_back_to_null(self, monkeypatch):
+        """If Codex CLI binary is missing, get_agent_provider should return NullProvider."""
         import goldfish.svs.agent as agent_module
 
         monkeypatch.setattr(agent_module.shutil, "which", lambda _: None)
 
-        provider = get_agent_provider("claude_code")
+        provider = get_agent_provider("codex_cli")
         assert isinstance(provider, NullProvider)
 
 

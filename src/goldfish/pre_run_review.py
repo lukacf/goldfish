@@ -16,12 +16,9 @@ from typing import TYPE_CHECKING
 
 from goldfish.models import ReviewIssue, ReviewSeverity, RunReason, RunReview
 from goldfish.svs.agent import (
-    ClaudeCodeProvider,
-    CodexCLIProvider,
-    GeminiCLIProvider,
-    NullProvider,
     ReviewRequest,
     ToolPolicy,
+    get_agent_provider,
 )
 
 if TYPE_CHECKING:
@@ -145,24 +142,45 @@ Check each stage for:
 
 ## Output Format
 
-Be brief but specific. Use these severity markers:
-- ERROR: Blocking issues that WILL cause failure
-- WARNING: Potential problems that MAY cause failure
-- NOTE: Suggestions that won't cause failure
+CRITICAL: Only use ERROR for issues that WILL DEFINITELY cause the run to fail. Do NOT use ERROR to discuss potential issues that you then explain are actually fine.
 
-For each stage, format as:
+Severity markers (use exactly these prefixes):
+- ERROR: Use ONLY for definite blocking issues - code that WILL crash or produce wrong results with THIS config
+- WARNING: Potential problems that MAY cause issues depending on runtime conditions
+- NOTE: Suggestions, observations, or things you checked that are fine
+
+Decision rules:
+- If you investigate something and determine it's NOT a problem, either skip it or use NOTE
+- If an issue only affects code paths not taken by this config, use WARNING not ERROR
+- ERROR means "stop the run" - only use it when you're certain
+
+Format for each stage:
 ```
 ## stage_name
-ERROR: file.py:line - description
-WARNING: file.py - description
-NOTE: suggestion
+ERROR: file.py:line - definite failure reason
+WARNING: file.py - potential concern
+NOTE: observation
 ```
 
-If a stage looks good, just write:
+If a stage looks good:
 ```
 ## stage_name
 No issues found.
 ```
+
+## Final Decision (REQUIRED)
+
+After your analysis, you MUST end with exactly one of these lines:
+
+```
+DECISION: APPROVE
+```
+Use when no blocking errors found. Warnings and notes are fine.
+
+```
+DECISION: BLOCK
+```
+Use ONLY when there are definite errors that WILL cause the run to fail.
 
 Start your review now:
 """
@@ -210,17 +228,12 @@ class PreRunReviewer:
         self.db = db
 
     def _get_agent(self):
-        """Get the configured SVS agent provider."""
-        provider_name = self.svs_config.agent_provider
-        if provider_name == "claude_code":
-            return ClaudeCodeProvider()
-        elif provider_name == "codex_cli":
-            return CodexCLIProvider()
-        elif provider_name == "gemini_cli":
-            return GeminiCLIProvider()
-        elif provider_name == "null":
-            return NullProvider()
-        return NullProvider()
+        """Get the configured SVS agent provider.
+
+        Uses get_agent_provider() which respects the GOLDFISH_SVS_AGENT_PROVIDER
+        environment variable for runtime overrides.
+        """
+        return get_agent_provider(self.svs_config.agent_provider)
 
     async def review(
         self,
@@ -345,7 +358,21 @@ This is a test run to verify the AI review system works. You MUST:
         auto_issues = self._detect_stale_inputs(input_context, stages)
         if auto_issues:
             issues.extend(auto_issues)
-        has_errors = any(i.severity == ReviewSeverity.ERROR for i in issues)
+
+        # Parse explicit decision from review text (authoritative)
+        explicit_decision = self._parse_explicit_decision(review_text)
+
+        # Determine approval: explicit decision takes precedence, then fall back to ERROR markers
+        if explicit_decision == "block":
+            approved = False
+        elif explicit_decision == "approve":
+            approved = True
+        else:
+            # No explicit decision - fall back to ERROR marker inference
+            # (This handles legacy reviews or reviews that don't follow the format)
+            approved = not any(i.severity == ReviewSeverity.ERROR for i in issues)
+            if not approved:
+                logger.warning("No explicit DECISION found in review, falling back to ERROR marker inference")
 
         elapsed_ms = int((time.time() - start_time) * 1000)
 
@@ -353,7 +380,7 @@ This is a test run to verify the AI review system works. You MUST:
         error_count = sum(1 for i in issues if i.severity == ReviewSeverity.ERROR)
         warning_count = sum(1 for i in issues if i.severity == ReviewSeverity.WARNING)
 
-        if has_errors:
+        if not approved:
             summary = f"Review blocked: {error_count} error(s), {warning_count} warning(s)"
         elif warning_count > 0:
             summary = f"Review passed with {warning_count} warning(s)"
@@ -361,7 +388,7 @@ This is a test run to verify the AI review system works. You MUST:
             summary = "Review passed: no issues found"
 
         return RunReview(
-            approved=not has_errors,
+            approved=approved,
             issues=issues,
             summary=summary,
             full_review=review_text,
@@ -482,6 +509,8 @@ This is a test run to verify the AI review system works. You MUST:
         import yaml
 
         sections = []
+        included_related_files: set[str] = set()  # Track already included files
+
         for stage in stages:
             # Validate stage name to prevent path traversal
             if not self._is_safe_filename(stage):
@@ -527,7 +556,42 @@ This is a test run to verify the AI review system works. You MUST:
             )
             sections.append(section)
 
+            # Include related local imports (model files, utils, etc.)
+            if module_lang == "python":
+                related_files = self._extract_local_imports(module_content)
+                for rel_file in related_files:
+                    if rel_file in included_related_files:
+                        continue
+                    included_related_files.add(rel_file)
+                    rel_path = self.workspace_path / "modules" / rel_file
+                    if rel_path.exists():
+                        rel_content = self._read_file_safe(rel_path, "# File not found")
+                        sections.append(f"""
+#### Related Module: modules/{escape_for_prompt(rel_file)}
+```python
+{escape_for_prompt(rel_content)}
+```
+""")
+
         return "\n".join(sections)
+
+    def _extract_local_imports(self, module_content: str) -> list[str]:
+        """Extract local module imports from Python code.
+
+        Looks for patterns like:
+        - from .module_name import ...
+        - from . import module_name
+
+        Returns list of filenames (e.g., ['byte_model.py', 'utils.py'])
+        """
+        files = []
+        # Match: from .module_name import ... or from . import module_name
+        import_pattern = re.compile(r"from\s+\.(\w+)\s+import|from\s+\.\s+import\s+(\w+)")
+        for match in import_pattern.finditer(module_content):
+            module_name = match.group(1) or match.group(2)
+            if module_name and self._is_safe_filename(module_name):
+                files.append(f"{module_name}.py")
+        return files
 
     def _is_safe_filename(self, name: str) -> bool:
         """Check if filename is safe (no path traversal)."""
@@ -589,6 +653,26 @@ This is a test run to verify the AI review system works. You MUST:
             logger.warning(f"OS error reading {file_path}: {e}")
             return default
 
+    def _parse_explicit_decision(self, review_text: str) -> str | None:
+        """Parse explicit DECISION directive from review text.
+
+        Looks for lines like:
+        - DECISION: APPROVE
+        - DECISION: BLOCK
+
+        Returns:
+            "approve", "block", or None if no explicit decision found
+        """
+        for line in review_text.split("\n"):
+            line = line.strip().upper()
+            if line.startswith("DECISION:"):
+                decision_part = line[9:].strip()
+                if decision_part.startswith("APPROVE"):
+                    return "approve"
+                elif decision_part.startswith("BLOCK"):
+                    return "block"
+        return None
+
     def _parse_review(self, review_text: str, stages: list[str]) -> list[ReviewIssue]:
         """Parse Claude's review text into structured ReviewIssues.
 
@@ -632,37 +716,24 @@ This is a test run to verify the AI review system works. You MUST:
             severity: ReviewSeverity | None = None
             content = ""
 
-            # Check for severity markers (case-insensitive, with/without bold)
-            lower_line = line.lower()
-            if lower_line.startswith("error:") or lower_line.startswith("**error:**"):
+            # Strip markdown bold markers and bullets for detection
+            # Handles: **ERROR: ...**, **ERROR:** ..., ERROR: ..., - ERROR: ...
+            check_line = line.lstrip("-").lstrip().lstrip("*").lstrip()
+            lower_check = check_line.lower()
+
+            if lower_check.startswith("error:"):
                 severity = ReviewSeverity.ERROR
-                # Find the actual marker end position
-                if line.lower().startswith("**error:**"):
-                    content = line[10:].strip()
-                else:
-                    content = line[6:].strip()
-            elif lower_line.startswith("warning:") or lower_line.startswith("**warning:**"):
+                # Extract content after the marker, handling trailing **
+                content = check_line[6:].strip().rstrip("*").strip()
+            elif lower_check.startswith("warning:"):
                 severity = ReviewSeverity.WARNING
-                if line.lower().startswith("**warning:**"):
-                    content = line[12:].strip()
-                else:
-                    content = line[8:].strip()
-            elif lower_line.startswith("note:") or lower_line.startswith("**note:**"):
-                severity = ReviewSeverity.NOTE
-                if line.lower().startswith("**note:**"):
-                    content = line[9:].strip()
-                else:
-                    content = line[5:].strip()
-            # Also handle bullet point format: - ERROR: ...
-            elif lower_line.startswith("- error:"):
-                severity = ReviewSeverity.ERROR
-                content = line[8:].strip()
-            elif lower_line.startswith("- warning:"):
+                content = check_line[8:].strip().rstrip("*").strip()
+            elif lower_check.startswith("warn:"):
                 severity = ReviewSeverity.WARNING
-                content = line[10:].strip()
-            elif lower_line.startswith("- note:"):
+                content = check_line[5:].strip().rstrip("*").strip()
+            elif lower_check.startswith("note:"):
                 severity = ReviewSeverity.NOTE
-                content = line[7:].strip()
+                content = check_line[5:].strip().rstrip("*").strip()
 
             if severity and content:
                 issue = self._parse_issue_content(severity, current_stage, content)

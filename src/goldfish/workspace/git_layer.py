@@ -130,7 +130,26 @@ class GitLayer:
         self._run_git("branch", branch, from_ref)
 
     def delete_branch(self, workspace_name: str, force: bool = False) -> None:
-        """Delete a workspace branch."""
+        """Delete a workspace branch.
+
+        Cleans up any stale tmp-sync worktree before deletion to avoid
+        "cannot delete branch checked out at" errors.
+        """
+        # Clean up any stale tmp-sync worktree for this workspace
+        temp_worktree = self.dev_repo / ".goldfish" / "tmp-sync" / workspace_name
+        if temp_worktree.exists():
+            try:
+                self._run_git("worktree", "remove", str(temp_worktree), "--force", check=False)
+            except GoldfishError:
+                pass
+            # If git worktree remove didn't work, force remove the directory
+            if temp_worktree.exists():
+                import shutil
+
+                shutil.rmtree(temp_worktree, ignore_errors=True)
+            # Prune worktree metadata
+            self._run_git("worktree", "prune", check=False)
+
         branch = self._workspace_branch(workspace_name)
         flag = "-D" if force else "-d"
         self._run_git("branch", flag, branch)

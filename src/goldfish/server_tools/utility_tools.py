@@ -105,10 +105,14 @@ def reload_config() -> dict:
         dict with success status and loaded configuration summary
     """
     from goldfish.server import _get_project_root, _init_server
+    from goldfish.server_tools.infra_tools import _reset_base_image_manager
 
     try:
         project_root = _get_project_root()
         _init_server(project_root)
+
+        # Reset singletons that cache config references
+        _reset_base_image_manager()
 
         # Get the new config to show what was loaded
         config = _get_config()

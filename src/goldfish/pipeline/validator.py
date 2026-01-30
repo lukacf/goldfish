@@ -10,7 +10,6 @@ import yaml
 
 from goldfish.db.database import Database
 from goldfish.errors import ConfigParamNotFoundError
-from goldfish.infra.profiles import ProfileNotFoundError, ProfileResolver, ProfileValidationError
 from goldfish.pipeline.parser import PipelineNotFoundError, PipelineParser
 from goldfish.svs.contract import (
     merge_stage_config,
@@ -132,6 +131,36 @@ def validate_pipeline_run(
         else:
             warnings.append(f"Stage '{stage_name}': config file not found at configs/{stage_name}.yaml")
 
+        # Backend-aware sanity checks for compute.profile (dry-run)
+        if config:
+            from goldfish.cloud.factory import backend_requires_compute_profile, validate_compute_profile
+
+            if backend_requires_compute_profile(config):
+                runtime_overrides: dict | None = None
+                if config_override:
+                    stage_overrides = config_override.get(stage_name)
+                    if isinstance(stage_overrides, dict):
+                        runtime_overrides = stage_overrides
+                    else:
+                        runtime_overrides = config_override
+
+                merged_config = merge_stage_config(
+                    stage_name=stage_name,
+                    workspace_path=workspace_path,
+                    runtime_overrides=runtime_overrides,
+                )
+                compute_cfg = merged_config.get("compute")
+                profile = compute_cfg.get("profile") if isinstance(compute_cfg, dict) else None
+
+                if not profile:
+                    warnings.append(f"Stage '{stage_name}': no compute.profile specified for GCE backend")
+                elif not isinstance(profile, str):
+                    errors.append(f"Stage '{stage_name}': compute.profile must be a string")
+                else:
+                    ok, err = validate_compute_profile(config, profile)
+                    if not ok:
+                        errors.append(f"Stage '{stage_name}': compute.profile '{profile}' is invalid: {err}")
+
         # 2b. SVS Contract Validation (if SVS enabled)
         if config and config.svs.enabled:
             # Load and merge config to resolve params
@@ -151,27 +180,6 @@ def validate_pipeline_run(
             contract_errors = validate_stage_contracts(stage_def_dict, merged_config)
             for err in contract_errors:
                 errors.append(f"Stage '{stage_name}' contract: {err}")
-
-        # 2c. GCE profile sanity checks
-        if config and config.jobs.backend == "gce":
-            merged_config = merge_stage_config(
-                stage_name=stage_name,
-                workspace_path=workspace_path,
-                runtime_overrides=config_override,
-            )
-            compute = merged_config.get("compute", {}) if isinstance(merged_config, dict) else {}
-            profile_name = compute.get("profile") if isinstance(compute, dict) else None
-            if not profile_name:
-                warnings.append(
-                    f"Stage '{stage_name}': no compute.profile set; GCE will use default machine_type n1-standard-4"
-                )
-            else:
-                profile_overrides = config.gce.effective_profile_overrides if config.gce else None
-                resolver = ProfileResolver(profile_overrides=profile_overrides)
-                try:
-                    resolver.resolve(profile_name)
-                except (ProfileNotFoundError, ProfileValidationError) as e:
-                    errors.append(f"Stage '{stage_name}': compute.profile '{profile_name}' invalid - {e}")
 
         # Check inputs
         for input_name, input_def in stage_def.inputs.items():

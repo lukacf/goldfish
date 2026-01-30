@@ -82,7 +82,7 @@ class SourceRegistry:
 
         Args:
             name: Source name (e.g., "eurusd_real_ticks")
-            gcs_location: GCS path (e.g., "gs://bucket/data/eurusd.csv")
+            gcs_location: Storage URI (e.g., "<scheme>://bucket/data/eurusd.csv")
             description: What this data contains
             size_bytes: Optional size in bytes
             metadata: Required metadata dict

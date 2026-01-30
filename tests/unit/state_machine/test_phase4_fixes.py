@@ -9,6 +9,7 @@ These tests verify the fixes identified by review agents:
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -280,10 +281,12 @@ class TestEventEmissionWithValidation:
         from goldfish.state_machine.exit_code import get_exit_code_gce
         from goldfish.validation import InvalidStageRunIdError
 
+        storage = MagicMock()
         with pytest.raises(InvalidStageRunIdError):
             get_exit_code_gce(
                 bucket_uri="gs://bucket",
                 stage_run_id="invalid;rm -rf /",
+                storage=storage,
                 project_id="my-project",
             )
 

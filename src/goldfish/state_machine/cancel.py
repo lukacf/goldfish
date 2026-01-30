@@ -19,8 +19,6 @@ from goldfish.state_machine.types import (
 )
 from goldfish.state_machine.utils import format_transition_result
 from goldfish.validation import (
-    validate_container_id,
-    validate_instance_name,
     validate_stage_run_id,
 )
 
@@ -103,6 +101,7 @@ def _cleanup_backend(run_id: str, backend_type: str, backend_handle: str) -> Non
     """Cleanup backend resources after cancellation.
 
     This is best-effort - failures are logged but don't affect the cancel result.
+    Uses the RunBackend protocol for backend-agnostic termination.
 
     Args:
         run_id: Stage run ID (for logging).
@@ -112,26 +111,32 @@ def _cleanup_backend(run_id: str, backend_type: str, backend_handle: str) -> Non
     Raises:
         InvalidContainerIdError: If backend_handle is invalid for local backend.
         InvalidInstanceNameError: If backend_handle is invalid for GCE backend.
+        ValueError: If backend_type is unknown.
     """
     # Import here to avoid circular dependencies
-    from goldfish.infra.gce_launcher import GCELauncher
-    from goldfish.infra.local_executor import LocalExecutor
+    from goldfish.cloud.contracts import RunHandle
+    from goldfish.cloud.factory import create_backend_for_cleanup, validate_backend_handle
 
-    if backend_type == "local":
-        # Validate container ID before subprocess call to prevent command injection
-        validate_container_id(backend_handle)
-        executor = LocalExecutor()
-        executor.stop_container(backend_handle)
-        logger.info("Stopped Docker container %s for run %s", backend_handle, run_id)
-    elif backend_type == "gce":
-        # Validate instance name before subprocess call to prevent command injection
-        validate_instance_name(backend_handle)
-        # For GCE, we delete the instance rather than just stopping it
-        launcher = GCELauncher()
-        launcher.delete_instance(backend_handle)
-        logger.info("Deleted GCE instance %s for run %s", backend_handle, run_id)
-    else:
+    # Delegate to adapter via factory - all backend logic is in the adapter
+    try:
+        backend = create_backend_for_cleanup(backend_type)
+    except ValueError:
         logger.warning("Unknown backend type %s for run %s", backend_type, run_id)
+        return
+
+    # Validate at the boundary using backend-aware rules.
+    validate_backend_handle(backend_type, backend_handle)
+
+    handle = RunHandle.from_dict(
+        {
+            "stage_run_id": run_id,
+            "backend_type": backend_type,
+            "backend_handle": backend_handle,
+        }
+    )
+
+    backend.terminate(handle)
+    logger.info("Terminated %s resource %s for run %s", backend_type, backend_handle, run_id)
 
 
 def _get_run_info(db: Database, run_id: str) -> dict[str, Any] | None:

@@ -73,6 +73,22 @@ class TestRegisterDataset:
         assert source.gcs_location == "gs://my-bucket/data/file.csv"
         assert source.status == SourceStatus.AVAILABLE
 
+    def test_register_dataset_with_s3_source_accepts_scheme(self, test_db, test_config):
+        """register_dataset should accept non-GCS storage URIs."""
+        registry = DatasetRegistry(db=test_db, config=test_config)
+
+        source = registry.register_dataset(
+            name="remote_s3_data",
+            source="s3://my-bucket/data/file.csv",
+            description="Remote S3 dataset for registry integration tests",
+            format="csv",
+            metadata=_csv_metadata("Remote S3 dataset for registry integration tests"),
+        )
+
+        assert source.name == "remote_s3_data"
+        assert source.gcs_location == "s3://my-bucket/data/file.csv"
+        assert source.status == SourceStatus.AVAILABLE
+
     def test_register_dataset_rejects_duplicate(self, test_db, test_config):
         """register_dataset should reject duplicate dataset names."""
         registry = DatasetRegistry(db=test_db, config=test_config)

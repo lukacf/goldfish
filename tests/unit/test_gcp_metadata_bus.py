@@ -2,8 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+from goldfish.cloud.adapters.gcp.metadata_bus import GCPMetadataBus
 from goldfish.infra.metadata.base import MetadataSignal
-from goldfish.infra.metadata.gcp import GCPMetadataBus
 
 
 def test_set_signal_command_syntax():

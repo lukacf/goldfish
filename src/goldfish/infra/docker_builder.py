@@ -3,21 +3,17 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 import shutil
 import subprocess
 import tempfile
-import time
-import uuid
-from datetime import UTC, datetime
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import yaml
-
-from goldfish.errors import CloudBuildError, CloudBuildNotConfiguredError, GoldfishError
+from goldfish.errors import GoldfishError
 
 if TYPE_CHECKING:
     from goldfish.db.database import Database
@@ -28,10 +24,12 @@ logger = logging.getLogger(__name__)
 GOLDFISH_IO_PATH = Path(__file__).parent.parent / "io" / "__init__.py"
 GOLDFISH_METRICS_PATH = Path(__file__).parent.parent / "metrics"
 GOLDFISH_SVS_PATH = Path(__file__).parent.parent / "svs"
+GOLDFISH_CLOUD_PATH = Path(__file__).parent.parent / "cloud"
 # Metrics and SVS depend on validation, errors, and utils modules
 GOLDFISH_VALIDATION_PATH = Path(__file__).parent.parent / "validation.py"
 GOLDFISH_ERRORS_PATH = Path(__file__).parent.parent / "errors.py"
 GOLDFISH_UTILS_PATH = Path(__file__).parent.parent / "utils"
+GOLDFISH_CONFIG_PATH = Path(__file__).parent.parent / "config.py"
 GOLDFISH_RUST_PATH = Path(__file__).parent.parent.parent.parent / "goldfish-rust"
 
 # Default base image when none specified (backwards compatibility)
@@ -64,7 +62,6 @@ class DockerBuilder:
         if not isinstance(provider, str):
             return []
         provider_map = {
-            "claude_code": "@anthropic-ai/claude-code",
             "codex_cli": "@openai/codex",
             "gemini_cli": "@google/gemini-cli",
         }
@@ -195,6 +192,50 @@ CMD ["/bin/bash"]
 
         return dockerfile
 
+    @contextmanager
+    def prepare_build_context(
+        self,
+        workspace_dir: Path,
+        workspace_name: str,
+        version: str,
+        base_image: str | None = None,
+    ) -> Generator[tuple[Path, Path, str], None, None]:
+        """Prepare build context for external image building.
+
+        This context manager sets up the build context directory with all necessary
+        files (workspace code, goldfish libraries, Dockerfile) and yields the paths.
+        The caller is responsible for the actual build (e.g., using ImageBuilder).
+
+        Usage with CloudBuildImageBuilder:
+            with docker_builder.prepare_build_context(ws_dir, ws_name, ver, base_img) as (ctx, df, tag):
+                image_builder.build(ctx, df, tag)
+
+        Args:
+            workspace_dir: Path to workspace directory
+            workspace_name: Workspace name
+            version: Version identifier
+            base_image: Pre-built base image to use
+
+        Yields:
+            Tuple of (context_path, dockerfile_path, image_tag)
+        """
+        # Generate image tag
+        image_tag = self._generate_image_tag(workspace_name, version)
+
+        # Create temporary build context
+        with tempfile.TemporaryDirectory(prefix="goldfish-docker-") as tmp_dir:
+            build_context = Path(tmp_dir)
+
+            # Copy workspace files to build context
+            self._prepare_build_context(workspace_dir, build_context)
+
+            # Generate and write Dockerfile
+            dockerfile_content = self.generate_dockerfile(workspace_dir, base_image=base_image)
+            dockerfile_path = build_context / "Dockerfile"
+            dockerfile_path.write_text(dockerfile_content)
+
+            yield build_context, dockerfile_path, image_tag
+
     def build_image(
         self,
         workspace_dir: Path,
@@ -202,13 +243,16 @@ CMD ["/bin/bash"]
         version: str,
         use_cache: bool = True,
         base_image: str | None = None,
-        backend: str = "local",
-        wait: bool = True,
     ) -> str:
-        """Build Docker image for workspace.
+        """Build Docker image for workspace using local Docker.
 
         Uses a temporary directory as build context to avoid dirtying
         the workspace with a Dockerfile.
+
+        For Cloud Build support, use prepare_build_context() with ImageBuilder:
+            with docker_builder.prepare_build_context(ws_dir, ws, ver, base) as (ctx, df, tag):
+                image_builder = factory.create_image_builder()  # CloudBuildImageBuilder for GCE
+                image_builder.build(ctx, df, tag)
 
         Args:
             workspace_dir: Path to workspace directory
@@ -217,105 +261,21 @@ CMD ["/bin/bash"]
             use_cache: Use Docker layer caching (default True)
             base_image: Pre-built base image to use (e.g., "registry/goldfish-base-cpu:v1")
                        If None, falls back to python:3.11-slim
-            backend: Build backend - "local" (default) or "cloud" (Cloud Build)
-            wait: For cloud backend, wait for completion (default True)
 
         Returns:
-            Image tag (e.g., "goldfish-test_ws-v1") for local builds
-            Registry tag for cloud builds
+            Image tag (e.g., "goldfish-test_ws-v1")
 
         Raises:
             GoldfishError: If docker build fails
-            CloudBuildNotConfiguredError: If backend="cloud" but GCE not configured
-            CloudBuildError: If cloud build fails
         """
-        if backend == "cloud":
-            return self._build_with_cloud_build(
-                workspace_dir=workspace_dir,
-                workspace_name=workspace_name,
-                version=version,
-                use_cache=use_cache,
-                base_image=base_image,
-                wait=wait,
-            )
-        # Generate image tag
-        image_tag = self._generate_image_tag(workspace_name, version)
-
-        # Create temporary build context to avoid dirtying workspace
-        with tempfile.TemporaryDirectory(prefix="goldfish-docker-") as tmp_dir:
-            build_context = Path(tmp_dir)
-
-            # Copy required workspace files to build context
-            if (workspace_dir / "requirements.txt").exists():
-                shutil.copy2(workspace_dir / "requirements.txt", build_context / "requirements.txt")
-
-            if (workspace_dir / "modules").exists():
-                shutil.copytree(workspace_dir / "modules", build_context / "modules")
-
-            if (workspace_dir / "configs").exists():
-                shutil.copytree(workspace_dir / "configs", build_context / "configs")
-
-            if (workspace_dir / "loaders").exists():
-                shutil.copytree(workspace_dir / "loaders", build_context / "loaders")
-
-            if (workspace_dir / "entrypoints").exists():
-                shutil.copytree(workspace_dir / "entrypoints", build_context / "entrypoints")
-
-            if GOLDFISH_RUST_PATH.exists():
-                shutil.copytree(
-                    GOLDFISH_RUST_PATH,
-                    build_context / "goldfish-rust",
-                    ignore=shutil.ignore_patterns("target", ".git", "__pycache__"),
-                )
-
-            # Copy goldfish.io module into build context
-            # This creates a goldfish/io package structure so `from goldfish.io import ...` works
-            goldfish_pkg_dest = build_context / "goldfish_io" / "goldfish"
-            goldfish_pkg_dest.mkdir(parents=True, exist_ok=True)
-            # Parent __init__.py for goldfish package
-            (goldfish_pkg_dest / "__init__.py").write_text('"""Goldfish ML package (container runtime)."""\n')
-            # Top-level __init__.py for goldfish_io directory
-            (build_context / "goldfish_io" / "__init__.py").write_text("")
-
-            # Copy goldfish sub-packages
-            for subpkg, path in [
-                ("io", GOLDFISH_IO_PATH.parent),
-                ("metrics", GOLDFISH_METRICS_PATH),
-                ("svs", GOLDFISH_SVS_PATH),
-                ("utils", GOLDFISH_UTILS_PATH),
-            ]:
-                if path.exists() and path.is_dir():
-                    dest = goldfish_pkg_dest / subpkg
-                    shutil.copytree(
-                        path,
-                        dest,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-                    )
-                elif path.exists() and path.is_file() and subpkg == "io":
-                    # Special case for goldfish.io if it's just __init__.py
-                    dest = goldfish_pkg_dest / "io"
-                    dest.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(path, dest / "__init__.py")
-
-            # Copy goldfish.validation and goldfish.errors (top-level modules in goldfish package)
-            if GOLDFISH_VALIDATION_PATH.exists():
-                shutil.copy2(GOLDFISH_VALIDATION_PATH, goldfish_pkg_dest / "validation.py")
-            if GOLDFISH_ERRORS_PATH.exists():
-                shutil.copy2(GOLDFISH_ERRORS_PATH, goldfish_pkg_dest / "errors.py")
-
-            # Generate Dockerfile in build context (not workspace)
-            dockerfile_content = self.generate_dockerfile(workspace_dir, base_image=base_image)
-            dockerfile_path = build_context / "Dockerfile"
-            dockerfile_path.write_text(dockerfile_content)
-
-            # Build image; force amd64 only when targeting GCE
+        with self.prepare_build_context(workspace_dir, workspace_name, version, base_image) as (
+            build_context,
+            dockerfile_path,
+            image_tag,
+        ):
+            # Build image
             build_cmd = ["docker", "build"]
-            jobs_backend: str | None = (
-                getattr(getattr(self.config, "jobs", None), "backend", None) if self.config else None
-            )
-            if jobs_backend == "gce":
-                build_cmd += ["--platform", "linux/amd64"]
-            build_cmd += ["-t", image_tag]
+            build_cmd += ["-t", image_tag, "-f", str(dockerfile_path)]
 
             # Pass version as build arg to bust cache on version change
             build_cmd += ["--build-arg", f"VERSION={version}"]
@@ -422,320 +382,6 @@ CMD ["/bin/bash"]
         except Exception as e:
             logger.debug(f"Failed to remove image {image_tag}: {e}")
 
-    def _build_with_cloud_build(
-        self,
-        workspace_dir: Path,
-        workspace_name: str,
-        version: str,
-        use_cache: bool,
-        base_image: str | None,
-        wait: bool,
-    ) -> str:
-        """Build workspace image using Cloud Build.
-
-        Args:
-            workspace_dir: Path to workspace directory
-            workspace_name: Workspace name
-            version: Version identifier
-            use_cache: Use Docker layer caching
-            base_image: Base image to use
-            wait: Wait for completion
-
-        Returns:
-            Registry tag for the built image
-
-        Raises:
-            CloudBuildNotConfiguredError: If GCE not configured
-            CloudBuildError: If cloud build fails
-        """
-        # Validate GCE configuration
-        gce = getattr(self.config, "gce", None) if self.config else None
-        if not gce:
-            raise CloudBuildNotConfiguredError()
-
-        project_id = gce.project_id
-        artifact_registry = gce.effective_artifact_registry
-
-        # Generate registry tag
-        sanitized_ws = re.sub(r"[^a-z0-9._-]", "_", workspace_name.lower())
-        sanitized_ver = re.sub(r"[^a-z0-9._-]", "_", version.lower())
-        registry_tag = f"{artifact_registry}/goldfish-{sanitized_ws}-{sanitized_ver}"
-
-        # Create build context to compute content hash FIRST
-        # This ensures goldfish source code changes are detected even when workspace version unchanged
-        with tempfile.TemporaryDirectory(prefix="goldfish-cloud-") as tmp_dir:
-            build_context = Path(tmp_dir)
-
-            # Copy workspace files (same as local build)
-            self._prepare_build_context(workspace_dir, build_context)
-
-            # Generate Dockerfile
-            dockerfile_content = self.generate_dockerfile(workspace_dir, base_image=base_image)
-            (build_context / "Dockerfile").write_text(dockerfile_content)
-
-            # Compute content hash for cache detection
-            # CRITICAL: This includes goldfish library code copied into build context
-            content_hash = self._compute_content_hash(build_context, dockerfile_content, base_image)
-
-            # Check if we've already built this exact content before
-            # Content hash is the primary caching mechanism - it detects ALL changes
-            # including goldfish library code, workspace code, and Dockerfile
-            if self.db:
-                cached_build = self.db.get_docker_build_by_content_hash(workspace_name, content_hash)
-                if cached_build:
-                    cached_tag = cached_build.get("registry_tag")
-                    if cached_tag:
-                        logger.info(
-                            "Content unchanged (hash=%s), reusing existing image %s",
-                            content_hash[:12],
-                            cached_tag,
-                        )
-                        return cached_tag
-
-            # Content hash doesn't match any cached build - need to build
-            # But first check if this version's image exists (shouldn't with new content)
-            if self._image_exists_in_registry(registry_tag, project_id):
-                # Image exists but content changed - this means goldfish library changed
-                # We need to rebuild, but can't use same tag (immutable in registry)
-                # Generate a new tag with content hash suffix
-                short_hash = content_hash[:8]
-                registry_tag = f"{artifact_registry}/goldfish-{sanitized_ws}-{sanitized_ver}-{short_hash}"
-                logger.info(
-                    "Content changed (hash=%s) but version unchanged, using tag %s",
-                    short_hash,
-                    registry_tag,
-                )
-
-            # Get Cloud Build configuration
-            docker_config = getattr(self.config, "docker", None)
-            cloud_config = getattr(docker_config, "cloud_build", None) if docker_config else None
-
-            machine_type = getattr(cloud_config, "machine_type", "E2_HIGHCPU_32") if cloud_config else "E2_HIGHCPU_32"
-            timeout_minutes = getattr(cloud_config, "timeout_minutes", 30) if cloud_config else 30
-            disk_size_gb = getattr(cloud_config, "disk_size_gb", 100) if cloud_config else 100
-
-            # Generate build ID
-            build_id = f"build-{uuid.uuid4().hex[:8]}"
-            started_at = datetime.now(UTC).isoformat()
-
-            # Record build start in database
-            if self.db:
-                self.db.insert_docker_build(
-                    build_id=build_id,
-                    image_type=self._get_image_type_from_base(base_image),
-                    target="workspace",
-                    backend="cloud",
-                    started_at=started_at,
-                    workspace_name=workspace_name,
-                    version=version,
-                    registry_tag=registry_tag,
-                    content_hash=content_hash,
-                )
-
-            try:
-                # Get previous version's registry tag for layer caching
-                prev_tag = self._get_previous_version_tag(workspace_name, version)
-
-                # Build cloudbuild.yaml
-                steps = []
-
-                # Step 1: Pull previous version for cache (optional, allow failure)
-                if prev_tag and use_cache:
-                    steps.append(
-                        {
-                            "name": "gcr.io/cloud-builders/docker",
-                            "args": ["pull", prev_tag],
-                            "allowFailure": True,
-                        }
-                    )
-
-                # Step 2: Build with cache-from
-                build_args = ["build", "--platform", "linux/amd64", "-t", registry_tag]
-                if prev_tag and use_cache:
-                    build_args += ["--cache-from", prev_tag]
-                if not use_cache:
-                    build_args.append("--no-cache")
-                build_args += ["--build-arg", f"VERSION={version}", "."]
-
-                steps.append(
-                    {
-                        "name": "gcr.io/cloud-builders/docker",
-                        "args": build_args,
-                    }
-                )
-
-                cloudbuild_config = {
-                    "steps": steps,
-                    "images": [registry_tag],
-                    "timeout": f"{timeout_minutes * 60}s",
-                    "options": {
-                        "machineType": machine_type,
-                        "diskSizeGb": disk_size_gb,
-                    },
-                }
-
-                # Write cloudbuild.yaml
-                config_file = build_context / "cloudbuild.yaml"
-                with open(config_file, "w") as f:
-                    yaml.dump(cloudbuild_config, f)
-
-                # Submit to Cloud Build
-                submit_cmd = [
-                    "gcloud",
-                    "builds",
-                    "submit",
-                    "--config",
-                    str(config_file),
-                    "--project",
-                    project_id,
-                    "--async",
-                    "--format=json",
-                    str(build_context),
-                ]
-
-                result = subprocess.run(
-                    submit_cmd,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-
-                if result.returncode != 0:
-                    error_msg = f"Cloud Build submission failed: {result.stderr}"
-                    if self.db:
-                        self.db.update_docker_build_status(
-                            build_id=build_id,
-                            status="failed",
-                            error=error_msg,
-                            completed_at=datetime.now(UTC).isoformat(),
-                        )
-                    raise CloudBuildError(error_msg)
-
-                # Parse Cloud Build ID from response
-                try:
-                    output = json.loads(result.stdout)
-                    cloud_build_id = output.get("id") or output.get("name", "").split("/")[-1]
-                except (json.JSONDecodeError, KeyError):
-                    cloud_build_id = "unknown"
-
-                # Update database with Cloud Build ID
-                if self.db:
-                    self.db.update_docker_build_status(
-                        build_id=build_id,
-                        status="building",
-                        cloud_build_id=cloud_build_id,
-                    )
-
-                # Wait for completion if requested
-                if wait:
-                    return self._wait_for_cloud_build(
-                        build_id=build_id,
-                        cloud_build_id=cloud_build_id,
-                        project_id=project_id,
-                        registry_tag=registry_tag,
-                        timeout_sec=timeout_minutes * 60,
-                    )
-                else:
-                    return registry_tag
-
-            except CloudBuildError:
-                raise
-            except Exception as e:
-                error_msg = f"Cloud Build failed: {e}"
-                if self.db:
-                    self.db.update_docker_build_status(
-                        build_id=build_id,
-                        status="failed",
-                        error=error_msg,
-                        completed_at=datetime.now(UTC).isoformat(),
-                    )
-                raise CloudBuildError(error_msg) from e
-
-    def _wait_for_cloud_build(
-        self,
-        build_id: str,
-        cloud_build_id: str,
-        project_id: str,
-        registry_tag: str,
-        timeout_sec: int,
-    ) -> str:
-        """Wait for Cloud Build to complete with progress feedback.
-
-        Args:
-            build_id: Our internal build ID
-            cloud_build_id: GCP Cloud Build operation ID
-            project_id: GCP project ID
-            registry_tag: Expected registry tag
-            timeout_sec: Maximum wait time in seconds
-
-        Returns:
-            Registry tag on success
-
-        Raises:
-            CloudBuildError: If build fails or times out
-        """
-        start = time.time()
-        poll_interval = 10
-        logs_uri = None
-
-        while time.time() - start < timeout_sec:
-            result = subprocess.run(
-                ["gcloud", "builds", "describe", cloud_build_id, "--project", project_id, "--format=json"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-
-            if result.returncode == 0:
-                try:
-                    data = json.loads(result.stdout)
-                    status = data.get("status")
-                    logs_uri = data.get("logUrl")
-
-                    if status == "SUCCESS":
-                        logger.info(f"Cloud Build completed. Logs: {logs_uri}")
-                        if self.db:
-                            self.db.update_docker_build_status(
-                                build_id=build_id,
-                                status="completed",
-                                completed_at=datetime.now(UTC).isoformat(),
-                                registry_tag=registry_tag,
-                                logs_uri=logs_uri,
-                            )
-                        return registry_tag
-
-                    elif status in ("FAILURE", "CANCELLED", "TIMEOUT"):
-                        error = data.get("statusDetail", f"Cloud Build {status}")
-                        error_msg = f"Cloud Build failed: {error}. Logs: {logs_uri}"
-                        logger.error(error_msg)
-                        if self.db:
-                            self.db.update_docker_build_status(
-                                build_id=build_id,
-                                status="failed",
-                                error=error_msg,
-                                completed_at=datetime.now(UTC).isoformat(),
-                                logs_uri=logs_uri,
-                            )
-                        raise CloudBuildError(error_msg)
-                except json.JSONDecodeError:
-                    pass
-
-            elapsed = int(time.time() - start)
-            logger.info(f"Cloud Build in progress... ({elapsed}s)")
-            time.sleep(poll_interval)
-
-        # Timeout
-        error_msg = f"Cloud Build timed out after {timeout_sec}s. Logs: {logs_uri}"
-        if self.db:
-            self.db.update_docker_build_status(
-                build_id=build_id,
-                status="failed",
-                error=error_msg,
-                completed_at=datetime.now(UTC).isoformat(),
-                logs_uri=logs_uri,
-            )
-        raise CloudBuildError(error_msg)
-
     def _prepare_build_context(self, workspace_dir: Path, build_context: Path) -> None:
         """Copy workspace files to build context.
 
@@ -778,6 +424,7 @@ CMD ["/bin/bash"]
             ("metrics", GOLDFISH_METRICS_PATH),
             ("svs", GOLDFISH_SVS_PATH),
             ("utils", GOLDFISH_UTILS_PATH),
+            ("cloud", GOLDFISH_CLOUD_PATH),
         ]:
             if path.exists() and path.is_dir():
                 dest = goldfish_pkg_dest / subpkg
@@ -791,11 +438,13 @@ CMD ["/bin/bash"]
                 dest.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, dest / "__init__.py")
 
-        # Copy goldfish.validation and goldfish.errors
+        # Copy goldfish.validation, goldfish.errors, and goldfish.config (top-level modules)
         if GOLDFISH_VALIDATION_PATH.exists():
             shutil.copy2(GOLDFISH_VALIDATION_PATH, goldfish_pkg_dest / "validation.py")
         if GOLDFISH_ERRORS_PATH.exists():
             shutil.copy2(GOLDFISH_ERRORS_PATH, goldfish_pkg_dest / "errors.py")
+        if GOLDFISH_CONFIG_PATH.exists():
+            shutil.copy2(GOLDFISH_CONFIG_PATH, goldfish_pkg_dest / "config.py")
 
     def _get_previous_version_tag(self, workspace_name: str, _version: str) -> str | None:
         """Get any previous version's registry tag for Docker layer caching.
