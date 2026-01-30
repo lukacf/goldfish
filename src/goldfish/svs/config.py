@@ -89,7 +89,7 @@ class SVSConfig(BaseModel):
     ai_during_run_summary_max_chars: int = Field(default=1200, ge=100)
 
     # Agent settings
-    agent_provider: Literal["claude_code", "codex_cli", "gemini_cli", "null"] = "claude_code"
+    agent_provider: Literal["anthropic_api", "codex_cli", "gemini_cli", "null"] = "anthropic_api"
     agent_model: str | None = None
     agent_fallback_model: str | None = None
     agent_timeout: int = Field(default=120, ge=0)
@@ -113,11 +113,11 @@ class SVSConfig(BaseModel):
         """Use default provider when YAML null is specified.
 
         In YAML, `agent_provider: null` is parsed as Python None.
-        We treat this as "use default" (claude_code), NOT as NullProvider.
+        We treat this as "use default" (anthropic_api), NOT as NullProvider.
         To explicitly use NullProvider, write `agent_provider: "null"` (quoted).
         """
         if v is None:
-            return "claude_code"
+            return "anthropic_api"
         return v
 
     @model_validator(mode="after")

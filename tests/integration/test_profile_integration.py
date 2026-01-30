@@ -1,7 +1,7 @@
 """Tests for profile integration in stage configs and GCE launcher."""
 
+from goldfish.cloud.adapters.gcp.profiles import ProfileResolver
 from goldfish.config import GCEConfig
-from goldfish.infra.profiles import ProfileResolver
 
 
 class TestStageConfigProfiles:
@@ -98,8 +98,8 @@ class TestGCELauncherWithProfiles:
 
     def test_launch_with_profile_dict(self):
         """GCE launcher should accept resolved profile dict."""
-        from goldfish.infra.gce_launcher import GCELauncher
-        from goldfish.infra.profiles import get_builtin_profile
+        from goldfish.cloud.adapters.gcp.gce_launcher import GCELauncher
+        from goldfish.cloud.adapters.gcp.profiles import get_builtin_profile
 
         launcher = GCELauncher(
             project_id="test-project",
@@ -120,7 +120,7 @@ class TestGCELauncherWithProfiles:
 
     def test_convert_profile_to_resource_list(self):
         """Should convert profile to resource list for ResourceLauncher."""
-        from goldfish.infra.profiles import get_builtin_profile
+        from goldfish.cloud.adapters.gcp.profiles import get_builtin_profile
 
         profile = get_builtin_profile("h100-spot")
 

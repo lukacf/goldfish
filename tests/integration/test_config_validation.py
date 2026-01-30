@@ -144,10 +144,90 @@ invalid_field: value
         assert "invalid_field" in error_msg or "unknown" in error_msg.lower()
 
 
+class TestExtraPackagesMigration:
+    """Test migration of legacy extra_packages from root level to docker.extra_packages.
+
+    Regression tests for backwards compatibility - the old format at root level
+    should be automatically migrated to the new docker.extra_packages.base format.
+    """
+
+    def test_root_level_extra_packages_migrated_to_docker(self, temp_dir):
+        """Legacy extra_packages at root should migrate to docker.extra_packages.base."""
+        config_path = temp_dir / "goldfish.yaml"
+        config_path.write_text("""
+project_name: test
+dev_repo_path: ./dev
+extra_packages:
+  - google-cloud-storage>=2.10.0
+  - numpy>=1.24.0
+""")
+
+        config = GoldfishConfig.load(temp_dir)
+
+        # Should have migrated to docker.extra_packages.base
+        assert config.docker.extra_packages == {"base": ["google-cloud-storage>=2.10.0", "numpy>=1.24.0"]}
+
+    def test_root_level_extra_packages_combined_with_docker_config(self, temp_dir):
+        """Root-level packages should merge with existing docker config."""
+        config_path = temp_dir / "goldfish.yaml"
+        config_path.write_text("""
+project_name: test
+dev_repo_path: ./dev
+extra_packages:
+  - google-cloud-storage>=2.10.0
+docker:
+  extra_packages:
+    gpu:
+      - flash-attn
+""")
+
+        config = GoldfishConfig.load(temp_dir)
+
+        # Should have both base (from root) and gpu (from docker section)
+        assert "base" in config.docker.extra_packages
+        assert "gpu" in config.docker.extra_packages
+        assert config.docker.extra_packages["base"] == ["google-cloud-storage>=2.10.0"]
+        assert config.docker.extra_packages["gpu"] == ["flash-attn"]
+
+    def test_new_format_docker_extra_packages_works(self, temp_dir):
+        """New format docker.extra_packages should work without migration."""
+        config_path = temp_dir / "goldfish.yaml"
+        config_path.write_text("""
+project_name: test
+dev_repo_path: ./dev
+docker:
+  extra_packages:
+    gpu:
+      - flash-attn
+    cpu:
+      - lightgbm
+""")
+
+        config = GoldfishConfig.load(temp_dir)
+
+        assert config.docker.extra_packages == {
+            "gpu": ["flash-attn"],
+            "cpu": ["lightgbm"],
+        }
+
+    def test_empty_extra_packages_list_migrated(self, temp_dir):
+        """Empty extra_packages list should migrate cleanly."""
+        config_path = temp_dir / "goldfish.yaml"
+        config_path.write_text("""
+project_name: test
+dev_repo_path: ./dev
+extra_packages: []
+""")
+
+        config = GoldfishConfig.load(temp_dir)
+
+        # Empty list becomes empty base
+        assert config.docker.extra_packages == {"base": []}
+
+
 class TestStageConfigValidation:
     """Test stage config (configs/train.yaml) validation."""
 
-    @pytest.mark.skip(reason="Stage config validation not yet implemented")
     def test_catches_unknown_stage_config_field(self, e2e_setup):
         """Unknown stage config fields like 'freeze_backone' should be caught."""
         manager = e2e_setup["manager"]
@@ -157,7 +237,7 @@ class TestStageConfigValidation:
         manager.create_workspace(
             name="config-test", goal="Test config validation", reason="Testing stage config validation"
         )
-        manager.mount(workspace="config-test", slot="w1", reason="Testing config")
+        manager.mount(workspace="config-test", slot="w1", reason="Testing config validation")
 
         slot_path = project_root / "workspaces" / "w1"
 

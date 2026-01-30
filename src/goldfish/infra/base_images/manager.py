@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import subprocess
 import tempfile
 import threading
@@ -26,6 +27,17 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+# Import image constants from cloud.image_versions (single source of truth)
+# NOT from gcp/profiles.py - this is generic infra code, not GCP-specific
+from goldfish.cloud.image_versions import (
+    BASE_IMAGE_CPU,
+    BASE_IMAGE_GPU,
+    PUBLIC_BASE_IMAGE_CPU,
+    PUBLIC_BASE_IMAGE_GPU,
+)
+from goldfish.cloud.image_versions import (
+    BASE_IMAGE_VERSION_DEFAULT as BASE_IMAGE_VERSION,
+)
 from goldfish.config import DockerConfig, GoldfishConfig
 from goldfish.errors import (
     BaseImageBuildError,
@@ -36,17 +48,14 @@ from goldfish.errors import (
     GoldfishError,
     RegistryNotConfiguredError,
 )
-from goldfish.infra.profiles import (
-    BASE_IMAGE_CPU,
-    BASE_IMAGE_GPU,
-    BASE_IMAGE_VERSION,
-    PUBLIC_BASE_IMAGE_CPU,
-    PUBLIC_BASE_IMAGE_GPU,
-)
 from goldfish.validation import validate_image_type
 
 if TYPE_CHECKING:
+    from goldfish.cloud.protocols import ImageBuilder, ImageRegistry
     from goldfish.db.database import Database
+
+# Module logger
+logger = logging.getLogger("goldfish.infra.base_images")
 
 # Directory containing goldfish base image Dockerfiles
 BASE_IMAGES_DIR = Path(__file__).parent
@@ -108,6 +117,8 @@ class BaseImageManager:
         project_root: Path,
         config: GoldfishConfig,
         db: Database | None = None,
+        image_builder: ImageBuilder | None = None,
+        image_registry: ImageRegistry | None = None,
     ):
         """Initialize the manager.
 
@@ -115,12 +126,18 @@ class BaseImageManager:
             project_root: Path to the user's project root (where goldfish.yaml lives)
             config: Loaded GoldfishConfig instance
             db: Optional database for persistent build tracking (required for cloud builds)
+            image_builder: Optional ImageBuilder protocol implementation for building images.
+                          When provided, cloud builds use this instead of direct gcloud calls.
+            image_registry: Optional ImageRegistry protocol implementation for registry operations.
+                           When provided, push/check operations use this instead of direct gcloud calls.
         """
         self.project_root = project_root
         self.config = config
         self.project_name = config.project_name
         self.docker_config: DockerConfig = config.docker
         self.db = db
+        self._image_builder: ImageBuilder | None = image_builder
+        self._image_registry: ImageRegistry | None = image_registry
 
         # In-memory build tracking (for local builds without db)
         self._builds: dict[str, BuildStatus] = {}
@@ -147,6 +164,20 @@ class BaseImageManager:
         except subprocess.TimeoutExpired as e:
             raise DockerNotAvailableError("Docker daemon timed out") from e
 
+    def _safe_update_build_status_in_db(self, build_id: str, status: str, **kwargs: Any) -> None:
+        """Best-effort DB status update.
+
+        Local async builds run in background threads; test teardown can remove the temporary
+        database while the build thread is still running. We must never let DB update
+        failures crash the thread (pytest treats unhandled thread exceptions as warnings/errors).
+        """
+        if self.db is None:
+            return
+        try:
+            self.db.update_docker_build_status(build_id, status, **kwargs)
+        except Exception as exc:
+            logger.warning("Failed to update docker_builds status for %s: %s", build_id, exc)
+
     def _get_artifact_registry(self) -> str:
         """Get artifact registry URL from config.
 
@@ -163,8 +194,28 @@ class BaseImageManager:
             raise RegistryNotConfiguredError()
         return registry
 
-    def _get_project_image_tag(self, image_type: str, for_registry: bool = False) -> str:
-        """Get the project-specific image tag.
+    def _get_project_image_version(self, image_type: str) -> str | None:
+        """Get the current project image version for an image type.
+
+        CRITICAL: Returns None when no version exists. Project images are
+        user-built, not Goldfish-shipped. There is NO default version.
+        Callers must handle None appropriately (build new image or error).
+
+        Args:
+            image_type: "cpu" or "gpu"
+
+        Returns:
+            Version string (e.g., "v1", "v7") or None if not yet built
+        """
+        if self.db is not None:
+            version_info = self.db.get_current_project_image_version(self.project_name, image_type)
+            if version_info is not None:
+                return str(version_info["version"])
+        # No default - project images are user-built
+        return None
+
+    def _get_project_image_tag(self, image_type: str, for_registry: bool = False) -> str | None:
+        """Get the project-specific image tag for the CURRENT version.
 
         Args:
             image_type: "cpu" or "gpu"
@@ -172,8 +223,43 @@ class BaseImageManager:
 
         Returns:
             Image tag (e.g., "mlm-gpu:v1" or "us-docker.pkg.dev/.../mlm-gpu:v1")
+            Returns None if no project image version exists yet.
         """
-        local_tag = f"{self.project_name}-{image_type}:v1"
+        version = self._get_project_image_version(image_type)
+        if version is None:
+            return None
+        local_tag = f"{self.project_name}-{image_type}:{version}"
+        if for_registry:
+            registry = self._get_artifact_registry()
+            return f"{registry}/{local_tag}"
+        return local_tag
+
+    def _get_next_project_image_tag(self, image_type: str, for_registry: bool = False) -> str:
+        """Get the project-specific image tag for the NEXT version (for building).
+
+        Unlike _get_project_image_tag, this ALWAYS returns a tag because it uses
+        the next version (v1 for first build, vN+1 for subsequent builds).
+        Use this when BUILDING a new project image.
+
+        REQUIRES DATABASE: Project image versioning requires a database to track
+        versions. Without a DB, there's no way to know the correct next version.
+
+        Args:
+            image_type: "cpu" or "gpu"
+            for_registry: If True, include registry URL prefix
+
+        Returns:
+            Image tag for the next version to build (e.g., "mlm-gpu:v1")
+
+        Raises:
+            GoldfishError: If database is not available
+        """
+        if self.db is None:
+            raise GoldfishError(
+                "Database required for project image builds. " "Project image versioning requires version tracking."
+            )
+        version = self.db.get_next_project_image_version(self.project_name, image_type)
+        local_tag = f"{self.project_name}-{image_type}:{version}"
         if for_registry:
             registry = self._get_artifact_registry()
             return f"{registry}/{local_tag}"
@@ -183,6 +269,7 @@ class BaseImageManager:
         """Get the goldfish base image tag to use as FROM.
 
         Uses registry image if configured, otherwise public fallback.
+        Uses database version if available, otherwise hardcoded constant.
 
         Args:
             image_type: "cpu" or "gpu"
@@ -191,11 +278,12 @@ class BaseImageManager:
             Full base image tag for FROM directive
         """
         base_name = BASE_IMAGE_GPU if image_type == "gpu" else BASE_IMAGE_CPU
+        version = self._get_base_image_version(image_type)
 
         # Try to use registry base image
         try:
             registry = self._get_artifact_registry()
-            return f"{registry}/{base_name}:{BASE_IMAGE_VERSION}"
+            return f"{registry}/{base_name}:{version}"
         except RegistryNotConfiguredError:
             # Fall back to public images
             if image_type == "gpu":
@@ -217,6 +305,24 @@ class BaseImageManager:
         """
         return BASE_IMAGES_DIR / f"Dockerfile.{image_type}"
 
+    def _get_base_image_version(self, image_type: str) -> str:
+        """Get the current base image version for an image type.
+
+        Checks database first (per-project tracking), falls back to hardcoded constant.
+
+        Args:
+            image_type: "cpu" or "gpu"
+
+        Returns:
+            Version string (e.g., "v10")
+        """
+        if self.db is not None:
+            version_info = self.db.get_current_base_image_version(image_type)
+            if version_info is not None:
+                return str(version_info["version"])
+        # Fall back to hardcoded constant
+        return BASE_IMAGE_VERSION
+
     def _get_goldfish_base_local_tag(self, image_type: str) -> str:
         """Get local tag for goldfish base image.
 
@@ -227,7 +333,8 @@ class BaseImageManager:
             Tag like "goldfish-base-gpu:v4"
         """
         base_name = BASE_IMAGE_GPU if image_type == "gpu" else BASE_IMAGE_CPU
-        return f"{base_name}:{BASE_IMAGE_VERSION}"
+        version = self._get_base_image_version(image_type)
+        return f"{base_name}:{version}"
 
     def _get_goldfish_base_registry_tag(self, image_type: str) -> str:
         """Get registry tag for goldfish base image.
@@ -243,7 +350,8 @@ class BaseImageManager:
         """
         registry = self._get_artifact_registry()
         base_name = BASE_IMAGE_GPU if image_type == "gpu" else BASE_IMAGE_CPU
-        return f"{registry}/{base_name}:{BASE_IMAGE_VERSION}"
+        version = self._get_base_image_version(image_type)
+        return f"{registry}/{base_name}:{version}"
 
     def _check_goldfish_base_exists_in_registry(self, image_type: str) -> bool:
         """Check if goldfish base image exists in registry.
@@ -287,7 +395,12 @@ class BaseImageManager:
         Returns:
             List of pip install arguments
         """
-        return self.docker_config.extra_packages.get(image_type, [])
+        # Get base packages that apply to all image types
+        base_packages = self.docker_config.extra_packages.get("base", [])
+        # Get type-specific packages
+        type_packages = self.docker_config.extra_packages.get(image_type, [])
+        # Combine: base first, then type-specific (allows overrides)
+        return list(base_packages) + list(type_packages)
 
     def _generate_dockerfile_content(self, image_type: str) -> str:
         """Generate Dockerfile content for project image.
@@ -374,7 +487,7 @@ class BaseImageManager:
     def _check_registry_image_exists(self, registry_tag: str) -> bool:
         """Check if image exists in registry.
 
-        Uses gcloud to check manifest without pulling.
+        Uses ImageRegistry protocol if available, otherwise falls back to gcloud CLI.
 
         Args:
             registry_tag: Full registry image tag
@@ -382,6 +495,14 @@ class BaseImageManager:
         Returns:
             True if image exists in registry
         """
+        # Use injected registry protocol if available
+        if self._image_registry is not None:
+            try:
+                return self._image_registry.exists(registry_tag)
+            except Exception:
+                return False
+
+        # Fallback to gcloud CLI (legacy path)
         try:
             result = subprocess.run(
                 ["gcloud", "artifacts", "docker", "images", "describe", registry_tag, "--quiet"],
@@ -432,22 +553,23 @@ class BaseImageManager:
         # Project images
         project_images = {}
         for image_type in ("cpu", "gpu"):
-            local_tag = self._get_project_image_tag(image_type, for_registry=False)
-            has_local = self._check_local_image_exists(local_tag)
+            proj_local_tag = self._get_project_image_tag(image_type, for_registry=False)
+            # If no project image version exists, no image can exist
+            has_local = self._check_local_image_exists(proj_local_tag) if proj_local_tag else False
 
             try:
-                registry_tag = self._get_project_image_tag(image_type, for_registry=True)
-                has_registry = self._check_registry_image_exists(registry_tag)
+                proj_registry_tag = self._get_project_image_tag(image_type, for_registry=True)
+                has_registry = self._check_registry_image_exists(proj_registry_tag) if proj_registry_tag else False
             except RegistryNotConfiguredError:
-                registry_tag = None
+                proj_registry_tag = None
                 has_registry = False
 
             custom_dockerfile = self._get_project_dockerfile_path(image_type)
             extra_packages = self._get_extra_packages(image_type)
 
             project_images[image_type] = {
-                "local_tag": local_tag if has_local else None,
-                "registry_tag": registry_tag if has_registry else None,
+                "local_tag": proj_local_tag if has_local else None,
+                "registry_tag": proj_registry_tag if has_registry else None,
                 "has_local": has_local,
                 "has_registry": has_registry,
                 "customization": {
@@ -515,16 +637,17 @@ class BaseImageManager:
         results = {}
         for image_type in ("cpu", "gpu"):
             local_tag = self._get_project_image_tag(image_type, for_registry=False)
-            has_local = self._check_local_image_exists(local_tag)
+            # If no project image version exists, no image can exist
+            has_local = self._check_local_image_exists(local_tag) if local_tag else False
 
             try:
                 registry_tag = self._get_project_image_tag(image_type, for_registry=True)
-                has_registry = self._check_registry_image_exists(registry_tag)
+                has_registry = self._check_registry_image_exists(registry_tag) if registry_tag else False
             except RegistryNotConfiguredError:
                 registry_tag = None
                 has_registry = False
 
-            # Determine if rebuild needed
+            # Determine if rebuild needed (also true if no version exists yet)
             needs_rebuild = not has_local
             needs_push = has_local and not has_registry
 
@@ -556,6 +679,100 @@ class BaseImageManager:
         if needs_push:
             return "Run push to deploy to registry"
         return "Up to date"
+
+    def _build_with_image_builder(
+        self,
+        image_type: str,
+        no_cache: bool,
+        target: str,
+        wait: bool,
+        backend: str = "cloud",
+    ) -> dict[str, Any]:
+        """Build image using injected ImageBuilder protocol.
+
+        Args:
+            image_type: "cpu" or "gpu"
+            no_cache: Force rebuild without Docker cache
+            target: "base" or "project"
+            wait: If True, block until complete
+            backend: "local" or "cloud" (for result reporting)
+
+        Returns:
+            Dict with build_id and status
+        """
+        assert self._image_builder is not None  # Caller must verify
+
+        # Prepare build context and image tags
+        if target == "base":
+            dockerfile_path = self._get_goldfish_base_dockerfile_path(image_type)
+            local_tag = self._get_goldfish_base_local_tag(image_type)
+            try:
+                registry_tag = self._get_goldfish_base_registry_tag(image_type)
+            except RegistryNotConfiguredError:
+                registry_tag = None
+            build_context = BASE_IMAGES_DIR
+        else:
+            dockerfile_content, source_path = self._get_effective_dockerfile(image_type)
+            # Use _get_next_project_image_tag for builds (not _get_project_image_tag)
+            # This ensures we get the NEXT version to build (v1 for first build)
+            local_tag = self._get_next_project_image_tag(image_type, for_registry=False)
+            try:
+                registry_tag = self._get_next_project_image_tag(image_type, for_registry=True)
+            except RegistryNotConfiguredError:
+                registry_tag = None
+            if source_path:
+                dockerfile_path = source_path
+                build_context = self.project_root
+            else:
+                # Write generated Dockerfile to temp location
+                tmpdir = tempfile.mkdtemp(prefix="goldfish-build-")
+                dockerfile_path = Path(tmpdir) / "Dockerfile"
+                dockerfile_path.write_text(dockerfile_content)
+                build_context = Path(tmpdir)
+
+        target_name = "goldfish base" if target == "base" else "project"
+        # Use local tag for local builds, registry tag for cloud builds (if available)
+        image_tag = registry_tag if backend == "cloud" and registry_tag else local_tag
+
+        if wait:
+            # Synchronous build
+            result_tag = self._image_builder.build(
+                context_path=build_context,
+                dockerfile_path=dockerfile_path,
+                image_tag=image_tag,
+                build_args={},
+                no_cache=no_cache,
+            )
+            return {
+                "build_id": f"build-sync-{uuid.uuid4().hex[:8]}",
+                "status": "completed",
+                "image_type": image_type,
+                "target": target,
+                "backend": backend,
+                "image_tag": result_tag,
+                "registry_tag": registry_tag,
+                "message": f"Successfully built {target_name} {image_type} image: {result_tag}",
+            }
+        else:
+            # Async build
+            build_id = self._image_builder.build_async(
+                context_path=build_context,
+                dockerfile_path=dockerfile_path,
+                image_tag=image_tag,
+                build_args={},
+                no_cache=no_cache,
+            )
+            return {
+                "build_id": build_id,
+                "status": "building",
+                "image_type": image_type,
+                "target": target,
+                "backend": backend,
+                "image_tag": image_tag,
+                "registry_tag": registry_tag,
+                "message": f"Building {target_name} {image_type} image. "
+                f"Use get_build_status('{build_id}') to check progress.",
+            }
 
     def build_image(
         self,
@@ -590,10 +807,20 @@ class BaseImageManager:
                 raise CloudBuildNotConfiguredError()
             if not self.config.gce:
                 raise CloudBuildNotConfiguredError()
+
+            # Use injected ImageBuilder protocol if available
+            if self._image_builder is not None:
+                return self._build_with_image_builder(image_type, no_cache, target, wait, backend="cloud")
+
+            # Fallback to gcloud CLI (legacy path)
             return self._build_with_cloud_build(image_type, no_cache, target)
 
         # Local builds require Docker
         self._check_docker_available()
+
+        # Use injected ImageBuilder protocol if available (supports both local and cloud builds)
+        if self._image_builder is not None:
+            return self._build_with_image_builder(image_type, no_cache, target, wait, backend="local")
 
         # Generate build ID
         build_id = f"build-{uuid.uuid4().hex[:8]}"
@@ -607,9 +834,10 @@ class BaseImageManager:
             except RegistryNotConfiguredError:
                 registry_tag = None
         else:
-            image_tag = self._get_project_image_tag(image_type, for_registry=False)
+            # Use _get_next_project_image_tag for builds (not _get_project_image_tag)
+            image_tag = self._get_next_project_image_tag(image_type, for_registry=False)
             try:
-                registry_tag = self._get_project_image_tag(image_type, for_registry=True)
+                registry_tag = self._get_next_project_image_tag(image_type, for_registry=True)
             except RegistryNotConfiguredError:
                 registry_tag = None
 
@@ -667,14 +895,11 @@ class BaseImageManager:
             no_cache: Force rebuild without Docker cache
             target: "base" or "project"
         """
-        with self._builds_lock:
-            self._builds[build_id].status = "building"
-
-        # Update DB status
-        if self.db:
-            self.db.update_docker_build_status(build_id, "building")
-
         try:
+            with self._builds_lock:
+                self._builds[build_id].status = "building"
+            self._safe_update_build_status_in_db(build_id, "building")
+
             if target == "base":
                 # Build goldfish base image
                 dockerfile_path = self._get_goldfish_base_dockerfile_path(image_type)
@@ -695,8 +920,7 @@ class BaseImageManager:
                 self._builds[build_id].status = "failed"
                 self._builds[build_id].completed_at = now
                 self._builds[build_id].error = str(e)
-            if self.db:
-                self.db.update_docker_build_status(build_id, "failed", error=str(e), completed_at=now.isoformat())
+            self._safe_update_build_status_in_db(build_id, "failed", error=str(e), completed_at=now.isoformat())
 
     def _run_project_build(self, build_id: str, image_type: str, no_cache: bool) -> None:
         """Execute project image build.
@@ -710,7 +934,8 @@ class BaseImageManager:
 
         # Get effective Dockerfile
         dockerfile_content, source_path = self._get_effective_dockerfile(image_type)
-        image_tag = self._get_project_image_tag(image_type, for_registry=False)
+        # Use _get_next_project_image_tag for builds (not _get_project_image_tag)
+        image_tag = self._get_next_project_image_tag(image_type, for_registry=False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmppath = Path(tmpdir)
@@ -793,7 +1018,12 @@ class BaseImageManager:
             self._builds[build_id].image_tag = image_tag
 
         if self.db:
-            self.db.update_docker_build_status(build_id, "completed", completed_at=now.isoformat(), image_tag=image_tag)
+            self._safe_update_build_status_in_db(
+                build_id,
+                "completed",
+                completed_at=now.isoformat(),
+                image_tag=image_tag,
+            )
 
     def get_build_status(self, build_id: str) -> dict[str, Any]:
         """Get status of a build.
@@ -855,6 +1085,8 @@ class BaseImageManager:
     def push_image(self, image_type: str, target: str = "project") -> dict[str, Any]:
         """Push an image to Artifact Registry.
 
+        Uses ImageRegistry protocol if available, otherwise falls back to gcloud CLI.
+
         Args:
             image_type: "cpu" or "gpu"
             target: "base" for goldfish-base-* or "project" for {project}-*
@@ -870,16 +1102,40 @@ class BaseImageManager:
         self._check_docker_available()
 
         # Get appropriate tags based on target
+        local_tag: str
+        registry_tag: str
         if target == "base":
             local_tag = self._get_goldfish_base_local_tag(image_type)
             registry_tag = self._get_goldfish_base_registry_tag(image_type)
         else:
-            local_tag = self._get_project_image_tag(image_type, for_registry=False)
-            registry_tag = self._get_project_image_tag(image_type, for_registry=True)
+            project_local = self._get_project_image_tag(image_type, for_registry=False)
+            project_registry = self._get_project_image_tag(image_type, for_registry=True)
+            # If no project image version exists, nothing to push
+            if project_local is None or project_registry is None:
+                raise BaseImageNotFoundError(
+                    f"No project image version exists for {image_type}. " "Build the project image first."
+                )
+            local_tag = project_local
+            registry_tag = project_registry
 
         if not self._check_local_image_exists(local_tag):
             raise BaseImageNotFoundError(local_tag)
 
+        target_name = "goldfish base" if target == "base" else "project"
+
+        # Use injected registry protocol if available
+        if self._image_registry is not None:
+            self._image_registry.push(local_tag, registry_tag)
+            return {
+                "success": True,
+                "target": target,
+                "image_type": image_type,
+                "local_tag": local_tag,
+                "registry_tag": registry_tag,
+                "message": f"Successfully pushed {target_name} {image_type} image to {registry_tag}",
+            }
+
+        # Fallback to gcloud CLI (legacy path)
         registry_url = self._get_artifact_registry()
 
         # Configure Docker authentication
@@ -916,7 +1172,6 @@ class BaseImageManager:
         if push_result.returncode != 0:
             raise GoldfishError(f"Docker push failed: {push_result.stderr}")
 
-        target_name = "goldfish base" if target == "base" else "project"
         return {
             "success": True,
             "target": target,
@@ -969,7 +1224,8 @@ class BaseImageManager:
             dockerfile_path = self._get_goldfish_base_dockerfile_path(image_type)
             build_context = BASE_IMAGES_DIR
         else:
-            registry_tag = self._get_project_image_tag(image_type, for_registry=True)
+            # Use _get_next_project_image_tag for builds (not _get_project_image_tag)
+            registry_tag = self._get_next_project_image_tag(image_type, for_registry=True)
             # For project builds, need to prepare Dockerfile
             dockerfile_content, source_path = self._get_effective_dockerfile(image_type)
             if source_path:
@@ -996,22 +1252,40 @@ class BaseImageManager:
             dockerfile_path.name,
         ]
 
-        # Add FA3 wheel GCS path for GPU builds (downloads via Python SDK during build)
-        if image_type == "gpu" and cloud_config.fa3_wheel_gcs:
-            build_args.extend(["--build-arg", f"FA3_WHEEL_GCS={cloud_config.fa3_wheel_gcs}"])
+        # For GPU builds with FA3 wheel, download it before Docker build
+        # gsutil downloads to /workspace/ which is the Docker build context
+        fa3_wheel_gcs = cloud_config.fa3_wheel_gcs if image_type == "gpu" else None
 
         if no_cache:
             build_args.append("--no-cache")
 
-        build_args.append(".")
+        # Use /workspace/ as build context so gsutil-downloaded files are included
+        # The source tarball is unpacked to /workspace/, and gsutil also downloads there
+        build_args.append("/workspace/")
+
+        # Build steps - optionally prepend FA3 download step
+        steps = []
+        if fa3_wheel_gcs:
+            # Extract wheel filename from GCS path (pip validates wheel filenames)
+            wheel_filename = fa3_wheel_gcs.split("/")[-1]
+            # Download wheel to /workspace/
+            steps.append(
+                {
+                    "name": "gcr.io/cloud-builders/gsutil",
+                    "args": ["cp", fa3_wheel_gcs, f"/workspace/{wheel_filename}"],
+                }
+            )
+            # Add build arg for wheel filename (pip requires valid wheel filename)
+            build_args.extend(["--build-arg", f"FA3_WHEEL_FILE={wheel_filename}"])
+        steps.append(
+            {
+                "name": "gcr.io/cloud-builders/docker",
+                "args": build_args,
+            }
+        )
 
         cloudbuild_config = {
-            "steps": [
-                {
-                    "name": "gcr.io/cloud-builders/docker",
-                    "args": build_args,
-                }
-            ],
+            "steps": steps,
             "images": [registry_tag],
             "timeout": f"{cloud_config.timeout_minutes * 60}s",
             "options": {

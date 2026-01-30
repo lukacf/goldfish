@@ -31,3 +31,6 @@ pydantic>=2.0,<3.0
 # Jupyter support (optional but commonly used)
 jupyterlab>=4.0,<5.0
 ipykernel>=6.25,<7.0
+
+# Claude Agent SDK for SVS during-run AI reviews
+claude-agent-sdk>=0.1.0

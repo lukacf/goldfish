@@ -79,10 +79,16 @@ MCP Client (Claude) ─── JSON-RPC ───▶ server.py
                     │                     │
         ┌───────────┼───────────┐         │
         ▼           ▼           ▼         ▼
-   workspace/    jobs/      pipeline/   infra/
-   manager.py   stage_      parser.py   docker_builder.py
-   git_layer.py executor.py             local_executor.py
-                                        gce_launcher.py
+   workspace/    jobs/      pipeline/   cloud/
+   manager.py   stage_      parser.py   protocols.py    ◄── Backend-agnostic
+   git_layer.py executor.py             contracts.py        interfaces
+                    │                   factory.py
+                    │                       │
+                    └───────────────────────┤
+                                            ▼
+                                    cloud/adapters/
+                                    ├── local/       ◄── Docker
+                                    └── gcp/         ◄── GCE + GCS
 ```
 
 ### Key Files
@@ -90,11 +96,15 @@ MCP Client (Claude) ─── JSON-RPC ───▶ server.py
 | File | Purpose |
 |------|---------|
 | `jobs/stage_executor.py` | **Core**: Stage execution + sync + provenance + review |
+| `cloud/protocols.py` | RunBackend, ObjectStorage, ImageBuilder interfaces |
+| `cloud/contracts.py` | BackendCapabilities, RunSpec, RunHandle, BackendStatus |
+| `cloud/factory.py` | AdapterFactory for backend instantiation |
+| `cloud/adapters/local/` | LocalRunBackend (Docker-based execution) |
+| `cloud/adapters/gcp/` | GCERunBackend (GCE instances), GCSStorage |
 | `pre_run_review.py` | Pre-run code review using Claude Agent SDK |
 | `db/database.py` | All database operations |
 | `workspace/manager.py` | Workspace CRUD + copy-based mounting |
 | `workspace/git_layer.py` | Git ops + sync_slot_to_branch |
-| `infra/gce_launcher.py` | GCE instance lifecycle |
 | `server.py` | MCP server initialization |
 
 ---
@@ -185,6 +195,57 @@ SVS provides defense-in-depth through three phases:
 - Path traversal protection in `pre_run_review.py`.
 - File size limits (100KB/file) for review context.
 
+### 8. Cloud Abstraction Layer
+
+**Core System**: `src/goldfish/cloud/` - Backend-agnostic execution and storage.
+
+The cloud abstraction layer isolates provider-specific code (GCP, AWS, local) from core Goldfish logic:
+
+```
+cloud/
+├── protocols.py    # Interfaces: RunBackend, ObjectStorage, ImageBuilder
+├── contracts.py    # Data types: BackendCapabilities, RunSpec, BackendStatus
+├── factory.py      # AdapterFactory for DI
+└── adapters/
+    ├── local/      # LocalRunBackend (Docker containers)
+    └── gcp/        # GCERunBackend (GCE instances), GCSStorage
+```
+
+**Key Protocols**:
+- `RunBackend`: Unified interface for execution (`launch()`, `get_status()`, `terminate()`, `get_logs()`)
+- `ObjectStorage`: Blob storage operations (`put()`, `get()`, `exists()`, `delete()`)
+- `ImageBuilder`: Docker image building (`build()`, `push()`)
+
+**BackendCapabilities** - Behavior configuration instead of conditionals:
+
+```python
+@dataclass
+class BackendCapabilities:
+    ack_timeout_seconds: float = 1.0    # How long to wait for ACK
+    has_launch_delay: bool = False       # GCE has startup delay, local doesn't
+    timeout_becomes_pending: bool = False # GCE timeout = sync pending, local = failure
+    logs_unavailable_message: str = "Logs not available"
+    zone_resolution_method: str = "config"  # "config" or "handle"
+```
+
+**Usage Pattern** - Always use protocol, never direct launcher:
+
+```python
+# GOOD: Protocol-based
+result = self.run_backend.launch(spec)
+status = self.run_backend.get_status(handle)
+logs = self.run_backend.get_logs(handle)
+
+# BAD: Direct launcher access (violates abstraction)
+self.gce_launcher.launch_instance(...)  # NEVER do this
+```
+
+**Adding a New Backend**:
+1. Implement `RunBackend` protocol in `cloud/adapters/your_provider/run_backend.py`
+2. Set appropriate `BackendCapabilities` values
+3. Register in `cloud/factory.py`
+4. No changes needed in `stage_executor.py` or `execution_tools.py`
+
 ---
 
 ## Critical Patterns
@@ -263,7 +324,7 @@ if path.is_symlink():
     raise InvalidLogPathError("Symlink detected")
 ```
 
-### 3. Docker Sandboxing (`local_executor.py`)
+### 3. Docker Sandboxing (`cloud/adapters/local/`)
 
 ```python
 # Containers run with:
@@ -421,10 +482,11 @@ import logging; logging.basicConfig(level=logging.DEBUG)
 | **Context** | `context.py` (ServerContext DI) |
 | **Models** | `models.py` (Pydantic), `db/types.py` (TypedDict) |
 | **Validation** | `validation.py`, `errors.py` |
+| **Cloud** | `cloud/protocols.py`, `cloud/contracts.py`, `cloud/factory.py`, `cloud/adapters/` |
 | **Workspace** | `workspace/manager.py`, `workspace/git_layer.py` (copy-based + sync) |
 | **Execution** | `jobs/stage_executor.py`, `jobs/pipeline_executor.py` |
 | **Pipeline** | `pipeline/parser.py`, `pipeline/manager.py` |
-| **Infra** | `infra/docker_builder.py`, `infra/local_executor.py`, `infra/gce_launcher.py` |
+| **Infra** | `infra/docker_builder.py` (use cloud/ adapters for execution) |
 | **Data** | `datasets/registry.py`, `sources/registry.py` |
 | **State** | `state/state_md.py` (per-workspace + global STATE.md) |
 | **IO** | `io/__init__.py` (container load_input/save_output) |

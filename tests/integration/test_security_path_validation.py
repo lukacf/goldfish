@@ -170,8 +170,8 @@ class TestArtifactUriValidation:
         finally:
             server.reset_server()
 
-    def test_rejects_artifact_uri_without_gs_prefix(self, temp_dir):
-        """artifact_uri must start with gs://."""
+    def test_rejects_artifact_uri_without_uri_scheme(self, temp_dir):
+        """artifact_uri must be a valid storage URI."""
         from goldfish import server
         from goldfish.config import AuditConfig, GoldfishConfig, JobsConfig, StateMdConfig
         from goldfish.db.database import Database
@@ -197,7 +197,7 @@ class TestArtifactUriValidation:
         db.update_job_status(
             job_id="job-b2c3d4e5",
             status="completed",
-            artifact_uri="/etc/passwd",  # Not GCS
+            artifact_uri="/etc/passwd",  # Not a URI
         )
 
         server.configure_server(
@@ -222,7 +222,7 @@ class TestArtifactUriValidation:
                     output_name="model",
                     source_name="promoted_model",
                     metadata=valid_file_metadata(),
-                    reason="Testing non-GCS URI rejection",
+                    reason="Testing non-URI rejection",
                 )
         finally:
             server.reset_server()
@@ -282,5 +282,63 @@ class TestArtifactUriValidation:
             )
             assert result.success
             assert "gs://my-bucket" in result.source.gcs_location
+        finally:
+            server.reset_server()
+
+    def test_accepts_valid_s3_artifact_uri(self, temp_dir):
+        """Valid s3:// artifact_uri should work."""
+        from goldfish import server
+        from goldfish.config import AuditConfig, GoldfishConfig, JobsConfig, StateMdConfig
+        from goldfish.db.database import Database
+        from goldfish.state.state_md import StateManager
+
+        db = Database(temp_dir / "test.db")
+        config = GoldfishConfig(
+            project_name="test",
+            dev_repo_path="../test-dev",
+            state_md=StateMdConfig(),
+            audit=AuditConfig(),
+            jobs=JobsConfig(),
+        )
+        state_manager = StateManager(temp_dir / "STATE.md", config)
+
+        # Note: job ID must match format job-{8 hex chars}
+        db.create_job(
+            job_id="job-d4e5f6a7",
+            workspace="test-ws",
+            snapshot_id="snap-abc1234-20251205-120000",
+            script="train.py",
+        )
+        db.update_job_status(
+            job_id="job-d4e5f6a7",
+            status="completed",
+            artifact_uri="s3://my-bucket/experiments/job-d4e5f6a7/",
+        )
+
+        server.configure_server(
+            project_root=temp_dir,
+            config=config,
+            db=db,
+            workspace_manager=MagicMock(),
+            state_manager=state_manager,
+            job_launcher=MagicMock(),
+            job_tracker=MagicMock(),
+            pipeline_manager=MagicMock(),
+            dataset_registry=MagicMock(),
+            stage_executor=MagicMock(),
+            pipeline_executor=MagicMock(),
+        )
+
+        try:
+            promote_fn = get_tool_fn(server.promote_artifact)
+            result = promote_fn(
+                job_id="job-d4e5f6a7",
+                output_name="model",
+                source_name="promoted_model_s3",
+                metadata=valid_file_metadata(),
+                reason="Testing valid S3 URI acceptance",
+            )
+            assert result.success
+            assert "s3://my-bucket" in result.source.gcs_location
         finally:
             server.reset_server()

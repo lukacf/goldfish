@@ -118,6 +118,65 @@ class ConfigParamNotFoundError(GoldfishError):
         super().__init__(message, details)
 
 
+# Cloud abstraction layer errors
+
+
+class StorageError(GoldfishError):
+    """Storage operation failed."""
+
+    def __init__(self, message: str, uri: str | None = None):
+        details = {}
+        if uri:
+            details["uri"] = uri
+        super().__init__(message, details)
+
+
+class NotFoundError(GoldfishError):
+    """Requested object not found in storage."""
+
+    def __init__(self, uri: str):
+        message = f"Object not found: {uri}"
+        super().__init__(message, {"uri": uri})
+
+
+class CapacityError(GoldfishError):
+    """No capacity available (zone exhausted, quota hit, etc.)."""
+
+    def __init__(self, message: str, zones_tried: list[str] | None = None):
+        details = {}
+        if zones_tried:
+            details["zones_tried"] = zones_tried
+        super().__init__(message, details)
+
+
+class LaunchError(GoldfishError):
+    """Failed to launch compute run."""
+
+    def __init__(self, message: str, stage_run_id: str | None = None, cause: str | None = None):
+        details = {}
+        if stage_run_id:
+            details["stage_run_id"] = stage_run_id
+        if cause:
+            details["cause"] = cause
+        super().__init__(message, details)
+
+
+class MetadataSizeLimitError(GoldfishError):
+    """Metadata signal exceeds size limit (256KB for GCP compatibility)."""
+
+    MAX_SIZE_BYTES = 262144  # 256KB
+
+    def __init__(self, actual_size: int, key: str | None = None):
+        message = f"Metadata exceeds 256KB limit: {actual_size} bytes"
+        details: dict[str, int | str] = {
+            "actual_size": actual_size,
+            "max_size": self.MAX_SIZE_BYTES,
+        }
+        if key:
+            details["key"] = key
+        super().__init__(message, details)
+
+
 # Docker image management errors
 
 

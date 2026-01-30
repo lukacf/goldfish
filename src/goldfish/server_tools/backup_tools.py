@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from goldfish.cloud.contracts import StorageURI
 from goldfish.server_core import (
     _get_config,
     _get_db,
@@ -45,13 +46,19 @@ def _get_backup_manager() -> BackupManager | None:
 
     from goldfish.backup.manager import BackupManager
 
-    # Database path is in the dev repo
+    # Database path is in the dev repo (sibling to project, not subdirectory)
     project_root = _get_project_root()
-    dev_repo = project_root / config.dev_repo_path
+    dev_repo = config.get_dev_repo_path(project_root)
     db_path = dev_repo / ".goldfish" / "goldfish.db"
 
     # Backup bucket: use GCS bucket with "backups/" prefix
-    gcs_bucket = f"gs://{config.gcs.bucket}/backups"
+    bucket = config.gcs.bucket
+    try:
+        bucket_root = StorageURI.parse(bucket)
+    except ValueError:
+        bucket_root = StorageURI("gs", bucket, "")
+    bucket_root = StorageURI(bucket_root.scheme, bucket_root.bucket, "")
+    gcs_bucket = str(bucket_root.join("backups")).rstrip("/")
 
     _backup_manager = BackupManager(
         db=_get_db(),
@@ -144,6 +151,8 @@ def create_backup(trigger: str = "manual", details: dict | None = None) -> dict:
     Returns:
         dict with backup info or error.
     """
+    import shutil
+
     manager = _get_backup_manager()
     if manager is None:
         return {
@@ -151,13 +160,28 @@ def create_backup(trigger: str = "manual", details: dict | None = None) -> dict:
             "error": "Backups not available - GCS not configured",
         }
 
+    # Pre-check: verify database file exists
+    if not manager.db_path.exists():
+        return {
+            "success": False,
+            "error": f"Database file not found: {manager.db_path}",
+        }
+
+    # Pre-check: verify gsutil is available
+    if shutil.which("gsutil") is None:
+        return {
+            "success": False,
+            "error": "gsutil command not found - install Google Cloud SDK",
+        }
+
     try:
         result = manager.create_backup(trigger=trigger, details=details)
 
         if result is None:
+            # create_backup returns None on gsutil upload failure
             return {
                 "success": False,
-                "error": "Backup failed - check logs for details",
+                "error": f"Backup upload failed - check GCS bucket permissions for {manager.gcs_bucket}",
             }
 
         # Record in audit trail

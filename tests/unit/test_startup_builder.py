@@ -2,7 +2,7 @@
 
 import shlex
 
-from goldfish.infra.startup_builder import (
+from goldfish.cloud.adapters.gcp.startup_builder import (
     build_startup_script,
     disk_mount_section,
     docker_run_section,

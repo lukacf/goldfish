@@ -8,11 +8,11 @@ import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from goldfish.cloud.factory import AdapterFactory
 from goldfish.config import GoldfishConfig
 from goldfish.context import ServerContext, set_context
 from goldfish.datasets.registry import DatasetRegistry
 from goldfish.db.database import Database
-from goldfish.infra.metadata.local import LocalMetadataBus
 from goldfish.jobs.launcher import JobLauncher
 from goldfish.jobs.pipeline_executor import PipelineExecutor
 from goldfish.jobs.stage_executor import StageExecutor
@@ -33,6 +33,7 @@ from goldfish.server_core import (
     _get_state_manager,
     _get_state_md,
     _get_workspace_manager,
+    _reset_project_root,
     _set_project_root,
     mcp,
 )
@@ -94,6 +95,9 @@ def configure_server(
         stage_executor: Stage executor instance
         pipeline_executor: Pipeline executor instance
     """
+    # Set module-level project root for tools that need it directly
+    _set_project_root(project_root)
+
     ctx = ServerContext(
         project_root=project_root,
         config=config,
@@ -116,6 +120,7 @@ def reset_server() -> None:
 
     Primarily for testing - clears all global state between tests.
     """
+    _reset_project_root()
     set_context(None)
 
 
@@ -218,16 +223,13 @@ def _init_server(project_root: Path) -> None:
     pipeline_executor = PipelineExecutor(stage_executor=stage_executor, pipeline_manager=pipeline_manager, db=db)
 
     # Initialize MetadataBus (Cloud-native or Local simulation)
+    from typing import cast
+
     from goldfish.infra.metadata.base import MetadataBus
 
-    metadata_bus: MetadataBus
-    if config.gce:
-        from goldfish.infra.metadata.gcp import GCPMetadataBus
-
-        metadata_bus = GCPMetadataBus()
-    else:
-        # Use a file in dev repo for local simulation
-        metadata_bus = LocalMetadataBus(dev_repo_path / ".metadata_bus.json")
+    adapter_factory = AdapterFactory(config)
+    signal_bus = adapter_factory.create_signal_bus(metadata_path=dev_repo_path / ".metadata_bus.json")
+    metadata_bus = cast(MetadataBus, signal_bus)
 
     # Ensure worker daemon is running (spawns if needed)
     _ensure_worker_running(project_root, dev_repo_path)

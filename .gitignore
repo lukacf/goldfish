@@ -74,3 +74,8 @@ docs/a_real_project_issues_example.md
 
 # Flash-attention wheel storage
 src/goldfish/infra/base_images/fa3_wheel/
+
+# Local simulation files
+.local_metadata.json
+.local_gcs/
+.rct/

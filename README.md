@@ -7,8 +7,8 @@
 [![AGPL-3.0 License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![CI](https://github.com/lukacf/goldfish/actions/workflows/ci.yml/badge.svg)](https://github.com/lukacf/goldfish/actions)
 
-> **Cloud Support**: V1 targets Google Cloud Platform (GCE + GCS + Artifact Registry).
-> Multi-cloud abstraction is on the roadmap but not yet implemented.
+> **Cloud Support**: Production-ready on Google Cloud Platform (GCE + GCS + Artifact Registry).
+> The cloud abstraction layer supports adding new backends (AWS, Azure, Kubernetes) by implementing protocols.
 
 ---
 
@@ -162,6 +162,8 @@ claude mcp add goldfish -- uv run --directory /path/to/goldfish goldfish serve
 | [SKILL.md](.claude/skills/goldfish-ml/SKILL.md) | AI Agents | Comprehensive tool reference, schemas, and workflows. |
 | [CLAUDE.md](CLAUDE.md) | AI Agents | Internal development guide and technical invariants. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Human Partners | Development environment and PR process. |
+| [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | Users | Installation and first run guide. |
+| [docs/CLOUD_ABSTRACTION.md](docs/CLOUD_ABSTRACTION.md) | Developers | Cloud backend architecture and extension guide. |
 
 ---
 

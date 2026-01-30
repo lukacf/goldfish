@@ -183,20 +183,18 @@ class TestWorkspaceLifecycleWorkflow:
 
         # Create first checkpoint (good state)
         (slot_path / "feature.py").write_text("# Version 1 - Good")
-        first_checkpoint = manager.checkpoint(slot="w1", message="Good version of feature")
+        first_version = manager.save_version(slot="w1", message="Good version of feature")
 
         # Create second checkpoint (bad state)
         (slot_path / "feature.py").write_text("# Version 2 - Bad")
         (slot_path / "extra.py").write_text("# Extra file")
-        manager.checkpoint(slot="w1", message="Bad version with bugs")
+        manager.save_version(slot="w1", message="Bad version with bugs")
 
         # Rollback to first checkpoint
-        rollback_result = manager.rollback(
-            slot="w1", snapshot_id=first_checkpoint.snapshot_id, reason="Rolling back to fix bugs"
-        )
+        rollback_result = manager.rollback(slot="w1", version=first_version.version, reason="Rolling back to fix bugs")
 
         assert rollback_result.success is True
-        assert rollback_result.snapshot_id == first_checkpoint.snapshot_id
+        assert rollback_result.version == first_version.version
 
         # Verify content is restored
         assert (slot_path / "feature.py").read_text() == "# Version 1 - Good"
@@ -374,7 +372,7 @@ class TestDiffWorkflow:
         diff_result = manager.diff("w1")
 
         assert diff_result.has_changes is True
-        assert "code.py" in diff_result.files_changed
+        assert any(path.endswith("code.py") for path in diff_result.files_changed)
         assert len(diff_result.diff_text) > 0
         assert diff_result.left == "w1"  # Left side is the slot
 
@@ -450,7 +448,7 @@ class TestErrorRecoveryWorkflow:
         manager.mount(workspace="bad-rollback", slot="w1", reason="Testing invalid rollback")
 
         with pytest.raises(GoldfishError):
-            manager.rollback(slot="w1", snapshot_id="snap-nonexistent-00000000-000000", reason="This should fail")
+            manager.rollback(slot="w1", version="v999", reason="This should fail")
 
         # Cleanup
         manager.hibernate(slot="w1", reason="Done with bad rollback test")

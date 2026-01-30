@@ -22,6 +22,7 @@ test = [
     "pytest-cov>=4.0",
     "pytest-mock>=3.11",
     "pytest-timeout>=2.1",
+    "import-linter>=2.0",
     "numpy>=1.24",
     "pandas>=2.0",
 ]
@@ -31,6 +32,7 @@ dev = [
     "pytest-cov>=4.0",
     "pytest-mock>=3.11",
     "pytest-timeout>=2.1",
+    "import-linter>=2.0",
     "ruff>=0.8.4",
     "mypy>=1.10",
     "pre-commit>=3.5",
@@ -58,6 +60,7 @@ addopts = "--strict-markers --tb=short"
 markers = [
     "slow: Tests that take more than 10 seconds",
     "deluxe_gce: Deluxe E2E tests with real GCE execution (opt-in, requires cloud resources)",
+    "requires_docker: Tests requiring Docker daemon to be running",
 ]
 
 [tool.coverage.run]
@@ -74,6 +77,25 @@ warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = [
+    "goldfish.config.*",
+    "goldfish.db.protocols",
+    "goldfish.db.sqlite.*",
+    "goldfish.jobs.phases.*",
+]
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+warn_unused_ignores = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true
+
 [tool.ruff]
 target-version = "py311"
 line-length = 120
@@ -84,3 +106,30 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["F841"]  # Allow unused variables in tests (sometimes needed for fixtures)
+
+[tool.importlinter]
+root_packages = ["goldfish"]
+
+[[tool.importlinter.contracts]]
+name = "core-no-api-surface"
+type = "forbidden"
+source_modules = ["goldfish.jobs", "goldfish.workspace.manager", "goldfish.pipeline"]
+forbidden_modules = ["goldfish.server", "goldfish.server_tools"]
+
+[[tool.importlinter.contracts]]
+name = "protocols-no-adapters"
+type = "forbidden"
+source_modules = ["goldfish.cloud.protocols", "goldfish.cloud.contracts"]
+forbidden_modules = ["goldfish.cloud.adapters"]
+
+[[tool.importlinter.contracts]]
+name = "infra-no-api"
+type = "forbidden"
+source_modules = ["goldfish.db", "goldfish.cloud.adapters", "goldfish.infra"]
+forbidden_modules = ["goldfish.server", "goldfish.server_tools"]
+
+[[tool.importlinter.contracts]]
+name = "only-factory-imports-adapters"
+type = "protected"
+protected_modules = ["goldfish.cloud.adapters"]
+allowed_importers = ["goldfish.cloud.factory"]

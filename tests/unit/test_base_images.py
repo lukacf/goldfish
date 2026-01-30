@@ -1,6 +1,6 @@
 """Unit tests for base image module."""
 
-from goldfish.infra.profiles import (
+from goldfish.cloud.adapters.gcp.profiles import (
     BASE_IMAGE_CPU,
     BASE_IMAGE_GPU,
     FALLBACK_BASE_IMAGE,
@@ -102,31 +102,31 @@ class TestProfilesHaveBaseImage:
 
     def test_cpu_small_has_custom_image(self) -> None:
         """cpu-small profile should use custom CPU base image."""
-        from goldfish.infra.profiles import BUILTIN_PROFILES
+        from goldfish.cloud.adapters.gcp.profiles import BUILTIN_PROFILES
 
         assert BUILTIN_PROFILES["cpu-small"]["base_image"] == BASE_IMAGE_CPU
 
     def test_cpu_large_has_custom_image(self) -> None:
         """cpu-large profile should use custom CPU base image."""
-        from goldfish.infra.profiles import BUILTIN_PROFILES
+        from goldfish.cloud.adapters.gcp.profiles import BUILTIN_PROFILES
 
         assert BUILTIN_PROFILES["cpu-large"]["base_image"] == BASE_IMAGE_CPU
 
     def test_h100_spot_has_custom_gpu_image(self) -> None:
         """h100-spot profile should use custom GPU base image (with nvrtc for Flash Attention)."""
-        from goldfish.infra.profiles import BUILTIN_PROFILES
+        from goldfish.cloud.adapters.gcp.profiles import BUILTIN_PROFILES
 
         assert BUILTIN_PROFILES["h100-spot"]["base_image"] == BASE_IMAGE_GPU
 
     def test_a100_spot_has_custom_gpu_image(self) -> None:
         """a100-spot profile should use custom GPU base image (with nvrtc for Flash Attention)."""
-        from goldfish.infra.profiles import BUILTIN_PROFILES
+        from goldfish.cloud.adapters.gcp.profiles import BUILTIN_PROFILES
 
         assert BUILTIN_PROFILES["a100-spot"]["base_image"] == BASE_IMAGE_GPU
 
     def test_all_profiles_have_base_image(self) -> None:
         """All built-in profiles should have a base_image set."""
-        from goldfish.infra.profiles import BUILTIN_PROFILES
+        from goldfish.cloud.adapters.gcp.profiles import BUILTIN_PROFILES
 
         for name, profile in BUILTIN_PROFILES.items():
             assert "base_image" in profile, f"Profile {name} missing base_image"

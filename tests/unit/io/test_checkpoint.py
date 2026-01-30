@@ -1,6 +1,6 @@
 """Tests for goldfish.io checkpoint functionality.
 
-Checkpoints provide immediate GCS upload for resume functionality,
+Checkpoints provide immediate storage upload for resume functionality,
 critical for preemptible/spot instances that can be terminated with ~30s notice.
 """
 
@@ -9,12 +9,27 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from goldfish.cloud.contracts import StorageURI
+
+
+def _create_mock_storage():
+    """Create a mock storage adapter."""
+    mock_storage = MagicMock()
+    mock_storage.put = MagicMock()
+    mock_storage.get = MagicMock(return_value=b"test data")
+    mock_storage.exists = MagicMock(return_value=True)
+    mock_storage.delete = MagicMock()
+    mock_storage.list_prefix = MagicMock(return_value=[])
+    mock_storage.download_to_file = MagicMock(return_value=True)
+    mock_storage.get_size = MagicMock(return_value=100)
+    return mock_storage
+
 
 class TestSaveCheckpoint:
     """Test save_checkpoint immediate upload."""
 
     def test_save_checkpoint_uploads_directory_to_gcs(self, tmp_path, monkeypatch):
-        """save_checkpoint should immediately upload directory to GCS."""
+        """save_checkpoint should immediately upload directory to storage."""
         from goldfish.io import save_checkpoint
 
         # Setup environment
@@ -30,20 +45,14 @@ class TestSaveCheckpoint:
         (ckpt_dir / "model.pt").write_bytes(b"fake model weights")
         (ckpt_dir / "optimizer.pt").write_bytes(b"fake optimizer state")
 
-        # Mock the GCS client
-        mock_blob = MagicMock()
-        mock_bucket = MagicMock()
-        mock_bucket.blob.return_value = mock_blob
-        mock_client = MagicMock()
-        mock_client.bucket.return_value = mock_bucket
+        # Mock the storage adapter
+        mock_storage = _create_mock_storage()
 
-        with patch("goldfish.io._get_gcs_client", return_value=mock_client):
+        with patch("goldfish.io._get_storage_adapter", return_value=mock_storage):
             save_checkpoint("model", ckpt_dir)
 
-            # Should have called bucket and blob for each file
-            mock_client.bucket.assert_called_with("my-bucket")
-            # Should upload both files
-            assert mock_blob.upload_from_filename.call_count == 2
+            # Should have called put for each file
+            assert mock_storage.put.call_count == 2
 
     def test_save_checkpoint_uploads_file_to_gcs(self, tmp_path, monkeypatch):
         """save_checkpoint should handle single file upload."""
@@ -59,20 +68,17 @@ class TestSaveCheckpoint:
         ckpt_file = tmp_path / "checkpoint.pt"
         ckpt_file.write_bytes(b"checkpoint data")
 
-        mock_blob = MagicMock()
-        mock_bucket = MagicMock()
-        mock_bucket.blob.return_value = mock_blob
-        mock_client = MagicMock()
-        mock_client.bucket.return_value = mock_bucket
+        mock_storage = _create_mock_storage()
 
-        with patch("goldfish.io._get_gcs_client", return_value=mock_client):
+        with patch("goldfish.io._get_storage_adapter", return_value=mock_storage):
             save_checkpoint("latest", ckpt_file)
 
-            mock_client.bucket.assert_called_with("my-bucket")
-            mock_bucket.blob.assert_called_once()
-            blob_path = mock_bucket.blob.call_args[0][0]
-            assert "checkpoints/stage-abc123/latest" in blob_path
-            mock_blob.upload_from_filename.assert_called_once()
+            mock_storage.put.assert_called_once()
+            # Verify the URI contains the expected path
+            call_args = mock_storage.put.call_args[0]
+            uri = call_args[0]
+            assert isinstance(uri, StorageURI)
+            assert "checkpoints/stage-abc123/latest" in uri.path
 
     def test_save_checkpoint_with_step_creates_versioned_path(self, tmp_path, monkeypatch):
         """save_checkpoint with step should create versioned checkpoint path."""
@@ -88,18 +94,15 @@ class TestSaveCheckpoint:
         ckpt_dir.mkdir()
         (ckpt_dir / "model.pt").write_bytes(b"weights")
 
-        mock_blob = MagicMock()
-        mock_bucket = MagicMock()
-        mock_bucket.blob.return_value = mock_blob
-        mock_client = MagicMock()
-        mock_client.bucket.return_value = mock_bucket
+        mock_storage = _create_mock_storage()
 
-        with patch("goldfish.io._get_gcs_client", return_value=mock_client):
+        with patch("goldfish.io._get_storage_adapter", return_value=mock_storage):
             save_checkpoint("model", ckpt_dir, step=1000)
 
             # Should include step in path
-            blob_path = mock_bucket.blob.call_args[0][0]
-            assert "step_1000" in blob_path
+            call_args = mock_storage.put.call_args[0]
+            uri = call_args[0]
+            assert "step_1000" in uri.path
 
     def test_save_checkpoint_raises_without_gcs_bucket(self, tmp_path, monkeypatch):
         """save_checkpoint should raise if GCS bucket not configured."""
@@ -118,7 +121,7 @@ class TestSaveCheckpoint:
             save_checkpoint("model", ckpt_file)
 
     def test_save_checkpoint_raises_on_upload_failure(self, tmp_path, monkeypatch):
-        """save_checkpoint should raise on GCS upload failure."""
+        """save_checkpoint should raise on storage upload failure."""
         from goldfish.io import save_checkpoint
 
         outputs_dir = tmp_path / "outputs"
@@ -130,14 +133,10 @@ class TestSaveCheckpoint:
         ckpt_file = tmp_path / "checkpoint.pt"
         ckpt_file.write_bytes(b"data")
 
-        mock_blob = MagicMock()
-        mock_blob.upload_from_filename.side_effect = Exception("Access denied")
-        mock_bucket = MagicMock()
-        mock_bucket.blob.return_value = mock_blob
-        mock_client = MagicMock()
-        mock_client.bucket.return_value = mock_bucket
+        mock_storage = _create_mock_storage()
+        mock_storage.put.side_effect = Exception("Access denied")
 
-        with patch("goldfish.io._get_gcs_client", return_value=mock_client):
+        with patch("goldfish.io._get_storage_adapter", return_value=mock_storage):
             with pytest.raises(RuntimeError, match="Checkpoint upload failed"):
                 save_checkpoint("model", ckpt_file)
 
@@ -156,26 +155,23 @@ class TestSaveCheckpoint:
 
         weights = np.random.randn(100, 100)
 
-        mock_blob = MagicMock()
-        mock_bucket = MagicMock()
-        mock_bucket.blob.return_value = mock_blob
-        mock_client = MagicMock()
-        mock_client.bucket.return_value = mock_bucket
+        mock_storage = _create_mock_storage()
 
-        with patch("goldfish.io._get_gcs_client", return_value=mock_client):
+        with patch("goldfish.io._get_storage_adapter", return_value=mock_storage):
             save_checkpoint("weights", weights)
 
             # Should have uploaded as .npy file
-            blob_path = mock_bucket.blob.call_args[0][0]
-            assert "weights.npy" in blob_path
-            mock_blob.upload_from_filename.assert_called_once()
+            call_args = mock_storage.put.call_args[0]
+            uri = call_args[0]
+            assert "weights.npy" in uri.path
+            mock_storage.put.assert_called_once()
 
 
 class TestLoadCheckpoint:
     """Test load_checkpoint for resume functionality."""
 
     def test_load_checkpoint_downloads_from_gcs(self, tmp_path, monkeypatch):
-        """load_checkpoint should download checkpoint from GCS."""
+        """load_checkpoint should download checkpoint from storage."""
         from goldfish.io import load_checkpoint
 
         outputs_dir = tmp_path / "outputs"
@@ -184,26 +180,19 @@ class TestLoadCheckpoint:
         monkeypatch.setenv("GOLDFISH_RUN_ID", "stage-abc123")
         monkeypatch.setenv("GOLDFISH_GCS_BUCKET", "gs://my-bucket")
 
-        def mock_download(local_path):
-            Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-            Path(local_path).write_bytes(b"checkpoint data")
+        mock_storage = _create_mock_storage()
+        mock_storage.exists.return_value = True
+        mock_storage.get.return_value = b"checkpoint data"
 
-        mock_blob = MagicMock()
-        mock_blob.exists.return_value = True
-        mock_blob.download_to_filename.side_effect = mock_download
-        mock_bucket = MagicMock()
-        mock_bucket.blob.return_value = mock_blob
-        mock_client = MagicMock()
-        mock_client.bucket.return_value = mock_bucket
-
-        with patch("goldfish.io._get_gcs_client", return_value=mock_client):
+        with patch("goldfish.io._get_storage_adapter", return_value=mock_storage):
             result = load_checkpoint("model")
 
             assert result is not None
             assert isinstance(result, Path)
-            # exists may be called multiple times (file check + directory check)
-            assert mock_blob.exists.call_count >= 1
-            mock_blob.download_to_filename.assert_called_once()
+            # exists is called to check if file exists
+            assert mock_storage.exists.call_count >= 1
+            # get is called to download the data
+            mock_storage.get.assert_called_once()
 
     def test_load_checkpoint_with_step(self, tmp_path, monkeypatch):
         """load_checkpoint with step should load specific version."""
@@ -215,24 +204,22 @@ class TestLoadCheckpoint:
         monkeypatch.setenv("GOLDFISH_RUN_ID", "stage-abc123")
         monkeypatch.setenv("GOLDFISH_GCS_BUCKET", "gs://my-bucket")
 
-        def mock_download(local_path):
+        def mock_download(uri, local_path):
             Path(local_path).parent.mkdir(parents=True, exist_ok=True)
             Path(local_path).write_bytes(b"checkpoint data")
+            return True
 
-        mock_blob = MagicMock()
-        mock_blob.exists.return_value = True
-        mock_blob.download_to_filename.side_effect = mock_download
-        mock_bucket = MagicMock()
-        mock_bucket.blob.return_value = mock_blob
-        mock_client = MagicMock()
-        mock_client.bucket.return_value = mock_bucket
+        mock_storage = _create_mock_storage()
+        mock_storage.exists.return_value = True
+        mock_storage.download_to_file.side_effect = mock_download
 
-        with patch("goldfish.io._get_gcs_client", return_value=mock_client):
+        with patch("goldfish.io._get_storage_adapter", return_value=mock_storage):
             load_checkpoint("model", step=1000)
 
-            # Verify blob was created with step path
-            blob_path = mock_bucket.blob.call_args[0][0]
-            assert "step_1000" in blob_path
+            # Verify exists was called with step path
+            call_args = mock_storage.exists.call_args_list[0][0]
+            uri = call_args[0]
+            assert "step_1000" in uri.path
 
     def test_load_checkpoint_returns_none_if_not_found(self, tmp_path, monkeypatch):
         """load_checkpoint should return None if checkpoint doesn't exist."""
@@ -244,14 +231,11 @@ class TestLoadCheckpoint:
         monkeypatch.setenv("GOLDFISH_RUN_ID", "stage-abc123")
         monkeypatch.setenv("GOLDFISH_GCS_BUCKET", "gs://my-bucket")
 
-        mock_blob = MagicMock()
-        mock_blob.exists.return_value = False
-        mock_bucket = MagicMock()
-        mock_bucket.blob.return_value = mock_blob
-        mock_client = MagicMock()
-        mock_client.bucket.return_value = mock_bucket
+        mock_storage = _create_mock_storage()
+        mock_storage.exists.return_value = False
+        mock_storage.list_prefix.return_value = []
 
-        with patch("goldfish.io._get_gcs_client", return_value=mock_client):
+        with patch("goldfish.io._get_storage_adapter", return_value=mock_storage):
             result = load_checkpoint("nonexistent")
 
             assert result is None
@@ -266,25 +250,23 @@ class TestLoadCheckpoint:
         monkeypatch.setenv("GOLDFISH_RUN_ID", "stage-new123")
         monkeypatch.setenv("GOLDFISH_GCS_BUCKET", "gs://my-bucket")
 
-        def mock_download(local_path):
+        def mock_download(uri, local_path):
             Path(local_path).parent.mkdir(parents=True, exist_ok=True)
             Path(local_path).write_bytes(b"checkpoint data")
+            return True
 
-        mock_blob = MagicMock()
-        mock_blob.exists.return_value = True
-        mock_blob.download_to_filename.side_effect = mock_download
-        mock_bucket = MagicMock()
-        mock_bucket.blob.return_value = mock_blob
-        mock_client = MagicMock()
-        mock_client.bucket.return_value = mock_bucket
+        mock_storage = _create_mock_storage()
+        mock_storage.exists.return_value = True
+        mock_storage.download_to_file.side_effect = mock_download
 
-        with patch("goldfish.io._get_gcs_client", return_value=mock_client):
+        with patch("goldfish.io._get_storage_adapter", return_value=mock_storage):
             load_checkpoint("model", run_id="stage-old456")
 
             # Should use the specified run_id, not current
-            blob_path = mock_bucket.blob.call_args[0][0]
-            assert "stage-old456" in blob_path
-            assert "stage-new123" not in blob_path
+            call_args = mock_storage.exists.call_args_list[0][0]
+            uri = call_args[0]
+            assert "stage-old456" in uri.path
+            assert "stage-new123" not in uri.path
 
 
 class TestListCheckpoints:
@@ -297,22 +279,18 @@ class TestListCheckpoints:
         monkeypatch.setenv("GOLDFISH_RUN_ID", "stage-abc123")
         monkeypatch.setenv("GOLDFISH_GCS_BUCKET", "gs://my-bucket")
 
-        # Create mock blobs
-        mock_blobs = [
-            MagicMock(name="checkpoints/stage-abc123/model/model.pt"),
-            MagicMock(name="checkpoints/stage-abc123/model/step_1000/model.pt"),
-            MagicMock(name="checkpoints/stage-abc123/model/step_2000/model.pt"),
-            MagicMock(name="checkpoints/stage-abc123/optimizer/optimizer.pt"),
+        # Create mock URIs
+        mock_uris = [
+            StorageURI("gs", "my-bucket", "checkpoints/stage-abc123/model/model.pt"),
+            StorageURI("gs", "my-bucket", "checkpoints/stage-abc123/model/step_1000/model.pt"),
+            StorageURI("gs", "my-bucket", "checkpoints/stage-abc123/model/step_2000/model.pt"),
+            StorageURI("gs", "my-bucket", "checkpoints/stage-abc123/optimizer/optimizer.pt"),
         ]
-        for blob in mock_blobs:
-            blob.name = blob._mock_name
 
-        mock_bucket = MagicMock()
-        mock_bucket.list_blobs.return_value = mock_blobs
-        mock_client = MagicMock()
-        mock_client.bucket.return_value = mock_bucket
+        mock_storage = _create_mock_storage()
+        mock_storage.list_prefix.return_value = mock_uris
 
-        with patch("goldfish.io._get_gcs_client", return_value=mock_client):
+        with patch("goldfish.io._get_storage_adapter", return_value=mock_storage):
             result = list_checkpoints()
 
             assert "model" in result
@@ -327,12 +305,10 @@ class TestListCheckpoints:
         monkeypatch.setenv("GOLDFISH_RUN_ID", "stage-abc123")
         monkeypatch.setenv("GOLDFISH_GCS_BUCKET", "gs://my-bucket")
 
-        mock_bucket = MagicMock()
-        mock_bucket.list_blobs.return_value = []
-        mock_client = MagicMock()
-        mock_client.bucket.return_value = mock_bucket
+        mock_storage = _create_mock_storage()
+        mock_storage.list_prefix.return_value = []
 
-        with patch("goldfish.io._get_gcs_client", return_value=mock_client):
+        with patch("goldfish.io._get_storage_adapter", return_value=mock_storage):
             result = list_checkpoints()
 
             assert result == {}
@@ -362,7 +338,7 @@ class TestCheckpointLocalFallback:
         assert local_ckpt.exists()
 
     def test_load_checkpoint_local_fallback(self, tmp_path, monkeypatch):
-        """load_checkpoint should check local first, then GCS."""
+        """load_checkpoint should check local first, then storage."""
         from goldfish.io import load_checkpoint
 
         outputs_dir = tmp_path / "outputs"

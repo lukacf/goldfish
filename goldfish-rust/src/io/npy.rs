@@ -178,7 +178,7 @@ fn read_npy_header_with_context<R: Read + Seek>(reader: &mut R, context: PathBuf
 }
 
 /// Parse dtype from header string with path context for errors.
-fn parse_dtype_with_context(header: &str, context: &PathBuf) -> Result<(String, Endian)> {
+fn parse_dtype_with_context(header: &str, context: &Path) -> Result<(String, Endian)> {
     // Look for 'descr': '<dtype>' or 'descr': '<dtype>'
     let descr_patterns = [
         "'descr': '",
@@ -225,13 +225,13 @@ fn parse_dtype_with_context(header: &str, context: &PathBuf) -> Result<(String, 
     }
 
     Err(GoldfishError::Io(IoError::NpyError {
-        path: context.clone(),
+        path: context.to_path_buf(),
         message: format!("Could not parse dtype from header: {}", header),
     }))
 }
 
 /// Normalize dtype string and infer endianness.
-fn normalize_dtype_with_endian(dtype_str: &str, context: &PathBuf) -> Result<(String, Endian)> {
+fn normalize_dtype_with_endian(dtype_str: &str, context: &Path) -> Result<(String, Endian)> {
     let endian = match dtype_str.chars().next() {
         Some('>') => Endian::Big,
         Some('<') => Endian::Little,
@@ -257,7 +257,7 @@ fn normalize_dtype_with_endian(dtype_str: &str, context: &PathBuf) -> Result<(St
 }
 
 /// Normalize dtype string by removing byte order prefix.
-fn normalize_dtype_with_context(dtype_str: &str, context: &PathBuf) -> Result<String> {
+fn normalize_dtype_with_context(dtype_str: &str, context: &Path) -> Result<String> {
     let normalized = dtype_str
         .trim_start_matches(['<', '>', '|', '='])
         .to_string();
@@ -267,14 +267,14 @@ fn normalize_dtype_with_context(dtype_str: &str, context: &PathBuf) -> Result<St
         "f4" | "f8" | "f2" | "f16" | "i4" | "i8" | "i2" | "i1" | "u4" | "u8" | "u2" | "u1"
         | "b1" | "?" => Ok(normalized),
         _ => Err(GoldfishError::Io(IoError::NpyError {
-            path: context.clone(),
+            path: context.to_path_buf(),
             message: format!("Unsupported dtype: {}", dtype_str),
         })),
     }
 }
 
 /// Get word size for dtype with path context for errors.
-fn dtype_to_word_size_with_context(dtype: &str, context: &PathBuf) -> Result<usize> {
+fn dtype_to_word_size_with_context(dtype: &str, context: &Path) -> Result<usize> {
     match dtype {
         "f8" | "i8" | "u8" => Ok(8),
         "f4" | "i4" | "u4" => Ok(4),
@@ -282,14 +282,14 @@ fn dtype_to_word_size_with_context(dtype: &str, context: &PathBuf) -> Result<usi
         "f16" => Ok(2),
         "i1" | "u1" | "b1" | "?" => Ok(1),
         _ => Err(GoldfishError::Io(IoError::NpyError {
-            path: context.clone(),
+            path: context.to_path_buf(),
             message: format!("Unknown dtype word size: {}", dtype),
         })),
     }
 }
 
 /// Parse shape from header string with path context for errors.
-fn parse_shape_with_context(header: &str, context: &PathBuf) -> Result<Vec<usize>> {
+fn parse_shape_with_context(header: &str, context: &Path) -> Result<Vec<usize>> {
     // Look for 'shape': (...)
     let shape_patterns = ["'shape': (", "'shape':(", "\"shape\": (", "\"shape\":("];
 
@@ -308,7 +308,7 @@ fn parse_shape_with_context(header: &str, context: &PathBuf) -> Result<Vec<usize
 }
 
 /// Parse a shape tuple like "10, 20, 30" or "100," (1D).
-fn parse_shape_tuple_with_context(s: &str, context: &PathBuf) -> Result<Vec<usize>> {
+fn parse_shape_tuple_with_context(s: &str, context: &Path) -> Result<Vec<usize>> {
     let mut dims = Vec::new();
 
     for part in s.split(',') {
@@ -316,7 +316,7 @@ fn parse_shape_tuple_with_context(s: &str, context: &PathBuf) -> Result<Vec<usiz
         if !trimmed.is_empty() {
             let dim: usize = trimmed.parse().map_err(|_| {
                 GoldfishError::Io(IoError::NpyError {
-                    path: context.clone(),
+                    path: context.to_path_buf(),
                     message: format!("Invalid shape dimension: {}", trimmed),
                 })
             })?;
@@ -753,22 +753,22 @@ pub fn read_sample_at_index<R: Read + Seek>(
 // Test helper wrappers (use empty path context for test convenience)
 #[cfg(test)]
 fn parse_dtype(header: &str) -> Result<String> {
-    parse_dtype_with_context(header, &PathBuf::new()).map(|(dtype, _)| dtype)
+    parse_dtype_with_context(header, Path::new("")).map(|(dtype, _)| dtype)
 }
 
 #[cfg(test)]
 fn parse_shape(header: &str) -> Result<Vec<usize>> {
-    parse_shape_with_context(header, &PathBuf::new())
+    parse_shape_with_context(header, Path::new(""))
 }
 
 #[cfg(test)]
 fn normalize_dtype(dtype_str: &str) -> Result<String> {
-    normalize_dtype_with_context(dtype_str, &PathBuf::new())
+    normalize_dtype_with_context(dtype_str, Path::new(""))
 }
 
 #[cfg(test)]
 fn dtype_to_word_size(dtype: &str) -> Result<usize> {
-    dtype_to_word_size_with_context(dtype, &PathBuf::new())
+    dtype_to_word_size_with_context(dtype, Path::new(""))
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 """Unit tests for Pre-Run Review context enhancements."""
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -57,28 +57,29 @@ def test_format_input_resolution_truncates_contents(reviewer):
     assert "... (10 more items)" in formatted
 
 
-@patch("goldfish.jobs.stage_executor.subprocess.run")
-def test_stage_executor_list_storage_contents_gsutil(mock_run):
-    """Test _list_storage_contents with gsutil fallback."""
+def test_stage_executor_list_storage_contents_cloud():
+    """Test _list_storage_contents with cloud storage adapter."""
+    from goldfish.cloud.contracts import StorageURI
+
     # Setup mock
     mock_executor = MagicMock(spec=StageExecutor)
     # Bind the method from the class to the mock instance
     mock_executor._list_storage_contents = StageExecutor._list_storage_contents.__get__(mock_executor, StageExecutor)
-    # Mock _get_gcs_client to return None (triggering gsutil fallback)
-    mock_executor._get_gcs_client = MagicMock(return_value=(None, "error"))
 
-    # Mock subprocess result
-    mock_run.return_value = MagicMock(
-        returncode=0, stdout="gs://bucket/path/file1.txt\ngs://bucket/path/subdir/file2.txt\n"
+    # Mock storage property to return a mock storage adapter
+    mock_storage = MagicMock()
+    mock_storage.list_prefix = MagicMock(
+        return_value=[
+            StorageURI("gs", "bucket", "path/file1.txt"),
+            StorageURI("gs", "bucket", "path/subdir/file2.txt"),
+        ]
     )
+    type(mock_executor).storage = property(lambda self: mock_storage)
 
     results = mock_executor._list_storage_contents("gs://bucket/path/")
 
     assert results == ["file1.txt", "subdir/file2.txt"]
-    mock_run.assert_called_once()
-    cmd = mock_run.call_args[0][0]
-    assert cmd[:3] == ["gsutil", "ls", "-r"]
-    assert cmd[3] == "gs://bucket/path/"
+    mock_storage.list_prefix.assert_called_once()
 
 
 def test_stage_executor_list_storage_contents_local():

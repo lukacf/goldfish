@@ -262,15 +262,15 @@ class TestVerifyInstanceStopped:
     """Tests for verify_instance_stopped() function."""
 
     def test_gce_instance_not_found_returns_true(self) -> None:
-        """GCE instance not found must return True (confirmed dead).
-
-        With `instances list --filter`, empty output means not found in any zone.
-        """
+        """GCE instance not found must return True (confirmed dead)."""
         from goldfish.state_machine.event_emission import verify_instance_stopped
 
-        with patch("subprocess.run") as mock_run:
-            # Empty output = instance doesn't exist anywhere
-            mock_run.return_value = MagicMock(stdout="", returncode=0)
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            from goldfish.errors import NotFoundError
+
+            mock_backend = MagicMock()
+            mock_backend.get_status.side_effect = NotFoundError("instance:instance-123")
+            mock_factory.return_value = mock_backend
 
             result = verify_instance_stopped(
                 run_id="stage-123",
@@ -279,14 +279,18 @@ class TestVerifyInstanceStopped:
                 project_id="test-project",
             )
 
-            assert result is True
+        assert result is True
 
     def test_gce_instance_running_returns_false(self) -> None:
         """GCE instance RUNNING must return False."""
         from goldfish.state_machine.event_emission import verify_instance_stopped
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="RUNNING\n", returncode=0)
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            from goldfish.cloud.contracts import BackendStatus, RunStatus
+
+            mock_backend = MagicMock()
+            mock_backend.get_status.return_value = BackendStatus(status=RunStatus.RUNNING)
+            mock_factory.return_value = mock_backend
 
             result = verify_instance_stopped(
                 run_id="stage-123",
@@ -295,14 +299,18 @@ class TestVerifyInstanceStopped:
                 project_id="test-project",
             )
 
-            assert result is False
+        assert result is False
 
     def test_gce_instance_terminated_returns_true(self) -> None:
         """GCE instance TERMINATED must return True."""
         from goldfish.state_machine.event_emission import verify_instance_stopped
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="TERMINATED\n", returncode=0)
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            from goldfish.cloud.contracts import BackendStatus, RunStatus
+
+            mock_backend = MagicMock()
+            mock_backend.get_status.return_value = BackendStatus(status=RunStatus.TERMINATED)
+            mock_factory.return_value = mock_backend
 
             result = verify_instance_stopped(
                 run_id="stage-123",
@@ -311,18 +319,18 @@ class TestVerifyInstanceStopped:
                 project_id="test-project",
             )
 
-            assert result is True
+        assert result is True
 
     def test_docker_container_not_found_returns_true(self) -> None:
         """Docker container not found must return True."""
         from goldfish.state_machine.event_emission import verify_instance_stopped
 
-        with patch("subprocess.run") as mock_run:
-            import subprocess
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            from goldfish.errors import NotFoundError
 
-            error = subprocess.CalledProcessError(1, "docker")
-            error.stderr = "No such container"
-            mock_run.side_effect = error
+            mock_backend = MagicMock()
+            mock_backend.get_status.side_effect = NotFoundError("container:container-123")
+            mock_factory.return_value = mock_backend
 
             result = verify_instance_stopped(
                 run_id="stage-123",
@@ -330,14 +338,18 @@ class TestVerifyInstanceStopped:
                 backend_handle="container-123",
             )
 
-            assert result is True
+        assert result is True
 
     def test_docker_container_running_returns_false(self) -> None:
         """Docker container running must return False."""
         from goldfish.state_machine.event_emission import verify_instance_stopped
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="running\n", returncode=0)
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            from goldfish.cloud.contracts import BackendStatus, RunStatus
+
+            mock_backend = MagicMock()
+            mock_backend.get_status.return_value = BackendStatus(status=RunStatus.RUNNING)
+            mock_factory.return_value = mock_backend
 
             result = verify_instance_stopped(
                 run_id="stage-123",
@@ -345,14 +357,18 @@ class TestVerifyInstanceStopped:
                 backend_handle="container-123",
             )
 
-            assert result is False
+        assert result is False
 
     def test_docker_container_exited_returns_true(self) -> None:
         """Docker container exited must return True."""
         from goldfish.state_machine.event_emission import verify_instance_stopped
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="exited\n", returncode=0)
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            from goldfish.cloud.contracts import BackendStatus, RunStatus
+
+            mock_backend = MagicMock()
+            mock_backend.get_status.return_value = BackendStatus(status=RunStatus.COMPLETED)
+            mock_factory.return_value = mock_backend
 
             result = verify_instance_stopped(
                 run_id="stage-123",
@@ -360,23 +376,26 @@ class TestVerifyInstanceStopped:
                 backend_handle="container-123",
             )
 
-            assert result is True
+        assert result is True
 
 
 class TestDetectTerminationCause:
     """Tests for detect_termination_cause() function."""
 
     def test_gce_preemption_detected(self) -> None:
-        """GCE preemption must be detected via operations API."""
+        """GCE preemption must be detected via backend status."""
         from goldfish.state_machine.event_emission import detect_termination_cause
         from goldfish.state_machine.types import TerminationCause
 
-        with patch("subprocess.run") as mock_run:
-            # Return preemption operation
-            mock_run.return_value = MagicMock(
-                stdout='[{"operationType": "compute.instances.preempted"}]',
-                returncode=0,
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            from goldfish.cloud.contracts import BackendStatus, RunStatus
+
+            mock_backend = MagicMock()
+            mock_backend.get_status.return_value = BackendStatus(
+                status=RunStatus.TERMINATED,
+                termination_cause="preemption",
             )
+            mock_factory.return_value = mock_backend
 
             result = detect_termination_cause(
                 run_id="stage-123",
@@ -385,16 +404,19 @@ class TestDetectTerminationCause:
                 project_id="test-project",
             )
 
-            assert result == TerminationCause.PREEMPTED
+        assert result == TerminationCause.PREEMPTED
 
     def test_gce_no_preemption_returns_crashed(self) -> None:
         """GCE instance stopped without preemption must return CRASHED."""
         from goldfish.state_machine.event_emission import detect_termination_cause
         from goldfish.state_machine.types import TerminationCause
 
-        with patch("subprocess.run") as mock_run:
-            # Return no preemption operations
-            mock_run.return_value = MagicMock(stdout="[]", returncode=0)
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            from goldfish.cloud.contracts import BackendStatus, RunStatus
+
+            mock_backend = MagicMock()
+            mock_backend.get_status.return_value = BackendStatus(status=RunStatus.TERMINATED)
+            mock_factory.return_value = mock_backend
 
             result = detect_termination_cause(
                 run_id="stage-123",
@@ -403,15 +425,22 @@ class TestDetectTerminationCause:
                 project_id="test-project",
             )
 
-            assert result == TerminationCause.CRASHED
+        assert result == TerminationCause.CRASHED
 
     def test_docker_oom_returns_crashed(self) -> None:
         """Docker OOM kill must return CRASHED."""
         from goldfish.state_machine.event_emission import detect_termination_cause
         from goldfish.state_machine.types import TerminationCause
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="true\n", returncode=0)
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            from goldfish.cloud.contracts import BackendStatus, RunStatus
+
+            mock_backend = MagicMock()
+            mock_backend.get_status.return_value = BackendStatus(
+                status=RunStatus.TERMINATED,
+                termination_cause="oom",
+            )
+            mock_factory.return_value = mock_backend
 
             result = detect_termination_cause(
                 run_id="stage-123",
@@ -419,15 +448,19 @@ class TestDetectTerminationCause:
                 backend_handle="container-123",
             )
 
-            assert result == TerminationCause.CRASHED
+        assert result == TerminationCause.CRASHED
 
     def test_docker_no_oom_returns_orphaned(self) -> None:
         """Docker container stopped without OOM must return ORPHANED."""
         from goldfish.state_machine.event_emission import detect_termination_cause
         from goldfish.state_machine.types import TerminationCause
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="false\n", returncode=0)
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            from goldfish.cloud.contracts import BackendStatus, RunStatus
+
+            mock_backend = MagicMock()
+            mock_backend.get_status.return_value = BackendStatus(status=RunStatus.TERMINATED)
+            mock_factory.return_value = mock_backend
 
             result = detect_termination_cause(
                 run_id="stage-123",
@@ -435,16 +468,18 @@ class TestDetectTerminationCause:
                 backend_handle="container-123",
             )
 
-            # Without OOM, we can't be sure why it stopped
-            assert result == TerminationCause.ORPHANED
+        # Without OOM, we can't be sure why it stopped
+        assert result == TerminationCause.ORPHANED
 
     def test_api_error_returns_orphaned(self) -> None:
         """API error must return ORPHANED (can't determine cause)."""
         from goldfish.state_machine.event_emission import detect_termination_cause
         from goldfish.state_machine.types import TerminationCause
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = Exception("API error")
+        with patch("goldfish.cloud.factory.create_backend_for_cleanup") as mock_factory:
+            mock_backend = MagicMock()
+            mock_backend.get_status.side_effect = Exception("API error")
+            mock_factory.return_value = mock_backend
 
             result = detect_termination_cause(
                 run_id="stage-123",
@@ -453,8 +488,8 @@ class TestDetectTerminationCause:
                 project_id="test-project",
             )
 
-            # When we can't determine the cause, default to ORPHANED
-            assert result == TerminationCause.ORPHANED
+        # When we can't determine the cause, default to ORPHANED
+        assert result == TerminationCause.ORPHANED
 
 
 class TestEventContextCreation:
@@ -495,7 +530,7 @@ class TestInstanceLostEvent:
     def test_instance_lost_when_instance_disappeared(self) -> None:
         """INSTANCE_LOST must be emitted when instance disappears unexpectedly.
 
-        With `instances list --filter`, empty output means not found in any zone.
+        This should only happen once the backend instance is confirmed dead.
         """
         from goldfish.state_machine.event_emission import determine_instance_event
         from goldfish.state_machine.types import StageEvent, StageState
@@ -507,15 +542,19 @@ class TestInstanceLostEvent:
             "backend_handle": "instance-123",
         }
 
-        with patch("subprocess.run") as mock_run:
-            # Empty output = instance doesn't exist anywhere
-            mock_run.return_value = MagicMock(stdout="", returncode=0)
+        with (
+            patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify,
+            patch("goldfish.state_machine.event_emission.detect_termination_cause") as mock_cause,
+        ):
+            from goldfish.state_machine.types import TerminationCause
 
+            mock_verify.return_value = True
+            mock_cause.return_value = TerminationCause.ORPHANED
             result = determine_instance_event(run, project_id="test-project")
 
-            assert result is not None
-            event, _ = result
-            assert event == StageEvent.INSTANCE_LOST
+        assert result is not None
+        event, _ = result
+        assert event == StageEvent.INSTANCE_LOST
 
     def test_instance_still_running_returns_none(self) -> None:
         """No event when instance is still running normally."""
@@ -529,12 +568,11 @@ class TestInstanceLostEvent:
             "backend_handle": "instance-123",
         }
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="RUNNING\n", returncode=0)
-
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            mock_verify.return_value = False
             result = determine_instance_event(run, project_id="test-project")
 
-            assert result is None  # No event, instance is fine
+        assert result is None  # No event, instance is fine
 
     def test_preparing_state_never_emits_instance_lost(self) -> None:
         """REGRESSION: PREPARING state must never emit INSTANCE_LOST.
@@ -587,24 +625,11 @@ class TestInstanceLostEvent:
             assert result is None
             mock_verify.assert_not_called()
 
-    def test_launching_state_never_emits_instance_lost(self) -> None:
-        """REGRESSION: LAUNCHING state must never emit INSTANCE_LOST.
+    def test_launching_state_without_handle_does_not_emit_instance_lost(self) -> None:
+        """LAUNCHING state without backend_handle should not emit INSTANCE_LOST.
 
-        This is a critical timing fix. The daemon polls every 2 seconds, but
-        instance creation (especially GCE) takes 5+ seconds. During LAUNCHING,
-        the instance might not be visible to the API yet - it's being created
-        asynchronously.
-
-        The executor emits LAUNCH_OK after verifying the instance is ready.
-        Until then, checking instance status would incorrectly report "not found"
-        and trigger a spurious INSTANCE_LOST event.
-
-        Bug scenario:
-        1. T+0s: Run enters LAUNCHING state, instance creation begins
-        2. T+2s: Daemon polls, instance not visible yet → wrongly emits INSTANCE_LOST
-        3. T+5s: Instance becomes ready, but run is already TERMINATED
-
-        Fix: Exclude LAUNCHING from instance checks (like PREPARING and BUILDING).
+        Early in LAUNCHING, before the instance is created, backend_handle is None.
+        The function should return None without checking instance status.
         """
         from goldfish.state_machine.event_emission import determine_instance_event
         from goldfish.state_machine.types import StageState
@@ -613,7 +638,7 @@ class TestInstanceLostEvent:
             "id": "stage-123",
             "state": StageState.LAUNCHING.value,
             "backend_type": "gce",
-            "backend_handle": "instance-123",
+            "backend_handle": None,  # No handle yet
         }
 
         with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
@@ -623,6 +648,44 @@ class TestInstanceLostEvent:
 
             assert result is None  # Must not emit any event
             mock_verify.assert_not_called()  # Must not even check instance status
+
+    def test_launching_state_with_handle_can_detect_preemption(self) -> None:
+        """REGRESSION: LAUNCHING state with backend_handle should detect preemption.
+
+        Bug: Preemption during LAUNCHING (after instance created, before ACK) was
+        not detected. The run would timeout after 20 minutes instead of properly
+        reporting preemption.
+
+        Fix: Allow LAUNCHING to check instance status if backend_handle exists.
+        If the instance was created and then preempted, we should detect it.
+        """
+        from goldfish.state_machine.event_emission import determine_instance_event
+        from goldfish.state_machine.types import StageEvent, StageState
+
+        run = {
+            "id": "stage-123",
+            "state": StageState.LAUNCHING.value,
+            "backend_type": "gce",
+            "backend_handle": "instance-123",  # Handle exists - instance was created
+        }
+
+        with (
+            patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify,
+            patch("goldfish.state_machine.event_emission.detect_termination_cause") as mock_detect,
+        ):
+            from goldfish.state_machine.types import TerminationCause
+
+            mock_verify.return_value = True  # Instance is stopped
+            mock_detect.return_value = TerminationCause.PREEMPTED
+
+            result = determine_instance_event(run, project_id="test-project")
+
+            assert result is not None
+            event, context = result
+            assert event == StageEvent.INSTANCE_LOST
+            assert context.termination_cause == TerminationCause.PREEMPTED
+            mock_verify.assert_called_once()
+            mock_detect.assert_called_once()
 
     def test_awaiting_user_finalization_state_never_emits_instance_lost(self) -> None:
         """AWAITING_USER_FINALIZATION state must never emit INSTANCE_LOST.
@@ -826,6 +889,25 @@ class TestAIStopDetection:
 
             assert result is None
 
+    def test_check_ai_stop_requested_remote_with_storage(self) -> None:
+        """check_ai_stop_requested uses storage adapter for remote stop file."""
+        from goldfish.cloud.contracts import StorageURI
+        from goldfish.state_machine.event_emission import check_ai_stop_requested
+
+        storage = MagicMock()
+        storage.exists.return_value = True
+        bucket_uri = StorageURI("gs", "test-bucket", "")
+
+        run = {"id": "stage-123"}
+
+        result = check_ai_stop_requested(run, storage=storage, bucket_uri=bucket_uri)
+
+        assert result is not None
+        assert result["stop_requested"] is True
+        storage.exists.assert_called_once_with(
+            bucket_uri.join("runs", "stage-123", "outputs", ".goldfish", "stop_requested")
+        )
+
     def test_check_ai_stop_requested_looks_up_svs_review_id(self) -> None:
         """check_ai_stop_requested looks up svs_review_id from database."""
         import tempfile
@@ -891,7 +973,7 @@ class TestStateBasedInstanceChecks:
         states_skip_instance_check = {
             StageState.PREPARING,  # Code syncing, no instance
             StageState.BUILDING,  # Docker build, no instance
-            StageState.LAUNCHING,  # Instance being created async
+            # LAUNCHING: removed - now checks for preemption if backend_handle exists
             StageState.POST_RUN,  # Instance stopping is EXPECTED after exit
             StageState.AWAITING_USER_FINALIZATION,  # Instance may be cleaned up
             StageState.UNKNOWN,  # Can't assume anything
@@ -901,6 +983,7 @@ class TestStateBasedInstanceChecks:
         # These are states where an instance being lost is unexpected
         states_do_instance_check = {
             StageState.RUNNING,  # Instance must exist while code runs
+            StageState.LAUNCHING,  # Instance may be preempted before ACK
         }
 
         # Terminal states - no checks needed, run is done
@@ -1019,310 +1102,20 @@ class TestStateBasedInstanceChecks:
             mock_verify.assert_not_called()
 
 
-class TestGCEInstanceVerificationCommand:
-    """REGRESSION TESTS for GCE instance verification gcloud command syntax.
-
-    These tests ensure we use `gcloud compute instances list --filter=name=X`
-    instead of `gcloud compute instances describe X --zone=Z`.
-
-    THE BUG (Fixed 2025-01-18):
-    - The daemon used `instances describe` which requires --zone parameter
-    - Config has `zones` (plural, a list) but code looked for `zone` (singular)
-    - When zone was None, gcloud used default zone from gcloud config
-    - If default zone (e.g., europe-west1-b) != actual zone (e.g., us-central1-a),
-      gcloud returned "not found" and we incorrectly concluded instance was dead
-    - This killed healthy GPU runs at ~6-7 minutes (after daemon's first check)
-
-    THE FIX:
-    - Use `instances list --filter=name=X` which searches across ALL zones
-    - No zone parameter needed, no zone mismatch possible
-
-    These tests MUST verify the exact command structure to prevent regression.
-    """
-
-    def test_gce_verify_uses_instances_list_not_describe(self) -> None:
-        """CRITICAL: Must use 'instances list' NOT 'instances describe'.
-
-        The bug: `instances describe` requires the correct zone. When zone was
-        wrong (e.g., default gcloud zone instead of instance's actual zone),
-        the command returned "not found" and we incorrectly concluded the
-        instance was dead.
-
-        The fix: Use `instances list --filter=name=X` which searches all zones.
-        """
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
-
-            _verify_gce_instance_stopped("stage-abc123", "my-project")
-
-            # Verify the command structure
-            call_args = mock_run.call_args
-            cmd = call_args[0][0]
-
-            # CRITICAL assertions - these prevent the bug from recurring
-            assert "gcloud" in cmd
-            assert "compute" in cmd
-            assert "instances" in cmd
-            assert "list" in cmd
-            assert "--filter=name=stage-abc123" in cmd
-
-            # MUST NOT use describe
-            assert "describe" not in cmd
-
-    def test_gce_verify_filter_syntax_correct(self) -> None:
-        """Verify the gcloud filter syntax is correct for instance lookup."""
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="", returncode=0)
-
-            _verify_gce_instance_stopped("my-instance-name", "my-project")
-
-            cmd = mock_run.call_args[0][0]
-
-            # Filter must use exact syntax: --filter=name=<instance_name>
-            assert "--filter=name=my-instance-name" in cmd
-            # Output format should extract status only
-            assert "--format=value(status)" in cmd
-
-    def test_gce_verify_zone_parameter_ignored(self) -> None:
-        """REGRESSION: Zone parameter MUST be ignored (even if passed).
-
-        This is THE fix for the bug. Even if a zone is passed, we must NOT
-        use it in the command. Instead, we search all zones with `instances list`.
-        """
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
-
-            # Pass a zone - it MUST be ignored
-            _verify_gce_instance_stopped("stage-abc123", "my-project", zone="us-central1-a")
-
-            cmd = mock_run.call_args[0][0]
-
-            # CRITICAL: zone MUST NOT appear in command
-            assert "--zone" not in cmd
-            assert "us-central1-a" not in cmd
-
-    def test_gce_verify_project_id_passed_correctly(self) -> None:
-        """Project ID should be passed to gcloud command when provided."""
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
-
-            _verify_gce_instance_stopped("stage-abc123", "my-gcp-project")
-
-            cmd = mock_run.call_args[0][0]
-            assert "--project" in cmd
-            project_idx = cmd.index("--project")
-            assert cmd[project_idx + 1] == "my-gcp-project"
-
-    def test_gce_verify_no_project_flag_when_none(self) -> None:
-        """No --project flag when project_id is None."""
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
-
-            _verify_gce_instance_stopped("stage-abc123", None)
-
-            cmd = mock_run.call_args[0][0]
-            assert "--project" not in cmd
-
-    def test_gce_verify_empty_output_means_not_found(self) -> None:
-        """Empty output (instance not found anywhere) should return True.
-
-        With `instances list`, empty output means the instance doesn't exist
-        in any zone, which means it's definitely stopped/dead.
-        """
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="", returncode=0)
-
-            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
-
-            assert result is True  # Instance not found = confirmed dead
-
-    def test_gce_verify_running_returns_false(self) -> None:
-        """Instance with RUNNING status should return False (not stopped)."""
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
-
-            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
-
-            assert result is False
-
-    def test_gce_verify_staging_returns_false(self) -> None:
-        """Instance with STAGING status should return False (still starting)."""
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="STAGING", returncode=0)
-
-            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
-
-            assert result is False
-
-    def test_gce_verify_provisioning_returns_false(self) -> None:
-        """Instance with PROVISIONING status should return False (still starting)."""
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="PROVISIONING", returncode=0)
-
-            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
-
-            assert result is False
-
-    def test_gce_verify_terminated_returns_true(self) -> None:
-        """Instance with TERMINATED status should return True (stopped)."""
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="TERMINATED", returncode=0)
-
-            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
-
-            assert result is True
-
-    def test_gce_verify_stopped_returns_true(self) -> None:
-        """Instance with STOPPED status should return True."""
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="STOPPED", returncode=0)
-
-            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
-
-            assert result is True
-
-    def test_gce_verify_case_insensitive_status(self) -> None:
-        """Status comparison should be case-insensitive."""
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            # Lower case from gcloud
-            mock_run.return_value = MagicMock(stdout="running", returncode=0)
-
-            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
-
-            # Should still recognize as running
-            assert result is False
-
-    def test_gce_verify_whitespace_trimmed(self) -> None:
-        """Output should have whitespace trimmed."""
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="  RUNNING  \n", returncode=0)
-
-            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
-
-            assert result is False
-
-    def test_gce_verify_subprocess_error_returns_false(self) -> None:
-        """Subprocess errors should return False (assume still running).
-
-        CRITICAL: On errors, we return False (not stopped) to avoid
-        false positives that would terminate healthy runs.
-        """
-        import subprocess
-
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.CalledProcessError(1, "gcloud", stderr="Permission denied")
-
-            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
-
-            # On error, assume instance is still running (fail-safe)
-            assert result is False
-
-    def test_gce_verify_timeout_returns_false(self) -> None:
-        """Timeout should return False (assume still running)."""
-        import subprocess
-
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = subprocess.TimeoutExpired("gcloud", 30)
-
-            result = _verify_gce_instance_stopped("stage-abc123", "my-project")
-
-            assert result is False
-
-    def test_gce_verify_timeout_is_30_seconds(self) -> None:
-        """Subprocess timeout should be 30 seconds."""
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
-
-            _verify_gce_instance_stopped("stage-abc123", "my-project")
-
-            call_kwargs = mock_run.call_args[1]
-            assert call_kwargs.get("timeout") == 30
-
-    def test_gce_verify_full_command_structure(self) -> None:
-        """Verify the complete command structure matches expected format."""
-        from goldfish.state_machine.event_emission import _verify_gce_instance_stopped
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="RUNNING", returncode=0)
-
-            _verify_gce_instance_stopped("stage-test-123", "test-project-456")
-
-            cmd = mock_run.call_args[0][0]
-
-            # Verify complete command structure
-            expected_cmd = [
-                "gcloud",
-                "compute",
-                "instances",
-                "list",
-                "--filter=name=stage-test-123",
-                "--format=value(status)",
-                "--project",
-                "test-project-456",
-            ]
-            assert cmd == expected_cmd
-
-
 class TestExitCodeMetadataPrimary:
-    """REGRESSION TESTS for exit code retrieval via instance metadata (PRIMARY).
+    """REGRESSION TESTS for exit code signaling.
 
-    THE DESIGN (2026-01-19):
-    - Instance metadata is the PRIMARY channel for exit code (fast, local, reliable)
-    - GCS is the SECONDARY/backup channel (persists after instance deletion)
-    - Metadata doesn't depend on GCS availability or network issues
+    The instance writes two signals:
+    - Instance metadata `goldfish_exit_code` (best-effort, in-instance)
+    - `exit_code.txt` in object storage (authoritative server-side signal)
 
-    WHY METADATA IS PRIMARY:
-    - Local to instance - no network dependency
-    - Fast - immediate availability
-    - Reliable - no GCS eventual consistency issues
-    - Still available while instance exists
-
-    THE FLOW:
-    1. Docker exits with code X
-    2. Instance sets metadata `goldfish_exit_code=X` (fast, local) - PRIMARY
-    3. Instance uploads exit_code.txt to GCS (backup for after deletion)
-    4. Instance self-deletes
-    5. Daemon tries metadata FIRST (while instance still visible)
-    6. If metadata unavailable, daemon falls back to GCS
-
-    This ensures we get the exit code reliably for all normal completions.
+    Core state machine code reads `exit_code.txt` via the ObjectStorage adapter.
+    Provider-specific probing stays behind the adapter boundary.
     """
 
     def test_startup_script_sets_exit_code_metadata(self) -> None:
         """Startup script must set exit code in instance metadata."""
-        from goldfish.infra.startup_builder import build_startup_script
+        from goldfish.cloud.adapters.gcp.startup_builder import build_startup_script
 
         script = build_startup_script(
             bucket="test-bucket",
@@ -1341,7 +1134,7 @@ class TestExitCodeMetadataPrimary:
 
     def test_startup_script_sets_metadata_before_gcs_upload(self) -> None:
         """Exit code metadata must be set BEFORE GCS upload call (for reliability)."""
-        from goldfish.infra.startup_builder import build_startup_script
+        from goldfish.cloud.adapters.gcp.startup_builder import build_startup_script
 
         script = build_startup_script(
             bucket="test-bucket",
@@ -1364,126 +1157,94 @@ class TestExitCodeMetadataPrimary:
             f"(pos={gcs_upload_call_pos}) so it's available as primary channel"
         )
 
-    def test_get_exit_code_gce_tries_metadata_first(self) -> None:
-        """get_exit_code_gce should try metadata FIRST (primary channel)."""
+    def test_get_exit_code_gce_reads_from_storage(self) -> None:
+        """get_exit_code_gce reads exit_code.txt from the storage adapter."""
+        from unittest.mock import MagicMock
+
+        from goldfish.state_machine.exit_code import get_exit_code_gce
+
+        storage = MagicMock()
+        storage.get.return_value = b"0\n"
+
+        result = get_exit_code_gce(
+            bucket_uri="gs://test-bucket",
+            stage_run_id="stage-abc123",
+            storage=storage,
+            project_id="test-project",
+        )
+
+        assert result.exists is True
+        assert result.code == 0
+        assert storage.get.call_count == 1
+
+        uri = storage.get.call_args.args[0]
+        assert str(uri) == "gs://test-bucket/runs/stage-abc123/logs/exit_code.txt"
+
+    def test_get_exit_code_gce_returns_not_found_when_object_missing(self) -> None:
+        """Missing exit_code.txt must return exists=False."""
+        from unittest.mock import MagicMock
+
+        from goldfish.errors import NotFoundError
+        from goldfish.state_machine.exit_code import get_exit_code_gce
+
+        storage = MagicMock()
+        storage.get.side_effect = NotFoundError("gs://test-bucket/runs/stage-abc123/logs/exit_code.txt")
+
+        result = get_exit_code_gce(
+            bucket_uri="gs://test-bucket",
+            stage_run_id="stage-abc123",
+            storage=storage,
+            project_id="test-project",
+            max_attempts=1,
+        )
+
+        assert result.exists is False
+        assert result.gcs_error is False
+
+    def test_get_exit_code_gce_retries_when_object_missing_then_succeeds(self) -> None:
+        """Retries on missing object to handle eventual consistency."""
         from unittest.mock import MagicMock, patch
 
+        from goldfish.errors import NotFoundError
         from goldfish.state_machine.exit_code import get_exit_code_gce
 
-        with patch("goldfish.state_machine.exit_code.subprocess.run") as mock_run:
-            # Metadata returns exit code 0
-            metadata_result = MagicMock()
-            metadata_result.returncode = 0
-            metadata_result.stdout = "0"
-            mock_run.return_value = metadata_result
+        storage = MagicMock()
+        storage.get.side_effect = [
+            NotFoundError("gs://test-bucket/runs/stage-abc123/logs/exit_code.txt"),
+            b"1\n",
+        ]
 
+        with patch("time.sleep"):
             result = get_exit_code_gce(
                 bucket_uri="gs://test-bucket",
                 stage_run_id="stage-abc123",
+                storage=storage,
                 project_id="test-project",
-                instance_name="instance-123",
-                instance_zone="us-central1-a",
+                max_attempts=2,
             )
 
-            # Should have succeeded via metadata (primary)
-            assert result.exists is True
-            assert result.code == 0
+        assert result.exists is True
+        assert result.code == 1
+        assert storage.get.call_count == 2
 
-            # Should only have made one call (metadata succeeded)
-            assert mock_run.call_count == 1
-
-            # The first call should be gcloud (metadata), not gsutil (GCS)
-            first_call = mock_run.call_args_list[0]
-            cmd = first_call[0][0]
-            assert cmd[0] == "gcloud", "First call should be gcloud (metadata), not gsutil"
-            assert "describe" in cmd, "Should use gcloud describe to get metadata"
-
-    def test_get_exit_code_gce_returns_not_found_when_both_fail(self) -> None:
-        """When both metadata and GCS fail, return not_found."""
-        from unittest.mock import patch
+    def test_get_exit_code_gce_without_uri_scheme_defaults_to_gs(self) -> None:
+        """Legacy bucket config without scheme defaults to gs://."""
+        from unittest.mock import MagicMock
 
         from goldfish.state_machine.exit_code import get_exit_code_gce
 
-        with patch("goldfish.state_machine.exit_code.subprocess.run") as mock_run:
-            import subprocess
+        storage = MagicMock()
+        storage.get.return_value = b"0\n"
 
-            # All attempts fail (metadata first, then GCS retries)
-            mock_run.side_effect = subprocess.CalledProcessError(1, "cmd", stderr="error")
+        _result = get_exit_code_gce(
+            bucket_uri="test-bucket",
+            stage_run_id="stage-abc123",
+            storage=storage,
+            project_id="test-project",
+        )
 
-            result = get_exit_code_gce(
-                bucket_uri="gs://test-bucket",
-                stage_run_id="stage-abc123",
-                project_id="test-project",
-                instance_name="instance-123",
-                instance_zone="us-central1-a",
-            )
-
-            # Should return not_found
-            assert result.exists is False
-
-    def test_get_exit_code_gce_falls_back_to_gcs_when_metadata_fails(self) -> None:
-        """When metadata fails (instance deleted?), fall back to GCS."""
-        from unittest.mock import MagicMock, patch
-
-        from goldfish.state_machine.exit_code import get_exit_code_gce
-
-        with patch("goldfish.state_machine.exit_code.subprocess.run") as mock_run:
-            import subprocess
-
-            # Metadata fails (instance deleted), GCS succeeds
-            metadata_error = subprocess.CalledProcessError(1, "gcloud", stderr="not found")
-            gcs_result = MagicMock()
-            gcs_result.returncode = 0
-            gcs_result.stdout = "1"
-
-            mock_run.side_effect = [
-                metadata_error,  # Metadata fails
-                gcs_result,  # GCS succeeds
-            ]
-
-            result = get_exit_code_gce(
-                bucket_uri="gs://test-bucket",
-                stage_run_id="stage-abc123",
-                project_id="test-project",
-                instance_name="instance-123",
-                instance_zone="us-central1-a",
-            )
-
-            # Should have gotten exit code from GCS (fallback)
-            assert result.exists is True
-            assert result.code == 1
-
-            # Should have made two calls: metadata (failed), then GCS (succeeded)
-            assert mock_run.call_count == 2
-
-    def test_get_exit_code_gce_without_instance_info_uses_gcs_only(self) -> None:
-        """When no instance info provided, use GCS only (instance already deleted)."""
-        from unittest.mock import MagicMock, patch
-
-        from goldfish.state_machine.exit_code import get_exit_code_gce
-
-        with patch("goldfish.state_machine.exit_code.subprocess.run") as mock_run:
-            # GCS returns exit code 1
-            gcs_result = MagicMock()
-            gcs_result.returncode = 0
-            gcs_result.stdout = "1"
-            mock_run.return_value = gcs_result
-
-            result = get_exit_code_gce(
-                bucket_uri="gs://test-bucket",
-                stage_run_id="stage-abc123",
-                project_id="test-project",
-                # No instance_name or instance_zone - can't try metadata
-            )
-
-            # Should have gotten exit code from GCS
-            assert result.exists is True
-            assert result.code == 1
-
-            # First call should be gsutil (GCS), not gcloud
-            first_call = mock_run.call_args_list[0]
-            cmd = first_call[0][0]
-            assert cmd[0] == "gsutil", "Without instance info, should go straight to GCS"
+        uri = storage.get.call_args.args[0]
+        assert str(uri).startswith("gs://test-bucket/")
 
 
 class TestExitCodeUploadMandatory:
@@ -1520,7 +1281,7 @@ class TestExitCodeUploadMandatory:
 
         Fix: use `upload_exit_code` which has more retries and NO fallback.
         """
-        from goldfish.infra.startup_builder import build_startup_script
+        from goldfish.cloud.adapters.gcp.startup_builder import build_startup_script
 
         # Generate a startup script
         script = build_startup_script(
@@ -1550,7 +1311,7 @@ class TestExitCodeUploadMandatory:
 
     def test_upload_critical_helper_exists(self) -> None:
         """Startup script should have upload_critical helper for mandatory uploads."""
-        from goldfish.infra.startup_builder import upload_helper_section
+        from goldfish.cloud.adapters.gcp.startup_builder import upload_helper_section
 
         helper = upload_helper_section()
 

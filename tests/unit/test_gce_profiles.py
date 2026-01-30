@@ -5,7 +5,7 @@ Tests the built-in profile system and customization capabilities.
 
 import pytest
 
-from goldfish.infra.profiles import (
+from goldfish.cloud.adapters.gcp.profiles import (
     BUILTIN_PROFILES,
     ProfileNotFoundError,
     ProfileResolver,
@@ -60,6 +60,29 @@ class TestBuiltinProfiles:
 
         # Should prefer spot/preemptible
         assert profile.get("preemptible_allowed") is True
+
+    def test_all_profiles_have_boot_image(self):
+        """REGRESSION: All profiles must specify boot image to ensure bash is available.
+
+        Bug: When boot_disk didn't have image or image_family, GCE would use the
+        project default (e.g., COS) which may not have bash. Startup scripts use
+        bash features (set -o pipefail) and would fail with:
+        "sh: Illegal option -o pipefail"
+
+        Fix: All profiles must explicitly specify image_family and image_project.
+        """
+        for profile_name, profile in BUILTIN_PROFILES.items():
+            boot_disk = profile.get("boot_disk", {})
+            assert "image_family" in boot_disk or "image" in boot_disk, (
+                f"Profile '{profile_name}' must specify boot_disk.image_family or "
+                f"boot_disk.image to ensure bash is available on the GCE instance. "
+                f"Without it, GCE may use a minimal image (e.g., COS) that lacks bash."
+            )
+            # If using image_family, should also have image_project
+            if "image_family" in boot_disk:
+                assert (
+                    "image_project" in boot_disk
+                ), f"Profile '{profile_name}' has image_family but missing image_project"
 
     def test_get_builtin_profile(self):
         """Should retrieve built-in profile by name."""
@@ -158,7 +181,7 @@ class TestProfileValidation:
 
     def test_validate_profile_structure(self):
         """Should validate required fields in profile."""
-        from goldfish.infra.profiles import validate_profile
+        from goldfish.cloud.adapters.gcp.profiles import validate_profile
 
         valid_profile = {
             "machine_type": "n2-standard-4",
@@ -173,7 +196,7 @@ class TestProfileValidation:
 
     def test_validate_missing_machine_type(self):
         """Should raise error if machine_type missing."""
-        from goldfish.infra.profiles import ProfileValidationError, validate_profile
+        from goldfish.cloud.adapters.gcp.profiles import ProfileValidationError, validate_profile
 
         invalid_profile = {
             "zones": ["us-central1-a"],
@@ -184,7 +207,7 @@ class TestProfileValidation:
 
     def test_validate_empty_zones(self):
         """Should raise error if zones list is empty."""
-        from goldfish.infra.profiles import ProfileValidationError, validate_profile
+        from goldfish.cloud.adapters.gcp.profiles import ProfileValidationError, validate_profile
 
         invalid_profile = {
             "machine_type": "n2-standard-4",

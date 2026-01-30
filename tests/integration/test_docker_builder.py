@@ -57,7 +57,7 @@ def test_dockerfile_installs_claude_cli_when_svs_enabled(tmp_path):
             "svs": SVSConfig(
                 enabled=True,
                 ai_post_run_enabled=True,
-                agent_provider="claude_code",
+                agent_provider="codex_cli",
             )
         }
     )
@@ -68,7 +68,7 @@ def test_dockerfile_installs_claude_cli_when_svs_enabled(tmp_path):
         base_image="python:3.11-slim",
     )
 
-    assert "@anthropic-ai/claude-code" in dockerfile
+    assert "@openai/codex" in dockerfile
     assert "npm install -g" in dockerfile
 
 
@@ -86,7 +86,7 @@ def test_dockerfile_skips_agent_cli_when_svs_disabled(tmp_path):
             "svs": SVSConfig(
                 enabled=False,
                 ai_post_run_enabled=True,
-                agent_provider="claude_code",
+                agent_provider="codex_cli",
             )
         }
     )

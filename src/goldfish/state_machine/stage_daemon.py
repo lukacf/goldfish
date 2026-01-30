@@ -10,9 +10,12 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from goldfish.cloud.contracts import RunHandle
+from goldfish.cloud.factory import AdapterFactory
+from goldfish.errors import NotFoundError
 from goldfish.state_machine.core import transition
 from goldfish.state_machine.event_emission import determine_exit_event, determine_instance_event
-from goldfish.state_machine.exit_code import get_exit_code_docker, get_exit_code_gce
+from goldfish.state_machine.exit_code import ExitCodeResult
 from goldfish.state_machine.leader_election import (
     DaemonLeaderElection,
     validate_holder_id,
@@ -26,6 +29,7 @@ from goldfish.state_machine.types import (
 )
 
 if TYPE_CHECKING:
+    from goldfish.cloud.protocols import RunBackend
     from goldfish.config import GoldfishConfig
     from goldfish.db.database import Database
 
@@ -33,10 +37,6 @@ logger = logging.getLogger(__name__)
 
 # Maximum number of active runs to query (prevents memory exhaustion)
 DEFAULT_ACTIVE_RUNS_LIMIT = 1000
-
-# Backend type constants
-BACKEND_GCE = "gce"
-BACKEND_LOCAL = "local"
 
 # Event source identifier (typed for mypy)
 SOURCE_DAEMON: SourceType = "daemon"
@@ -85,6 +85,7 @@ class StageDaemon:
         """
         self._db = db
         self._config = config
+        self._backend_cache: dict[str, RunBackend] = {}
 
         # Validate holder_id if provided, otherwise auto-generate
         if holder_id is not None:
@@ -207,6 +208,31 @@ class StageDaemon:
         """
         transition(self._db, run_id, event, context)
 
+    def _get_backend(self, backend_type: str, *, project_id: str | None) -> RunBackend | None:
+        """Get (or create) a RunBackend for a backend_type."""
+        cached = self._backend_cache.get(backend_type)
+        if cached is not None:
+            return cached
+
+        if self._config is None:
+            return None
+
+        configured_backend = getattr(getattr(self._config, "jobs", None), "backend", None)
+        if configured_backend and configured_backend != backend_type:
+            # Only monitor runs for the configured backend. This prevents creating
+            # partially-configured backends (missing bucket/zones) that can produce
+            # misleading statuses.
+            return None
+
+        try:
+            backend = AdapterFactory(self._config).create_run_backend()
+        except Exception as e:
+            logger.warning("Failed to create run backend for stage daemon (%s): %s", backend_type, e)
+            return None
+
+        self._backend_cache[backend_type] = backend
+        return backend
+
     def _determine_event(
         self,
         run: dict[str, Any],
@@ -276,51 +302,47 @@ class StageDaemon:
             )
             return (StageEvent.TIMEOUT, context)
 
-        # Backend-specific event detection
-        backend_type = run.get("backend_type", BACKEND_LOCAL)
         project_id = None
-        zone = None
-        if backend_type == BACKEND_GCE and self._config and self._config.gce:
+        if self._config and self._config.gce:
             try:
                 project_id = self._config.gce.effective_project_id
             except ValueError:
                 pass
-            # Use stored zone (preferred) or fall back to config for legacy runs
-            zone = run.get("instance_zone")
-            if not zone:
-                zones = getattr(self._config.gce, "zones", None)
-                zone = zones[0] if zones else None
 
         # 1) RUNNING: check for exit code (success/failure/missing) first
         if state == StageState.RUNNING:
-            exit_result = None
-            try:
-                if backend_type == BACKEND_LOCAL:
-                    backend_handle = run.get("backend_handle")
-                    if backend_handle:
-                        exit_result = get_exit_code_docker(backend_handle)
-                elif backend_type == BACKEND_GCE and self._config and self._config.gcs and self._config.gcs.bucket:
-                    bucket = self._config.gcs.bucket
-                    bucket_uri = bucket if bucket.startswith("gs://") else f"gs://{bucket}"
-                    # Try instance metadata first (PRIMARY), fall back to GCS (SECONDARY)
-                    # backend_handle is the instance name for GCE runs
-                    instance_name = run.get("backend_handle")
-                    exit_result = get_exit_code_gce(
-                        bucket_uri,
-                        run.get("id", ""),
-                        project_id=project_id,
-                        instance_name=instance_name,
-                        instance_zone=zone,
+            exit_result: ExitCodeResult | None = None
+            backend_handle = run.get("backend_handle")
+            backend_type = run.get("backend_type", "local")
+            if backend_handle:
+                backend = self._get_backend(str(backend_type), project_id=project_id)
+                if backend is not None:
+                    handle = RunHandle.from_dict(
+                        {
+                            "stage_run_id": str(run.get("id", "")),
+                            "backend_type": str(backend_type),
+                            "backend_handle": str(backend_handle),
+                            "zone": None,
+                        }
                     )
-            except Exception as e:
-                logger.warning("Error retrieving exit code for run %s: %s", run.get("id", UNKNOWN_RUN_ID), e)
-                exit_result = None
+                    try:
+                        status = backend.get_status(handle)
+                        if status.exit_code is not None:
+                            exit_result = ExitCodeResult.from_code(status.exit_code)
+                    except NotFoundError:
+                        exit_result = ExitCodeResult.from_not_found()
+                    except Exception as e:
+                        logger.warning(
+                            "Error retrieving backend status for run %s: %s",
+                            run.get("id", UNKNOWN_RUN_ID),
+                            e,
+                        )
+
             event_ctx = determine_exit_event(
                 run,
                 exit_result,
                 db=self._db,
                 project_id=project_id,
-                zone=zone,
             )
             if event_ctx is not None:
                 return event_ctx
