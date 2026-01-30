@@ -18,7 +18,8 @@ from goldfish.cloud.adapters.local.run_backend import (
 )
 from goldfish.cloud.adapters.local.storage import LocalObjectStorage
 from goldfish.cloud.contracts import BackendCapabilities
-from goldfish.infra.metadata.local import LocalMetadataBus
+
+# NOTE: goldfish.infra is NOT available in container images - imports must be lazy
 
 if TYPE_CHECKING:
     pass  # Path moved to runtime import
@@ -205,6 +206,7 @@ class AdapterFactory:
         """
         if self._backend_type == "local":
             from goldfish.config import LocalSignalingConfig
+            from goldfish.infra.metadata.local import LocalMetadataBus
 
             local_config = self._config.local
             if local_config and local_config.signaling:
