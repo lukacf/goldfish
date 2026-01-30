@@ -59,6 +59,15 @@ def temp_project_root(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture
+def test_db(tmp_path: Path):
+    """Create a test database."""
+    from goldfish.db.database import Database
+
+    db_path = tmp_path / ".goldfish" / "goldfish.db"
+    return Database(db_path)
+
+
 class TestBaseImageManagerInit:
     """Tests for BaseImageManager initialization."""
 
@@ -137,21 +146,59 @@ class TestRegistryConfiguration:
 class TestImageTagGeneration:
     """Tests for project image tag generation."""
 
-    def test_local_tag_format(self, temp_project_root: Path, mock_config: GoldfishConfig) -> None:
-        """Local tag should be {project}-{type}:v1."""
+    def test_local_tag_returns_none_when_no_version(self, temp_project_root: Path, mock_config: GoldfishConfig) -> None:
+        """Local tag should be None when no project image version exists.
+
+        Project images are user-built. _get_project_image_tag returns None
+        when no version exists. Use _get_next_project_image_tag for builds.
+        """
         manager = BaseImageManager(temp_project_root, mock_config)
 
         gpu_tag = manager._get_project_image_tag("gpu", for_registry=False)
         cpu_tag = manager._get_project_image_tag("cpu", for_registry=False)
 
+        assert gpu_tag is None
+        assert cpu_tag is None
+
+    def test_next_tag_format_for_build(self, temp_project_root: Path, mock_config: GoldfishConfig, test_db) -> None:
+        """Next tag should be {project}-{type}:v1 for first build."""
+        # Database is required for project image builds (version tracking)
+        manager = BaseImageManager(temp_project_root, mock_config, db=test_db)
+
+        # Use _get_next_project_image_tag which is for building
+        gpu_tag = manager._get_next_project_image_tag("gpu", for_registry=False)
+        cpu_tag = manager._get_next_project_image_tag("cpu", for_registry=False)
+
         assert gpu_tag == "test-project-gpu:v1"
         assert cpu_tag == "test-project-cpu:v1"
 
-    def test_registry_tag_includes_url(self, temp_project_root: Path, mock_config_with_gce: GoldfishConfig) -> None:
-        """Registry tag should include registry URL prefix."""
+    def test_next_tag_requires_database(self, temp_project_root: Path, mock_config: GoldfishConfig) -> None:
+        """_get_next_project_image_tag should require database."""
+        from goldfish.errors import GoldfishError
+
+        manager = BaseImageManager(temp_project_root, mock_config, db=None)
+
+        with pytest.raises(GoldfishError, match="Database required"):
+            manager._get_next_project_image_tag("gpu", for_registry=False)
+
+    def test_registry_tag_returns_none_when_no_version(
+        self, temp_project_root: Path, mock_config_with_gce: GoldfishConfig
+    ) -> None:
+        """Registry tag should be None when no project image version exists."""
         manager = BaseImageManager(temp_project_root, mock_config_with_gce)
 
         tag = manager._get_project_image_tag("gpu", for_registry=True)
+
+        assert tag is None
+
+    def test_next_registry_tag_includes_url(
+        self, temp_project_root: Path, mock_config_with_gce: GoldfishConfig, test_db
+    ) -> None:
+        """Next registry tag should include registry URL prefix for building."""
+        # Database is required for project image builds (version tracking)
+        manager = BaseImageManager(temp_project_root, mock_config_with_gce, db=test_db)
+
+        tag = manager._get_next_project_image_tag("gpu", for_registry=True)
 
         assert tag == "us-docker.pkg.dev/my-project/goldfish/test-project-gpu:v1"
 
@@ -314,11 +361,13 @@ class TestCheckImages:
         assert result["checks"]["gpu"]["needs_rebuild"] is True
 
     def test_check_shows_needs_push_when_local_only(
-        self, temp_project_root: Path, mock_config_with_gce: GoldfishConfig
+        self, temp_project_root: Path, mock_config_with_gce: GoldfishConfig, test_db
     ) -> None:
         """check_images should indicate push needed when only local exists."""
         mock_config_with_gce.docker = DockerConfig(extra_packages={"gpu": ["some-pkg"]})
-        manager = BaseImageManager(temp_project_root, mock_config_with_gce)
+        # Set up a project image version so _get_project_image_tag returns a tag
+        test_db.set_project_image_version("test-project", "gpu", "v1", "tag1")
+        manager = BaseImageManager(temp_project_root, mock_config_with_gce, db=test_db)
 
         with patch.object(manager, "_check_docker_available"):
             with patch.object(manager, "_check_local_image_exists", return_value=True):
@@ -331,9 +380,10 @@ class TestCheckImages:
 class TestBuildImage:
     """Tests for build_image method."""
 
-    def test_build_async_returns_build_id(self, temp_project_root: Path, mock_config: GoldfishConfig) -> None:
+    def test_build_async_returns_build_id(self, temp_project_root: Path, mock_config: GoldfishConfig, test_db) -> None:
         """build_image with wait=False should return build_id immediately."""
-        manager = BaseImageManager(temp_project_root, mock_config)
+        # Database is required for project image builds (version tracking)
+        manager = BaseImageManager(temp_project_root, mock_config, db=test_db)
 
         with patch.object(manager, "_check_docker_available"):
             with patch.object(manager, "_run_build"):
@@ -343,9 +393,12 @@ class TestBuildImage:
         assert result["build_id"].startswith("build-")
         assert result["status"] == "pending"
 
-    def test_build_sync_blocks_until_complete(self, temp_project_root: Path, mock_config: GoldfishConfig) -> None:
+    def test_build_sync_blocks_until_complete(
+        self, temp_project_root: Path, mock_config: GoldfishConfig, test_db
+    ) -> None:
         """build_image with wait=True should block and return final status."""
-        manager = BaseImageManager(temp_project_root, mock_config)
+        # Database is required for project image builds (version tracking)
+        manager = BaseImageManager(temp_project_root, mock_config, db=test_db)
 
         with patch.object(manager, "_check_docker_available"):
             with patch.object(manager, "_run_build") as mock_run:
@@ -353,6 +406,8 @@ class TestBuildImage:
                 def complete_build(build_id: str, image_type: str, no_cache: bool, target: str = "project") -> None:
                     manager._builds[build_id].status = "completed"
                     manager._builds[build_id].image_tag = "test-project-gpu:v1"
+                    # Also update database since get_build_status checks DB first
+                    test_db.update_docker_build_status(build_id, "completed", image_tag="test-project-gpu:v1")
 
                 mock_run.side_effect = complete_build
                 result = manager.build_image("gpu", wait=True)
@@ -379,9 +434,11 @@ class TestPushImage:
                 with pytest.raises(BaseImageNotFoundError):
                     manager.push_image("gpu")
 
-    def test_push_requires_registry(self, temp_project_root: Path, mock_config: GoldfishConfig) -> None:
+    def test_push_requires_registry(self, temp_project_root: Path, mock_config: GoldfishConfig, test_db) -> None:
         """push_image should raise when registry not configured."""
-        manager = BaseImageManager(temp_project_root, mock_config)
+        # Set up a project image version so we get past the "no version" check
+        test_db.set_project_image_version("test-project", "gpu", "v1", "tag1")
+        manager = BaseImageManager(temp_project_root, mock_config, db=test_db)
 
         with patch.object(manager, "_check_docker_available"):
             with patch.object(manager, "_check_local_image_exists", return_value=True):

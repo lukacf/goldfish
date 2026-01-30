@@ -66,10 +66,8 @@ pub use stats::{enqueue_stats, finalize_svs, StatsEntry};
 /// ```no_run
 /// use goldfish_rust::init;
 ///
-/// fn main() {
-///     let _guard = init(); // SVS will be finalized when _guard drops
-///     // ... stage code ...
-/// }
+/// let _guard = init(); // SVS will be finalized when _guard drops
+/// // ... stage code ...
 /// ```
 pub struct GoldfishGuard {
     _private: (),

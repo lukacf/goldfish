@@ -116,156 +116,159 @@ class TestGetExitCodeGCE:
 
     def test_gcs_unavailable_returns_gcs_error_not_exit_1(self) -> None:
         """GCS unavailable must return gcs_error=True, not exit code 1."""
+        from goldfish.errors import StorageError
         from goldfish.state_machine.exit_code import get_exit_code_gce
 
-        with patch("subprocess.run") as mock_run, patch("time.sleep"):
-            mock_run.side_effect = Exception("ServiceUnavailable: 503")
+        storage = MagicMock()
+        storage.get.side_effect = StorageError("ServiceUnavailable: 503")
 
-            result = get_exit_code_gce(
-                bucket_uri="gs://test-bucket",
-                stage_run_id="stage-123",
-                project_id="test-project",
-            )
+        result = get_exit_code_gce(
+            bucket_uri="gs://test-bucket",
+            stage_run_id="stage-123",
+            storage=storage,
+            project_id="test-project",
+            max_attempts=1,
+        )
 
-            assert result.gcs_error is True
-            assert result.exists is False
-            assert result.code is None  # NOT 1!
+        assert result.gcs_error is True
+        assert result.exists is False
+        assert result.code is None  # NOT 1!
 
     def test_file_not_found_returns_exists_false(self) -> None:
         """Missing exit code file must return exists=False."""
-        import subprocess
-
+        from goldfish.errors import NotFoundError
         from goldfish.state_machine.exit_code import get_exit_code_gce
 
-        with patch("subprocess.run") as mock_run, patch("time.sleep"):
-            error = subprocess.CalledProcessError(1, "gsutil")
-            error.stderr = "No URLs matched"
-            mock_run.side_effect = error
+        storage = MagicMock()
+        storage.get.side_effect = NotFoundError("gs://test-bucket/runs/stage-123/logs/exit_code.txt")
 
-            result = get_exit_code_gce(
-                bucket_uri="gs://test-bucket",
-                stage_run_id="stage-123",
-                project_id="test-project",
-            )
+        result = get_exit_code_gce(
+            bucket_uri="gs://test-bucket",
+            stage_run_id="stage-123",
+            storage=storage,
+            project_id="test-project",
+            max_attempts=1,
+        )
 
-            assert result.exists is False
-            assert result.code is None
-            assert result.gcs_error is False  # File not found is not a GCS error
+        assert result.exists is False
+        assert result.code is None
+        assert result.gcs_error is False  # File not found is not a GCS error
 
     def test_exit_code_0_file_returns_success(self) -> None:
         """Exit code 0 file must return success."""
         from goldfish.state_machine.exit_code import get_exit_code_gce
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="0\n", returncode=0)
+        storage = MagicMock()
+        storage.get.return_value = b"0\n"
 
-            result = get_exit_code_gce(
-                bucket_uri="gs://test-bucket",
-                stage_run_id="stage-123",
-                project_id="test-project",
-            )
+        result = get_exit_code_gce(
+            bucket_uri="gs://test-bucket",
+            stage_run_id="stage-123",
+            storage=storage,
+            project_id="test-project",
+        )
 
-            assert result.exists is True
-            assert result.code == 0
-            assert result.gcs_error is False
+        assert result.exists is True
+        assert result.code == 0
+        assert result.gcs_error is False
 
     def test_exit_code_nonzero_returns_failure(self) -> None:
         """Exit code non-zero must return failure with code."""
         from goldfish.state_machine.exit_code import get_exit_code_gce
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="137\n", returncode=0)
+        storage = MagicMock()
+        storage.get.return_value = b"137\n"
 
-            result = get_exit_code_gce(
-                bucket_uri="gs://test-bucket",
-                stage_run_id="stage-123",
-                project_id="test-project",
-            )
+        result = get_exit_code_gce(
+            bucket_uri="gs://test-bucket",
+            stage_run_id="stage-123",
+            storage=storage,
+            project_id="test-project",
+        )
 
-            assert result.exists is True
-            assert result.code == 137
-            assert result.gcs_error is False
+        assert result.exists is True
+        assert result.code == 137
+        assert result.gcs_error is False
 
     def test_timeout_returns_gcs_error(self) -> None:
         """Subprocess timeout must return gcs_error=True."""
-        import subprocess
-
+        from goldfish.errors import StorageError
         from goldfish.state_machine.exit_code import get_exit_code_gce
 
-        with patch("subprocess.run") as mock_run, patch("time.sleep"):
-            mock_run.side_effect = subprocess.TimeoutExpired("gsutil", 30)
+        storage = MagicMock()
+        storage.get.side_effect = StorageError("Timeout after 30s")
 
-            result = get_exit_code_gce(
-                bucket_uri="gs://test-bucket",
-                stage_run_id="stage-123",
-                project_id="test-project",
-            )
+        result = get_exit_code_gce(
+            bucket_uri="gs://test-bucket",
+            stage_run_id="stage-123",
+            storage=storage,
+            project_id="test-project",
+            max_attempts=1,
+        )
 
-            assert result.gcs_error is True
-            assert result.exists is False
-            assert "timeout" in (result.error or "").lower()
+        assert result.gcs_error is True
+        assert result.exists is False
+        assert "timeout" in (result.error or "").lower()
 
     def test_invalid_content_returns_error(self) -> None:
         """Invalid exit code content must return error, not 1."""
         from goldfish.state_machine.exit_code import get_exit_code_gce
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="not_a_number\n", returncode=0)
+        storage = MagicMock()
+        storage.get.return_value = b"not_a_number\n"
 
-            result = get_exit_code_gce(
-                bucket_uri="gs://test-bucket",
-                stage_run_id="stage-123",
-                project_id="test-project",
-            )
+        result = get_exit_code_gce(
+            bucket_uri="gs://test-bucket",
+            stage_run_id="stage-123",
+            storage=storage,
+            project_id="test-project",
+        )
 
-            # Invalid content should be treated as exists=True but with error
-            assert result.exists is True
-            assert result.code is None
-            assert result.error is not None
+        # Invalid content should be treated as exists=True but with error
+        assert result.exists is True
+        assert result.code is None
+        assert result.error is not None
 
     def test_auth_error_returns_gcs_error(self) -> None:
         """Authentication error must return gcs_error=True."""
-        import subprocess
-
+        from goldfish.errors import StorageError
         from goldfish.state_machine.exit_code import get_exit_code_gce
 
-        with patch("subprocess.run") as mock_run:
-            error = subprocess.CalledProcessError(1, "gsutil")
-            error.stderr = "AccessDeniedException: 403"
-            mock_run.side_effect = error
+        storage = MagicMock()
+        storage.get.side_effect = StorageError("AccessDeniedException: 403")
 
-            result = get_exit_code_gce(
-                bucket_uri="gs://test-bucket",
-                stage_run_id="stage-123",
-                project_id="test-project",
-            )
+        result = get_exit_code_gce(
+            bucket_uri="gs://test-bucket",
+            stage_run_id="stage-123",
+            storage=storage,
+            project_id="test-project",
+            max_attempts=1,
+        )
 
-            # Auth error is a GCS error, not "file not found"
-            assert result.gcs_error is True
-            assert result.exists is False
+        # Auth error is a GCS error, not "file not found"
+        assert result.gcs_error is True
+        assert result.exists is False
 
     def test_retries_on_transient_errors(self) -> None:
         """Function must retry on transient GCS errors."""
-        import subprocess
-
+        from goldfish.errors import StorageError
         from goldfish.state_machine.exit_code import get_exit_code_gce
 
-        with patch("subprocess.run") as mock_run, patch("time.sleep"):
-            # First call fails, second succeeds
-            error = subprocess.CalledProcessError(1, "gsutil")
-            error.stderr = "ServiceUnavailable: 503"
-            mock_run.side_effect = [error, MagicMock(stdout="0\n", returncode=0)]
+        storage = MagicMock()
+        storage.get.side_effect = [StorageError("ServiceUnavailable: 503"), b"0\n"]
 
+        with patch("time.sleep"):
             result = get_exit_code_gce(
                 bucket_uri="gs://test-bucket",
                 stage_run_id="stage-123",
+                storage=storage,
                 project_id="test-project",
                 max_attempts=2,
             )
 
-            assert result.exists is True
-            assert result.code == 0
-            assert mock_run.call_count == 2
+        assert result.exists is True
+        assert result.code == 0
+        assert storage.get.call_count == 2
 
 
 class TestGetExitCodeDocker:

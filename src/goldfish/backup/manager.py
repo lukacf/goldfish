@@ -59,7 +59,7 @@ class BackupManager:
         Args:
             db: Database instance for tracking backups
             db_path: Path to the database file to backup
-            gcs_bucket: GCS bucket path (e.g., "gs://bucket/backups")
+            gcs_bucket: Cloud bucket URI (e.g., "<scheme>://bucket/backups")
         """
         self.db = db
         self.db_path = db_path

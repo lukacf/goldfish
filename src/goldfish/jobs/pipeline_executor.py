@@ -256,6 +256,7 @@ class PipelineExecutor:
             reason_dict,
             results_spec,
             experiment_group,
+            skip_review,
         )
 
         # Build queued stage info for immediate feedback
@@ -332,6 +333,7 @@ class PipelineExecutor:
         reason_structured: dict | None = None,
         results_spec: dict | None = None,
         experiment_group: str | None = None,
+        skip_review: bool = False,
     ) -> None:
         self._logger.info("Worker started for pipeline %s workspace=%s", pipeline_run_id, workspace)
         start_time = time.time()
@@ -354,6 +356,7 @@ class PipelineExecutor:
                     reason_structured,
                     results_spec,
                     experiment_group,
+                    skip_review,
                 )
                 error_count = 0
             except Exception as e:
@@ -480,6 +483,7 @@ class PipelineExecutor:
         reason_structured: dict | None = None,
         results_spec: dict | None = None,
         experiment_group: str | None = None,
+        skip_review: bool = False,
     ) -> list[StageRunInfo]:
         launched: list[StageRunInfo] = []
         now = datetime.now(UTC)
@@ -656,6 +660,7 @@ class PipelineExecutor:
                     experiment_group=experiment_group,
                     results_spec=results_spec,  # Saved immediately after experiment record creation
                     stage_run_id=pre_stage_run_id,  # Use pre-generated ID from queue
+                    skip_review=skip_review,
                 )
                 launched.append(stage_run)
                 # stage_run_id already in queue from creation, no update needed

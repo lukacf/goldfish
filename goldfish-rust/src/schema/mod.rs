@@ -174,7 +174,49 @@ pub fn validate_output_data_against_schema(
                 errors.push(format!("Output '{}' kind=json requires Json data", name));
             }
         }
-        Some("tabular") | _ if schema.columns.is_some() || schema.dtypes.is_some() => {
+        Some("tabular") => {
+            if let OutputData::Tabular(df) = data {
+                // Validate columns
+                if let Some(expected_cols) = &schema.columns {
+                    let actual_cols: Vec<String> =
+                        df.get_column_names().iter().map(|s| s.to_string()).collect();
+                    if expected_cols != &actual_cols {
+                        errors.push(format!(
+                            "Output '{}' column mismatch. Expected {:?}, got {:?}",
+                            name, expected_cols, actual_cols
+                        ));
+                    }
+                }
+                // Validate column dtypes
+                if let Some(expected_dtypes) = &schema.dtypes {
+                    for (col, expected_dt) in expected_dtypes {
+                        match df.column(col) {
+                            Ok(c) => {
+                                let actual_dt = format!("{:?}", c.dtype()).to_lowercase();
+                                if actual_dt != expected_dt.to_lowercase() {
+                                    errors.push(format!(
+                                        "Output '{}' column '{}' dtype mismatch. Expected {}, got {}",
+                                        name, col, expected_dt, actual_dt
+                                    ));
+                                }
+                            }
+                            Err(_) => {
+                                errors.push(format!(
+                                    "Output '{}' missing required column '{}'",
+                                    name, col
+                                ));
+                            }
+                        }
+                    }
+                }
+            } else {
+                errors.push(format!(
+                    "Output '{}' kind=tabular requires Tabular data",
+                    name
+                ));
+            }
+        }
+        _ if schema.columns.is_some() || schema.dtypes.is_some() => {
             if let OutputData::Tabular(df) = data {
                 // Validate columns
                 if let Some(expected_cols) = &schema.columns {

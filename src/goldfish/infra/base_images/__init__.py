@@ -6,8 +6,16 @@ Pre-built images with common ML libraries to avoid per-workspace dependency inst
 import subprocess
 from pathlib import Path
 
+# Import image constants from cloud.image_versions (single source of truth)
+# NOT from gcp/profiles.py - this is generic infra code, not GCP-specific
+from goldfish.cloud.image_versions import (
+    BASE_IMAGE_CPU,
+    BASE_IMAGE_GPU,
+)
+from goldfish.cloud.image_versions import (
+    BASE_IMAGE_VERSION_DEFAULT as BASE_IMAGE_VERSION,
+)
 from goldfish.errors import GoldfishError
-from goldfish.infra.profiles import BASE_IMAGE_CPU, BASE_IMAGE_GPU, BASE_IMAGE_VERSION
 
 # Directory containing Dockerfiles
 BASE_IMAGES_DIR = Path(__file__).parent

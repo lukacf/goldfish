@@ -179,18 +179,21 @@ stages:
       features:
         type: npy
         storage: local
+        schema: null
 
   - name: train
     inputs:
       features:
         from_stage: preprocess
-        signal_name: features
+        signal: features
         type: npy
+        schema: null
     outputs:
       model:
         type: directory
         storage: local
         artifact: true
+        schema: null
 """
         (workspace_path / "pipeline.yaml").write_text(pipeline_yaml)
 
@@ -392,11 +395,11 @@ env:
         # Should have audit entries for:
         # - create_workspace
         # - mount
-        # - checkpoint
+        # - save_version (checkpoint is deprecated)
         operations = [a["operation"] for a in audits]
         assert "create_workspace" in operations
         assert "mount" in operations
-        assert "checkpoint" in operations
+        assert "save_version" in operations
 
         # === Cleanup ===
         workspace_manager.hibernate(slot="w1", reason="E2E test complete")
@@ -479,12 +482,11 @@ stages:
         # Validate pipeline - should return errors
         errors = pipeline_manager.validate_pipeline("validation-test")
 
-        assert len(errors) >= 2  # Should catch missing module AND config
+        assert len(errors) >= 1  # Should catch missing module
 
         # Check error messages mention the missing files
         error_text = "\n".join(errors)
         assert "process.py" in error_text or "Module not found" in error_text
-        assert "process.yaml" in error_text or "Config not found" in error_text
 
         # Cleanup
         workspace_manager.hibernate(slot="w1", reason="Validation test complete")

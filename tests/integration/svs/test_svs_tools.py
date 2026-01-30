@@ -27,37 +27,45 @@ import pytest
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError
 
-svs_tools_available = False
+_EXPECTED_TOOL_FNS = [
+    "list_failure_patterns",
+    "get_failure_pattern",
+    "approve_pattern",
+    "reject_pattern",
+    "update_pattern",
+    "get_svs_reviews",
+    "get_run_svs_findings",
+    "review_pending_patterns",
+    "librarian_review_patterns",
+]
 
 # Load svs_tools.py directly without going through the package
 svs_tools_path = Path(__file__).parent.parent.parent.parent / "src" / "goldfish" / "server_tools" / "svs_tools.py"
-if svs_tools_path.exists():
-    try:
-        spec = importlib.util.spec_from_file_location("svs_tools_standalone", svs_tools_path)
-        if spec and spec.loader:
-            svs_module = importlib.util.module_from_spec(spec)
-            sys.modules["svs_tools_standalone"] = svs_module
-            spec.loader.exec_module(svs_module)
+if not svs_tools_path.exists():
+    raise AssertionError(f"Missing SVS tools module at {svs_tools_path}")
 
-            # Extract functions
-            list_failure_patterns = svs_module.list_failure_patterns
-            get_failure_pattern = svs_module.get_failure_pattern
-            approve_pattern = svs_module.approve_pattern
-            reject_pattern = svs_module.reject_pattern
-            update_pattern = svs_module.update_pattern
-            get_svs_reviews = svs_module.get_svs_reviews
-            get_run_svs_findings = svs_module.get_run_svs_findings
-            review_pending_patterns = svs_module.review_pending_patterns
-            librarian_review_patterns = svs_module.librarian_review_patterns
-            svs_tools_available = True
-    except Exception as e:
-        print(f"Failed to load svs_tools: {e}")
+spec = importlib.util.spec_from_file_location("svs_tools_standalone", svs_tools_path)
+if not spec or not spec.loader:
+    raise AssertionError(f"Unable to load SVS tools module spec for {svs_tools_path}")
 
+svs_module = importlib.util.module_from_spec(spec)
+sys.modules["svs_tools_standalone"] = svs_module
+spec.loader.exec_module(svs_module)
 
-pytestmark = pytest.mark.skipif(
-    not svs_tools_available,
-    reason="svs_tools.py not yet implemented",
-)
+missing = [name for name in _EXPECTED_TOOL_FNS if not hasattr(svs_module, name)]
+if missing:
+    raise AssertionError("svs_tools.py is missing required callables for integration tests: " + ", ".join(missing))
+
+# Extract functions
+list_failure_patterns = svs_module.list_failure_patterns
+get_failure_pattern = svs_module.get_failure_pattern
+approve_pattern = svs_module.approve_pattern
+reject_pattern = svs_module.reject_pattern
+update_pattern = svs_module.update_pattern
+get_svs_reviews = svs_module.get_svs_reviews
+get_run_svs_findings = svs_module.get_run_svs_findings
+review_pending_patterns = svs_module.review_pending_patterns
+librarian_review_patterns = svs_module.librarian_review_patterns
 
 
 # Create a mock svs_tools namespace that wraps functions with test_db

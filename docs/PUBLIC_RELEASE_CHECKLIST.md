@@ -128,9 +128,9 @@ These items should be resolved for a quality public release.
 
 ### 7. Make Container Resource Limits Configurable
 
-**Current State**: Hardcoded limits in local executor.
+**Current State**: Hardcoded limits in LocalRunBackend.
 
-**Location**: `src/goldfish/infra/local_executor.py`
+**Location**: `src/goldfish/cloud/adapters/local/run_backend.py`
 
 **Current Values**:
 ```python

@@ -13,7 +13,10 @@ import logging
 import subprocess
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+from goldfish.cloud.contracts import StorageURI
+from goldfish.errors import NotFoundError, StorageError
 from goldfish.validation import (
     validate_container_id,
     validate_project_id,
@@ -21,6 +24,9 @@ from goldfish.validation import (
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from goldfish.cloud.protocols import ObjectStorage
 
 
 @dataclass
@@ -82,101 +88,24 @@ class ExitCodeResult:
         return cls(exists=True, code=None, gcs_error=False, error=error)
 
 
-def _get_exit_code_from_metadata(
-    instance_name: str,
-    instance_zone: str,
-    project_id: str,
-) -> ExitCodeResult | None:
-    """Try to get exit code from instance metadata (PRIMARY channel).
-
-    Args:
-        instance_name: GCE instance name.
-        instance_zone: GCE zone (e.g., "us-central1-a").
-        project_id: GCP project ID.
-
-    Returns:
-        ExitCodeResult if metadata found, None if metadata not available.
-    """
-    try:
-        cmd = [
-            "gcloud",
-            "compute",
-            "instances",
-            "describe",
-            instance_name,
-            f"--zone={instance_zone}",
-            f"--project={project_id}",
-            "--format=value(metadata.items.goldfish_exit_code)",
-        ]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-        )
-        content = result.stdout.strip()
-        if content:
-            try:
-                exit_code = int(content)
-                logger.info(
-                    "exit_code retrieved from instance metadata for %s (exit_code=%d)",
-                    instance_name,
-                    exit_code,
-                )
-                return ExitCodeResult.from_code(exit_code)
-            except ValueError:
-                logger.warning(
-                    "Invalid exit_code in metadata for %s: %s",
-                    instance_name,
-                    content,
-                )
-                return None
-        # Empty content - metadata not set yet
-        return None
-    except subprocess.CalledProcessError as e:
-        # Instance not found or other error - fall back to GCS
-        logger.debug(
-            "Could not get exit_code from metadata for %s: %s",
-            instance_name,
-            e.stderr,
-        )
-        return None
-    except subprocess.TimeoutExpired:
-        logger.debug("Timeout getting metadata for %s", instance_name)
-        return None
-    except Exception as e:
-        logger.debug("Error getting metadata for %s: %s", instance_name, e)
-        return None
-
-
 def get_exit_code_gce(
     bucket_uri: str,
     stage_run_id: str,
+    *,
+    storage: ObjectStorage,
     project_id: str | None = None,
     max_attempts: int = 5,
     retry_delay: float = 2.0,
-    instance_name: str | None = None,
-    instance_zone: str | None = None,
 ) -> ExitCodeResult:
-    """Get exit code with metadata-first strategy.
-
-    Uses instance metadata as PRIMARY channel (fast, local, reliable).
-    Falls back to GCS when metadata is unavailable (instance deleted).
-
-    The flow:
-    1. If instance_name/zone provided, try metadata first (PRIMARY)
-    2. If metadata fails or no instance info, fall back to GCS (SECONDARY)
-    3. GCS uses retries to handle eventual consistency
+    """Get exit code by reading exit_code.txt from object storage.
 
     Args:
-        bucket_uri: GCS bucket URI (e.g., "gs://my-bucket").
+        bucket_uri: Cloud bucket URI (e.g., "<scheme>://my-bucket").
         stage_run_id: Stage run identifier.
+        storage: Object storage adapter to read from (e.g., GCSStorage).
         project_id: Optional GCP project ID.
         max_attempts: Number of retry attempts for GCS (default 5).
         retry_delay: Seconds between retries (default 2.0).
-        instance_name: Optional GCE instance name (for metadata lookup).
-        instance_zone: Optional GCE zone (for metadata lookup).
 
     Returns:
         ExitCodeResult with proper categorization of the outcome.
@@ -190,37 +119,20 @@ def get_exit_code_gce(
     if project_id:
         validate_project_id(project_id)
 
-    # PRIMARY: Try instance metadata first (if instance info available)
-    if instance_name and instance_zone and project_id:
-        metadata_result = _get_exit_code_from_metadata(instance_name, instance_zone, project_id)
-        if metadata_result is not None:
-            return metadata_result
-        logger.debug(
-            "Metadata lookup failed for %s, falling back to GCS",
-            stage_run_id,
-        )
+    # bucket_uri may be configured as "my-bucket" (legacy) or a full URI.
+    try:
+        bucket_root = StorageURI.parse(bucket_uri)
+    except ValueError:
+        bucket_root = StorageURI("gs", bucket_uri, "")
+    bucket_root = StorageURI(bucket_root.scheme, bucket_root.bucket, "")
 
-    # SECONDARY: Fall back to GCS
-
-    gcs_path = f"{bucket_uri.rstrip('/')}/runs/{stage_run_id}/logs/exit_code.txt"
+    exit_code_uri = bucket_root.join("runs", stage_run_id, "logs", "exit_code.txt")
     last_error: str | None = None
 
     for attempt in range(1, max_attempts + 1):
         try:
-            cmd = ["gsutil"]
-            if project_id:
-                cmd.extend(["-o", f"GSUtil:project_id={project_id}"])
-            cmd.extend(["cat", gcs_path])
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=30,
-            )
-
-            content = result.stdout.strip()
+            data = storage.get(exit_code_uri)
+            content = data.decode("utf-8", errors="replace").strip()
             if not content:
                 # Empty file - treat as exists but parse error
                 return ExitCodeResult.from_parse_error("Empty exit code file")
@@ -238,71 +150,26 @@ def get_exit_code_gce(
             except ValueError as e:
                 return ExitCodeResult.from_parse_error(f"Invalid exit code content: {e}")
 
-        except subprocess.TimeoutExpired:
-            last_error = f"Timeout after 30s (attempt {attempt}/{max_attempts})"
+        except NotFoundError:
+            # Object genuinely doesn't exist yet (or ever). Retry for eventual consistency.
+            if attempt == max_attempts:
+                return ExitCodeResult.from_not_found()
+            last_error = "Object not found"
+
+        except StorageError as e:
+            last_error = str(e)
             logger.warning(
-                "gsutil timeout for %s (attempt %d/%d)",
+                "Storage error reading exit_code for %s (attempt %d/%d): %s",
                 stage_run_id,
                 attempt,
                 max_attempts,
+                e,
             )
-
-        except subprocess.CalledProcessError as e:
-            stderr = (e.stderr or "").lower()
-
-            # Check for "not found" errors vs GCS errors
-            if "no urls matched" in stderr or "commandexception" in stderr:
-                # File not found - not a GCS error, file genuinely doesn't exist
-                logger.debug(
-                    "exit_code.txt not found for %s (attempt %d/%d)",
-                    stage_run_id,
-                    attempt,
-                    max_attempts,
-                )
-                # Retry in case of eventual consistency
-                if attempt == max_attempts:
-                    return ExitCodeResult.from_not_found()
-                last_error = "File not found"
-
-            elif "accessdeniedexception" in stderr or "403" in stderr:
-                # Auth error - this is a GCS error
-                last_error = f"Access denied: {e.stderr}"
-                logger.warning(
-                    "gsutil auth error for %s (attempt %d/%d): %s",
-                    stage_run_id,
-                    attempt,
-                    max_attempts,
-                    e.stderr,
-                )
-                # Return immediately for auth errors - retries won't help
-                return ExitCodeResult.from_gcs_error(last_error)
-
-            elif "serviceunavailable" in stderr or "503" in stderr:
-                # Transient GCS error - retry
-                last_error = f"Service unavailable: {e.stderr}"
-                logger.warning(
-                    "gsutil service error for %s (attempt %d/%d): %s",
-                    stage_run_id,
-                    attempt,
-                    max_attempts,
-                    e.stderr,
-                )
-
-            else:
-                # Other error
-                last_error = f"gsutil error: {e.stderr}"
-                logger.warning(
-                    "gsutil error for %s (attempt %d/%d): %s",
-                    stage_run_id,
-                    attempt,
-                    max_attempts,
-                    e.stderr,
-                )
 
         except Exception as e:
             last_error = str(e)
             logger.warning(
-                "Unexpected error reading exit_code.txt for %s (attempt %d/%d): %s",
+                "Unexpected error reading exit_code for %s (attempt %d/%d): %s",
                 stage_run_id,
                 attempt,
                 max_attempts,

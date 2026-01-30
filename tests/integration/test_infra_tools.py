@@ -21,6 +21,8 @@ from goldfish.config import (
 from goldfish.db.database import Database
 from goldfish.state.state_md import StateManager
 
+pytestmark = pytest.mark.filterwarnings("error::pytest.PytestUnhandledThreadExceptionWarning")
+
 
 def _get_tool_fn(tool: Any) -> Callable:
     """Get the underlying function from a tool (handles FunctionTool wrapper)."""

@@ -3,6 +3,7 @@
 import subprocess
 from pathlib import Path
 
+from goldfish.cloud.contracts import StorageURI
 from goldfish.config import GoldfishConfig
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError, SourceAlreadyExistsError, SourceNotFoundError
@@ -37,7 +38,7 @@ class DatasetRegistry:
 
         Args:
             name: Dataset identifier (e.g., "eurusd_raw_v3")
-            source: Local path or GCS URL (e.g., "local:/path/to/data.csv" or "gs://bucket/path")
+            source: Local path or storage URI (e.g., "local:/path/to/data.csv" or "s3://bucket/path")
             description: Human-readable description
             format: csv, npy, directory, etc.
             metadata: Required metadata dict
@@ -89,11 +90,16 @@ class DatasetRegistry:
 
             gcs_location = self._upload_to_gcs(name, local_path)
 
-        elif source.startswith("gs://"):
-            # Use GCS path directly
-            gcs_location = source
         else:
-            raise GoldfishError(f"Invalid source format: {source}. Must start with 'local:' or 'gs://'")
+            try:
+                uri = StorageURI.parse(source)
+            except ValueError as err:
+                raise GoldfishError(
+                    f"Invalid source format: {source}. Must start with 'local:' or be a valid storage URI"
+                ) from err
+
+            # Use storage URI directly
+            gcs_location = str(uri)
 
         # Register in database
         self.db.create_source(
@@ -117,7 +123,7 @@ class DatasetRegistry:
             local_path: Local file or directory path
 
         Returns:
-            GCS path (gs://bucket/prefix/name)
+            Storage URI for the uploaded object(s)
 
         Raises:
             GoldfishError: If GCS not configured or upload fails
@@ -129,7 +135,12 @@ class DatasetRegistry:
 
         bucket = self.config.gcs.bucket
         prefix = (self.config.gcs.datasets_prefix or "datasets").rstrip("/")
-        gcs_path = f"gs://{bucket}/{prefix}/{name}"
+        try:
+            bucket_root = StorageURI.parse(bucket)
+        except ValueError:
+            bucket_root = StorageURI("gs", bucket, "")
+        bucket_root = StorageURI(bucket_root.scheme, bucket_root.bucket, "")
+        gcs_path = str(bucket_root.join(prefix, name))
 
         # Build gsutil command
         if local_path.is_dir():

@@ -37,6 +37,12 @@ def _set_project_root(project_root: Path) -> None:
     _project_root = project_root.resolve()
 
 
+def _reset_project_root() -> None:
+    """Reset the project root directory (for testing)."""
+    global _project_root
+    _project_root = None
+
+
 def _get_project_root() -> Path:
     """Get the project root directory."""
     if _project_root is None:

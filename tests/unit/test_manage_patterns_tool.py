@@ -66,3 +66,44 @@ def test_manage_patterns_approve():
 
     assert result["success"] is True
     assert result["status"] == "approved"
+
+
+def test_manage_patterns_list_with_filters():
+    """Regression test: list action must accept stage_type, severity, status filters.
+
+    Ensures the tool signature matches the implementation and filters are passed
+    through to the database layer correctly.
+    """
+    from goldfish.server_tools.svs_tools import manage_patterns
+
+    mock_db = MagicMock()
+    mock_db.list_failure_patterns.return_value = []
+    mock_db.count_failure_patterns.return_value = 0
+
+    with patch("goldfish.server_tools.svs_tools._get_db", return_value=mock_db):
+        # Call with all filter parameters
+        result = manage_patterns(
+            action="list",
+            stage_type="train",
+            status="approved",
+            severity="HIGH",
+            limit=25,
+            offset=10,
+        )
+
+    # Verify filters were passed to database method
+    mock_db.list_failure_patterns.assert_called_once_with(
+        status="approved",
+        stage_type="train",
+        severity="HIGH",
+        limit=25,
+        offset=10,
+    )
+    mock_db.count_failure_patterns.assert_called_once_with(
+        status="approved",
+        stage_type="train",
+        severity="HIGH",
+    )
+
+    assert "patterns" in result
+    assert "total" in result

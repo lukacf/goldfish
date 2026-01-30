@@ -183,7 +183,7 @@ def inspect_workspace(
         except Exception as e:
             logger.warning(f"Failed to refresh STATE.md for {workspace_name}: {e}")
 
-    result = {
+    result: dict[str, Any] = {
         "name": workspace_name,
         "goal": goal,
         "is_mounted": ws_info.is_mounted,

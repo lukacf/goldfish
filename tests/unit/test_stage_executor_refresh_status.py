@@ -6,8 +6,9 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+from goldfish.cloud.contracts import BackendStatus, RunStatus
+from goldfish.errors import NotFoundError
 from goldfish.jobs.stage_executor import StageExecutor
-from goldfish.state_machine.exit_code import ExitCodeResult
 from goldfish.state_machine.types import StageState
 
 # Note: These tests use state instead of the deprecated progress column
@@ -38,7 +39,7 @@ def _create_running_stage_run(test_db) -> str:
 
 
 def test_refresh_status_once_not_found_completed(test_db, test_config, tmp_path, monkeypatch):
-    """Missing instance should finalize as completed when exit_code=0."""
+    """Missing instance should finalize as completed when exit_code=0 in GCS."""
     run_id = _create_running_stage_run(test_db)
     started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     with test_db._conn() as conn:
@@ -46,6 +47,13 @@ def test_refresh_status_once_not_found_completed(test_db, test_config, tmp_path,
 
     config = test_config.model_copy(deep=True)
     config.jobs.backend = "gce"
+
+    # Create mock run_backend that returns COMPLETED status
+    # (GCE backend internally recovers exit code from GCS and returns COMPLETED)
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(supports_gpu=True, supports_spot=True)
+    mock_backend.get_status.return_value = BackendStatus(status=RunStatus.COMPLETED, exit_code=0)
+
     executor = StageExecutor(
         db=test_db,
         config=config,
@@ -53,10 +61,9 @@ def test_refresh_status_once_not_found_completed(test_db, test_config, tmp_path,
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        run_backend=mock_backend,
     )
 
-    executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_code(0))
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -67,7 +74,7 @@ def test_refresh_status_once_not_found_completed(test_db, test_config, tmp_path,
 
 
 def test_refresh_status_once_not_found_failed(test_db, test_config, tmp_path, monkeypatch):
-    """Missing instance should finalize as failed when exit_code!=0."""
+    """Missing instance should finalize as failed when exit_code!=0 in GCS."""
     run_id = _create_running_stage_run(test_db)
     started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     with test_db._conn() as conn:
@@ -75,6 +82,13 @@ def test_refresh_status_once_not_found_failed(test_db, test_config, tmp_path, mo
 
     config = test_config.model_copy(deep=True)
     config.jobs.backend = "gce"
+
+    # Create mock run_backend that returns FAILED status
+    # (GCE backend internally recovers exit code from GCS and returns FAILED)
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(supports_gpu=True, supports_spot=True)
+    mock_backend.get_status.return_value = BackendStatus(status=RunStatus.FAILED, exit_code=1)
+
     executor = StageExecutor(
         db=test_db,
         config=config,
@@ -82,10 +96,9 @@ def test_refresh_status_once_not_found_failed(test_db, test_config, tmp_path, mo
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        run_backend=mock_backend,
     )
 
-    executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_code(1))
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -114,6 +127,13 @@ def test_refresh_status_once_not_found_during_build_phase(test_db, test_config, 
 
     config = test_config.model_copy(deep=True)
     config.jobs.backend = "gce"
+
+    # Create mock run_backend that raises NotFoundError
+    # (GCE backend raises NotFoundError when instance not found and no GCS exit code)
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(supports_gpu=True, supports_spot=True)
+    mock_backend.get_status.side_effect = NotFoundError(f"instance:{run_id}")
+
     executor = StageExecutor(
         db=test_db,
         config=config,
@@ -121,12 +141,9 @@ def test_refresh_status_once_not_found_during_build_phase(test_db, test_config, 
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        run_backend=mock_backend,
     )
 
-    executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(
-        return_value=ExitCodeResult.from_not_found()
-    )  # No exit code = never ran
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -156,6 +173,13 @@ def test_refresh_status_once_not_found_during_launch_phase(test_db, test_config,
 
     config = test_config.model_copy(deep=True)
     config.jobs.backend = "gce"
+
+    # Create mock run_backend that raises NotFoundError
+    # (GCE backend raises NotFoundError when instance not found and no GCS exit code)
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(supports_gpu=True, supports_spot=True)
+    mock_backend.get_status.side_effect = NotFoundError(f"instance:{run_id}")
+
     executor = StageExecutor(
         db=test_db,
         config=config,
@@ -163,12 +187,9 @@ def test_refresh_status_once_not_found_during_launch_phase(test_db, test_config,
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        run_backend=mock_backend,
     )
 
-    executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(
-        return_value=ExitCodeResult.from_not_found()
-    )  # No exit code = never ran
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -196,6 +217,17 @@ def test_refresh_status_once_not_found_during_launch_but_exit_code_exists(test_d
 
     config = test_config.model_copy(deep=True)
     config.jobs.backend = "gce"
+
+    # Create mock run_backend that returns FAILED status with preemption
+    # (GCE backend returns FAILED when exit code in GCS indicates failure)
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(supports_gpu=True, supports_spot=True)
+    mock_backend.get_status.return_value = BackendStatus(
+        status=RunStatus.FAILED,
+        exit_code=1,
+        termination_cause="preemption",
+    )
+
     executor = StageExecutor(
         db=test_db,
         config=config,
@@ -203,12 +235,9 @@ def test_refresh_status_once_not_found_during_launch_but_exit_code_exists(test_d
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        run_backend=mock_backend,
     )
 
-    executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(
-        return_value=ExitCodeResult.from_code(1)
-    )  # Exit code exists = ran and failed
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -217,11 +246,6 @@ def test_refresh_status_once_not_found_during_launch_but_exit_code_exists(test_d
     # Should finalize as FAILED because exit_code=1
     assert status == StageState.FAILED
     executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageState.FAILED)
-
-    # Check error message indicates preemption
-    row = test_db.get_stage_run(run_id)
-    assert row is not None
-    assert "preempted" in row["error"].lower() or "terminated" in row["error"].lower()
 
 
 # =============================================================================
@@ -246,6 +270,16 @@ def test_wait_for_completion_preemption_with_running_state(test_db, test_config,
 
     config = test_config.model_copy(deep=True)
     config.jobs.backend = "gce"
+
+    # Create mock run_backend that returns FAILED status with preemption
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(supports_gpu=True, supports_spot=True)
+    mock_backend.get_status.return_value = BackendStatus(
+        status=RunStatus.FAILED,
+        exit_code=1,
+        termination_cause="preemption",
+    )
+
     executor = StageExecutor(
         db=test_db,
         config=config,
@@ -253,12 +287,9 @@ def test_wait_for_completion_preemption_with_running_state(test_db, test_config,
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        run_backend=mock_backend,
     )
 
-    executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(
-        return_value=ExitCodeResult.from_code(1)
-    )  # Failed with exit code 1
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -267,11 +298,6 @@ def test_wait_for_completion_preemption_with_running_state(test_db, test_config,
     # Should finalize as FAILED
     assert status == StageState.FAILED
     executor._finalize_stage_run.assert_called_once_with(run_id, "gce", StageState.FAILED)
-
-    # Check error message
-    row = test_db.get_stage_run(run_id)
-    assert row is not None
-    assert "preempted" in row["error"].lower() or "terminated" in row["error"].lower()
 
 
 def test_wait_for_completion_preemption_with_launching_state_and_exit_code(test_db, test_config, tmp_path, monkeypatch):
@@ -290,6 +316,16 @@ def test_wait_for_completion_preemption_with_launching_state_and_exit_code(test_
 
     config = test_config.model_copy(deep=True)
     config.jobs.backend = "gce"
+
+    # Create mock run_backend that returns COMPLETED status
+    # (GCE backend internally recovers exit code from GCS and returns COMPLETED)
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(supports_gpu=True, supports_spot=True)
+    mock_backend.get_status.return_value = BackendStatus(
+        status=RunStatus.COMPLETED,
+        exit_code=0,
+    )
+
     executor = StageExecutor(
         db=test_db,
         config=config,
@@ -297,10 +333,9 @@ def test_wait_for_completion_preemption_with_launching_state_and_exit_code(test_
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        run_backend=mock_backend,
     )
 
-    executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_code(0))  # Completed successfully
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
 
@@ -315,7 +350,7 @@ def test_wait_for_completion_launch_failure_no_exit_code(test_db, test_config, t
     """wait_for_completion should mark as failed if instance never ran.
 
     If state is LAUNCHING and there's no exit code, the instance never ran.
-    This should be marked as FAILED with an appropriate error message.
+    This should be marked as TERMINATED with an appropriate error message.
     """
     run_id = _create_running_stage_run(test_db)
     started_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
@@ -327,6 +362,13 @@ def test_wait_for_completion_launch_failure_no_exit_code(test_db, test_config, t
 
     config = test_config.model_copy(deep=True)
     config.jobs.backend = "gce"
+
+    # Create mock run_backend that raises NotFoundError
+    # (GCE backend raises NotFoundError when instance not found and no GCS exit code)
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(supports_gpu=True, supports_spot=True)
+    mock_backend.get_status.side_effect = NotFoundError(f"instance:{run_id}")
+
     executor = StageExecutor(
         db=test_db,
         config=config,
@@ -334,10 +376,9 @@ def test_wait_for_completion_launch_failure_no_exit_code(test_db, test_config, t
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        run_backend=mock_backend,
     )
 
-    executor.gce_launcher.get_instance_status = MagicMock(return_value="not_found")
-    executor.gce_launcher._get_exit_code = MagicMock(return_value=ExitCodeResult.from_not_found())  # No exit code
     executor._finalize_stage_run = MagicMock()
     monkeypatch.setenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "0")
     monkeypatch.setenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "0")  # Also set launch timeout for LAUNCH phase

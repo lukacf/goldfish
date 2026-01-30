@@ -12,6 +12,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from goldfish.cloud.contracts import StorageURI
 from goldfish.config import GoldfishConfig
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError, SlotEmptyError
@@ -410,14 +411,14 @@ class JobLauncher:
     def _get_artifact_uri(self, job_id: str) -> str | None:
         """Get the artifact URI for a job.
 
-        Constructs the GCS location where job outputs will be stored.
-        Format: gs://{bucket}/{artifacts_prefix}/{job_id}/
+        Constructs the storage URI where job outputs will be stored.
+        Format: {bucket}/{artifacts_prefix}/{job_id}/ (scheme determined by bucket config)
 
         Args:
             job_id: The job ID
 
         Returns:
-            GCS URI string, or None if GCS not configured
+            Storage URI string, or None if storage not configured
         """
         if self.config.gcs is None:
             return None
@@ -425,4 +426,9 @@ class JobLauncher:
         bucket = self.config.gcs.bucket
         prefix = self.config.gcs.artifacts_prefix.rstrip("/")
 
-        return f"gs://{bucket}/{prefix}/{job_id}/"
+        try:
+            bucket_root = StorageURI.parse(bucket)
+        except ValueError:
+            bucket_root = StorageURI("gs", bucket, "")
+        bucket_root = StorageURI(bucket_root.scheme, bucket_root.bucket, "")
+        return str(bucket_root.join(prefix, job_id, "")).rstrip("/") + "/"

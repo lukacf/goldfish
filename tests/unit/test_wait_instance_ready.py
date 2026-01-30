@@ -4,8 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from goldfish.cloud.adapters.gcp.resource_launcher import wait_for_instance_ready
 from goldfish.errors import GoldfishError
-from goldfish.infra.resource_launcher import wait_for_instance_ready
 
 
 class TestWaitForInstanceReady:
@@ -13,7 +13,7 @@ class TestWaitForInstanceReady:
 
     def test_instance_already_running_returns_immediately(self):
         """If instance is already RUNNING, return immediately."""
-        with patch("goldfish.infra.resource_launcher.run_gcloud") as mock_gcloud:
+        with patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud") as mock_gcloud:
             mock_gcloud.return_value = MagicMock(returncode=0, stdout="RUNNING\n", stderr="")
 
             # Should return without error
@@ -39,7 +39,7 @@ class TestWaitForInstanceReady:
             else:
                 return MagicMock(returncode=0, stdout="RUNNING\n", stderr="")
 
-        with patch("goldfish.infra.resource_launcher.run_gcloud", side_effect=mock_gcloud):
+        with patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud", side_effect=mock_gcloud):
             wait_for_instance_ready(
                 instance_name="test-instance",
                 zone="us-central1-a",
@@ -60,7 +60,7 @@ class TestWaitForInstanceReady:
             call_count += 1
             return MagicMock(returncode=0, stdout=f"{status}\n", stderr="")
 
-        with patch("goldfish.infra.resource_launcher.run_gcloud", side_effect=mock_gcloud):
+        with patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud", side_effect=mock_gcloud):
             wait_for_instance_ready(
                 instance_name="test-instance",
                 zone="us-central1-a",
@@ -72,7 +72,7 @@ class TestWaitForInstanceReady:
 
     def test_instance_terminated_raises_error(self):
         """Raise error if instance reaches TERMINATED state."""
-        with patch("goldfish.infra.resource_launcher.run_gcloud") as mock_gcloud:
+        with patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud") as mock_gcloud:
             mock_gcloud.return_value = MagicMock(returncode=0, stdout="TERMINATED\n", stderr="")
 
             with pytest.raises(GoldfishError, match="unexpected state: TERMINATED"):
@@ -85,7 +85,7 @@ class TestWaitForInstanceReady:
 
     def test_instance_stopped_raises_error(self):
         """Raise error if instance reaches STOPPED state."""
-        with patch("goldfish.infra.resource_launcher.run_gcloud") as mock_gcloud:
+        with patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud") as mock_gcloud:
             mock_gcloud.return_value = MagicMock(returncode=0, stdout="STOPPED\n", stderr="")
 
             with pytest.raises(GoldfishError, match="unexpected state: STOPPED"):
@@ -98,7 +98,7 @@ class TestWaitForInstanceReady:
 
     def test_timeout_raises_error(self):
         """Raise error if instance doesn't reach RUNNING within timeout."""
-        with patch("goldfish.infra.resource_launcher.run_gcloud") as mock_gcloud:
+        with patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud") as mock_gcloud:
             # Always return PROVISIONING
             mock_gcloud.return_value = MagicMock(returncode=0, stdout="PROVISIONING\n", stderr="")
 
@@ -130,7 +130,7 @@ class TestWaitForInstanceReady:
             else:
                 return MagicMock(returncode=0, stdout="RUNNING\n", stderr="")
 
-        with patch("goldfish.infra.resource_launcher.run_gcloud", side_effect=mock_gcloud):
+        with patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud", side_effect=mock_gcloud):
             wait_for_instance_ready(
                 instance_name="test-instance",
                 zone="us-central1-a",
@@ -142,7 +142,7 @@ class TestWaitForInstanceReady:
 
     def test_project_id_passed_to_gcloud(self):
         """Project ID is passed to gcloud command."""
-        with patch("goldfish.infra.resource_launcher.run_gcloud") as mock_gcloud:
+        with patch("goldfish.cloud.adapters.gcp.resource_launcher.run_gcloud") as mock_gcloud:
             mock_gcloud.return_value = MagicMock(returncode=0, stdout="RUNNING\n", stderr="")
 
             wait_for_instance_ready(

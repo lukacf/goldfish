@@ -153,7 +153,7 @@ def register_source(
 
     Args:
         name: Source name (e.g., "eurusd_real_ticks")
-        gcs_path: GCS location (e.g., "gs://bucket/data/eurusd.csv")
+        gcs_path: Storage URI (e.g., "<scheme>://bucket/data/eurusd.csv")
         description: What this data contains
         reason: Why you're registering this source (min 15 chars)
         metadata: Required metadata dict (strict schema)
@@ -332,7 +332,7 @@ def promote_artifact(
         if not artifact_uri:
             raise GoldfishError(f"Job {job_id} has no artifact URI")
 
-        # Security: validate artifact URI (must be GCS, no path traversal)
+        # Security: validate artifact URI (no path traversal)
         validate_artifact_uri(artifact_uri)
 
         # The artifact path for a specific output

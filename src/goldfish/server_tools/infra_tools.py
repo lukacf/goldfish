@@ -49,6 +49,7 @@ def manage_base_images(
     wait: bool = False,
     target: str = "project",
     backend: str = "local",
+    version: str | None = None,
 ) -> dict:
     """Unified tool for managing Docker base images.
 
@@ -60,14 +61,17 @@ def manage_base_images(
     - "local": Build using local Docker daemon (default)
     - "cloud": Build using Google Cloud Build (recommended for GPU images - faster, doesn't tie up local machine)
 
+    Base image versions are tracked per-project in the database.
+
     Args:
-        action: "list", "inspect", "check", "build", or "push"
-        image_type: Required for inspect/build/push: "cpu" or "gpu"
+        action: "list", "inspect", "check", "build", "push", "set_version", "list_versions", or "next_version"
+        image_type: Required for most actions: "cpu" or "gpu"
         no_cache: For build action - force rebuild without Docker cache
         wait: For build action - if True blocks until complete, False returns immediately
               (only affects local builds; cloud builds always return immediately)
         target: "base" for goldfish base images, "project" (default) for project images
         backend: "local" (default) or "cloud" for Cloud Build
+        version: For set_version action - version string (e.g., "v11")
 
     Returns:
         Dict with action results:
@@ -76,6 +80,9 @@ def manage_base_images(
         - check: Compares local vs registry, recommends rebuild/push
         - build: Builds image (async by default, returns build_id)
         - push: Pushes built image to Artifact Registry
+        - set_version: Registers a version as current in the database
+        - list_versions: Shows version history for an image type
+        - next_version: Returns the next auto-incremented version number
 
     Examples:
         # View all images (base + project)
@@ -91,11 +98,21 @@ def manage_base_images(
         # Push to Artifact Registry
         manage_base_images(action="push", image_type="gpu", target="base")
 
+        # Register new version in database after push
+        manage_base_images(action="set_version", image_type="gpu", version="v11")
+
+        # List version history
+        manage_base_images(action="list_versions", image_type="gpu")
+
+        # Get next version number for a new build
+        manage_base_images(action="next_version", image_type="gpu")
+
         # Build project image with extra packages
         manage_base_images(action="build", image_type="gpu", target="project", backend="cloud")
     """
     try:
         manager = _get_base_image_manager()
+        ctx = get_context()
 
         if action == "list":
             return manager.list_images()
@@ -130,10 +147,66 @@ def manage_base_images(
             validate_image_type(image_type)
             return manager.push_image(image_type, target=target)
 
+        elif action == "set_version":
+            if not image_type:
+                return {
+                    "success": False,
+                    "error": "image_type required for set_version action (use 'cpu' or 'gpu')",
+                }
+            if not version:
+                return {
+                    "success": False,
+                    "error": "version required for set_version action (e.g., 'v11')",
+                }
+            validate_image_type(image_type)
+            # Build the registry tag
+            registry_tag = manager._get_goldfish_base_registry_tag(image_type)
+            # Replace the version in the tag (it uses the current DB version, so we need to fix it)
+            base_tag = registry_tag.rsplit(":", 1)[0]
+            registry_tag = f"{base_tag}:{version}"
+            ctx.db.set_base_image_version(image_type, version, registry_tag)
+            return {
+                "success": True,
+                "image_type": image_type,
+                "version": version,
+                "registry_tag": registry_tag,
+                "message": f"Set {image_type} base image version to {version}",
+            }
+
+        elif action == "list_versions":
+            if not image_type:
+                return {
+                    "success": False,
+                    "error": "image_type required for list_versions action (use 'cpu' or 'gpu')",
+                }
+            validate_image_type(image_type)
+            versions = ctx.db.list_base_image_versions(image_type)
+            current = ctx.db.get_current_base_image_version(image_type)
+            return {
+                "success": True,
+                "image_type": image_type,
+                "current_version": current["version"] if current else None,
+                "versions": versions,
+            }
+
+        elif action == "next_version":
+            if not image_type:
+                return {
+                    "success": False,
+                    "error": "image_type required for next_version action (use 'cpu' or 'gpu')",
+                }
+            validate_image_type(image_type)
+            next_ver = ctx.db.get_next_base_image_version(image_type)
+            return {
+                "success": True,
+                "image_type": image_type,
+                "next_version": next_ver,
+            }
+
         else:
             return {
                 "success": False,
-                "error": f"Unknown action: {action}. Valid actions: list, inspect, check, build, push",
+                "error": f"Unknown action: {action}. Valid actions: list, inspect, check, build, push, set_version, list_versions, next_version",
             }
 
     except GoldfishError as e:

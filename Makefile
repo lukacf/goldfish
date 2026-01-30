@@ -3,12 +3,13 @@
 PYTEST := pytest
 SOURCE_DIR := src/goldfish
 
-.PHONY: help install-hooks lint test test-unit test-integration test-e2e test-deluxe ci clean
+.PHONY: help install-hooks lint lint-imports test test-unit test-integration test-e2e test-deluxe ci clean
 
 help:
 	@echo "Available targets:"
 	@echo "  install-hooks    Install pre-commit hooks"
 	@echo "  lint             Run ruff and mypy"
+	@echo "  lint-imports     Run import-linter boundary checks"
 	@echo "  test             Run fast unit tests (pre-commit)"
 	@echo "  test-unit        Run all unit tests with coverage"
 	@echo "  test-integration Run integration tests"
@@ -26,8 +27,11 @@ lint:
 	pre-commit run ruff-format --all-files
 	pre-commit run mypy --all-files
 
+lint-imports:
+	lint-imports
+
 test:
-	$(PYTEST) tests/unit -q --tb=short -m "not slow"
+	$(PYTEST) tests/unit tests/contracts -q --tb=short -m "not slow"
 
 test-unit:
 	$(PYTEST) tests/unit -v --cov=$(SOURCE_DIR) --cov-report=xml --cov-report=term
