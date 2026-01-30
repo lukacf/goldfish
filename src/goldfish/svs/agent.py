@@ -843,6 +843,7 @@ class AnthropicAPIProvider:
         try:
             # Use model from request context if provided, else default
             model = agent_request.model or self.model
+            logger.debug("Using model: %s for during-run review", model)
 
             # Configure agent options with read-only file access
             # This allows the agent to read files in the workspace for context
@@ -857,22 +858,50 @@ class AnthropicAPIProvider:
                 max_turns=agent_request.max_turns or 5,
             )
 
-            # Run the agent query asynchronously
-            async def run_agent() -> str:
+            # Run the agent query asynchronously with detailed logging
+            async def run_agent() -> tuple[str, int, int]:
+                """Returns (output_text, message_count, text_block_count)."""
                 output_parts: list[str] = []
+                message_count = 0
+                text_block_count = 0
                 async for message in query(prompt=agent_request.prompt, options=options):
+                    message_count += 1
                     # Only process AssistantMessage which has content blocks
                     if isinstance(message, AssistantMessage):
                         for block in message.content:
                             if isinstance(block, TextBlock):
+                                text_block_count += 1
                                 output_parts.append(block.text)
-                return "\n".join(output_parts)
+                            else:
+                                # Log non-text blocks for debugging
+                                logger.debug("Received non-TextBlock: %s", type(block).__name__)
+                    else:
+                        # Log non-assistant messages for debugging
+                        logger.debug("Received non-AssistantMessage: %s", type(message).__name__)
+                return "\n".join(output_parts), message_count, text_block_count
 
             # Execute async function - anyio.run() creates a new event loop
-            raw_output = anyio.run(run_agent)
+            raw_output, message_count, text_block_count = anyio.run(run_agent)
 
             duration_ms = int((time.time() - start) * 1000)
-            logger.info("Claude Agent SDK response: %d chars in %dms", len(raw_output), duration_ms)
+            logger.info(
+                "Claude Agent SDK: %d chars, %d messages, %d text blocks in %dms",
+                len(raw_output),
+                message_count,
+                text_block_count,
+                duration_ms,
+            )
+
+            # Handle empty response - SDK may have connected but returned nothing
+            if not raw_output.strip():
+                if message_count == 0:
+                    reason = "No messages received from Claude Agent SDK - possible API/network issue"
+                elif text_block_count == 0:
+                    reason = f"Received {message_count} messages but no text content - possible model/prompt issue"
+                else:
+                    reason = "Claude Agent SDK returned empty text blocks"
+                logger.warning("%s (model=%s, duration=%dms)", reason, model, duration_ms)
+                return self._make_skip_response(reason)
 
             decision, findings = _parse_findings(raw_output)
 
