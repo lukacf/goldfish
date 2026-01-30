@@ -6,8 +6,9 @@ Complete schema reference for `goldfish.yaml` - the project configuration file.
 
 The `goldfish.yaml` file lives at the root of your project and configures:
 - Project identity and paths
+- Default execution settings (timeouts, backends)
+- Storage backends (GCS, S3, Azure)
 - GCE compute settings (for remote execution)
-- GCS storage (for artifacts and datasets)
 - Resource profiles (machine types and GPUs)
 
 ## Minimal Configuration
@@ -35,7 +36,23 @@ slots:                              # Default: ["w1", "w2", "w3"]
   - w2
   - w3
 
-# GCS Storage (required for GCE execution)
+# Global execution defaults
+defaults:
+  timeout_seconds: 7200             # Stage timeout (default: 3600 = 1 hour)
+  log_sync_interval: 15             # Log sync frequency in seconds (default: 10)
+  backend: gce                      # Default compute backend: local, gce
+
+# Storage backend (new unified interface - preferred)
+storage:
+  backend: gcs                      # gcs, s3, azure (s3/azure adapters coming soon)
+  gcs:
+    bucket: my-project-artifacts
+    sources_prefix: sources/
+    artifacts_prefix: artifacts/
+    snapshots_prefix: snapshots/
+    datasets_prefix: datasets/
+
+# Legacy GCS config (still supported for backwards compatibility)
 gcs:
   bucket: my-project-artifacts      # GCS bucket name
   sources_prefix: sources/          # Default: "sources/"
@@ -193,7 +210,81 @@ Path to the dev repository (relative to project's parent directory).
 - Contains git history, database, and STATE.md
 - User project contains only `goldfish.yaml` and `workspaces/`
 
-### gcs (required for GCE)
+### defaults (optional)
+
+Global settings for stage execution:
+
+```yaml
+defaults:
+  timeout_seconds: 7200    # 2 hours (default: 3600)
+  log_sync_interval: 15    # Sync logs every 15 seconds (default: 10)
+  backend: gce             # Default compute backend: local, gce
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `timeout_seconds` | `3600` | Stage execution timeout in seconds |
+| `log_sync_interval` | `10` | Frequency of log synchronization in seconds |
+| `backend` | `local` | Default compute backend (`local` or `gce`) |
+
+These defaults can be overridden per-stage in the stage config files.
+
+### storage (optional, preferred over legacy gcs)
+
+The new unified storage configuration supports multiple cloud providers:
+
+```yaml
+storage:
+  backend: gcs              # gcs, s3, or azure
+
+  # GCS configuration (when backend: gcs)
+  gcs:
+    bucket: my-bucket
+    sources_prefix: sources/
+    artifacts_prefix: artifacts/
+    snapshots_prefix: snapshots/
+    datasets_prefix: datasets/
+
+  # S3 configuration (when backend: s3) - adapter coming soon
+  s3:
+    bucket: my-bucket
+    region: us-east-1
+    endpoint_url: http://localhost:9000  # For MinIO/S3-compatible
+
+  # Azure configuration (when backend: azure) - adapter coming soon
+  azure:
+    container: my-container
+    account: mystorageaccount
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `backend` | `gcs` | Storage provider: `gcs`, `s3`, or `azure` |
+| `gcs` | - | GCS-specific configuration (see below) |
+| `s3` | - | S3-specific configuration (see below) |
+| `azure` | - | Azure Blob-specific configuration (see below) |
+
+**S3 Configuration Fields:**
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `bucket` | Yes | - | S3 bucket name |
+| `region` | No | `us-east-1` | AWS region |
+| `endpoint_url` | No | - | Custom endpoint for MinIO/S3-compatible storage |
+
+**Azure Configuration Fields:**
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `container` | Yes | - | Azure blob container name |
+| `account` | Yes | - | Azure storage account name |
+
+**Backend Selection Priority:**
+1. New `storage:` section takes precedence if present
+2. Falls back to legacy `gcs:` section for backwards compatibility
+3. Use `storage:` for new projects, `gcs:` still works for existing projects
+
+### gcs (legacy, still supported)
 
 ```yaml
 gcs:
@@ -211,6 +302,8 @@ gcs:
 | `artifacts_prefix` | No | `artifacts/` | Path prefix for stage outputs |
 | `snapshots_prefix` | No | `snapshots/` | Path prefix for workspace snapshots |
 | `datasets_prefix` | No | `datasets/` | Path prefix for uploaded datasets |
+
+**Note:** For new projects, prefer using the `storage:` section instead.
 
 ### gce (required for remote execution)
 
