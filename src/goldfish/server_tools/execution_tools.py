@@ -9,7 +9,7 @@ import os
 import threading
 import time
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
@@ -328,8 +328,7 @@ def run(
     return result
 
 
-@mcp.tool()
-def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
+def _inspect_run_impl(run_id: str, include: list[str] | None = None) -> dict:
     """Get a comprehensive, synthesized view of a run.
 
     This is the master tool for understanding run state, results, and health.
@@ -733,6 +732,50 @@ def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
     return cast(dict, result)
 
 
+def inspect_run(run_id: str, include: list[str] | None = None) -> dict:
+    """Get a comprehensive, synthesized view of a run.
+
+    This is the master tool for understanding run state, results, and health.
+    It combines metadata, dashboard (state/trends), manifest (config/io),
+    and provenance into a single response.
+
+    Args:
+        run_id: The stage run ID (e.g., "stage-abc123")
+        include: List of data to include. Defaults to ["dashboard", "metadata", "thoughts"].
+                Options: ["dashboard", "metadata", "manifest", "provenance", "svs", "thoughts", "attempt"]
+
+    Returns:
+        Dict with synthesized run data.
+    """
+    return _inspect_run_impl(run_id=run_id, include=include)
+
+
+def _inspect_run_trampoline(run_id: str, include: list[str] | None = None) -> dict:
+    """Call the current module's inspect_run implementation.
+
+    Some unit tests patch `sys.modules` and manipulate `goldfish.server_tools`
+    imports, which can lead to stale tool objects whose `.fn` points at an
+    outdated module instance. This trampoline resolves the canonical module by
+    name at call time.
+    """
+    from importlib import import_module
+
+    class _ExecutionToolsModule(Protocol):
+        def inspect_run(self, run_id: str, include: list[str] | None = None) -> dict: ...
+
+    mod = cast(_ExecutionToolsModule, import_module("goldfish.server_tools.execution_tools"))
+    return mod.inspect_run(run_id=run_id, include=include)
+
+
+# Ensure `.fn` always points at the canonical implementation.
+cast(Any, inspect_run).fn = _inspect_run_trampoline
+
+
+# Register the MCP tool using a stable name. Keep the exported symbol as the
+# plain function to avoid order-dependent behavior in tests that mock MCP.
+mcp.tool(name="inspect_run")(inspect_run)
+
+
 @mcp.tool()
 def logs(run_id: str, tail: int = 200, since: str | None = None, follow: bool = False) -> dict:
     """Get logs from a run.
@@ -959,3 +1002,19 @@ def cancel(run_id: str, reason: str) -> dict:
         previous_status=sm_result.get("previous_state"),
     ).model_dump(mode="json")
     return success_result
+
+
+def _ensure_tool_has_fn_attr(tool: Any) -> None:
+    """Ensure a tool object has a `.fn` attribute for test compatibility.
+
+    FastMCP returns a `FunctionTool` with `.fn`, but some unit tests mock
+    `mcp.tool()` as an identity decorator, leaving us with a plain function.
+    """
+    if callable(tool) and not hasattr(tool, "fn"):
+        tool.fn = tool
+
+
+_ensure_tool_has_fn_attr(run)
+_ensure_tool_has_fn_attr(inspect_run)
+_ensure_tool_has_fn_attr(logs)
+_ensure_tool_has_fn_attr(cancel)

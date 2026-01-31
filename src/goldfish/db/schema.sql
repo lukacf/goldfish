@@ -180,6 +180,8 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     preflight_warnings_json TEXT,     -- JSON list of preflight validation warnings
     backend_type TEXT,                -- local | gce
     backend_handle TEXT,              -- container_id or instance_name for cancel/log lookup
+    build_context_hash TEXT,          -- SHA256 cache key of Docker build context
+    image_tag TEXT,                   -- Docker tag used for the run image
     instance_zone TEXT,               -- GCE zone where instance was launched (NULL for local)
     error TEXT,
     outcome TEXT,                     -- NULL (unset), 'success', 'bad_results' - semantic result quality
@@ -207,6 +209,7 @@ CREATE INDEX IF NOT EXISTS idx_stage_runs_pipeline_run ON stage_runs(pipeline_ru
 CREATE INDEX IF NOT EXISTS idx_stage_runs_ws_stage_status ON stage_runs(workspace_name, stage_name, status);
 CREATE INDEX IF NOT EXISTS idx_stage_runs_ws_stage_attempt ON stage_runs(workspace_name, stage_name, attempt_num);
 CREATE INDEX IF NOT EXISTS idx_stage_runs_outcome ON stage_runs(outcome);
+CREATE INDEX IF NOT EXISTS idx_stage_runs_build_context_hash ON stage_runs(build_context_hash);
 -- Partial index for active states (used by daemon polling)
 CREATE INDEX IF NOT EXISTS idx_stage_runs_active_state ON stage_runs(state)
     WHERE state IN ('preparing', 'building', 'launching', 'running', 'finalizing', 'unknown');
@@ -470,6 +473,14 @@ CREATE TABLE IF NOT EXISTS docker_builds (
     workspace_name TEXT,              -- For workspace builds (NULL for base/project images)
     version TEXT,                     -- Workspace version (NULL for base/project images)
     content_hash TEXT,                -- SHA256 of build context (for cache hit detection)
+    dockerfile_hash TEXT,             -- SHA256 of rendered Dockerfile content
+    git_sha TEXT,                     -- Git commit SHA of workspace code
+    goldfish_runtime_hash TEXT,       -- Hash of Goldfish runtime files copied into build context
+    base_image TEXT,                  -- Base image tag used for build
+    base_image_digest TEXT,           -- Resolved digest for base image (sha256:...)
+    requirements_hash TEXT,           -- SHA256 of requirements.txt (hash of empty string if missing)
+    build_args_json TEXT,             -- JSON build args passed to docker build (no secrets)
+    build_context_json TEXT,          -- JSON serialization of full BuildContext
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 

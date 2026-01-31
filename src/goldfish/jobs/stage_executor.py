@@ -12,12 +12,8 @@ from uuid import uuid4
 
 from goldfish.config.logging import current_request_id, current_stage_run_id
 from goldfish.config.settings import GoldfishSettings
-from goldfish.jobs._stage_executor_impl import (
-    StageExecutor as _StageExecutorImpl,
-)
-from goldfish.jobs._stage_executor_impl import (
-    _extract_stage_run_id_from_path,
-)
+from goldfish.jobs._stage_executor_impl import StageExecutor as _StageExecutorImpl
+from goldfish.jobs._stage_executor_impl import _extract_stage_run_id_from_path
 from goldfish.jobs.phases import build as phase_build
 from goldfish.jobs.phases import finalize as phase_finalize
 from goldfish.jobs.phases import launch as phase_launch
@@ -297,7 +293,14 @@ class StageExecutor(_StageExecutorImpl):
                 )
 
                 profile_name = ctx.stage_config.get("compute", {}).get("profile")
-                image_tag = phase_build.build_image(self, ctx, profile_name=profile_name)
+                image_tag, build_context_hash = phase_build.build_image(self, ctx, profile_name=profile_name)
+
+                # Record the exact image used for this run (cache key + tag).
+                self.db.update_stage_run_status(
+                    stage_run_id=stage_run_id,
+                    build_context_hash=build_context_hash,
+                    image_tag=image_tag,
+                )
 
                 sm_transition(
                     self.db,
@@ -380,20 +383,12 @@ class StageExecutor(_StageExecutorImpl):
     def wait_for_completion(self, stage_run_id: str, poll_interval: int = 5, timeout: int = 3600) -> str:
         ctx = self._placeholder_context(stage_run_id)
         return phase_monitor.monitor_status(
-            super().wait_for_completion,
-            ctx,
-            poll_interval=poll_interval,
-            timeout=timeout,
+            super().wait_for_completion, ctx, poll_interval=poll_interval, timeout=timeout
         )
 
     def _finalize_stage_run(self, stage_run_id: str, backend: str, status: str) -> None:
         ctx = self._placeholder_context(stage_run_id)
-        phase_finalize.finalize_outputs(
-            super()._finalize_stage_run,
-            ctx,
-            backend=backend,
-            status=status,
-        )
+        phase_finalize.finalize_outputs(super()._finalize_stage_run, ctx, backend=backend, status=status)
 
 
 __all__ = ["StageExecutor", "_extract_stage_run_id_from_path"]

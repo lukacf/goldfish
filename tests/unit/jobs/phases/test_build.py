@@ -40,10 +40,11 @@ def _ctx(*, workspace_name: str = "ws", stage_name: str = "train", version: str 
 def test_build_image_when_called_delegates_to_executor() -> None:
     """build_image should delegate to deps._build_docker_image()."""
     deps = MagicMock()
-    deps._build_docker_image.return_value = "goldfish-test:latest"
+    deps._build_docker_image.return_value = ("goldfish-test:latest", "0" * 64)
 
     ctx = _ctx(version="v2")
-    image_tag = build_image(deps, ctx, profile_name="cpu-small")
+    image_tag, build_context_hash = build_image(deps, ctx, profile_name="cpu-small")
 
     assert image_tag == "goldfish-test:latest"
+    assert build_context_hash == "0" * 64
     deps._build_docker_image.assert_called_once_with("ws", "v2", profile_name="cpu-small")

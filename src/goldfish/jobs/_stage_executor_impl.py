@@ -31,7 +31,7 @@ from goldfish.datasets.registry import DatasetRegistry
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError, NotFoundError
 from goldfish.experiment_model.records import ExperimentRecordManager
-from goldfish.infra.docker_builder import DockerBuilder
+from goldfish.infra.docker_builder import DockerBuilder, compute_build_context_hash
 from goldfish.models import (
     PipelineDef,
     ReviewSeverity,
@@ -561,7 +561,14 @@ class StageExecutor:
 
             # 6. Build Docker image (use profile's base image)
             profile_name = stage_config.get("compute", {}).get("profile")
-            image_tag = self._build_docker_image(workspace, version, profile_name=profile_name)
+            image_tag, build_context_hash = self._build_docker_image(workspace, version, profile_name=profile_name)
+
+            # Record the exact image used for this run (cache key + tag).
+            self.db.update_stage_run_status(
+                stage_run_id=stage_run_id,
+                build_context_hash=build_context_hash,
+                image_tag=image_tag,
+            )
 
             # State machine: BUILDING → LAUNCHING (BUILD_OK)
             sm_transition(
@@ -1941,7 +1948,7 @@ class StageExecutor:
             except Exception as e:
                 logger.debug(f"Failed to sync during-run finding to svs_reviews: {e}")
 
-    def _build_docker_image(self, workspace: str, version: str, profile_name: str | None = None) -> str:
+    def _build_docker_image(self, workspace: str, version: str, profile_name: str | None = None) -> tuple[str, str]:
         """Build Docker image for this run.
 
         Args:
@@ -1949,7 +1956,8 @@ class StageExecutor:
             version: Version identifier
             profile_name: Optional profile name to determine base image
 
-        Returns image tag (local for local backend, registry for GCE backend).
+        Returns:
+            Tuple of (image_tag, build_context_hash).
         """
         # Import constants from image_versions (single source of truth)
         from goldfish.cloud.image_versions import BASE_IMAGE_CPU, BASE_IMAGE_GPU
@@ -1988,22 +1996,95 @@ class StageExecutor:
             # Use docker_builder to prepare context, then ImageBuilder for actual build
             # This delegates Cloud Build logic to the CloudBuildImageBuilder adapter
             with self.docker_builder.prepare_build_context(workspace_dir, workspace, version, base_image) as (
+                build_ctx,
                 context_path,
                 dockerfile_path,
                 local_tag,
             ):
-                # ImageBuilder.build() returns registry tag for cloud builds
-                registry_image_tag = self.image_builder.build(
-                    context_path=context_path,
-                    dockerfile_path=dockerfile_path,
-                    image_tag=f"{self.artifact_registry}/{local_tag}",
-                    build_args={"VERSION": version},
-                    no_cache=False,  # Use cache for faster builds
+                build_context_hash = compute_build_context_hash(build_ctx)
+                cached = self.db.get_docker_build_by_content_hash(workspace, build_context_hash)
+                if cached and cached.get("registry_tag"):
+                    logger.info("Reusing cached workspace image (build_context_hash=%s)", build_context_hash[:16])
+                    return str(cached["registry_tag"]), build_context_hash
+
+                registry_tag = f"{self.artifact_registry}/{local_tag}"
+                started_at = datetime.now(UTC).isoformat()
+                build_id = f"build-{uuid4().hex[:8]}"
+                build_args_json = json.dumps(build_ctx.build_args, sort_keys=True, separators=(",", ":"))
+                build_context_json = json.dumps(
+                    {
+                        "dockerfile_hash": build_ctx.dockerfile_hash,
+                        "git_sha": build_ctx.git_sha,
+                        "goldfish_runtime_hash": build_ctx.goldfish_runtime_hash,
+                        "base_image": build_ctx.base_image,
+                        "base_image_digest": build_ctx.base_image_digest,
+                        "requirements_hash": build_ctx.requirements_hash,
+                        "build_args": build_ctx.build_args,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
                 )
-                return registry_image_tag
+                image_type = "gpu" if "gpu" in build_ctx.base_image.lower() else "cpu"
+                self.db.insert_docker_build(
+                    build_id=build_id,
+                    image_type=image_type,
+                    target="workspace",
+                    backend="cloud",
+                    started_at=started_at,
+                    registry_tag=registry_tag,
+                    cloud_build_id=None,
+                    workspace_name=workspace,
+                    version=version,
+                    content_hash=build_context_hash,
+                    dockerfile_hash=build_ctx.dockerfile_hash,
+                    git_sha=build_ctx.git_sha,
+                    goldfish_runtime_hash=build_ctx.goldfish_runtime_hash,
+                    base_image=build_ctx.base_image,
+                    base_image_digest=build_ctx.base_image_digest,
+                    requirements_hash=build_ctx.requirements_hash,
+                    build_args_json=build_args_json,
+                    build_context_json=build_context_json,
+                )
+
+                # ImageBuilder.build() returns registry tag for cloud builds
+                try:
+                    registry_image_tag = self.image_builder.build(
+                        context_path=context_path,
+                        dockerfile_path=dockerfile_path,
+                        image_tag=registry_tag,
+                        build_args=build_ctx.build_args,
+                        no_cache=False,  # Use cache for faster builds
+                    )
+                except Exception as e:
+                    self.db.update_docker_build_status(
+                        build_id,
+                        status="failed",
+                        error=str(e),
+                        completed_at=datetime.now(UTC).isoformat(),
+                    )
+                    raise
+
+                pip_freeze = self.docker_builder.capture_pip_freeze_from_image(registry_image_tag)
+                if pip_freeze is not None:
+                    try:
+                        payload = json.loads(build_context_json)
+                        if isinstance(payload, dict):
+                            payload["pip_freeze"] = pip_freeze
+                            build_context_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                    except Exception as e:
+                        logger.debug("Failed to store pip freeze output for build %s: %s", build_id, e)
+
+                self.db.update_docker_build_status(
+                    build_id,
+                    status="completed",
+                    completed_at=datetime.now(UTC).isoformat(),
+                    registry_tag=registry_image_tag,
+                    build_context_json=build_context_json,
+                )
+                return registry_image_tag, build_context_hash
 
         # Local backend: Build locally using DockerBuilder
-        local_image_tag = self.docker_builder.build_image(
+        local_image_tag, build_context_hash = self.docker_builder.build_image_with_context_hash(
             workspace_dir=workspace_dir,
             workspace_name=workspace,
             version=version,
@@ -2011,7 +2092,7 @@ class StageExecutor:
             base_image=base_image,
         )
 
-        return local_image_tag
+        return local_image_tag, build_context_hash
 
     def _load_stage_config(self, workspace: str, stage_name: str) -> dict:
         """Load stage config from configs/{stage}.yaml.

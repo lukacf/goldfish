@@ -322,34 +322,68 @@ def run_stage_with_svs(module_main: Callable[[], int | None]) -> int:
     try:
         during_run_enabled = _during_run_enabled()
         print(f"[SVS-DEBUG] _during_run_enabled() = {during_run_enabled}", file=_sys.stderr, flush=True)
-        if during_run_enabled and not _during_run_monitor_started:
+        if during_run_enabled:
+            outputs_dir = _get_outputs_dir()
+
+            # Some test fixtures mock + reload modules in ways that can leave
+            # `_during_run_monitor_started=True` even when there's no live monitor
+            # (or when it points at a different outputs_dir). Ensure we always
+            # have a live monitor for this run.
+            monitor_to_stop = None
+            need_start = False
             with _during_run_monitor_lock:
-                # Double-check after acquiring lock
-                if not _during_run_monitor_started:
-                    try:
-                        from goldfish.svs.during_run_monitor import DuringRunMonitor
+                existing = _during_run_monitor
+                if existing is None:
+                    need_start = True
+                elif not isinstance(existing, threading.Thread):
+                    need_start = True
+                elif not existing.is_alive():
+                    need_start = True
+                else:
+                    existing_outputs_dir = getattr(existing, "outputs_dir", None)
+                    if existing_outputs_dir is not None and Path(existing_outputs_dir) != outputs_dir:
+                        need_start = True
 
-                        # Small delay to let ML frameworks initialize (avoids issues with fork/multiprocessing)
-                        print("[SVS-DEBUG] Starting during-run monitor...", file=_sys.stderr, flush=True)
-                        time.sleep(1.0)
-                        config = _load_svs_config()
-                        print(
-                            f"[SVS-DEBUG] Creating DuringRunMonitor with outputs_dir={_get_outputs_dir()}",
-                            file=_sys.stderr,
-                            flush=True,
-                        )
-                        _during_run_monitor = DuringRunMonitor(config, _get_outputs_dir())
-                        _during_run_monitor.start()
+                if need_start:
+                    monitor_to_stop = existing
+                    _during_run_monitor = None
+                    _during_run_monitor_started = False
+                else:
+                    _during_run_monitor_started = True
+
+            if monitor_to_stop:
+                try:
+                    monitor_to_stop.stop(timeout=10.0)
+                except Exception as e:
+                    logger.error(f"Failed to stop during-run monitor: {e}")
+
+            if need_start:
+                try:
+                    from goldfish.svs.during_run_monitor import DuringRunMonitor
+
+                    # Small delay to let ML frameworks initialize (avoids issues with fork/multiprocessing)
+                    print("[SVS-DEBUG] Starting during-run monitor...", file=_sys.stderr, flush=True)
+                    time.sleep(1.0)
+                    config = _load_svs_config()
+                    print(
+                        f"[SVS-DEBUG] Creating DuringRunMonitor with outputs_dir={outputs_dir}",
+                        file=_sys.stderr,
+                        flush=True,
+                    )
+                    new_monitor = DuringRunMonitor(config, outputs_dir)
+                    new_monitor.start()
+                    with _during_run_monitor_lock:
+                        _during_run_monitor = new_monitor
                         _during_run_monitor_started = True
-                        print("[SVS-DEBUG] During-run monitor started successfully", file=_sys.stderr, flush=True)
-                        logger.info("During-run SVS monitor started")
-                    except Exception as e:
-                        import traceback
+                    print("[SVS-DEBUG] During-run monitor started successfully", file=_sys.stderr, flush=True)
+                    logger.info("During-run SVS monitor started")
+                except Exception as e:
+                    import traceback
 
-                        print(f"[SVS-DEBUG] Failed to start during-run monitor: {e}", file=_sys.stderr, flush=True)
-                        traceback.print_exc(file=_sys.stderr)
-                        logger.error(f"Failed to start during-run monitor: {e}")
-                        _during_run_monitor_started = True  # Don't retry on failure
+                    print(f"[SVS-DEBUG] Failed to start during-run monitor: {e}", file=_sys.stderr, flush=True)
+                    traceback.print_exc(file=_sys.stderr)
+                    logger.error(f"Failed to start during-run monitor: {e}")
+                    _during_run_monitor_started = True  # Don't retry on failure
 
         # Run user's main function
         exit_code = module_main()
@@ -362,9 +396,13 @@ def run_stage_with_svs(module_main: Callable[[], int | None]) -> int:
 
     finally:
         # Stop monitor if started (using global monitor)
-        if _during_run_monitor:
+        monitor_to_stop = _during_run_monitor
+        _during_run_monitor = None
+        _during_run_monitor_started = False
+
+        if monitor_to_stop:
             try:
-                _during_run_monitor.stop(timeout=10.0)
+                monitor_to_stop.stop(timeout=10.0)
             except Exception as e:
                 logger.error(f"Failed to stop during-run monitor: {e}")
 

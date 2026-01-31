@@ -79,7 +79,7 @@ def executor(test_db, test_config, temp_dir):
         run_backend=mock_backend,
     )
     # Mock build to avoid real Docker
-    executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
+    executor._build_docker_image = MagicMock(return_value=("goldfish-test-v1", "0" * 64))
 
     return executor
 

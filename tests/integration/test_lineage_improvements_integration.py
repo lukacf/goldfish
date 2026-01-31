@@ -59,7 +59,7 @@ def test_full_lineage_flow(test_db, test_config, temp_dir, mocker):
     )
 
     # Mocking execution steps
-    executor._build_docker_image = MagicMock(return_value="img-v1")
+    executor._build_docker_image = MagicMock(return_value=("img-v1", "0" * 64))
     executor._launch_container = MagicMock()
 
     # Run preprocess

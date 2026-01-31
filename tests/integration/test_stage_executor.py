@@ -582,6 +582,55 @@ class TestStageRunRecords:
         assert json.loads(record["config_json"]) == config_override
         assert record["stage_version_id"] == stage_version_id
 
+    def test_stage_run_has_build_context_hash(self, test_db, test_config, temp_dir):
+        """Should persist build_context_hash and image_tag on stage_runs."""
+        # Setup workspace and pipeline (with version for FK constraint)
+        test_db.create_workspace_lineage("test_workspace", description="Test")
+        test_db.create_version("test_workspace", "v1", "test_workspace-v1", "abc123", "run")
+
+        pipeline_manager = MagicMock()
+        pipeline_manager.get_pipeline.return_value = PipelineDef(
+            name="test_pipeline",
+            stages=[
+                StageDef(
+                    name="preprocess",
+                    inputs={"raw_data": SignalDef(name="raw_data", type="dataset", dataset="test_data")},
+                    outputs={"features": SignalDef(name="features", type="npy")},
+                )
+            ],
+        )
+
+        dataset_registry = MagicMock()
+        dataset_registry.get_dataset.return_value = MagicMock(gcs_location="gs://bucket/datasets/test_data")
+
+        workspace_manager = MagicMock()
+        workspace_manager.get_workspace_path.return_value = Path(temp_dir)
+        workspace_manager.get_all_slots.return_value = [
+            MagicMock(workspace="test_workspace", slot="w1"),
+        ]
+        workspace_manager.sync_and_version.return_value = ("v1", "abc123")
+
+        executor = StageExecutor(
+            db=test_db,
+            config=test_config,
+            workspace_manager=workspace_manager,
+            pipeline_manager=pipeline_manager,
+            project_root=Path("/tmp"),
+            dataset_registry=dataset_registry,
+        )
+
+        expected_tag = "goldfish-test:v1"
+        expected_hash = "a" * 64
+        executor._build_docker_image = MagicMock(return_value=(expected_tag, expected_hash))
+        executor._launch_container = MagicMock()
+
+        run_info = executor.run_stage(workspace="test_workspace", stage_name="preprocess", reason="Test run")
+
+        stage_run = test_db.get_stage_run(run_info.stage_run_id)
+        assert stage_run is not None
+        assert stage_run["build_context_hash"] == expected_hash
+        assert stage_run["image_tag"] == expected_tag
+
 
 class TestStageExecution:
     """Test full stage execution flow (mocked)."""
@@ -625,7 +674,7 @@ class TestStageExecution:
         )
 
         # Mock stage execution methods
-        executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
+        executor._build_docker_image = MagicMock(return_value=("goldfish-test-v1", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Execute
@@ -838,7 +887,7 @@ class TestStageVersioning:
         )
 
         # Mock execution methods
-        executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
+        executor._build_docker_image = MagicMock(return_value=("goldfish-test-v1", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Execute
@@ -883,7 +932,7 @@ class TestStageVersioning:
             project_root=Path("/tmp"),
             dataset_registry=MagicMock(),
         )
-        executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
+        executor._build_docker_image = MagicMock(return_value=("goldfish-test-v1", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Run twice with same SHA
@@ -924,7 +973,7 @@ class TestStageVersioning:
             project_root=Path("/tmp"),
             dataset_registry=MagicMock(),
         )
-        executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
+        executor._build_docker_image = MagicMock(return_value=("goldfish-test-v1", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Run with different SHAs
@@ -967,7 +1016,7 @@ class TestStageVersioning:
             project_root=Path("/tmp"),
             dataset_registry=MagicMock(),
         )
-        executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
+        executor._build_docker_image = MagicMock(return_value=("goldfish-test-v1", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Run with same SHA but different configs
@@ -1018,7 +1067,7 @@ class TestStageVersioning:
             project_root=Path("/tmp"),
             dataset_registry=MagicMock(),
         )
-        executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
+        executor._build_docker_image = MagicMock(return_value=("goldfish-test-v1", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Execute
@@ -1061,7 +1110,7 @@ class TestStageVersioning:
             project_root=Path("/tmp"),
             dataset_registry=MagicMock(),
         )
-        executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
+        executor._build_docker_image = MagicMock(return_value=("goldfish-test-v1", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Execute
@@ -1140,7 +1189,7 @@ class TestLineageTracking:
             project_root=Path("/tmp"),
             dataset_registry=MagicMock(),
         )
-        executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
+        executor._build_docker_image = MagicMock(return_value=("goldfish-test-v1", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Run downstream stage (train)
@@ -1199,7 +1248,7 @@ class TestLineageTracking:
             project_root=Path("/tmp"),
             dataset_registry=dataset_registry,
         )
-        executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
+        executor._build_docker_image = MagicMock(return_value=("goldfish-test-v1", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Run stage
@@ -1252,7 +1301,7 @@ class TestLineageTracking:
             project_root=Path("/tmp"),
             dataset_registry=MagicMock(),
         )
-        executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
+        executor._build_docker_image = MagicMock(return_value=("goldfish-test-v1", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Run stage with override
