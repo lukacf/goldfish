@@ -399,10 +399,22 @@ RUN if command -v cargo >/dev/null 2>&1; then \\
 COPY --chown=1000:100 goldfish-rust/src/ /app/goldfish-rust/src/
 """
 
-        dockerfile += """
+        # Capture pip freeze as root (non-root images switch to USER 1000 after
+        # agent install, so /app may not be writable by that user)
+        if is_nonroot_image:
+            dockerfile += """
+# Capture resolved Python environment for reproducibility audits
+USER root
+RUN python -m pip freeze > /app/pip-freeze.txt && chown 1000:100 /app/pip-freeze.txt
+USER 1000
+"""
+        else:
+            dockerfile += """
 # Capture resolved Python environment for reproducibility audits
 RUN python -m pip freeze > /app/pip-freeze.txt
+"""
 
+        dockerfile += """
 WORKDIR /app
 
 # Entrypoint will be overridden at runtime
