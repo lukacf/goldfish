@@ -370,21 +370,41 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
         # Root users can still read files owned by uid 1000, so this works for all images
         #
         # VERSION arg busts cache when workspace version changes
-        dockerfile += """# Cache-bust: version changes invalidate subsequent layers
+        #
+        # For non-root images: agent install ends with USER 1000, but chown requires root
+        if is_nonroot_image and agent_cli_packages:
+            dockerfile += """# Cache-bust: version changes invalidate subsequent layers
 ARG VERSION
 RUN echo "Building version: ${VERSION}"
 
-# Create /app owned by user 1000 (required for non-root images so tools like
-# Claude CLI can write config files to $HOME=/app)
+# Create /app owned by user 1000 (required so tools like Claude CLI can write to $HOME=/app)
+USER root
+RUN mkdir -p /app && chown 1000:100 /app
+USER 1000
+
+# Install Goldfish IO library
+COPY --chown=1000:100 goldfish_io/ /app/goldfish_io/
+ENV PYTHONPATH="/app/goldfish_io:/app/modules:/app:${PYTHONPATH}"
+
+# Copy workspace code
+COPY --chown=1000:100 modules/ /app/modules/
+COPY --chown=1000:100 configs/ /app/configs/
+"""
+        else:
+            dockerfile += """# Cache-bust: version changes invalidate subsequent layers
+ARG VERSION
+RUN echo "Building version: ${VERSION}"
+
+# Create /app owned by user 1000 (required so tools like Claude CLI can write to $HOME=/app)
 RUN mkdir -p /app && chown 1000:100 /app
 
 # Install Goldfish IO library
 COPY --chown=1000:100 goldfish_io/ /app/goldfish_io/
 ENV PYTHONPATH="/app/goldfish_io:/app/modules:/app:${PYTHONPATH}"
 
-        # Copy workspace code
-        COPY --chown=1000:100 modules/ /app/modules/
-        COPY --chown=1000:100 configs/ /app/configs/
+# Copy workspace code
+COPY --chown=1000:100 modules/ /app/modules/
+COPY --chown=1000:100 configs/ /app/configs/
 """
         if has_loaders:
             dockerfile += "COPY --chown=1000:100 loaders/ /app/loaders/\n"
