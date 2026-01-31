@@ -374,6 +374,10 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 ARG VERSION
 RUN echo "Building version: ${VERSION}"
 
+# Create /app owned by user 1000 (required for non-root images so tools like
+# Claude CLI can write config files to $HOME=/app)
+RUN mkdir -p /app && chown 1000:100 /app
+
 # Install Goldfish IO library
 COPY --chown=1000:100 goldfish_io/ /app/goldfish_io/
 ENV PYTHONPATH="/app/goldfish_io:/app/modules:/app:${PYTHONPATH}"
