@@ -803,9 +803,9 @@ class AnthropicAPIProvider:
         """Initialize the provider.
 
         Args:
-            model: Model to use. Defaults to claude-sonnet-4-20250514.
+            model: Model to use. Defaults to claude-opus-4-5-20251101 (same as pre-run review).
         """
-        self.model = model or os.environ.get("GOLDFISH_ANTHROPIC_MODEL") or "claude-sonnet-4-20250514"
+        self.model = model or os.environ.get("GOLDFISH_ANTHROPIC_MODEL") or "claude-opus-4-5-20251101"
 
     def _make_skip_response(self, reason: str) -> ReviewResult:
         """Create a skip response with proper JSON for during-run compatibility."""

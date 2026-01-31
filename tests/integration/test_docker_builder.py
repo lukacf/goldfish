@@ -100,6 +100,79 @@ def test_dockerfile_skips_agent_cli_when_svs_disabled(tmp_path):
     assert "@anthropic-ai/claude-code" not in dockerfile
 
 
+def test_dockerfile_installs_claude_code_for_anthropic_api_provider(tmp_path):
+    """Regression: anthropic_api provider requires Claude Code CLI in container.
+
+    The claude-agent-sdk on Linux gets a pure Python wheel without the bundled
+    CLI binary. The SDK spawns 'claude' as a subprocess, so we must install it.
+
+    Bug: During-run AI monitoring returned empty responses because claude-agent-sdk
+    couldn't find the Claude Code CLI binary in the container.
+    Fix: Install @anthropic-ai/claude-code via npm when using anthropic_api provider.
+    """
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    (workspace_path / "modules").mkdir()
+    (workspace_path / "modules" / "train.py").write_text("# test module")
+    (workspace_path / "configs").mkdir()
+
+    config = GoldfishConfig(project_name="test", dev_repo_path=".")
+    config = config.model_copy(
+        update={
+            "svs": SVSConfig(
+                enabled=True,
+                ai_post_run_enabled=True,
+                agent_provider="anthropic_api",
+            )
+        }
+    )
+    builder = DockerBuilder(config)
+
+    dockerfile = builder.generate_dockerfile(
+        workspace_dir=workspace_path,
+        base_image="python:3.11-slim",
+    )
+
+    # Must install Claude Code CLI for anthropic_api provider
+    assert "@anthropic-ai/claude-code" in dockerfile
+    assert "npm install -g" in dockerfile
+
+
+def test_dockerfile_installs_cli_for_during_run_reviews(tmp_path):
+    """Regression: during-run reviews also need CLI installed.
+
+    ai_during_run_enabled uses the same agent provider as post-run,
+    so it also needs the CLI installed in the container.
+    """
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    (workspace_path / "modules").mkdir()
+    (workspace_path / "modules" / "train.py").write_text("# test module")
+    (workspace_path / "configs").mkdir()
+
+    config = GoldfishConfig(project_name="test", dev_repo_path=".")
+    config = config.model_copy(
+        update={
+            "svs": SVSConfig(
+                enabled=True,
+                ai_during_run_enabled=True,  # Only during-run, not post-run
+                ai_post_run_enabled=False,
+                agent_provider="anthropic_api",
+            )
+        }
+    )
+    builder = DockerBuilder(config)
+
+    dockerfile = builder.generate_dockerfile(
+        workspace_dir=workspace_path,
+        base_image="python:3.11-slim",
+    )
+
+    # Should install CLI even when only during-run is enabled
+    assert "@anthropic-ai/claude-code" in dockerfile
+    assert "npm install -g" in dockerfile
+
+
 def test_dockerfile_copy_uses_chown(tmp_path):
     """Regression: All COPY commands must use --chown=1000:100 for non-root containers.
 

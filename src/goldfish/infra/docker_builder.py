@@ -51,17 +51,32 @@ class DockerBuilder:
         self.db = db
 
     def _get_agent_cli_packages(self) -> list[str]:
-        """Return CLI packages to install based on SVS config."""
+        """Return CLI packages to install based on SVS config.
+
+        The anthropic_api provider uses claude-agent-sdk which requires the Claude
+        Code CLI. On Linux, the SDK's pure Python wheel (no bundled CLI) is installed,
+        so we must install the CLI separately via npm.
+        """
         svs = getattr(self.config, "svs", None) if self.config else None
         if not svs or not getattr(svs, "enabled", False):
             return []
-        if not getattr(svs, "ai_post_run_enabled", False):
+
+        # Check if either during-run or post-run AI reviews are enabled
+        # Both use the same agent provider and need the CLI installed
+        during_run_enabled = getattr(svs, "ai_during_run_enabled", False)
+        post_run_enabled = getattr(svs, "ai_post_run_enabled", False)
+        if not (during_run_enabled or post_run_enabled):
             return []
 
         provider = getattr(svs, "agent_provider", None)
         if not isinstance(provider, str):
             return []
+
+        # Map SVS agent provider names to npm package names
+        # anthropic_api: Uses claude-agent-sdk which wraps Claude Code CLI
+        #                SDK on Linux has no bundled CLI, so we install it here
         provider_map = {
+            "anthropic_api": "@anthropic-ai/claude-code",
             "codex_cli": "@openai/codex",
             "gemini_cli": "@google/gemini-cli",
         }
