@@ -686,14 +686,10 @@ class TestGCERunBackendGetStatus:
 
     def test_get_status_failed_checks_exit_code(self, backend, mock_launcher, sample_handle):
         """Failed instance checks exit code for details."""
-
-        @dataclass
-        class ExitResult:
-            exists: bool
-            code: int | None
+        from goldfish.state_machine.exit_code import ExitCodeResult
 
         mock_launcher.get_instance_status.return_value = StageState.FAILED
-        mock_launcher._get_exit_code.return_value = ExitResult(exists=True, code=137)
+        mock_launcher._get_exit_code.return_value = ExitCodeResult.from_code(137)
 
         status = backend.get_status(sample_handle)
 
@@ -702,14 +698,10 @@ class TestGCERunBackendGetStatus:
 
     def test_get_status_failed_without_exit_code_returns_exit_1(self, backend, mock_launcher, sample_handle):
         """Failed instance without exit code defaults to exit_code=1."""
-
-        @dataclass
-        class ExitResult:
-            exists: bool
-            code: int | None
+        from goldfish.state_machine.exit_code import ExitCodeResult
 
         mock_launcher.get_instance_status.return_value = StageState.FAILED
-        mock_launcher._get_exit_code.return_value = ExitResult(exists=False, code=None)
+        mock_launcher._get_exit_code.return_value = ExitCodeResult.from_not_found()
 
         status = backend.get_status(sample_handle)
 
@@ -718,12 +710,11 @@ class TestGCERunBackendGetStatus:
 
     def test_get_status_not_found_raises_not_found_error(self, backend, mock_launcher, sample_handle):
         """Not found instance raises NotFoundError."""
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
         mock_launcher.get_instance_status.return_value = "not_found"
         # Mock _get_exit_code to return no exit code found (instance never ran)
-        exit_result = MagicMock()
-        exit_result.exists = False
-        exit_result.code = None
-        mock_launcher._get_exit_code.return_value = exit_result
+        mock_launcher._get_exit_code.return_value = ExitCodeResult.from_not_found()
 
         with pytest.raises(NotFoundError) as exc_info:
             backend.get_status(sample_handle)
@@ -758,6 +749,89 @@ class TestGCERunBackendGetStatus:
         assert status.status == RunStatus.UNKNOWN
         assert status.message is not None
         assert "Network timeout" in status.message
+
+    def test_get_status_failed_with_gcs_error_includes_error_message(self, backend, mock_launcher, sample_handle):
+        """REGRESSION: GCS errors during exit code retrieval should be visible in status message.
+
+        Bug: When GCE status was FAILED and GCS returned an error reading exit_code.txt,
+        we silently returned exit_code=1 without any indication of the GCS error.
+        This made it impossible to distinguish between:
+        - Actual exit code 1 (process failure)
+        - GCS error (network/auth issue)
+
+        Fix: Include GCS error message in BackendStatus.message for visibility.
+        """
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
+        mock_launcher.get_instance_status.return_value = StageState.FAILED
+        mock_launcher._get_exit_code.return_value = ExitCodeResult(
+            exists=False,
+            code=None,
+            gcs_error=True,
+            error="Connection refused to GCS",
+        )
+
+        status = backend.get_status(sample_handle)
+
+        assert status.status == RunStatus.FAILED
+        assert status.exit_code == 1
+        # Key assertion: error message must be propagated
+        assert status.message is not None
+        assert "GCS error" in status.message
+        assert "Connection refused" in status.message
+
+    def test_get_status_failed_with_parse_error_includes_error_message(self, backend, mock_launcher, sample_handle):
+        """REGRESSION: Exit code parse errors should be visible in status message.
+
+        Bug: When exit_code.txt existed but had invalid content, we returned exit_code=1
+        without any indication of the parse error.
+
+        Fix: Include parse error message in BackendStatus.message for visibility.
+        """
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
+        mock_launcher.get_instance_status.return_value = StageState.FAILED
+        mock_launcher._get_exit_code.return_value = ExitCodeResult(
+            exists=True,
+            code=None,  # Parse failed
+            gcs_error=False,
+            error="Invalid exit code content: 'not_a_number'",
+        )
+
+        status = backend.get_status(sample_handle)
+
+        assert status.status == RunStatus.FAILED
+        assert status.exit_code == 1
+        assert status.message is not None
+        assert "error" in status.message.lower()
+        assert "Invalid exit code" in status.message
+
+    def test_get_status_not_found_with_gcs_error_returns_unknown(self, backend, mock_launcher, sample_handle):
+        """REGRESSION: GCS errors when instance not found should return UNKNOWN, not raise.
+
+        Bug: When instance was not found and GCS returned an error reading exit_code.txt,
+        we raised NotFoundError. But we can't be sure the exit code doesn't exist - we just
+        couldn't read it due to the GCS error.
+
+        Fix: Return UNKNOWN status with GCS error message when GCS fails during not_found.
+        """
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
+        mock_launcher.get_instance_status.return_value = "not_found"
+        mock_launcher._get_exit_code.return_value = ExitCodeResult(
+            exists=False,
+            code=None,
+            gcs_error=True,
+            error="IAM permission denied",
+        )
+
+        status = backend.get_status(sample_handle)
+
+        # Should return UNKNOWN, not raise NotFoundError
+        assert status.status == RunStatus.UNKNOWN
+        assert status.message is not None
+        assert "GCS error" in status.message
+        assert "IAM permission" in status.message
 
 
 # --- Get Logs Tests ---

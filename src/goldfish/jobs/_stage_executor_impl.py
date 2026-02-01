@@ -2797,9 +2797,11 @@ echo "Stage completed successfully"
                 raise GoldfishError(f"Stage run {stage_run_id} timed out after {timeout} seconds")
 
             # Get status via run_backend protocol
+            backend_status_message: str | None = None
             try:
                 backend_status = self.run_backend.get_status(handle)
                 status = self._backend_status_to_stage_state(backend_status)
+                backend_status_message = backend_status.message
             except NotFoundError:
                 status = "not_found"
 
@@ -2812,6 +2814,21 @@ echo "Stage completed successfully"
             if status in (StageState.COMPLETED, StageState.FAILED):
                 self._finalize_stage_run(stage_run_id, backend, status)
                 return status
+
+            if status == "unknown":
+                # UNKNOWN status - log with details and continue polling
+                # This handles transient API errors, GCS issues, etc.
+                now = time.time()
+                if now - last_log >= 60:
+                    logger.warning(
+                        "Status UNKNOWN for %s (elapsed: %ds): %s",
+                        stage_run_id,
+                        int(elapsed),
+                        backend_status_message or "no details available",
+                    )
+                    last_log = now
+                time.sleep(poll_interval)
+                continue
 
             if status == "not_found":
                 # Handle based on backend capabilities
@@ -2905,14 +2922,25 @@ echo "Stage completed successfully"
         caps = self.run_backend.capabilities
 
         # Get status via run_backend protocol
+        backend_status_message: str | None = None
         try:
             handle = self._get_run_handle(stage_run_id)
             backend_status = self.run_backend.get_status(handle)
             status = self._backend_status_to_stage_state(backend_status)
+            backend_status_message = backend_status.message
         except NotFoundError:
             status = "not_found"
 
         # Handle common statuses (same for all backends)
+        if status == "unknown":
+            # UNKNOWN status - log with details but don't change state
+            logger.warning(
+                "Status UNKNOWN for %s: %s",
+                stage_run_id,
+                backend_status_message or "no details available",
+            )
+            return status
+
         if status == StageState.RUNNING:
             # State machine already has state=RUNNING, no update needed
             pass
@@ -3134,7 +3162,7 @@ echo "Stage completed successfully"
             decision = "warned"
 
         try:
-            self.db.create_svs_review(
+            review_id = self.db.create_svs_review(
                 stage_run_id=stage_run_id,
                 review_type="pre_run",
                 model_used=self.config.pre_run_review.model,
@@ -3144,6 +3172,13 @@ echo "Stage completed successfully"
                 response_text=review.full_review,
                 parsed_findings=json.dumps([i.model_dump(mode="json") for i in review.issues]),
                 duration_ms=review.review_time_ms,
+            )
+            logger.info(
+                "Recorded pre-run review for %s: id=%s decision=%s issues=%d",
+                stage_run_id,
+                review_id,
+                decision,
+                len(review.issues),
             )
         except Exception as e:
             logger.warning(f"Failed to record pre-run review for {stage_run_id}: {e}")

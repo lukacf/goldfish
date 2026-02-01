@@ -294,6 +294,19 @@ class GCERunBackend:
                 exit_result = self._launcher._get_exit_code(instance_name)
                 if exit_result.exists and exit_result.code is not None:
                     return BackendStatus.from_exit_code(exit_result.code)
+                # Propagate GCS error info in message for visibility
+                if exit_result.gcs_error:
+                    return BackendStatus(
+                        status=RunStatus.FAILED,
+                        exit_code=1,
+                        message=f"GCS error retrieving exit code: {exit_result.error}",
+                    )
+                if exit_result.error:
+                    return BackendStatus(
+                        status=RunStatus.FAILED,
+                        exit_code=1,
+                        message=f"Exit code retrieval error: {exit_result.error}",
+                    )
                 return BackendStatus(status=RunStatus.FAILED, exit_code=1)
             elif status_str == "not_found":
                 # Instance is gone - try to recover exit code from GCS
@@ -304,6 +317,17 @@ class GCERunBackend:
                     return BackendStatus.from_exit_code(
                         exit_result.code,
                         termination_cause="preemption" if exit_result.code != 0 else None,
+                    )
+                # GCS error - can't determine if exit code exists, return UNKNOWN
+                if exit_result.gcs_error:
+                    logger.warning(
+                        "Instance %s not found and GCS error reading exit code: %s",
+                        instance_name,
+                        exit_result.error,
+                    )
+                    return BackendStatus(
+                        status=RunStatus.UNKNOWN,
+                        message=f"Instance not found; GCS error: {exit_result.error}",
                     )
                 # No exit code found - truly not found
                 raise NotFoundError(f"instance:{instance_name}")
