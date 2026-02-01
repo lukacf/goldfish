@@ -79,3 +79,11 @@ src/goldfish/infra/base_images/fa3_wheel/
 .local_metadata.json
 .local_gcs/
 .rct/
+.rct-*/
+
+# Sensitive files (extra protection)
+*.pem
+*.key
+credentials.json
+service-account*.json
+*.p12

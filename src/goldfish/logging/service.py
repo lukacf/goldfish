@@ -195,5 +195,5 @@ Examples
    _time:1h error | stats by (bucket=_time(1m)) count() errors
 
 4. Search specific project
-   _time:2h {project~"/Users/luka"} error
+   _time:2h {project~"/home/user/myproject"} error
 """

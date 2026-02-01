@@ -6,7 +6,6 @@
 |----------|---------|
 | [README.md](../README.md) | Project overview |
 | [GETTING_STARTED.md](GETTING_STARTED.md) | Installation and first run |
-| [GETTING_STARTED_KING.md](GETTING_STARTED_KING.md) | King-specific onboarding |
 | [GCP_SETUP.md](GCP_SETUP.md) | GCP infrastructure setup |
 
 ## Architecture & Development
