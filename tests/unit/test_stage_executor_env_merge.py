@@ -457,7 +457,9 @@ compute:
     mock_backend.launch.assert_called_once()
     run_spec = mock_backend.launch.call_args[0][0]
 
-    # timeout_seconds should be None when not specified
-    assert (
-        run_spec.timeout_seconds is None
-    ), f"RunSpec.timeout_seconds should be None when not configured, got {run_spec.timeout_seconds}"
+    # timeout_seconds should use defaults.timeout_seconds (3600) when not specified in stage config
+    # This was changed to fallback to config defaults instead of None
+    assert run_spec.timeout_seconds == 3600, (
+        f"RunSpec.timeout_seconds should use defaults.timeout_seconds (3600) when not configured, "
+        f"got {run_spec.timeout_seconds}"
+    )

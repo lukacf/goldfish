@@ -645,12 +645,21 @@ class GoldfishConfig(BaseModel):
         if "gce" not in data and "jobs" in data and isinstance(data["jobs"], dict):
             if "gce" in data["jobs"]:
                 data["gce"] = data["jobs"].pop("gce")
+                logger.warning(
+                    "Migrated 'gce' from inside 'jobs' section to top level. "
+                    "Consider updating goldfish.yaml: move 'gce:' to be a sibling of 'jobs:', not nested inside it."
+                )
 
         # Handle convenience: gcs_bucket inside gce section -> create gcs config
         if "gcs" not in data and "gce" in data and isinstance(data["gce"], dict):
             gcs_bucket = data["gce"].pop("gcs_bucket", None)
             if gcs_bucket:
                 data["gcs"] = {"bucket": gcs_bucket}
+                logger.warning(
+                    "Migrated 'gcs_bucket' from 'gce' section to 'gcs.bucket'. "
+                    "Consider updating goldfish.yaml: use 'gcs: {bucket: %s}' instead of 'gce.gcs_bucket'.",
+                    gcs_bucket,
+                )
 
         # Migrate old profile_overrides format
         if "gce" in data and isinstance(data["gce"], dict):

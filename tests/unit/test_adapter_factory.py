@@ -11,19 +11,33 @@ class TestAdapterFactoryBackendValidation:
     """Tests for AdapterFactory runtime backend validation."""
 
     def test_factory_rejects_invalid_backend_type(self) -> None:
-        """AdapterFactory should reject invalid backend types at construction time."""
+        """AdapterFactory should reject unknown backend types at construction time."""
         from goldfish.cloud.factory import AdapterFactory
         from goldfish.config import GoldfishConfig, JobsConfig
         from goldfish.errors import GoldfishError
 
-        # Create a config with invalid backend
+        # Create a config with completely unknown backend
         mock_config = MagicMock(spec=GoldfishConfig)
         mock_config.jobs = MagicMock(spec=JobsConfig)
-        mock_config.jobs.backend = "kubernetes"  # Invalid - not supported yet
+        mock_config.jobs.backend = "unknown_backend"
 
         with pytest.raises((ValueError, GoldfishError)) as exc_info:
             AdapterFactory(mock_config)
-        assert "kubernetes" in str(exc_info.value) or "backend" in str(exc_info.value).lower()
+        assert "unknown_backend" in str(exc_info.value) or "backend" in str(exc_info.value).lower()
+
+    def test_factory_rejects_kubernetes_backend_with_clear_message(self) -> None:
+        """AdapterFactory should reject kubernetes with a helpful 'not yet implemented' message."""
+        from goldfish.cloud.factory import AdapterFactory
+        from goldfish.config import GoldfishConfig, JobsConfig
+
+        mock_config = MagicMock(spec=GoldfishConfig)
+        mock_config.jobs = MagicMock(spec=JobsConfig)
+        mock_config.jobs.backend = "kubernetes"
+
+        with pytest.raises(NotImplementedError) as exc_info:
+            AdapterFactory(mock_config)
+        assert "kubernetes" in str(exc_info.value).lower()
+        assert "not yet implemented" in str(exc_info.value).lower() or "coming soon" in str(exc_info.value).lower()
 
     def test_factory_accepts_local_backend(self) -> None:
         """AdapterFactory should accept 'local' backend type."""
@@ -195,3 +209,63 @@ class TestStorageConfigTypeAnnotation:
         storage_config = StorageConfig(backend="local")
         storage = factory._create_storage_from_storage_config(storage_config)
         assert storage is not None
+
+
+class TestGCSProjectWarning:
+    """Tests for GCS project None warning."""
+
+    def test_create_storage_warns_when_gce_config_has_no_project(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Should warn when gce_config exists but both project and project_id are None."""
+        import logging
+
+        from goldfish.cloud.factory import AdapterFactory
+        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig, StorageConfig
+
+        mock_config = MagicMock(spec=GoldfishConfig)
+        mock_config.jobs = MagicMock(spec=JobsConfig)
+        mock_config.jobs.backend = "gce"
+        mock_config.gce = MagicMock(spec=GCEConfig)
+        mock_config.gce.project = None
+        mock_config.gce.project_id = None
+        mock_config.storage = MagicMock(spec=StorageConfig)
+        mock_config.storage.backend = "gcs"
+        mock_config.storage.gcs = MagicMock(spec=GCSConfig)
+        mock_config.local = None
+
+        factory = AdapterFactory(mock_config)
+
+        with caplog.at_level(logging.WARNING):
+            with patch("goldfish.cloud.adapters.gcp.storage.GCSStorage") as mock_gcs:
+                mock_gcs.return_value = MagicMock()
+                factory.create_storage()
+
+        # Should have logged a warning about missing project
+        assert any("project" in record.message.lower() for record in caplog.records)
+
+    def test_create_storage_no_warning_when_project_is_set(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Should NOT warn when gce_config has a valid project_id."""
+        import logging
+
+        from goldfish.cloud.factory import AdapterFactory
+        from goldfish.config import GCEConfig, GCSConfig, GoldfishConfig, JobsConfig, StorageConfig
+
+        mock_config = MagicMock(spec=GoldfishConfig)
+        mock_config.jobs = MagicMock(spec=JobsConfig)
+        mock_config.jobs.backend = "gce"
+        mock_config.gce = MagicMock(spec=GCEConfig)
+        mock_config.gce.project = None
+        mock_config.gce.project_id = "my-project"
+        mock_config.storage = MagicMock(spec=StorageConfig)
+        mock_config.storage.backend = "gcs"
+        mock_config.storage.gcs = MagicMock(spec=GCSConfig)
+        mock_config.local = None
+
+        factory = AdapterFactory(mock_config)
+
+        with caplog.at_level(logging.WARNING):
+            with patch("goldfish.cloud.adapters.gcp.storage.GCSStorage") as mock_gcs:
+                mock_gcs.return_value = MagicMock()
+                factory.create_storage()
+
+        # Should NOT have logged a warning about missing project
+        assert not any("project" in record.message.lower() for record in caplog.records)

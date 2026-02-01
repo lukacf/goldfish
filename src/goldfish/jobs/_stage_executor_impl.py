@@ -1679,12 +1679,19 @@ class StageExecutor:
         return value not in {"0", "false", "no", "off"}
 
     def _metrics_live_sync_interval(self) -> int:
-        value = os.getenv("GOLDFISH_METRICS_LIVE_SYNC_INTERVAL", "15")
-        try:
-            parsed = int(value)
-        except ValueError:
-            return 15
-        return max(5, min(300, parsed))
+        """Get metrics live sync interval in seconds.
+
+        Priority: env var > config defaults > hardcoded default (15s)
+        """
+        env_value = os.getenv("GOLDFISH_METRICS_LIVE_SYNC_INTERVAL")
+        if env_value:
+            try:
+                parsed = int(env_value)
+                return max(5, min(300, parsed))
+            except ValueError:
+                pass
+        # Fall back to config defaults
+        return max(5, min(300, self.config.defaults.log_sync_interval))
 
     def _get_metrics_sync_state(self, stage_run_id: str) -> _MetricsSyncState:
         with self._metrics_sync_lock:
@@ -1831,7 +1838,15 @@ class StageExecutor:
             return
 
         now = time.time()
-        interval = float(os.environ.get("GOLDFISH_SVS_LIVE_SYNC_INTERVAL", "10"))
+        # SVS sync interval: env var > config defaults
+        env_interval = os.environ.get("GOLDFISH_SVS_LIVE_SYNC_INTERVAL")
+        if env_interval:
+            try:
+                interval = float(env_interval)
+            except ValueError:
+                interval = float(self.config.defaults.log_sync_interval)
+        else:
+            interval = float(self.config.defaults.log_sync_interval)
         with self._svs_sync_lock:
             last_sync = self._svs_sync_state.get(stage_run_id, 0.0)
             if now - last_sync < interval:
@@ -2445,12 +2460,15 @@ echo "Stage completed successfully"
             spot = profile.get("preemptible_allowed", False)
 
         # Extract timeout from stage config (compute.max_runtime_seconds)
+        # Falls back to defaults.timeout_seconds if not specified
         timeout_seconds: int | None = None
         compute_config = stage_config_yaml.get("compute", {})
         if compute_config and isinstance(compute_config, dict):
             max_runtime = compute_config.get("max_runtime_seconds")
             if max_runtime is not None:
                 timeout_seconds = int(max_runtime)
+        if timeout_seconds is None:
+            timeout_seconds = self.config.defaults.timeout_seconds
 
         # Build command from entrypoint
         entrypoint_script = self._build_entrypoint_script(stage_name, runtime, entrypoint)

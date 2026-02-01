@@ -17,6 +17,10 @@ and other container-side storage operations.
 
 import subprocess
 import sys
+from pathlib import Path
+
+# Resolve project root dynamically for portable tests
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
 
 class TestContainerImports:
@@ -60,7 +64,7 @@ except ImportError as e:
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
-            cwd="/Users/luka/src/goldfish",
+            cwd=str(PROJECT_ROOT),
         )
         assert result.returncode == 0, f"Import failed: {result.stderr}"
         assert "SUCCESS" in result.stdout
@@ -127,7 +131,7 @@ except ImportError as e:
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
-            cwd="/Users/luka/src/goldfish",
+            cwd=str(PROJECT_ROOT),
         )
         assert result.returncode == 0, f"Import failed: {result.stderr}"
         assert "SUCCESS" in result.stdout

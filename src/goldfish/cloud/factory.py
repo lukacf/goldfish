@@ -58,6 +58,12 @@ class AdapterFactory:
 
         # Validate backend type at runtime instead of using type: ignore
         backend = config.jobs.backend
+        if backend == "kubernetes":
+            raise NotImplementedError(
+                "Kubernetes backend not yet implemented. "
+                "Use jobs.backend='local' or 'gce' for now. "
+                "Kubernetes support is planned for a future release."
+            )
         if backend not in ("local", "gce"):
             raise ValueError(
                 f"Unsupported backend type: '{backend}'. "
@@ -102,13 +108,7 @@ class AdapterFactory:
             return self._create_local_storage(root)
 
         if backend == "gcs":
-            from goldfish.cloud.adapters.gcp.storage import GCSStorage
-
-            # Use project from gce config if available
-            # Explicit parentheses for clarity (ternary has lower precedence than or)
-            gce_config = self._config.gce
-            project = (gce_config.project or gce_config.project_id) if gce_config else None
-            return GCSStorage(project=project)
+            return self._create_gcs_storage()
 
         if backend == "s3":
             raise NotImplementedError(
@@ -122,18 +122,35 @@ class AdapterFactory:
 
         raise ValueError(f"Unknown storage backend: {backend}")
 
+    def _create_gcs_storage(self) -> ObjectStorage:
+        """Create GCSStorage adapter with project from gce config.
+
+        Logs a warning if gce config exists but has no project_id.
+        """
+        from goldfish.cloud.adapters.gcp.storage import GCSStorage
+
+        gce_config = self._config.gce
+        project: str | None = None
+
+        if gce_config:
+            project = gce_config.project or gce_config.project_id
+            if not project:
+                logger.warning(
+                    "GCE config present but no project_id or project field set. "
+                    "GCS operations will use default credentials project. "
+                    "Consider adding project_id to gce config in goldfish.yaml."
+                )
+        # If gce_config is None, project stays None (uses default credentials)
+
+        return GCSStorage(project=project)
+
     def _create_storage_legacy(self, root: Path | None = None) -> ObjectStorage:
         """Create storage adapter using legacy jobs.backend selection."""
         if self._backend_type == "local":
             return self._create_local_storage(root)
 
         if self._backend_type == "gce":
-            from goldfish.cloud.adapters.gcp.storage import GCSStorage
-
-            # Explicit parentheses for clarity (ternary has lower precedence than or)
-            gce_config = self._config.gce
-            project = (gce_config.project or gce_config.project_id) if gce_config else None
-            return GCSStorage(project=project)
+            return self._create_gcs_storage()
 
         raise ValueError(f"Unknown backend type: {self._backend_type}")
 
