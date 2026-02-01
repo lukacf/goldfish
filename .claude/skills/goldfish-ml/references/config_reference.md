@@ -159,7 +159,7 @@ svs:
   # Pre-run review specific configuration
   pre_run_review:
     enabled: true
-    model: opus
+    model: claude-opus-4-5-20251101
     timeout_seconds: 120
     max_turns: 3
 
@@ -553,6 +553,48 @@ Domain profiles provide optimized thresholds and policies for common ML tasks. E
 | `agent_timeout` | `120` | Timeout in seconds for AI calls |
 
 **Note:** In YAML, `agent_provider: null` (unquoted) means "use default" (`claude_code`). To explicitly disable AI reviews, use `agent_provider: "null"` (quoted string) for NullProvider.
+
+## LocalConfig (Local Backend)
+
+The `local` section configures the local Docker-based execution backend.
+
+```yaml
+local:
+  enabled: true                    # Enable local backend
+  docker_host: unix:///var/run/docker.sock  # Docker daemon socket
+  network_mode: bridge             # Docker network mode
+  memory_limit: 8g                 # Container memory limit
+  cpu_limit: 4                     # Container CPU limit
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Enable local Docker execution backend |
+| `docker_host` | (system default) | Docker daemon socket URL |
+| `network_mode` | `bridge` | Docker network mode |
+| `memory_limit` | `8g` | Default container memory limit |
+| `cpu_limit` | `4` | Default container CPU limit |
+
+## Docker Configuration
+
+The `docker` section configures Docker image building and customization.
+
+```yaml
+docker:
+  extra_packages:
+    gpu:
+      - triton
+      - flash-attn
+    cpu:
+      - lightgbm
+  fa3_wheel_gcs: gs://my-bucket/wheels/flash_attn-3.0.0-cp311-linux_x86_64.whl
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `extra_packages.gpu` | `[]` | Additional pip packages for GPU images |
+| `extra_packages.cpu` | `[]` | Additional pip packages for CPU images |
+| `fa3_wheel_gcs` | `null` | GCS path for FlashAttention-3 wheel (for custom builds) |
 
 ## Metrics Configuration
 

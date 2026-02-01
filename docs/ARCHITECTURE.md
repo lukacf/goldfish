@@ -37,12 +37,13 @@ Goldfish is an **MCP (Model Context Protocol) server** that enables AI agents to
                            │
             ┌──────────────┼──────────────┐
             ▼              ▼              ▼
-     ┌──────────┐   ┌──────────┐   ┌──────────┐
-     │  Local   │   │   GCE    │   │   AWS    │
-     │ (Docker) │   │  (GCP)   │   │  (ECS)   │
-     └──────────┘   └──────────┘   └──────────┘
-                                    (future)
+     ┌──────────┐   ┌──────────┐   ┌────────────┐
+     │  Local   │   │   GCE    │   │ Kubernetes │
+     │ (Docker) │   │  (GCP)   │   │  (future)  │
+     └──────────┘   └──────────┘   └────────────┘
 ```
+
+> **Note**: The Kubernetes backend is defined in the codebase but currently raises `NotImplementedError`. It is planned for a future release.
 
 ---
 
@@ -170,8 +171,10 @@ class BackendCapabilities:
     ack_timeout_seconds: float = 1.0
     has_launch_delay: bool = False
     timeout_becomes_pending: bool = False
-    # ... etc
+    # ... additional fields defined in cloud/contracts.py
 ```
+
+> **Note**: The fields shown above are a subset. See `src/goldfish/cloud/contracts.py` for the complete `BackendCapabilities` definition.
 
 ### Key Files
 
@@ -272,6 +275,7 @@ GoldfishConfig
 ├── gce: GCEConfig | None          # GCE compute settings
 ├── jobs: JobsConfig               # Job execution config
 ├── local: LocalConfig             # Local backend simulation
+├── pre_run_review: PreRunReviewConfig  # AI code review settings
 ├── docker: DockerConfig           # Image customization
 └── svs: SVSConfig                 # Validation settings
 ```

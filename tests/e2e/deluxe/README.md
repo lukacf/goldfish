@@ -131,7 +131,7 @@ The Docker container will automatically load all variables from your existing `.
 # - GOLDFISH_GCE_PROJECT
 # - GOLDFISH_GCS_BUCKET
 
-cd tests/deluxe
+cd tests/e2e/deluxe
 ./run_deluxe_tests.sh
 ```
 
@@ -243,7 +243,7 @@ If cleanup fails and instances remain:
 
 To add new test scenarios:
 
-1. Create new test method in `test_gce_e2e_full.py`
+1. Create new test method in one of the existing test files (`test_gce_fixtures.py`, `test_gce_io_staging.py`, `test_gce_mocked.py`)
 2. Use `deluxe_project` fixture for setup
 3. Use `gce_cleanup` fixture to ensure cleanup
 4. Tag with `@pytest.mark.deluxe_gce`
@@ -286,5 +286,4 @@ To run in CI, set up:
 ## Related Documentation
 
 - [Goldfish Architecture](../../CLAUDE.md)
-- [GCE Configuration](../../docs/gce_config.md)
-- [Resource Profiles](../../docs/profiles.md)
+- [Configuration Reference](../../../.claude/skills/goldfish-ml/references/config_reference.md) - includes GCE and resource profile configuration

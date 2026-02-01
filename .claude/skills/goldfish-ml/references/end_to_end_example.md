@@ -63,8 +63,8 @@ register_source(
 
 Verify it's available:
 ```
-list_sources()
-get_source("v37-tokens")
+manage_sources(action="list")
+manage_sources(action="get", name="v37-tokens")
 ```
 
 ## Step 3: Create Workspace
@@ -72,10 +72,11 @@ get_source("v37-tokens")
 ```
 create_workspace(
     name="1b-8k-lm",
-    goal="Train 1B parameter LM with 8096 context on V37 tokens"
+    goal="Train 1B parameter LM with 8096 context on V37 tokens",
+    reason="Starting new 1B LM training experiment baseline"
 )
 
-mount(slot="w1", workspace="1b-8k-lm", reason="Starting LM training experiment")
+mount(workspace="1b-8k-lm", slot="w1", reason="Starting LM training experiment")
 ```
 
 ## Step 4: Create Pipeline
@@ -429,8 +430,8 @@ promote_artifact(
 ### Branch for Experiment Variation
 
 ```
-create_workspace("1b-8k-lm-larger", goal="Try 2B params instead")
-mount("w2", "1b-8k-lm-larger", reason="Experimenting with larger model")
+create_workspace("1b-8k-lm-larger", goal="Try 2B params instead", reason="Experimenting with larger model variant")
+mount(workspace="1b-8k-lm-larger", slot="w2", reason="Experimenting with larger model")
 
 # Copy and modify configs
 # Run new experiment

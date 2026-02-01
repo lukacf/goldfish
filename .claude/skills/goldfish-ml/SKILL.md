@@ -68,7 +68,7 @@ START: What task?
   │     └─▶ list_history() → inspect_record(record_id) → inspect_run/run logs (infra)
   │
   ├─▶ "Manage data"
-  │     └─▶ register_source() or manage_sources(action="list")
+  │     └─▶ register_source() or manage_sources(action="list") or manage_sources(action="get", name="...")
   │
   ├─▶ "Track lineage"
   │     └─▶ get_lineage(run_id, direction) → inspect_run(include=["provenance"])
@@ -889,9 +889,9 @@ manage_base_images(action="push", image_type="gpu", target="project")
 
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
-| `run()` | Execute stages (requires results_spec; finalization gate enforced) | workspace, stages, results_spec, reason |
+| `run()` | Execute stages (finalization gate enforced). **Note:** `results_spec` is REQUIRED (not optional) | workspace, stages, results_spec, reason |
 | `finalize_run()` | Finalize ML results and outcome (authoritative) | record_or_run_id, results |
-| `list_history()` | Experiment records with reason, metric, age | workspace, tagged, stage, metric, min_value |
+| `list_history()` | Experiment records with reason, metric, age | workspace, tagged, stage, metric, min_value, finalized_only: bool = False |
 | `inspect_record()` | Record details (results, comparison, tags) | ref, include, workspace |
 | `tag_record()` | Tag a run/checkpoint (runs also tag version) | ref, tag |
 | `list_unfinalized_runs()` | Runs needing finalization | workspace |
@@ -957,7 +957,7 @@ manage_base_images(action="push", image_type="gpu", target="project")
 
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
-| `manage_base_images()` | Docker base image management | action, image_type, target, backend, version |
+| `manage_base_images()` | Docker base image management. **Note:** `image_type` is required for all actions except 'list' and 'check' | action, image_type, target, backend, version |
 | `get_build_status()` | Poll image build progress | build_id |
 
 **`manage_base_images` actions:**
@@ -1025,6 +1025,7 @@ manage_base_images(action="push", image_type="gpu", target="project")
 
 
 | `reload_config()` | Hot-reload goldfish.yaml | None |
+| `get_audit_log()` | Get recent audit trail entries | limit, workspace |
 
 
 

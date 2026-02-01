@@ -109,7 +109,7 @@ MCP Client (Claude) ─── JSON-RPC ───▶ server.py
 
 ---
 
-## The Seven Abstractions
+## The Nine Abstractions
 
 ### 1. Workspaces = Copy-Based Isolation
 
@@ -194,6 +194,7 @@ SVS provides defense-in-depth through three phases:
 **Security**:
 - Path traversal protection in `pre_run_review.py`.
 - File size limits (100KB/file) for review context.
+- Note: IPv6 SSRF validation not yet implemented (S3 endpoint_url only validates IPv4 addresses).
 
 ### 8. Cloud Abstraction Layer
 
@@ -215,6 +216,9 @@ cloud/
 - `RunBackend`: Unified interface for execution (`launch()`, `get_status()`, `terminate()`, `get_logs()`)
 - `ObjectStorage`: Blob storage operations (`put()`, `get()`, `exists()`, `delete()`)
 - `ImageBuilder`: Docker image building (`build()`, `push()`)
+- `SignalBus`: Inter-stage signal coordination and messaging
+- `InstanceIdentity`: Cloud instance metadata abstraction
+- `ImageRegistry`: Container image registry operations
 
 **BackendCapabilities** - Behavior configuration instead of conditionals:
 
@@ -454,8 +458,8 @@ Full schema: `db/schema.sql`
 
 ```
 tests/
-├── unit/           # Over 850 tests, <1s, pure logic, all mocked
-├── integration/    # Over 750 tests, ~2min, real DB + git
+├── unit/           # Over 2400 tests, <1s, pure logic, all mocked
+├── integration/    # Over 1200 tests, ~2min, real DB + git
 ├── e2e/            # Full Docker tests
 │   └── deluxe/     # GCE tests (@pytest.mark.deluxe_gce)
 └── conftest.py     # Fixtures: test_db, temp_git_repo

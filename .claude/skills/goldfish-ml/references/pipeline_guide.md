@@ -15,7 +15,7 @@ workspace/
 
 Run specific pipelines with: `run("w1", pipeline="training", results_spec=RESULTS_SPEC)`
 
-`results_spec` is required for all runs. After the run is terminal, call `finalize_run()`.
+**IMPORTANT:** `results_spec` is **REQUIRED** for all `run()` calls (not optional). After the run is terminal, call `finalize_run()`.
 
 Example results_spec (use as `RESULTS_SPEC` below):
 ```json

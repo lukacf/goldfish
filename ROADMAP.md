@@ -82,7 +82,7 @@ compute:
 
 **Interface:**
 ```python
-class ComputeBackend(Protocol):
+class RunBackend(Protocol):
     def launch(self, run: StageRun, image: str, inputs: dict) -> str: ...
     def get_status(self, run_id: str) -> RunStatus: ...
     def get_logs(self, run_id: str, tail: int) -> str: ...
@@ -370,6 +370,7 @@ Not now and maybe never:
                     ┌─────────────────┐
                     │  Configuration  │
                     │   Flexibility   │
+                    │   (COMPLETED)   │
                     └─────────────────┘
 ```
 
