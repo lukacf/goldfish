@@ -22,8 +22,6 @@ from goldfish.cloud.contracts import BackendCapabilities
 # NOTE: goldfish.infra is NOT available in container images - imports must be lazy
 
 if TYPE_CHECKING:
-    pass  # Path moved to runtime import
-
     from goldfish.cloud.protocols import (
         ImageBuilder,
         ImageRegistry,
@@ -32,7 +30,7 @@ if TYPE_CHECKING:
         RunBackend,
         SignalBus,
     )
-    from goldfish.config import GoldfishConfig
+    from goldfish.config import GoldfishConfig, StorageConfig
     from goldfish.db.database import Database
 
 logger = logging.getLogger(__name__)
@@ -52,9 +50,21 @@ class AdapterFactory:
 
         Args:
             config: Goldfish configuration with backend settings.
+
+        Raises:
+            ValueError: If jobs.backend is not a supported backend type.
         """
         self._config = config
-        self._backend_type: BackendType = config.jobs.backend  # type: ignore[assignment]
+
+        # Validate backend type at runtime instead of using type: ignore
+        backend = config.jobs.backend
+        if backend not in ("local", "gce"):
+            raise ValueError(
+                f"Unsupported backend type: '{backend}'. "
+                f"Supported backends: 'local', 'gce'. "
+                f"Check jobs.backend in goldfish.yaml."
+            )
+        self._backend_type: BackendType = backend  # type: ignore[assignment]
 
     @property
     def backend_type(self) -> BackendType:
@@ -82,7 +92,9 @@ class AdapterFactory:
         # Fall back to legacy behavior based on jobs.backend
         return self._create_storage_legacy(root)
 
-    def _create_storage_from_storage_config(self, storage_config: Any, root: Path | None = None) -> ObjectStorage:
+    def _create_storage_from_storage_config(
+        self, storage_config: StorageConfig, root: Path | None = None
+    ) -> ObjectStorage:
         """Create storage adapter from the new storage: config section."""
         backend = storage_config.backend
 
@@ -93,8 +105,9 @@ class AdapterFactory:
             from goldfish.cloud.adapters.gcp.storage import GCSStorage
 
             # Use project from gce config if available
+            # Explicit parentheses for clarity (ternary has lower precedence than or)
             gce_config = self._config.gce
-            project = gce_config.project or gce_config.project_id if gce_config else None
+            project = (gce_config.project or gce_config.project_id) if gce_config else None
             return GCSStorage(project=project)
 
         if backend == "s3":
@@ -117,8 +130,9 @@ class AdapterFactory:
         if self._backend_type == "gce":
             from goldfish.cloud.adapters.gcp.storage import GCSStorage
 
+            # Explicit parentheses for clarity (ternary has lower precedence than or)
             gce_config = self._config.gce
-            project = gce_config.project or gce_config.project_id if gce_config else None
+            project = (gce_config.project or gce_config.project_id) if gce_config else None
             return GCSStorage(project=project)
 
         raise ValueError(f"Unknown backend type: {self._backend_type}")
@@ -179,9 +193,10 @@ class AdapterFactory:
         elif self._backend_type == "gce":
             from goldfish.cloud.adapters.gcp.run_backend import GCERunBackend
 
+            # Explicit parentheses for clarity (ternary has lower precedence than or)
             gce_config = self._config.gce
             gcs_config = self._config.gcs
-            project = gce_config.project or gce_config.project_id if gce_config else None
+            project = (gce_config.project or gce_config.project_id) if gce_config else None
             bucket = gcs_config.bucket if gcs_config else None
 
             return GCERunBackend(

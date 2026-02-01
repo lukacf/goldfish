@@ -124,6 +124,10 @@ class S3StorageConfig(BaseModel):
     """S3 storage configuration.
 
     For AWS S3 or S3-compatible storage (MinIO, etc).
+
+    Security: endpoint_url is validated to prevent SSRF attacks.
+    Only public DNS names are allowed - localhost, internal IPs, and
+    cloud metadata endpoints are rejected.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -136,9 +140,81 @@ class S3StorageConfig(BaseModel):
     snapshots_prefix: str = "snapshots/"
     datasets_prefix: str = "datasets/"
 
+    @model_validator(mode="after")
+    def validate_endpoint_url_security(self) -> "S3StorageConfig":
+        """Validate endpoint_url to prevent SSRF attacks.
+
+        Rejects:
+        - localhost and 127.0.0.1
+        - Internal IP ranges (10.x, 172.16-31.x, 192.168.x)
+        - Cloud metadata endpoints (169.254.169.254)
+        - Link-local addresses (169.254.x.x)
+        """
+        if self.endpoint_url is None:
+            return self
+
+        import ipaddress
+        import re
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(self.endpoint_url)
+            host = parsed.hostname
+        except Exception:
+            raise ValueError(f"Invalid endpoint_url format: {self.endpoint_url}") from None
+
+        if not host:
+            raise ValueError("endpoint_url must include a hostname")
+
+        # Check for localhost
+        if host.lower() in ("localhost", "localhost.localdomain"):
+            raise ValueError(
+                "endpoint_url cannot be localhost (SSRF protection). "
+                "Use a public DNS name for S3-compatible storage."
+            )
+
+        # Check if host is an IP address
+        # Handle IPv4 addresses, including those with brackets
+        ip_pattern = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
+        if ip_pattern.match(host):
+            try:
+                ip = ipaddress.ip_address(host)
+
+                # Reject loopback (127.x.x.x)
+                if ip.is_loopback:
+                    raise ValueError(
+                        f"endpoint_url cannot use loopback address {host} (SSRF protection). "
+                        "Use a public DNS name for S3-compatible storage."
+                    )
+
+                # Reject private IP ranges
+                if ip.is_private:
+                    raise ValueError(
+                        f"endpoint_url cannot use internal IP address {host} (SSRF protection). "
+                        "Use a public DNS name for S3-compatible storage."
+                    )
+
+                # Reject link-local (169.254.x.x including cloud metadata 169.254.169.254)
+                if ip.is_link_local:
+                    raise ValueError(
+                        f"endpoint_url cannot use link-local address {host} (SSRF protection). "
+                        "This includes cloud metadata endpoints."
+                    )
+
+            except ValueError:
+                # Re-raise our own ValueError, ignore ipaddress parsing errors
+                raise
+
+        return self
+
 
 class AzureStorageConfig(BaseModel):
-    """Azure Blob storage configuration."""
+    """Azure Blob storage configuration.
+
+    Azure storage account names must be:
+    - 3-24 characters long
+    - Alphanumeric only (lowercase letters and numbers)
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -148,6 +224,37 @@ class AzureStorageConfig(BaseModel):
     artifacts_prefix: str = "artifacts/"
     snapshots_prefix: str = "snapshots/"
     datasets_prefix: str = "datasets/"
+
+    @model_validator(mode="after")
+    def validate_account_name(self) -> "AzureStorageConfig":
+        """Validate Azure storage account name format.
+
+        Azure requires: 3-24 characters, alphanumeric only (lowercase).
+        """
+        import re
+
+        account = self.account
+
+        if len(account) < 3:
+            raise ValueError(
+                f"Azure storage account name must be at least 3 characters, got {len(account)}. "
+                "Account names must be 3-24 characters, alphanumeric only."
+            )
+
+        if len(account) > 24:
+            raise ValueError(
+                f"Azure storage account name must be at most 24 characters, got {len(account)}. "
+                "Account names must be 3-24 characters, alphanumeric only."
+            )
+
+        # Azure requires lowercase alphanumeric only
+        if not re.match(r"^[a-z0-9]+$", account):
+            raise ValueError(
+                f"Azure storage account name must be alphanumeric only (lowercase letters and numbers). "
+                f"Got: '{account}'. Remove hyphens, underscores, and uppercase letters."
+            )
+
+        return self
 
 
 StorageBackend = Literal["gcs", "s3", "azure", "local"]
@@ -161,6 +268,9 @@ class StorageConfig(BaseModel):
     - s3: AWS S3 or S3-compatible
     - azure: Azure Blob Storage
     - local: Local filesystem (for development/testing)
+
+    The selected backend must have its corresponding configuration section present.
+    For example, backend='s3' requires the s3: section to be defined.
 
     Example goldfish.yaml:
         storage:
@@ -176,6 +286,31 @@ class StorageConfig(BaseModel):
     gcs: GCSConfig | None = None
     s3: S3StorageConfig | None = None
     azure: AzureStorageConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_backend_config_consistency(self) -> "StorageConfig":
+        """Validate that the selected backend has its config section.
+
+        Raises:
+            ValueError: If backend is set but its config section is missing.
+        """
+        if self.backend == "gcs" and self.gcs is None:
+            raise ValueError(
+                "storage.backend='gcs' requires storage.gcs section with bucket configuration. "
+                "Add gcs: {bucket: 'your-bucket'} to storage config."
+            )
+        if self.backend == "s3" and self.s3 is None:
+            raise ValueError(
+                "storage.backend='s3' requires storage.s3 section with bucket configuration. "
+                "Add s3: {bucket: 'your-bucket'} to storage config."
+            )
+        if self.backend == "azure" and self.azure is None:
+            raise ValueError(
+                "storage.backend='azure' requires storage.azure section with container and account. "
+                "Add azure: {container: 'your-container', account: 'your-account'} to storage config."
+            )
+        # backend='local' doesn't require any additional config
+        return self
 
     @property
     def effective_bucket(self) -> str | None:

@@ -38,13 +38,13 @@ class TestS3StorageConfig:
         config = S3StorageConfig(
             bucket="my-bucket",
             region="us-east-1",
-            endpoint_url="http://localhost:9000",
+            endpoint_url="https://minio.example.com:9000",  # Public URL required
             sources_prefix="data/sources/",
             artifacts_prefix="data/artifacts/",
         )
         assert config.bucket == "my-bucket"
         assert config.region == "us-east-1"
-        assert config.endpoint_url == "http://localhost:9000"
+        assert config.endpoint_url == "https://minio.example.com:9000"
         assert config.sources_prefix == "data/sources/"
         assert config.artifacts_prefix == "data/artifacts/"
 
@@ -74,17 +74,18 @@ class TestAzureStorageConfig:
             AzureStorageConfig(container="my-container")  # type: ignore[call-arg]
 
         with pytest.raises(ValidationError):
-            AzureStorageConfig(account="my-account")  # type: ignore[call-arg]
+            AzureStorageConfig(account="myaccount123")  # type: ignore[call-arg]
 
     def test_azure_config_with_required_fields(self) -> None:
         """AzureConfig can be created with required fields."""
-        config = AzureStorageConfig(container="my-container", account="my-account")
+        # Azure account names must be 3-24 alphanumeric chars
+        config = AzureStorageConfig(container="my-container", account="myaccount123")
         assert config.container == "my-container"
-        assert config.account == "my-account"
+        assert config.account == "myaccount123"
 
     def test_azure_config_default_prefixes(self) -> None:
         """AzureConfig has sensible default prefixes matching GCS."""
-        config = AzureStorageConfig(container="my-container", account="my-account")
+        config = AzureStorageConfig(container="my-container", account="myaccount123")
         assert config.sources_prefix == "sources/"
         assert config.artifacts_prefix == "artifacts/"
         assert config.snapshots_prefix == "snapshots/"
@@ -95,7 +96,7 @@ class TestAzureStorageConfig:
         with pytest.raises(ValidationError):
             AzureStorageConfig(
                 container="my-container",
-                account="my-account",
+                account="myaccount123",
                 unknown="value",  # type: ignore[call-arg]
             )
 
@@ -104,9 +105,20 @@ class TestStorageConfig:
     """Tests for unified StorageConfig."""
 
     def test_storage_config_defaults_to_gcs(self) -> None:
-        """StorageConfig defaults backend to 'gcs'."""
-        config = StorageConfig()
+        """StorageConfig defaults backend to 'gcs' but requires gcs section.
+
+        As of the backend-config consistency validation, StorageConfig()
+        without a gcs section raises ValidationError.
+        """
+        # Backend defaults to 'gcs' but requires gcs config
+        config = StorageConfig(backend="gcs", gcs=GCSConfig(bucket="test-bucket"))
         assert config.backend == "gcs"
+
+    def test_storage_config_gcs_requires_gcs_section(self) -> None:
+        """StorageConfig with backend='gcs' requires gcs section."""
+        with pytest.raises(ValidationError) as exc_info:
+            StorageConfig()  # Defaults to gcs but no gcs config
+        assert "gcs" in str(exc_info.value).lower()
 
     def test_storage_config_accepts_gcs_backend(self) -> None:
         """StorageConfig accepts 'gcs' backend."""
@@ -131,14 +143,15 @@ class TestStorageConfig:
 
     def test_storage_config_accepts_azure_backend(self) -> None:
         """StorageConfig accepts 'azure' backend."""
+        # Azure account names must be 3-24 alphanumeric chars
         config = StorageConfig(
             backend="azure",
-            azure=AzureStorageConfig(container="my-container", account="my-account"),
+            azure=AzureStorageConfig(container="my-container", account="myaccount123"),
         )
         assert config.backend == "azure"
         assert config.azure is not None
         assert config.azure.container == "my-container"
-        assert config.azure.account == "my-account"
+        assert config.azure.account == "myaccount123"
 
     def test_storage_config_accepts_local_backend(self) -> None:
         """StorageConfig accepts 'local' backend."""
@@ -308,18 +321,14 @@ class TestStorageConfigEffectiveBucket:
 
     def test_effective_bucket_from_azure(self) -> None:
         """effective_bucket returns Azure container when backend is azure."""
+        # Azure account names must be 3-24 alphanumeric chars
         config = StorageConfig(
             backend="azure",
-            azure=AzureStorageConfig(container="azure-container", account="myaccount"),
+            azure=AzureStorageConfig(container="azure-container", account="myaccount123"),
         )
         assert config.effective_bucket == "azure-container"
 
     def test_effective_bucket_local_returns_none(self) -> None:
         """effective_bucket returns None for local backend."""
         config = StorageConfig(backend="local")
-        assert config.effective_bucket is None
-
-    def test_effective_bucket_missing_config_returns_none(self) -> None:
-        """effective_bucket returns None when backend config is missing."""
-        config = StorageConfig(backend="gcs")  # No gcs config
         assert config.effective_bucket is None
