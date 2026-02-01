@@ -194,7 +194,6 @@ SVS provides defense-in-depth through three phases:
 **Security**:
 - Path traversal protection in `pre_run_review.py`.
 - File size limits (100KB/file) for review context.
-- Note: IPv6 SSRF validation not yet implemented (S3 endpoint_url only validates IPv4 addresses).
 
 ### 8. Cloud Abstraction Layer
 

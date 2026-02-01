@@ -154,7 +154,6 @@ class S3StorageConfig(BaseModel):
             return self
 
         import ipaddress
-        import re
         from urllib.parse import urlparse
 
         try:
@@ -173,37 +172,49 @@ class S3StorageConfig(BaseModel):
                 "Use a public DNS name for S3-compatible storage."
             )
 
-        # Check if host is an IP address
-        # Handle IPv4 addresses, including those with brackets
-        ip_pattern = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
-        if ip_pattern.match(host):
+        # Check if host is an IP address (IPv4 or IPv6)
+        def check_ip_security(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
+            """Check IP address for SSRF vulnerabilities."""
+            # Reject loopback (127.x.x.x for IPv4, ::1 for IPv6)
+            if ip.is_loopback:
+                raise ValueError(
+                    f"endpoint_url cannot use loopback address {host} (SSRF protection). "
+                    "Use a public DNS name for S3-compatible storage."
+                )
+
+            # Reject private IP ranges (10.x, 172.16-31.x, 192.168.x for IPv4; fc00::/7 for IPv6)
+            if ip.is_private:
+                raise ValueError(
+                    f"endpoint_url cannot use internal IP address {host} (SSRF protection). "
+                    "Use a public DNS name for S3-compatible storage."
+                )
+
+            # Reject link-local (169.254.x.x for IPv4, fe80::/10 for IPv6)
+            if ip.is_link_local:
+                raise ValueError(
+                    f"endpoint_url cannot use link-local address {host} (SSRF protection). "
+                    "This includes cloud metadata endpoints."
+                )
+
+        # Try to parse as IP address (IPv4 or IPv6)
+        ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            # Not a valid IP address - could be a hostname (which is fine)
+            pass
+
+        if ip is not None:
+            check_ip_security(ip)
+
+        # Check for IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
+        if host.lower().startswith("::ffff:"):
+            ipv4_part = host[7:]  # Strip ::ffff: prefix
             try:
-                ip = ipaddress.ip_address(host)
-
-                # Reject loopback (127.x.x.x)
-                if ip.is_loopback:
-                    raise ValueError(
-                        f"endpoint_url cannot use loopback address {host} (SSRF protection). "
-                        "Use a public DNS name for S3-compatible storage."
-                    )
-
-                # Reject private IP ranges
-                if ip.is_private:
-                    raise ValueError(
-                        f"endpoint_url cannot use internal IP address {host} (SSRF protection). "
-                        "Use a public DNS name for S3-compatible storage."
-                    )
-
-                # Reject link-local (169.254.x.x including cloud metadata 169.254.169.254)
-                if ip.is_link_local:
-                    raise ValueError(
-                        f"endpoint_url cannot use link-local address {host} (SSRF protection). "
-                        "This includes cloud metadata endpoints."
-                    )
-
+                ipv4 = ipaddress.ip_address(ipv4_part)
+                check_ip_security(ipv4)
             except ValueError:
-                # Re-raise our own ValueError, ignore ipaddress parsing errors
-                raise
+                pass
 
         return self
 

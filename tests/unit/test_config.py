@@ -208,6 +208,49 @@ class TestS3StorageConfigValidation:
         with pytest.raises(ValidationError):
             S3StorageConfig(bucket="test", endpoint_url="http://169.254.169.254/latest/meta-data/")
 
+    def test_s3_endpoint_url_rejects_ipv6_loopback(self) -> None:
+        """S3 endpoint_url must reject IPv6 loopback (::1) to prevent SSRF."""
+        from pydantic import ValidationError
+
+        from goldfish.config import S3StorageConfig
+
+        with pytest.raises(ValidationError) as exc_info:
+            S3StorageConfig(bucket="test", endpoint_url="http://[::1]:9000")
+        assert "loopback" in str(exc_info.value).lower() or "ssrf" in str(exc_info.value).lower()
+
+    def test_s3_endpoint_url_rejects_ipv6_link_local(self) -> None:
+        """S3 endpoint_url must reject IPv6 link-local addresses (fe80::)."""
+        from pydantic import ValidationError
+
+        from goldfish.config import S3StorageConfig
+
+        with pytest.raises(ValidationError) as exc_info:
+            S3StorageConfig(bucket="test", endpoint_url="http://[fe80::1]:9000")
+        assert "link-local" in str(exc_info.value).lower() or "ssrf" in str(exc_info.value).lower()
+
+    def test_s3_endpoint_url_rejects_ipv6_private(self) -> None:
+        """S3 endpoint_url must reject IPv6 private addresses (fc00::/fd00::)."""
+        from pydantic import ValidationError
+
+        from goldfish.config import S3StorageConfig
+
+        ipv6_private_urls = [
+            "http://[fc00::1]:9000",
+            "http://[fd00::1]:9000",
+        ]
+        for url in ipv6_private_urls:
+            with pytest.raises(ValidationError):
+                S3StorageConfig(bucket="test", endpoint_url=url)
+
+    def test_s3_endpoint_url_rejects_ipv4_mapped_ipv6(self) -> None:
+        """S3 endpoint_url must reject IPv4-mapped IPv6 addresses (::ffff:127.0.0.1)."""
+        from pydantic import ValidationError
+
+        from goldfish.config import S3StorageConfig
+
+        with pytest.raises(ValidationError):
+            S3StorageConfig(bucket="test", endpoint_url="http://[::ffff:127.0.0.1]:9000")
+
     def test_s3_endpoint_url_accepts_valid_public_url(self) -> None:
         """S3 endpoint_url should accept valid public URLs."""
         from goldfish.config import S3StorageConfig
