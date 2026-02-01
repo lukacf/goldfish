@@ -271,7 +271,7 @@ class TestStageExecutorReviewIntegration:
             ],
         )
         executor._perform_pre_run_review = MagicMock(return_value=mock_review)
-        executor._build_docker_image = MagicMock(return_value="test-image")
+        executor._build_docker_image = MagicMock(return_value=("test-image", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Execute
@@ -330,7 +330,7 @@ class TestStageExecutorReviewIntegration:
             issues=[],
         )
         executor._perform_pre_run_review = MagicMock(return_value=mock_review)
-        executor._build_docker_image = MagicMock(return_value="test-image")
+        executor._build_docker_image = MagicMock(return_value=("test-image", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Execute
@@ -376,7 +376,7 @@ class TestStageExecutorReviewIntegration:
 
         # Mock methods
         executor._perform_pre_run_review = MagicMock()
-        executor._build_docker_image = MagicMock(return_value="test-image")
+        executor._build_docker_image = MagicMock(return_value=("test-image", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Execute
@@ -436,7 +436,7 @@ class TestStageExecutorReviewIntegration:
             ],
         )
         executor._perform_pre_run_review = MagicMock(return_value=mock_review)
-        executor._build_docker_image = MagicMock(return_value="test-image")
+        executor._build_docker_image = MagicMock(return_value=("test-image", "0" * 64))
         executor._launch_container = MagicMock()
 
         # Execute

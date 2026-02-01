@@ -31,7 +31,7 @@ from goldfish.datasets.registry import DatasetRegistry
 from goldfish.db.database import Database
 from goldfish.errors import GoldfishError, NotFoundError
 from goldfish.experiment_model.records import ExperimentRecordManager
-from goldfish.infra.docker_builder import DockerBuilder
+from goldfish.infra.docker_builder import DockerBuilder, compute_build_context_hash
 from goldfish.models import (
     PipelineDef,
     ReviewSeverity,
@@ -561,7 +561,14 @@ class StageExecutor:
 
             # 6. Build Docker image (use profile's base image)
             profile_name = stage_config.get("compute", {}).get("profile")
-            image_tag = self._build_docker_image(workspace, version, profile_name=profile_name)
+            image_tag, build_context_hash = self._build_docker_image(workspace, version, profile_name=profile_name)
+
+            # Record the exact image used for this run (cache key + tag).
+            self.db.update_stage_run_status(
+                stage_run_id=stage_run_id,
+                build_context_hash=build_context_hash,
+                image_tag=image_tag,
+            )
 
             # State machine: BUILDING → LAUNCHING (BUILD_OK)
             sm_transition(
@@ -1672,12 +1679,19 @@ class StageExecutor:
         return value not in {"0", "false", "no", "off"}
 
     def _metrics_live_sync_interval(self) -> int:
-        value = os.getenv("GOLDFISH_METRICS_LIVE_SYNC_INTERVAL", "15")
-        try:
-            parsed = int(value)
-        except ValueError:
-            return 15
-        return max(5, min(300, parsed))
+        """Get metrics live sync interval in seconds.
+
+        Priority: env var > config defaults > hardcoded default (15s)
+        """
+        env_value = os.getenv("GOLDFISH_METRICS_LIVE_SYNC_INTERVAL")
+        if env_value:
+            try:
+                parsed = int(env_value)
+                return max(5, min(300, parsed))
+            except ValueError:
+                pass
+        # Fall back to config defaults
+        return max(5, min(300, self.config.defaults.log_sync_interval))
 
     def _get_metrics_sync_state(self, stage_run_id: str) -> _MetricsSyncState:
         with self._metrics_sync_lock:
@@ -1824,7 +1838,15 @@ class StageExecutor:
             return
 
         now = time.time()
-        interval = float(os.environ.get("GOLDFISH_SVS_LIVE_SYNC_INTERVAL", "10"))
+        # SVS sync interval: env var > config defaults
+        env_interval = os.environ.get("GOLDFISH_SVS_LIVE_SYNC_INTERVAL")
+        if env_interval:
+            try:
+                interval = float(env_interval)
+            except ValueError:
+                interval = float(self.config.defaults.log_sync_interval)
+        else:
+            interval = float(self.config.defaults.log_sync_interval)
         with self._svs_sync_lock:
             last_sync = self._svs_sync_state.get(stage_run_id, 0.0)
             if now - last_sync < interval:
@@ -1941,7 +1963,7 @@ class StageExecutor:
             except Exception as e:
                 logger.debug(f"Failed to sync during-run finding to svs_reviews: {e}")
 
-    def _build_docker_image(self, workspace: str, version: str, profile_name: str | None = None) -> str:
+    def _build_docker_image(self, workspace: str, version: str, profile_name: str | None = None) -> tuple[str, str]:
         """Build Docker image for this run.
 
         Args:
@@ -1949,7 +1971,8 @@ class StageExecutor:
             version: Version identifier
             profile_name: Optional profile name to determine base image
 
-        Returns image tag (local for local backend, registry for GCE backend).
+        Returns:
+            Tuple of (image_tag, build_context_hash).
         """
         # Import constants from image_versions (single source of truth)
         from goldfish.cloud.image_versions import BASE_IMAGE_CPU, BASE_IMAGE_GPU
@@ -1988,22 +2011,95 @@ class StageExecutor:
             # Use docker_builder to prepare context, then ImageBuilder for actual build
             # This delegates Cloud Build logic to the CloudBuildImageBuilder adapter
             with self.docker_builder.prepare_build_context(workspace_dir, workspace, version, base_image) as (
+                build_ctx,
                 context_path,
                 dockerfile_path,
                 local_tag,
             ):
-                # ImageBuilder.build() returns registry tag for cloud builds
-                registry_image_tag = self.image_builder.build(
-                    context_path=context_path,
-                    dockerfile_path=dockerfile_path,
-                    image_tag=f"{self.artifact_registry}/{local_tag}",
-                    build_args={"VERSION": version},
-                    no_cache=False,  # Use cache for faster builds
+                build_context_hash = compute_build_context_hash(build_ctx)
+                cached = self.db.get_docker_build_by_content_hash(workspace, build_context_hash)
+                if cached and cached.get("registry_tag"):
+                    logger.info("Reusing cached workspace image (build_context_hash=%s)", build_context_hash[:16])
+                    return str(cached["registry_tag"]), build_context_hash
+
+                registry_tag = f"{self.artifact_registry}/{local_tag}"
+                started_at = datetime.now(UTC).isoformat()
+                build_id = f"build-{uuid4().hex[:8]}"
+                build_args_json = json.dumps(build_ctx.build_args, sort_keys=True, separators=(",", ":"))
+                build_context_json = json.dumps(
+                    {
+                        "dockerfile_hash": build_ctx.dockerfile_hash,
+                        "git_sha": build_ctx.git_sha,
+                        "goldfish_runtime_hash": build_ctx.goldfish_runtime_hash,
+                        "base_image": build_ctx.base_image,
+                        "base_image_digest": build_ctx.base_image_digest,
+                        "requirements_hash": build_ctx.requirements_hash,
+                        "build_args": build_ctx.build_args,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
                 )
-                return registry_image_tag
+                image_type = "gpu" if "gpu" in build_ctx.base_image.lower() else "cpu"
+                self.db.insert_docker_build(
+                    build_id=build_id,
+                    image_type=image_type,
+                    target="workspace",
+                    backend="cloud",
+                    started_at=started_at,
+                    registry_tag=registry_tag,
+                    cloud_build_id=None,
+                    workspace_name=workspace,
+                    version=version,
+                    content_hash=build_context_hash,
+                    dockerfile_hash=build_ctx.dockerfile_hash,
+                    git_sha=build_ctx.git_sha,
+                    goldfish_runtime_hash=build_ctx.goldfish_runtime_hash,
+                    base_image=build_ctx.base_image,
+                    base_image_digest=build_ctx.base_image_digest,
+                    requirements_hash=build_ctx.requirements_hash,
+                    build_args_json=build_args_json,
+                    build_context_json=build_context_json,
+                )
+
+                # ImageBuilder.build() returns registry tag for cloud builds
+                try:
+                    registry_image_tag = self.image_builder.build(
+                        context_path=context_path,
+                        dockerfile_path=dockerfile_path,
+                        image_tag=registry_tag,
+                        build_args=build_ctx.build_args,
+                        no_cache=False,  # Use cache for faster builds
+                    )
+                except Exception as e:
+                    self.db.update_docker_build_status(
+                        build_id,
+                        status="failed",
+                        error=str(e),
+                        completed_at=datetime.now(UTC).isoformat(),
+                    )
+                    raise
+
+                pip_freeze = self.docker_builder.capture_pip_freeze_from_image(registry_image_tag)
+                if pip_freeze is not None:
+                    try:
+                        payload = json.loads(build_context_json)
+                        if isinstance(payload, dict):
+                            payload["pip_freeze"] = pip_freeze
+                            build_context_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                    except Exception as e:
+                        logger.debug("Failed to store pip freeze output for build %s: %s", build_id, e)
+
+                self.db.update_docker_build_status(
+                    build_id,
+                    status="completed",
+                    completed_at=datetime.now(UTC).isoformat(),
+                    registry_tag=registry_image_tag,
+                    build_context_json=build_context_json,
+                )
+                return registry_image_tag, build_context_hash
 
         # Local backend: Build locally using DockerBuilder
-        local_image_tag = self.docker_builder.build_image(
+        local_image_tag, build_context_hash = self.docker_builder.build_image_with_context_hash(
             workspace_dir=workspace_dir,
             workspace_name=workspace,
             version=version,
@@ -2011,7 +2107,7 @@ class StageExecutor:
             base_image=base_image,
         )
 
-        return local_image_tag
+        return local_image_tag, build_context_hash
 
     def _load_stage_config(self, workspace: str, stage_name: str) -> dict:
         """Load stage config from configs/{stage}.yaml.
@@ -2364,12 +2460,15 @@ echo "Stage completed successfully"
             spot = profile.get("preemptible_allowed", False)
 
         # Extract timeout from stage config (compute.max_runtime_seconds)
+        # Falls back to defaults.timeout_seconds if not specified
         timeout_seconds: int | None = None
         compute_config = stage_config_yaml.get("compute", {})
         if compute_config and isinstance(compute_config, dict):
             max_runtime = compute_config.get("max_runtime_seconds")
             if max_runtime is not None:
                 timeout_seconds = int(max_runtime)
+        if timeout_seconds is None:
+            timeout_seconds = self.config.defaults.timeout_seconds
 
         # Build command from entrypoint
         entrypoint_script = self._build_entrypoint_script(stage_name, runtime, entrypoint)
@@ -2716,9 +2815,11 @@ echo "Stage completed successfully"
                 raise GoldfishError(f"Stage run {stage_run_id} timed out after {timeout} seconds")
 
             # Get status via run_backend protocol
+            backend_status_message: str | None = None
             try:
                 backend_status = self.run_backend.get_status(handle)
                 status = self._backend_status_to_stage_state(backend_status)
+                backend_status_message = backend_status.message
             except NotFoundError:
                 status = "not_found"
 
@@ -2731,6 +2832,21 @@ echo "Stage completed successfully"
             if status in (StageState.COMPLETED, StageState.FAILED):
                 self._finalize_stage_run(stage_run_id, backend, status)
                 return status
+
+            if status == "unknown":
+                # UNKNOWN status - log with details and continue polling
+                # This handles transient API errors, GCS issues, etc.
+                now = time.time()
+                if now - last_log >= 60:
+                    logger.warning(
+                        "Status UNKNOWN for %s (elapsed: %ds): %s",
+                        stage_run_id,
+                        int(elapsed),
+                        backend_status_message or "no details available",
+                    )
+                    last_log = now
+                time.sleep(poll_interval)
+                continue
 
             if status == "not_found":
                 # Handle based on backend capabilities
@@ -2824,14 +2940,25 @@ echo "Stage completed successfully"
         caps = self.run_backend.capabilities
 
         # Get status via run_backend protocol
+        backend_status_message: str | None = None
         try:
             handle = self._get_run_handle(stage_run_id)
             backend_status = self.run_backend.get_status(handle)
             status = self._backend_status_to_stage_state(backend_status)
+            backend_status_message = backend_status.message
         except NotFoundError:
             status = "not_found"
 
         # Handle common statuses (same for all backends)
+        if status == "unknown":
+            # UNKNOWN status - log with details but don't change state
+            logger.warning(
+                "Status UNKNOWN for %s: %s",
+                stage_run_id,
+                backend_status_message or "no details available",
+            )
+            return status
+
         if status == StageState.RUNNING:
             # State machine already has state=RUNNING, no update needed
             pass
@@ -3053,7 +3180,7 @@ echo "Stage completed successfully"
             decision = "warned"
 
         try:
-            self.db.create_svs_review(
+            review_id = self.db.create_svs_review(
                 stage_run_id=stage_run_id,
                 review_type="pre_run",
                 model_used=self.config.pre_run_review.model,
@@ -3063,6 +3190,13 @@ echo "Stage completed successfully"
                 response_text=review.full_review,
                 parsed_findings=json.dumps([i.model_dump(mode="json") for i in review.issues]),
                 duration_ms=review.review_time_ms,
+            )
+            logger.info(
+                "Recorded pre-run review for %s: id=%s decision=%s issues=%d",
+                stage_run_id,
+                review_id,
+                decision,
+                len(review.issues),
             )
         except Exception as e:
             logger.warning(f"Failed to record pre-run review for {stage_run_id}: {e}")

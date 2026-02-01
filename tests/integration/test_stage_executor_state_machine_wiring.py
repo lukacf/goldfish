@@ -102,7 +102,7 @@ def test_run_stage_emits_build_start_build_ok_and_launch_ok(test_db: Database, t
         run_backend=mock_backend,
     )
 
-    executor._build_docker_image = MagicMock(return_value="goldfish-test-v1")
+    executor._build_docker_image = MagicMock(return_value=("goldfish-test-v1", "0" * 64))
 
     info = executor.run_stage(workspace="test_workspace", stage_name="preprocess", reason="Test run", wait=False)
 
@@ -773,7 +773,7 @@ class TestPreGeneratedStageRunId:
 
         with (
             patch.object(executor, "_perform_pre_run_review", return_value=mock_review),
-            patch.object(executor, "_build_docker_image", return_value="goldfish-test-v1"),
+            patch.object(executor, "_build_docker_image", return_value=("goldfish-test-v1", "0" * 64)),
         ):
             # This should NOT raise FK constraint error
             # Previously, this would fail because stage_runs row wasn't created
@@ -885,7 +885,7 @@ class TestPreGeneratedStageRunId:
 
         with (
             patch.object(executor, "_perform_pre_run_review", return_value=mock_review),
-            patch.object(executor, "_build_docker_image", return_value="goldfish-test-v1"),
+            patch.object(executor, "_build_docker_image", return_value=("goldfish-test-v1", "0" * 64)),
         ):
             info = executor.run_stage(
                 workspace="test_workspace",
@@ -995,7 +995,7 @@ class TestPreGeneratedStageRunId:
 
         pre_generated_id = "stage-trans-order"
 
-        with patch.object(executor, "_build_docker_image", return_value="goldfish-test-v1"):
+        with patch.object(executor, "_build_docker_image", return_value=("goldfish-test-v1", "0" * 64)):
             info = executor.run_stage(
                 workspace="test_workspace",
                 stage_name="preprocess",

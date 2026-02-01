@@ -1,10 +1,13 @@
 import subprocess
+from unittest.mock import MagicMock
 
 import pytest
 
-from goldfish.config import GoldfishConfig
+from goldfish.config import GCEConfig, GoldfishConfig
 from goldfish.errors import GoldfishError
+from goldfish.infra import docker_builder as docker_builder_module
 from goldfish.infra.docker_builder import DockerBuilder
+from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.svs.config import SVSConfig
 
 
@@ -39,6 +42,152 @@ def test_push_image_auth_failure(monkeypatch):
 
 
 # =============================================================================
+# Version Tag Aliasing (REQ-005)
+# =============================================================================
+
+
+def test_version_tag_retagged_on_hash_change(test_db, test_config, tmp_path, monkeypatch) -> None:
+    """Same version, different build_context_hash should rebuild and reuse version tag."""
+    runtime_hashes = iter(["0" * 64, "1" * 64])
+    monkeypatch.setattr(
+        docker_builder_module, "compute_goldfish_runtime_hash", lambda *args, **kwargs: next(runtime_hashes)
+    )
+
+    config = test_config.model_copy(
+        deep=True,
+        update={
+            "gce": GCEConfig(
+                project_id="test-proj",
+                artifact_registry="us-docker.pkg.dev/test-proj/goldfish",
+                zones=["us-central1-a"],
+            )
+        },
+    )
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    dev_repo = config.get_dev_repo_path(project_root)
+    dev_repo.mkdir(parents=True, exist_ok=True)
+
+    workspace_path = project_root / "workspaces" / "test_ws"
+    (workspace_path / "modules").mkdir(parents=True)
+    (workspace_path / "modules" / "train.py").write_text("# test module\n")
+    (workspace_path / "configs").mkdir()
+
+    test_db.create_workspace_lineage("test_ws", description="test")
+    test_db.create_version("test_ws", "v1", "test_ws-v1", "deadbeef", "run")
+
+    mock_workspace_manager = MagicMock()
+    mock_workspace_manager.get_workspace_path.return_value = workspace_path
+
+    mock_caps = MagicMock()
+    mock_caps.has_launch_delay = True
+    mock_caps.timeout_becomes_pending = True
+    mock_backend = MagicMock()
+    mock_backend.capabilities = mock_caps
+
+    registry_tag = "us-docker.pkg.dev/test-proj/goldfish/goldfish-test_ws-v1"
+    mock_image_builder = MagicMock()
+    mock_image_builder.build.side_effect = [registry_tag, registry_tag]
+
+    executor = StageExecutor(
+        db=test_db,
+        config=config,
+        workspace_manager=mock_workspace_manager,
+        pipeline_manager=MagicMock(),
+        project_root=project_root,
+        dataset_registry=None,
+        run_backend=mock_backend,
+        image_builder=mock_image_builder,
+    )
+
+    image_tag_1, hash_1 = executor._build_docker_image("test_ws", "v1", profile_name=None)
+    image_tag_2, hash_2 = executor._build_docker_image("test_ws", "v1", profile_name=None)
+
+    assert image_tag_1 == registry_tag
+    assert image_tag_2 == registry_tag
+    assert hash_1 != hash_2
+    assert mock_image_builder.build.call_count == 2
+
+    with test_db._conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT content_hash, registry_tag
+            FROM docker_builds
+            WHERE workspace_name = 'test_ws'
+              AND version = 'v1'
+              AND status = 'completed'
+            ORDER BY started_at ASC
+            """
+        ).fetchall()
+
+    assert len(rows) == 2
+    assert rows[0]["content_hash"] != rows[1]["content_hash"]
+    assert rows[0]["registry_tag"] == rows[1]["registry_tag"]
+
+
+def test_version_tag_mutable_alias(test_db, test_config, tmp_path, monkeypatch) -> None:
+    """Same version, same build_context_hash should reuse cached image (no rebuild)."""
+    monkeypatch.setattr(docker_builder_module, "compute_goldfish_runtime_hash", lambda *args, **kwargs: "0" * 64)
+
+    config = test_config.model_copy(
+        deep=True,
+        update={
+            "gce": GCEConfig(
+                project_id="test-proj",
+                artifact_registry="us-docker.pkg.dev/test-proj/goldfish",
+                zones=["us-central1-a"],
+            )
+        },
+    )
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    dev_repo = config.get_dev_repo_path(project_root)
+    dev_repo.mkdir(parents=True, exist_ok=True)
+
+    workspace_path = project_root / "workspaces" / "test_ws"
+    (workspace_path / "modules").mkdir(parents=True)
+    (workspace_path / "modules" / "train.py").write_text("# test module\n")
+    (workspace_path / "configs").mkdir()
+
+    test_db.create_workspace_lineage("test_ws", description="test")
+    test_db.create_version("test_ws", "v1", "test_ws-v1", "deadbeef", "run")
+
+    mock_workspace_manager = MagicMock()
+    mock_workspace_manager.get_workspace_path.return_value = workspace_path
+
+    mock_caps = MagicMock()
+    mock_caps.has_launch_delay = True
+    mock_caps.timeout_becomes_pending = True
+    mock_backend = MagicMock()
+    mock_backend.capabilities = mock_caps
+
+    registry_tag = "us-docker.pkg.dev/test-proj/goldfish/goldfish-test_ws-v1"
+    mock_image_builder = MagicMock()
+    mock_image_builder.build.return_value = registry_tag
+
+    executor = StageExecutor(
+        db=test_db,
+        config=config,
+        workspace_manager=mock_workspace_manager,
+        pipeline_manager=MagicMock(),
+        project_root=project_root,
+        dataset_registry=None,
+        run_backend=mock_backend,
+        image_builder=mock_image_builder,
+    )
+
+    image_tag_1, hash_1 = executor._build_docker_image("test_ws", "v1", profile_name=None)
+    image_tag_2, hash_2 = executor._build_docker_image("test_ws", "v1", profile_name=None)
+
+    assert image_tag_1 == registry_tag
+    assert image_tag_2 == registry_tag
+    assert hash_1 == hash_2
+    mock_image_builder.build.assert_called_once()
+
+
+# =============================================================================
 # Regression Tests - Dockerfile must use --chown for non-root containers
 # =============================================================================
 
@@ -68,8 +217,16 @@ def test_dockerfile_installs_claude_cli_when_svs_enabled(tmp_path):
         base_image="python:3.11-slim",
     )
 
-    assert "@openai/codex" in dockerfile
-    assert "npm install -g" in dockerfile
+    assert "ARG SVS_AGENT_CLI_PACKAGES" in dockerfile
+    assert "npm install -g ${SVS_AGENT_CLI_PACKAGES}" in dockerfile
+
+    with builder.prepare_build_context(workspace_path, "test_ws", "v1", base_image="python:3.11-slim") as (
+        ctx,
+        _context_path,
+        _dockerfile_path,
+        _image_tag,
+    ):
+        assert ctx.build_args["SVS_AGENT_CLI_PACKAGES"] == "@openai/codex"
 
 
 def test_dockerfile_skips_agent_cli_when_svs_disabled(tmp_path):
@@ -98,6 +255,93 @@ def test_dockerfile_skips_agent_cli_when_svs_disabled(tmp_path):
     )
 
     assert "@anthropic-ai/claude-code" not in dockerfile
+
+
+def test_dockerfile_installs_claude_code_for_anthropic_api_provider(tmp_path):
+    """Regression: anthropic_api provider requires Claude Code CLI in container.
+
+    The claude-agent-sdk on Linux gets a pure Python wheel without the bundled
+    CLI binary. The SDK spawns 'claude' as a subprocess, so we must install it.
+
+    Bug: During-run AI monitoring returned empty responses because claude-agent-sdk
+    couldn't find the Claude Code CLI binary in the container.
+    Fix: Install @anthropic-ai/claude-code via npm when using anthropic_api provider.
+    """
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    (workspace_path / "modules").mkdir()
+    (workspace_path / "modules" / "train.py").write_text("# test module")
+    (workspace_path / "configs").mkdir()
+
+    config = GoldfishConfig(project_name="test", dev_repo_path=".")
+    config = config.model_copy(
+        update={
+            "svs": SVSConfig(
+                enabled=True,
+                ai_post_run_enabled=True,
+                agent_provider="anthropic_api",
+            )
+        }
+    )
+    builder = DockerBuilder(config)
+
+    dockerfile = builder.generate_dockerfile(
+        workspace_dir=workspace_path,
+        base_image="python:3.11-slim",
+    )
+
+    assert "ARG SVS_AGENT_CLI_PACKAGES" in dockerfile
+    assert "npm install -g ${SVS_AGENT_CLI_PACKAGES}" in dockerfile
+
+    with builder.prepare_build_context(workspace_path, "test_ws", "v1", base_image="python:3.11-slim") as (
+        ctx,
+        _context_path,
+        _dockerfile_path,
+        _image_tag,
+    ):
+        assert ctx.build_args["SVS_AGENT_CLI_PACKAGES"] == "@anthropic-ai/claude-code"
+
+
+def test_dockerfile_installs_cli_for_during_run_reviews(tmp_path):
+    """Regression: during-run reviews also need CLI installed.
+
+    ai_during_run_enabled uses the same agent provider as post-run,
+    so it also needs the CLI installed in the container.
+    """
+    workspace_path = tmp_path / "workspace"
+    workspace_path.mkdir()
+    (workspace_path / "modules").mkdir()
+    (workspace_path / "modules" / "train.py").write_text("# test module")
+    (workspace_path / "configs").mkdir()
+
+    config = GoldfishConfig(project_name="test", dev_repo_path=".")
+    config = config.model_copy(
+        update={
+            "svs": SVSConfig(
+                enabled=True,
+                ai_during_run_enabled=True,  # Only during-run, not post-run
+                ai_post_run_enabled=False,
+                agent_provider="anthropic_api",
+            )
+        }
+    )
+    builder = DockerBuilder(config)
+
+    dockerfile = builder.generate_dockerfile(
+        workspace_dir=workspace_path,
+        base_image="python:3.11-slim",
+    )
+
+    assert "ARG SVS_AGENT_CLI_PACKAGES" in dockerfile
+    assert "npm install -g ${SVS_AGENT_CLI_PACKAGES}" in dockerfile
+
+    with builder.prepare_build_context(workspace_path, "test_ws", "v1", base_image="python:3.11-slim") as (
+        ctx,
+        _context_path,
+        _dockerfile_path,
+        _image_tag,
+    ):
+        assert ctx.build_args["SVS_AGENT_CLI_PACKAGES"] == "@anthropic-ai/claude-code"
 
 
 def test_dockerfile_copy_uses_chown(tmp_path):

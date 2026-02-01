@@ -201,7 +201,15 @@ my-ml-project/
 ```yaml
 project_name: my-ml-project
 dev_repo_path: my-ml-project-dev
+
+# Optional: customize defaults
+defaults:
+  timeout_seconds: 3600     # 1 hour stage timeout (seconds, must be > 0)
+  log_sync_interval: 10     # Log sync frequency (seconds, must be > 0)
+  backend: local            # Compute backend: local, gce, kubernetes
 ```
+
+> **Note**: `defaults.backend` controls where stages execute (compute). For storage configuration (where artifacts are stored), see the `storage:` section below.
 
 ### With GCP
 
@@ -214,7 +222,53 @@ gcs:
 
 gce:
   project_id: your-project-id
+  zones: ["us-central1-a", "us-central1-b"]
+
+# Optional: customize defaults
+defaults:
+  timeout_seconds: 7200     # 2 hours for GPU training (seconds, must be > 0)
+  log_sync_interval: 15     # Log sync frequency (seconds, must be > 0)
+  backend: gce              # Compute backend: local, gce, kubernetes
+
+# Optional: local Docker resource limits (for backend: local)
+jobs:
+  container_memory: "8g"    # Docker memory limit (e.g., "4g", "8g")
+  container_cpus: "4.0"     # Docker CPU limit (e.g., "2.0", "4.0")
+  container_pids: 200       # Docker pids limit (e.g., 100, 200)
 ```
+
+> **Note**: `defaults.backend` controls compute (where stages run). `storage.backend` controls storage (where artifacts are stored). They can be configured independently.
+
+### Advanced: Multi-Backend Storage
+
+Configure storage independently of compute (useful for AWS/Azure users):
+
+```yaml
+project_name: my-ml-project
+dev_repo_path: my-ml-project-dev
+
+# New unified storage configuration
+storage:
+  backend: "s3"  # or "gcs", "azure", "local"
+  s3:
+    bucket: "my-ml-artifacts"
+    region: "us-east-1"
+
+# Can still use GCE for compute with S3 for storage
+gce:
+  project_id: your-project-id
+```
+
+**Local storage** (for development/testing without cloud):
+
+```yaml
+storage:
+  backend: "local"
+  local:
+    base_path: "/tmp/goldfish-artifacts"  # Local filesystem path
+```
+
+> **Note**: S3 and Azure storage adapters are coming soon. GCS and local are fully supported.
 
 ---
 

@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -27,6 +28,25 @@ class AuditConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     min_reason_length: int = 15
+
+
+class DefaultsConfig(BaseModel):
+    """Global defaults configuration for stage execution.
+
+    These defaults apply to all stages unless overridden at the stage level.
+
+    Example goldfish.yaml:
+        defaults:
+          timeout_seconds: 7200    # 2 hours
+          log_sync_interval: 15    # Sync logs every 15 seconds
+          backend: gce             # Default compute backend
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    timeout_seconds: int = Field(default=3600, gt=0)  # 1 hour default
+    log_sync_interval: int = Field(default=10, gt=0)  # 10 seconds default
+    backend: Literal["local", "gce", "kubernetes"] = "local"
 
 
 class LocalStorageConfig(BaseModel):
@@ -98,6 +118,225 @@ class GCSConfig(BaseModel):
     artifacts_prefix: str = "artifacts/"
     snapshots_prefix: str = "snapshots/"
     datasets_prefix: str = "datasets/"
+
+
+class S3StorageConfig(BaseModel):
+    """S3 storage configuration.
+
+    For AWS S3 or S3-compatible storage (MinIO, etc).
+
+    Security: endpoint_url is validated to prevent SSRF attacks.
+    Only public DNS names are allowed - localhost, internal IPs, and
+    cloud metadata endpoints are rejected.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    bucket: str
+    region: str | None = None
+    endpoint_url: str | None = None  # For S3-compatible (MinIO, etc)
+    sources_prefix: str = "sources/"
+    artifacts_prefix: str = "artifacts/"
+    snapshots_prefix: str = "snapshots/"
+    datasets_prefix: str = "datasets/"
+
+    @model_validator(mode="after")
+    def validate_endpoint_url_security(self) -> "S3StorageConfig":
+        """Validate endpoint_url to prevent SSRF attacks.
+
+        Rejects:
+        - localhost and 127.0.0.1
+        - Internal IP ranges (10.x, 172.16-31.x, 192.168.x)
+        - Cloud metadata endpoints (169.254.169.254)
+        - Link-local addresses (169.254.x.x)
+        """
+        if self.endpoint_url is None:
+            return self
+
+        import ipaddress
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(self.endpoint_url)
+            host = parsed.hostname
+        except Exception:
+            raise ValueError(f"Invalid endpoint_url format: {self.endpoint_url}") from None
+
+        if not host:
+            raise ValueError("endpoint_url must include a hostname")
+
+        # Check for localhost
+        if host.lower() in ("localhost", "localhost.localdomain"):
+            raise ValueError(
+                "endpoint_url cannot be localhost (SSRF protection). "
+                "Use a public DNS name for S3-compatible storage."
+            )
+
+        # Check if host is an IP address (IPv4 or IPv6)
+        def check_ip_security(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
+            """Check IP address for SSRF vulnerabilities."""
+            # Reject loopback (127.x.x.x for IPv4, ::1 for IPv6)
+            if ip.is_loopback:
+                raise ValueError(
+                    f"endpoint_url cannot use loopback address {host} (SSRF protection). "
+                    "Use a public DNS name for S3-compatible storage."
+                )
+
+            # Reject private IP ranges (10.x, 172.16-31.x, 192.168.x for IPv4; fc00::/7 for IPv6)
+            if ip.is_private:
+                raise ValueError(
+                    f"endpoint_url cannot use internal IP address {host} (SSRF protection). "
+                    "Use a public DNS name for S3-compatible storage."
+                )
+
+            # Reject link-local (169.254.x.x for IPv4, fe80::/10 for IPv6)
+            if ip.is_link_local:
+                raise ValueError(
+                    f"endpoint_url cannot use link-local address {host} (SSRF protection). "
+                    "This includes cloud metadata endpoints."
+                )
+
+        # Try to parse as IP address (IPv4 or IPv6)
+        ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            # Not a valid IP address - could be a hostname (which is fine)
+            pass
+
+        if ip is not None:
+            check_ip_security(ip)
+
+        # Check for IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
+        if host.lower().startswith("::ffff:"):
+            ipv4_part = host[7:]  # Strip ::ffff: prefix
+            try:
+                ipv4 = ipaddress.ip_address(ipv4_part)
+                check_ip_security(ipv4)
+            except ValueError:
+                pass
+
+        return self
+
+
+class AzureStorageConfig(BaseModel):
+    """Azure Blob storage configuration.
+
+    Azure storage account names must be:
+    - 3-24 characters long
+    - Alphanumeric only (lowercase letters and numbers)
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    container: str
+    account: str
+    sources_prefix: str = "sources/"
+    artifacts_prefix: str = "artifacts/"
+    snapshots_prefix: str = "snapshots/"
+    datasets_prefix: str = "datasets/"
+
+    @model_validator(mode="after")
+    def validate_account_name(self) -> "AzureStorageConfig":
+        """Validate Azure storage account name format.
+
+        Azure requires: 3-24 characters, alphanumeric only (lowercase).
+        """
+        import re
+
+        account = self.account
+
+        if len(account) < 3:
+            raise ValueError(
+                f"Azure storage account name must be at least 3 characters, got {len(account)}. "
+                "Account names must be 3-24 characters, alphanumeric only."
+            )
+
+        if len(account) > 24:
+            raise ValueError(
+                f"Azure storage account name must be at most 24 characters, got {len(account)}. "
+                "Account names must be 3-24 characters, alphanumeric only."
+            )
+
+        # Azure requires lowercase alphanumeric only
+        if not re.match(r"^[a-z0-9]+$", account):
+            raise ValueError(
+                f"Azure storage account name must be alphanumeric only (lowercase letters and numbers). "
+                f"Got: '{account}'. Remove hyphens, underscores, and uppercase letters."
+            )
+
+        return self
+
+
+StorageBackend = Literal["gcs", "s3", "azure", "local"]
+
+
+class StorageConfig(BaseModel):
+    """Unified storage backend configuration.
+
+    Allows selecting between multiple storage backends:
+    - gcs: Google Cloud Storage (default)
+    - s3: AWS S3 or S3-compatible
+    - azure: Azure Blob Storage
+    - local: Local filesystem (for development/testing)
+
+    The selected backend must have its corresponding configuration section present.
+    For example, backend='s3' requires the s3: section to be defined.
+
+    Example goldfish.yaml:
+        storage:
+          backend: s3
+          s3:
+            bucket: my-bucket
+            region: us-east-1
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    backend: StorageBackend = "gcs"
+    gcs: GCSConfig | None = None
+    s3: S3StorageConfig | None = None
+    azure: AzureStorageConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_backend_config_consistency(self) -> "StorageConfig":
+        """Validate that the selected backend has its config section.
+
+        Raises:
+            ValueError: If backend is set but its config section is missing.
+        """
+        if self.backend == "gcs" and self.gcs is None:
+            raise ValueError(
+                "storage.backend='gcs' requires storage.gcs section with bucket configuration. "
+                "Add gcs: {bucket: 'your-bucket'} to storage config."
+            )
+        if self.backend == "s3" and self.s3 is None:
+            raise ValueError(
+                "storage.backend='s3' requires storage.s3 section with bucket configuration. "
+                "Add s3: {bucket: 'your-bucket'} to storage config."
+            )
+        if self.backend == "azure" and self.azure is None:
+            raise ValueError(
+                "storage.backend='azure' requires storage.azure section with container and account. "
+                "Add azure: {container: 'your-container', account: 'your-account'} to storage config."
+            )
+        # backend='local' doesn't require any additional config
+        return self
+
+    @property
+    def effective_bucket(self) -> str | None:
+        """Get the bucket/container name for the active backend.
+
+        Returns:
+            The bucket name for GCS/S3, container for Azure, or None for local.
+        """
+        if self.backend == "gcs" and self.gcs:
+            return self.gcs.bucket
+        if self.backend == "s3" and self.s3:
+            return self.s3.bucket
+        if self.backend == "azure" and self.azure:
+            return self.azure.container
+        return None
 
 
 class PreRunReviewConfig(BaseModel):
@@ -292,8 +531,10 @@ def _get_valid_fields_for_path(loc: Sequence[object]) -> list[str]:
     field_maps = {
         "state_md": list(StateMdConfig.model_fields.keys()),
         "audit": list(AuditConfig.model_fields.keys()),
+        "defaults": list(DefaultsConfig.model_fields.keys()),
         "jobs": list(JobsConfig.model_fields.keys()),
         "gcs": list(GCSConfig.model_fields.keys()),
+        "storage": list(StorageConfig.model_fields.keys()),
         "gce": list(GCEConfig.model_fields.keys()),
         "local": list(LocalConfig.model_fields.keys()),
         "pre_run_review": list(PreRunReviewConfig.model_fields.keys()),
@@ -309,8 +550,10 @@ def _get_valid_fields_for_path(loc: Sequence[object]) -> list[str]:
         "slots",
         "state_md",
         "audit",
+        "defaults",
         "jobs",
         "gcs",
+        "storage",
         "gce",
         "local",
         "pre_run_review",
@@ -347,8 +590,10 @@ class GoldfishConfig(BaseModel):
     slots: list[str] = Field(default_factory=lambda: ["w1", "w2", "w3"])
     state_md: StateMdConfig = Field(default_factory=StateMdConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
+    defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     jobs: JobsConfig = Field(default_factory=JobsConfig)
     gcs: GCSConfig | None = None
+    storage: StorageConfig | None = None
     gce: GCEConfig | None = None
     local: LocalConfig = Field(default_factory=LocalConfig)  # Local simulation config
     pre_run_review: PreRunReviewConfig = Field(default_factory=PreRunReviewConfig)
@@ -411,12 +656,21 @@ class GoldfishConfig(BaseModel):
         if "gce" not in data and "jobs" in data and isinstance(data["jobs"], dict):
             if "gce" in data["jobs"]:
                 data["gce"] = data["jobs"].pop("gce")
+                logger.warning(
+                    "Migrated 'gce' from inside 'jobs' section to top level. "
+                    "Consider updating goldfish.yaml: move 'gce:' to be a sibling of 'jobs:', not nested inside it."
+                )
 
         # Handle convenience: gcs_bucket inside gce section -> create gcs config
         if "gcs" not in data and "gce" in data and isinstance(data["gce"], dict):
             gcs_bucket = data["gce"].pop("gcs_bucket", None)
             if gcs_bucket:
                 data["gcs"] = {"bucket": gcs_bucket}
+                logger.warning(
+                    "Migrated 'gcs_bucket' from 'gce' section to 'gcs.bucket'. "
+                    "Consider updating goldfish.yaml: use 'gcs: {bucket: %s}' instead of 'gce.gcs_bucket'.",
+                    gcs_bucket,
+                )
 
         # Migrate old profile_overrides format
         if "gce" in data and isinstance(data["gce"], dict):

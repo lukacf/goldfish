@@ -18,6 +18,15 @@
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Contribution guidelines |
 | [CHANGELOG.md](../CHANGELOG.md) | Version history |
 
+## Reference Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [SKILL.md](../.claude/skills/goldfish-ml/SKILL.md) | Complete MCP tool reference |
+| [Pipeline Guide](../.claude/skills/goldfish-ml/references/pipeline_guide.md) | Signal types and stage wiring |
+| [Stage Authoring](../.claude/skills/goldfish-ml/references/stage_authoring.md) | Writing training code |
+| [End-to-End Example](../.claude/skills/goldfish-ml/references/end_to_end_example.md) | Full LLM training walkthrough |
+
 ## Other
 
 | Document | Purpose |

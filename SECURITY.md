@@ -57,9 +57,11 @@ All file operations validate paths to prevent directory traversal:
 
 ### Input Validation
 
-User inputs are validated using strict patterns:
-- Workspace names: `^[a-zA-Z0-9_-]+$`
-- Version identifiers: `^v[0-9]+$`
+User inputs are validated using strict patterns (see `src/goldfish/validation.py`):
+- Workspace names: `^[a-zA-Z0-9][a-zA-Z0-9_-]*[a-zA-Z0-9]$` (1-64 chars)
+- Version identifiers: `^v[0-9]+$` (e.g., v1, v2)
+- Snapshot IDs: `^snap-[a-f0-9]{7,8}-\d{8}-\d{6}$`
+- Stage run IDs: `^stage-[a-f0-9]+$`
 - Stage names: Alphanumeric with underscores
 
 ## Known Limitations

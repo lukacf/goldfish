@@ -19,7 +19,7 @@ If you're new to Goldfish, we recommend starting with these well-scoped areas:
 
 1.  **Validation Logic** (`src/goldfish/validation.py`): Improve input sanitization or regex patterns for workspace/version names.
 2.  **Utility Tools** (`src/goldfish/server_tools/utility_tools.py`): Add simple helper tools that provide better visibility into project state for AI agents.
-3.  **Documentation Snippets**: Add real-world ML examples to `SKILL.md` or improve the tutorial in `end_to_end_example.md`.
+3.  **Documentation Snippets**: Add real-world ML examples to `.claude/skills/goldfish-ml/SKILL.md` or improve the tutorial in `end_to_end_example.md`.
 4.  **Unit Test Gaps**: Look for missing edge cases in `tests/unit/` to help us reach 100% coverage on core logic.
 
 ---
@@ -135,7 +135,7 @@ Use this map to find the right place for your changes:
 | :--- | :--- | :--- |
 | **MCP Tools** | `src/goldfish/server_tools/` | Add/Modify tools available to AI agents. |
 | **Execution Engine** | `src/goldfish/jobs/stage_executor.py` | Change how stages are executed (uses RunBackend protocol). |
-| **Cloud Backends** | `src/goldfish/cloud/adapters/` | Add new compute backends (implement RunBackend, ObjectStorage). See [CLOUD_ABSTRACTION.md](docs/CLOUD_ABSTRACTION.md). |
+| **Cloud Backends** | `src/goldfish/cloud/adapters/` | Add new compute backends (implement RunBackend, ObjectStorage). See [CLOUD_ABSTRACTION.md](docs/archive/CLOUD_ABSTRACTION.md). |
 | **Validation (SVS)** | `src/goldfish/svs/` | Add new mechanistic checks (entropy, variance, etc.). |
 | **Database** | `src/goldfish/db/database.py` | Update schema or add complex metadata queries. |
 | **Workspace Ops** | `src/goldfish/workspace/manager.py` | Modify how local slots and git branches sync. |
@@ -147,6 +147,6 @@ Use this map to find the right place for your changes:
 
 1.  **Open an Issue**: For non-trivial changes, discuss the design with maintainers first.
 2.  **Lint & Check**: Run `make lint` and `make ci` locally. We do not accept PRs with linting errors or failing tests.
-3.  **Documentation**: If you add a tool, update `tools_reference.md` and `SKILL.md`.
+3.  **Documentation**: If you add a tool, update `.claude/skills/goldfish-ml/references/tools_reference.md` and `.claude/skills/goldfish-ml/SKILL.md`.
 4.  **Description**: Use the PR template. Clearly state the **Why** and the **Architectural Impact**.
 5.  **Review**: Address reviewer feedback promptly. Once approved and CI passes, a maintainer will merge your work.

@@ -26,8 +26,8 @@ Goldfish automatically uses pre-built Docker images with common ML libraries:
 
 | Profile Type | Base Image | Included Libraries |
 |--------------|------------|-------------------|
-| CPU (`cpu-small`, `cpu-large`) | `goldfish-base-cpu:v5` | numpy, pandas, scikit-learn, torch, matplotlib, seaborn |
-| GPU (`h100-*`, `a100-*`) | `goldfish-base-gpu:v5` | Same as CPU + CUDA 12.8 + PyTorch 2.9.1 + FlashAttention-3 |
+| CPU (`cpu-small`, `cpu-large`) | `goldfish-base-cpu:v10` | numpy, pandas, scikit-learn, torch, matplotlib, seaborn |
+| GPU (`h100-*`, `a100-*`) | `goldfish-base-gpu:v10` | Same as CPU + CUDA 12.8 + PyTorch 2.9.1 + FlashAttention-3 |
 
 **No setup required** - the appropriate base image is automatically selected based on your stage's compute profile.
 
@@ -919,7 +919,7 @@ For system-level dependencies or major customizations, place a `Dockerfile.gpu` 
 
 ```dockerfile
 # Dockerfile.gpu (in project root)
-FROM goldfish-base-gpu:v5
+FROM goldfish-base-gpu:v10
 
 # System dependencies
 RUN apt-get update && apt-get install -y \
@@ -963,8 +963,8 @@ manage_base_images(action="build", image_type="gpu", wait=True)
 
 | Type | Base Image | Included |
 |------|------------|----------|
-| GPU | `goldfish-base-gpu:v5` | CUDA 12.8 + PyTorch 2.9.1 + PyTorch + FlashAttention-3 + numpy/pandas/scikit-learn |
-| CPU | `goldfish-base-cpu:v5` | PyTorch (CPU) + numpy/pandas/scikit-learn |
+| GPU | `goldfish-base-gpu:v10` | CUDA 12.8 + PyTorch 2.9.1 + PyTorch + FlashAttention-3 + numpy/pandas/scikit-learn |
+| CPU | `goldfish-base-cpu:v10` | PyTorch (CPU) + numpy/pandas/scikit-learn |
 
 ### Target Parameter
 

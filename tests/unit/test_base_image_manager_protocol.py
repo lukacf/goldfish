@@ -6,7 +6,7 @@ instead of direct subprocess calls, enabling cleaner separation of concerns.
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, create_autospec
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 
@@ -110,8 +110,10 @@ class TestBaseImageManagerWithProtocols:
 
         assert manager._image_registry is mock_image_registry
 
+    @patch.object(BaseImageManager, "_check_docker_available")
     def test_build_uses_injected_image_builder(
         self,
+        mock_docker_check: MagicMock,
         temp_project_root: Path,
         mock_config: GoldfishConfig,
         mock_image_builder: MagicMock,
@@ -134,8 +136,10 @@ class TestBaseImageManagerWithProtocols:
         # Check that image_tag was passed correctly
         assert "test-project-gpu:v1" in str(call_args)
 
+    @patch.object(BaseImageManager, "_check_docker_available")
     def test_build_async_uses_injected_image_builder(
         self,
+        mock_docker_check: MagicMock,
         temp_project_root: Path,
         mock_config: GoldfishConfig,
         mock_image_builder: MagicMock,
@@ -156,8 +160,10 @@ class TestBaseImageManagerWithProtocols:
         mock_image_builder.build_async.assert_called_once()
         assert "build_id" in result
 
+    @patch.object(BaseImageManager, "_check_docker_available")
     def test_push_uses_injected_image_registry(
         self,
+        mock_docker_check: MagicMock,
         temp_project_root: Path,
         mock_config_with_gce: GoldfishConfig,
         mock_image_builder: MagicMock,

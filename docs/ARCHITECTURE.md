@@ -37,12 +37,13 @@ Goldfish is an **MCP (Model Context Protocol) server** that enables AI agents to
                            │
             ┌──────────────┼──────────────┐
             ▼              ▼              ▼
-     ┌──────────┐   ┌──────────┐   ┌──────────┐
-     │  Local   │   │   GCE    │   │   AWS    │
-     │ (Docker) │   │  (GCP)   │   │  (ECS)   │
-     └──────────┘   └──────────┘   └──────────┘
-                                    (future)
+     ┌──────────┐   ┌──────────┐   ┌────────────┐
+     │  Local   │   │   GCE    │   │ Kubernetes │
+     │ (Docker) │   │  (GCP)   │   │  (future)  │
+     └──────────┘   └──────────┘   └────────────┘
 ```
+
+> **Note**: The Kubernetes backend is defined in the codebase but currently raises `NotImplementedError`. It is planned for a future release.
 
 ---
 
@@ -170,8 +171,10 @@ class BackendCapabilities:
     ack_timeout_seconds: float = 1.0
     has_launch_delay: bool = False
     timeout_becomes_pending: bool = False
-    # ... etc
+    # ... additional fields defined in cloud/contracts.py
 ```
+
+> **Note**: The fields shown above are a subset. See `src/goldfish/cloud/contracts.py` for the complete `BackendCapabilities` definition.
 
 ### Key Files
 
@@ -191,6 +194,91 @@ src/goldfish/cloud/
 2. Define `BackendCapabilities` for your backend
 3. Register in `factory.py`
 4. No changes needed in core code
+
+---
+
+## Configuration Flexibility
+
+Goldfish supports flexible configuration for multi-cloud and multi-environment deployments.
+
+### Global Defaults
+
+Set project-wide execution defaults:
+
+```yaml
+# goldfish.yaml
+defaults:
+  timeout_seconds: 7200    # Default stage timeout (2 hours)
+  log_sync_interval: 15    # How often to sync logs
+  backend: gce             # Default compute: local, gce, kubernetes
+```
+
+### Storage Backend Selection
+
+Choose your storage provider independently of compute:
+
+```yaml
+# goldfish.yaml
+storage:
+  backend: "gcs"  # or "s3", "azure", "local"
+
+  gcs:
+    bucket: "my-artifacts"
+    sources_prefix: "sources/"
+
+  s3:
+    bucket: "my-artifacts"
+    region: "us-east-1"
+    endpoint_url: "http://localhost:9000"  # MinIO
+
+  azure:
+    container: "my-artifacts"
+    account: "mystorageaccount"
+```
+
+| Backend | Status | Use Case |
+|---------|--------|----------|
+| `gcs` | Complete | GCP users |
+| `s3` | Config ready, adapter coming | AWS users, MinIO |
+| `azure` | Config ready, adapter coming | Azure users |
+| `local` | Complete | Development, testing |
+
+**Backwards Compatibility**: The legacy `gcs:` section at root level still works. New `storage:` section takes precedence when present.
+
+### Profile-Based Configuration
+
+Override settings per compute profile:
+
+```yaml
+# goldfish.yaml
+gce:
+  project_id: my-project
+  zones: ["us-central1-a", "us-central1-b"]
+
+  profile_overrides:
+    h100-spot:
+      zones: ["us-central1-a"]  # Specific zone for H100 quota
+
+    cpu-large:
+      zones: ["us-west1-a"]     # Different region for CPU
+```
+
+### Configuration Model
+
+```
+GoldfishConfig
+├── project_name: str
+├── dev_repo_path: str
+├── defaults: DefaultsConfig       # Global execution defaults
+├── storage: StorageConfig | None  # Multi-backend storage
+├── gcs: GCSConfig | None          # Legacy GCS (backwards compat)
+├── gce: GCEConfig | None          # GCE compute settings
+├── jobs: JobsConfig               # Job execution config
+├── local: LocalConfig             # Local backend simulation
+├── pre_run_review: PreRunReviewConfig  # AI code review settings
+├── docker: DockerConfig           # Image customization
+└── svs: SVSConfig                 # Validation settings
+```
 
 ---
 

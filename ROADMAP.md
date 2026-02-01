@@ -82,7 +82,7 @@ compute:
 
 **Interface:**
 ```python
-class ComputeBackend(Protocol):
+class RunBackend(Protocol):
     def launch(self, run: StageRun, image: str, inputs: dict) -> str: ...
     def get_status(self, run_id: str) -> RunStatus: ...
     def get_logs(self, run_id: str, tail: int) -> str: ...
@@ -129,56 +129,61 @@ nodeSelector:
 
 ---
 
-### 4. Configuration Flexibility
+### 4. Configuration Flexibility (COMPLETED)
 
 User-customizable settings without forking.
 
-**Resource Profiles:**
+**Status**: Core configuration abstractions implemented (2026-01-30)
+- `DefaultsConfig` for global execution settings (timeout, log sync, backend)
+- `StorageConfig` for multi-backend storage selection (GCS, S3, Azure, local)
+- Profile overrides via `gce.profile_overrides`
+- Backwards-compatible with existing `gcs:` config section
+
+**Defaults (COMPLETED):**
 ```yaml
 # goldfish.yaml
-compute_profiles:
-  # Override built-in profiles
-  h100-spot:
-    zones: ["us-central1-a"]  # Restrict to our quota
-
-  # Define custom profiles
-  team-gpu:
-    backend: "kubernetes"
-    resources:
-      gpu_type: "nvidia-tesla-t4"
-      gpu_count: 1
-      memory: "16Gi"
-      cpu: 4
-    spot: true
-
-  cpu-highmem:
-    backend: "gce"
-    machine_type: "n2-highmem-8"
-    spot: true
-```
-
-**Defaults:**
-```yaml
 defaults:
-  timeout_seconds: 7200
-  log_sync_interval: 15
-  backend: "kubernetes"
-
-docker:
-  base_image: "us-docker.pkg.dev/my-project/ml/base:latest"
-  registry: "us-docker.pkg.dev/my-project/goldfish"
+  timeout_seconds: 7200    # Stage timeout (default: 3600)
+  log_sync_interval: 15    # Log sync interval (default: 10)
+  backend: gce             # Default compute: local, gce, kubernetes
 ```
 
-**Storage:**
+**Storage Backend (COMPLETED):**
 ```yaml
+# goldfish.yaml
 storage:
   backend: "gcs"  # or "s3", "azure", "local"
+
   gcs:
     bucket: "my-goldfish-artifacts"
+    sources_prefix: "sources/"
+
   s3:
     bucket: "my-goldfish-artifacts"
     region: "us-east-1"
+    endpoint_url: "http://localhost:9000"  # For MinIO
+
+  azure:
+    container: "my-artifacts"
+    account: "mystorageaccount"
 ```
+
+**Profile Overrides (COMPLETED):**
+```yaml
+# goldfish.yaml
+gce:
+  project_id: my-project
+  profile_overrides:
+    h100-spot:
+      zones: ["us-central1-a"]  # Restrict to quota zone
+    cpu-large:
+      zones: ["us-west1-a"]
+```
+
+**Remaining work:**
+- S3 adapter implementation (config ready)
+- Azure adapter implementation (config ready)
+- Kubernetes backend (separate roadmap item)
 
 ---
 
@@ -365,6 +370,7 @@ Not now and maybe never:
                     ┌─────────────────┐
                     │  Configuration  │
                     │   Flexibility   │
+                    │   (COMPLETED)   │
                     └─────────────────┘
 ```
 
@@ -390,3 +396,10 @@ Not now and maybe never:
   - See [docs/CLOUD_ABSTRACTION.md](docs/CLOUD_ABSTRACTION.md)
 - **GCE backend**: Production-ready
 - **Local Docker backend**: Production-ready with storage integration
+- **Configuration flexibility** (2026-01-30): Core abstractions implemented
+  - `DefaultsConfig` for global execution settings
+  - `StorageConfig` for multi-backend storage (GCS/S3/Azure/local)
+  - `S3StorageConfig` and `AzureStorageConfig` models (adapters pending)
+  - Profile overrides via `gce.profile_overrides`
+  - Backwards compatible with legacy `gcs:` section
+  - `AdapterFactory.create_storage()` updated for backend selection

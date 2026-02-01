@@ -3,7 +3,9 @@
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import types
 from collections.abc import Generator
 from pathlib import Path
 
@@ -30,6 +32,38 @@ _GIT_ENV_VARS = [
     "GIT_REFLOG_ACTION",
     "GIT_QUARANTINE_PATH",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _clean_stale_server_tools_submodules() -> Generator[None, None, None]:
+    """Prevent stale `goldfish.server_tools.<submodule>` package attributes.
+
+    Some unit tests remove `goldfish.server_tools.*` entries from `sys.modules`
+    to force fresh imports under mocks. If the corresponding attribute on the
+    `goldfish.server_tools` package is not removed, later imports can return a
+    stale module object that is no longer in `sys.modules`, making patching
+    brittle and order-dependent.
+    """
+    try:
+        import goldfish.server_tools as server_tools_pkg
+
+        for attr_name, attr_value in list(vars(server_tools_pkg).items()):
+            if not isinstance(attr_value, types.ModuleType):
+                continue
+
+            mod_name = attr_value.__name__
+            if not mod_name.startswith("goldfish.server_tools."):
+                continue
+
+            mod = sys.modules.get(mod_name)
+            if mod is None:
+                delattr(server_tools_pkg, attr_name)
+            elif mod is not attr_value:
+                setattr(server_tools_pkg, attr_name, mod)
+    except Exception:
+        pass
+
+    yield
 
 
 def pytest_configure(config: pytest.Config) -> None:

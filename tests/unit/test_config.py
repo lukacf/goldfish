@@ -158,3 +158,205 @@ docker:
         config = GoldfishConfig.load(project_dir)
         assert config.docker.base_images == {"gpu": "my-custom-gpu:v1"}
         assert "cpu" not in config.docker.base_images
+
+
+class TestS3StorageConfigValidation:
+    """Tests for S3StorageConfig SSRF protection and validation."""
+
+    def test_s3_endpoint_url_rejects_localhost(self) -> None:
+        """S3 endpoint_url must reject localhost to prevent SSRF."""
+        from pydantic import ValidationError
+
+        from goldfish.config import S3StorageConfig
+
+        with pytest.raises(ValidationError) as exc_info:
+            S3StorageConfig(bucket="test", endpoint_url="http://localhost:9000")
+        assert "localhost" in str(exc_info.value).lower() or "ssrf" in str(exc_info.value).lower()
+
+    def test_s3_endpoint_url_rejects_127_0_0_1(self) -> None:
+        """S3 endpoint_url must reject 127.0.0.1 to prevent SSRF."""
+        from pydantic import ValidationError
+
+        from goldfish.config import S3StorageConfig
+
+        with pytest.raises(ValidationError) as exc_info:
+            S3StorageConfig(bucket="test", endpoint_url="http://127.0.0.1:9000")
+        assert "127.0.0.1" in str(exc_info.value) or "internal" in str(exc_info.value).lower()
+
+    def test_s3_endpoint_url_rejects_internal_ip_ranges(self) -> None:
+        """S3 endpoint_url must reject internal IP ranges (10.x, 172.16-31.x, 192.168.x)."""
+        from pydantic import ValidationError
+
+        from goldfish.config import S3StorageConfig
+
+        internal_urls = [
+            "http://10.0.0.1:9000",
+            "http://172.16.0.1:9000",
+            "http://172.31.255.255:9000",
+            "http://192.168.1.1:9000",
+        ]
+        for url in internal_urls:
+            with pytest.raises(ValidationError):
+                S3StorageConfig(bucket="test", endpoint_url=url)
+
+    def test_s3_endpoint_url_rejects_metadata_endpoint(self) -> None:
+        """S3 endpoint_url must reject cloud metadata endpoints (169.254.169.254)."""
+        from pydantic import ValidationError
+
+        from goldfish.config import S3StorageConfig
+
+        with pytest.raises(ValidationError):
+            S3StorageConfig(bucket="test", endpoint_url="http://169.254.169.254/latest/meta-data/")
+
+    def test_s3_endpoint_url_rejects_ipv6_loopback(self) -> None:
+        """S3 endpoint_url must reject IPv6 loopback (::1) to prevent SSRF."""
+        from pydantic import ValidationError
+
+        from goldfish.config import S3StorageConfig
+
+        with pytest.raises(ValidationError) as exc_info:
+            S3StorageConfig(bucket="test", endpoint_url="http://[::1]:9000")
+        assert "loopback" in str(exc_info.value).lower() or "ssrf" in str(exc_info.value).lower()
+
+    def test_s3_endpoint_url_rejects_ipv6_link_local(self) -> None:
+        """S3 endpoint_url must reject IPv6 link-local addresses (fe80::)."""
+        from pydantic import ValidationError
+
+        from goldfish.config import S3StorageConfig
+
+        with pytest.raises(ValidationError) as exc_info:
+            S3StorageConfig(bucket="test", endpoint_url="http://[fe80::1]:9000")
+        assert "link-local" in str(exc_info.value).lower() or "ssrf" in str(exc_info.value).lower()
+
+    def test_s3_endpoint_url_rejects_ipv6_private(self) -> None:
+        """S3 endpoint_url must reject IPv6 private addresses (fc00::/fd00::)."""
+        from pydantic import ValidationError
+
+        from goldfish.config import S3StorageConfig
+
+        ipv6_private_urls = [
+            "http://[fc00::1]:9000",
+            "http://[fd00::1]:9000",
+        ]
+        for url in ipv6_private_urls:
+            with pytest.raises(ValidationError):
+                S3StorageConfig(bucket="test", endpoint_url=url)
+
+    def test_s3_endpoint_url_rejects_ipv4_mapped_ipv6(self) -> None:
+        """S3 endpoint_url must reject IPv4-mapped IPv6 addresses (::ffff:127.0.0.1)."""
+        from pydantic import ValidationError
+
+        from goldfish.config import S3StorageConfig
+
+        with pytest.raises(ValidationError):
+            S3StorageConfig(bucket="test", endpoint_url="http://[::ffff:127.0.0.1]:9000")
+
+    def test_s3_endpoint_url_accepts_valid_public_url(self) -> None:
+        """S3 endpoint_url should accept valid public URLs."""
+        from goldfish.config import S3StorageConfig
+
+        # MinIO on public domain
+        config = S3StorageConfig(bucket="test", endpoint_url="https://minio.example.com:9000")
+        assert config.endpoint_url == "https://minio.example.com:9000"
+
+        # AWS S3 compatible endpoint
+        config = S3StorageConfig(bucket="test", endpoint_url="https://s3.us-west-2.amazonaws.com")
+        assert config.endpoint_url == "https://s3.us-west-2.amazonaws.com"
+
+    def test_s3_endpoint_url_accepts_none(self) -> None:
+        """S3 endpoint_url=None should be valid (uses default AWS endpoint)."""
+        from goldfish.config import S3StorageConfig
+
+        config = S3StorageConfig(bucket="test", endpoint_url=None)
+        assert config.endpoint_url is None
+
+
+class TestStorageConfigConsistency:
+    """Tests for StorageConfig backend-config consistency validation."""
+
+    def test_storage_config_gcs_requires_gcs_section(self) -> None:
+        """StorageConfig with backend='gcs' must have gcs section."""
+        from pydantic import ValidationError
+
+        from goldfish.config import StorageConfig
+
+        with pytest.raises(ValidationError) as exc_info:
+            StorageConfig(backend="gcs", gcs=None)
+        assert "gcs" in str(exc_info.value).lower()
+
+    def test_storage_config_s3_requires_s3_section(self) -> None:
+        """StorageConfig with backend='s3' must have s3 section."""
+        from pydantic import ValidationError
+
+        from goldfish.config import StorageConfig
+
+        with pytest.raises(ValidationError) as exc_info:
+            StorageConfig(backend="s3", s3=None)
+        assert "s3" in str(exc_info.value).lower()
+
+    def test_storage_config_azure_requires_azure_section(self) -> None:
+        """StorageConfig with backend='azure' must have azure section."""
+        from pydantic import ValidationError
+
+        from goldfish.config import StorageConfig
+
+        with pytest.raises(ValidationError) as exc_info:
+            StorageConfig(backend="azure", azure=None)
+        assert "azure" in str(exc_info.value).lower()
+
+    def test_storage_config_local_does_not_require_section(self) -> None:
+        """StorageConfig with backend='local' doesn't require any section."""
+        from goldfish.config import StorageConfig
+
+        config = StorageConfig(backend="local")
+        assert config.backend == "local"
+
+    def test_storage_config_gcs_with_gcs_section_valid(self) -> None:
+        """StorageConfig with backend='gcs' and gcs section is valid."""
+        from goldfish.config import GCSConfig, StorageConfig
+
+        config = StorageConfig(backend="gcs", gcs=GCSConfig(bucket="my-bucket"))
+        assert config.backend == "gcs"
+        assert config.gcs is not None
+        assert config.gcs.bucket == "my-bucket"
+
+
+class TestAzureStorageConfigValidation:
+    """Tests for Azure storage account name validation."""
+
+    def test_azure_account_name_rejects_too_short(self) -> None:
+        """Azure account names must be at least 3 characters."""
+        from pydantic import ValidationError
+
+        from goldfish.config import AzureStorageConfig
+
+        with pytest.raises(ValidationError):
+            AzureStorageConfig(container="test", account="ab")
+
+    def test_azure_account_name_rejects_too_long(self) -> None:
+        """Azure account names must be at most 24 characters."""
+        from pydantic import ValidationError
+
+        from goldfish.config import AzureStorageConfig
+
+        with pytest.raises(ValidationError):
+            AzureStorageConfig(container="test", account="a" * 25)
+
+    def test_azure_account_name_rejects_invalid_chars(self) -> None:
+        """Azure account names must be alphanumeric only."""
+        from pydantic import ValidationError
+
+        from goldfish.config import AzureStorageConfig
+
+        with pytest.raises(ValidationError):
+            AzureStorageConfig(container="test", account="my-account")  # hyphen not allowed
+
+        with pytest.raises(ValidationError):
+            AzureStorageConfig(container="test", account="my_account")  # underscore not allowed
+
+    def test_azure_account_name_accepts_valid(self) -> None:
+        """Azure account names that are 3-24 alphanumeric chars should be valid."""
+        from goldfish.config import AzureStorageConfig
+
+        config = AzureStorageConfig(container="test", account="mystorageaccount123")
+        assert config.account == "mystorageaccount123"

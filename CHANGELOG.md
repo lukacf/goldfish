@@ -10,6 +10,12 @@ All notable changes to Goldfish.
 - **Local backend parity** - Full feature parity with GCE including preemption simulation
 - **Database-driven base images** - Version tracking for Docker base images
 - `docs/ARCHITECTURE.md` - Comprehensive architecture documentation
+- `DefaultsConfig` for global stage execution defaults (timeout_seconds, log_sync_interval, backend)
+- `StorageConfig` for multi-backend storage configuration
+- `S3StorageConfig` and `AzureStorageConfig` for future cloud providers
+
+### Security
+- SSRF protection for S3 endpoint_url (blocks localhost, private IPs, metadata endpoints)
 
 ### Changed
 - **De-googlify refactor** - All GCP-specific code moved to `cloud/adapters/gcp/`

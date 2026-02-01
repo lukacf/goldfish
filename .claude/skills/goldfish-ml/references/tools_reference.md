@@ -48,7 +48,8 @@ Returns a structured summary organized for quick action.
     "mounted": [...],  # Slots with workspace name, goal, dirty state
     "unmounted_count": int
   },
-  "source_count": int
+  "source_count": int,
+  "recent_outcomes": list  # Recent run outcomes for quick review
 }
 ```
 
@@ -207,7 +208,7 @@ Optional fields: `unit`, `step`, `epoch`, `secondary`, `termination`.
 
 ---
 
-### list_history(workspace, record_type, stage, tagged, metric, min_value, experiment_group, sort_by, desc, include_pruned, include_internal_ids, limit, offset)
+### list_history(workspace, record_type, stage, tagged, metric, min_value, experiment_group, sort_by, desc, include_pruned, include_internal_ids, finalized_only, limit, offset)
 
 List experiment records (runs + checkpoints). Primary history/query tool.
 

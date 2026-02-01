@@ -487,13 +487,87 @@ def test_inspect_run_includes_svs_partial_outcome():
     assert result["svs"]["post_run"]["ml_metric_value"] == 0.72
 
 
+def test_inspect_run_includes_pre_run_reviews_from_database():
+    """Regression test: pre_run reviews from svs_reviews table must appear in response.
+
+    This test verifies that inspect_run with include=["svs"] correctly retrieves
+    pre_run reviews from the svs_reviews database table (not just svs_findings_json
+    in the stage_runs table).
+
+    Bug: pre_run reviews were recorded but not appearing in inspect_run output
+    because the code path to retrieve them from svs_reviews was not being tested.
+    """
+    import json
+
+    from goldfish.server_tools.execution_tools import inspect_run
+
+    run_id = "stage-abc123def"
+
+    # Mock pre_run review from svs_reviews table
+    pre_run_review = {
+        "id": 999,
+        "stage_run_id": run_id,
+        "review_type": "pre_run",
+        "decision": "approved",
+        "model_used": "claude-opus-4-5-20251101",
+        "reviewed_at": "2026-02-01T10:00:00Z",
+        "response_text": "No issues found in train stage code.",
+        "parsed_findings": json.dumps(
+            [{"severity": "NOTE", "message": "Code looks clean", "file": "train.py", "line": 10}]
+        ),
+    }
+
+    mock_db = MagicMock()
+    mock_db.get_stage_run.return_value = {
+        "id": run_id,
+        "workspace_name": "w1",
+        "stage_name": "train",
+        "status": "running",
+        "state": "running",
+        "started_at": "2026-02-01T10:00:00Z",
+        "completed_at": None,
+        "config_json": "{}",
+        "inputs_json": "{}",
+        "outputs_json": "[]",
+        "reason_json": None,
+        "svs_findings_json": None,  # No during_run or post_run yet
+        "preflight_errors_json": None,
+        "preflight_warnings_json": None,
+    }
+
+    # CRITICAL: Mock get_svs_reviews to return the pre_run review
+    mock_db.get_svs_reviews.return_value = [pre_run_review]
+
+    mock_db.get_metrics_trends.return_value = {}
+    mock_db.get_metrics_summary.return_value = []
+
+    with patch("goldfish.server_tools.execution_tools._get_db", return_value=mock_db):
+        result = inspect_run(run_id, include=["svs"])
+
+    # Verify pre_run data is present
+    assert "svs" in result, "SVS section should be in result"
+    assert "pre_run" in result["svs"], "pre_run should be in SVS section"
+    assert len(result["svs"]["pre_run"]) == 1, "Should have 1 pre_run review"
+
+    pre_run = result["svs"]["pre_run"][0]
+    assert pre_run["decision"] == "approved"
+    assert pre_run["model"] == "claude-opus-4-5-20251101"
+    assert pre_run["full_text"] == "No issues found in train stage code."
+    assert pre_run["findings"] is not None
+    assert len(pre_run["findings"]) == 1
+    assert pre_run["findings"][0]["severity"] == "NOTE"
+
+    # Verify get_svs_reviews was called with correct parameters
+    mock_db.get_svs_reviews.assert_called_once_with(stage_run_id=run_id, review_type="pre_run")
+
+
 def test_inspect_run_includes_reason():
     """Test that inspect_run includes reason from reason_json."""
     import json
 
     from goldfish.server_tools.execution_tools import inspect_run
 
-    run_id = "stage-abc123def"
+    run_id = "stage-def456789"
     reason_data = {"description": "Testing new learning rate schedule"}
     mock_db = MagicMock()
     mock_db.get_stage_run.return_value = {

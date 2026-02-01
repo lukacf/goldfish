@@ -18,11 +18,10 @@ from goldfish.cloud.adapters.local.run_backend import (
 )
 from goldfish.cloud.adapters.local.storage import LocalObjectStorage
 from goldfish.cloud.contracts import BackendCapabilities
-from goldfish.infra.metadata.local import LocalMetadataBus
+
+# NOTE: goldfish.infra is NOT available in container images - imports must be lazy
 
 if TYPE_CHECKING:
-    pass  # Path moved to runtime import
-
     from goldfish.cloud.protocols import (
         ImageBuilder,
         ImageRegistry,
@@ -31,7 +30,7 @@ if TYPE_CHECKING:
         RunBackend,
         SignalBus,
     )
-    from goldfish.config import GoldfishConfig
+    from goldfish.config import GoldfishConfig, StorageConfig
     from goldfish.db.database import Database
 
 logger = logging.getLogger(__name__)
@@ -51,9 +50,27 @@ class AdapterFactory:
 
         Args:
             config: Goldfish configuration with backend settings.
+
+        Raises:
+            ValueError: If jobs.backend is not a supported backend type.
         """
         self._config = config
-        self._backend_type: BackendType = config.jobs.backend  # type: ignore[assignment]
+
+        # Validate backend type at runtime instead of using type: ignore
+        backend = config.jobs.backend
+        if backend == "kubernetes":
+            raise NotImplementedError(
+                "Kubernetes backend not yet implemented. "
+                "Use jobs.backend='local' or 'gce' for now. "
+                "Kubernetes support is planned for a future release."
+            )
+        if backend not in ("local", "gce"):
+            raise ValueError(
+                f"Unsupported backend type: '{backend}'. "
+                f"Supported backends: 'local', 'gce'. "
+                f"Check jobs.backend in goldfish.yaml."
+            )
+        self._backend_type: BackendType = backend  # type: ignore[assignment]
 
     @property
     def backend_type(self) -> BackendType:
@@ -63,41 +80,100 @@ class AdapterFactory:
     def create_storage(self, root: Path | None = None) -> ObjectStorage:
         """Create an ObjectStorage adapter.
 
+        Storage backend selection priority:
+        1. If storage: section exists, use storage.backend
+        2. Otherwise, fall back to jobs.backend for backwards compatibility
+
         Args:
-            root: Root directory for local storage (ignored for GCS).
+            root: Root directory for local storage (ignored for cloud storage).
 
         Returns:
             ObjectStorage implementation for the configured backend.
         """
+        # Check new storage: section first
+        storage_config = self._config.storage
+        if storage_config is not None:
+            return self._create_storage_from_storage_config(storage_config, root)
+
+        # Fall back to legacy behavior based on jobs.backend
+        return self._create_storage_legacy(root)
+
+    def _create_storage_from_storage_config(
+        self, storage_config: StorageConfig, root: Path | None = None
+    ) -> ObjectStorage:
+        """Create storage adapter from the new storage: config section."""
+        backend = storage_config.backend
+
+        if backend == "local":
+            return self._create_local_storage(root)
+
+        if backend == "gcs":
+            return self._create_gcs_storage()
+
+        if backend == "s3":
+            raise NotImplementedError(
+                "S3 storage adapter not yet implemented. " "Use storage.backend='gcs' or 'local' for now."
+            )
+
+        if backend == "azure":
+            raise NotImplementedError(
+                "Azure storage adapter not yet implemented. " "Use storage.backend='gcs' or 'local' for now."
+            )
+
+        raise ValueError(f"Unknown storage backend: {backend}")
+
+    def _create_gcs_storage(self) -> ObjectStorage:
+        """Create GCSStorage adapter with project from gce config.
+
+        Logs a warning if gce config exists but has no project_id.
+        """
+        from goldfish.cloud.adapters.gcp.storage import GCSStorage
+
+        gce_config = self._config.gce
+        project: str | None = None
+
+        if gce_config:
+            project = gce_config.project or gce_config.project_id
+            if not project:
+                logger.warning(
+                    "GCE config present but no project_id or project field set. "
+                    "GCS operations will use default credentials project. "
+                    "Consider adding project_id to gce config in goldfish.yaml."
+                )
+        # If gce_config is None, project stays None (uses default credentials)
+
+        return GCSStorage(project=project)
+
+    def _create_storage_legacy(self, root: Path | None = None) -> ObjectStorage:
+        """Create storage adapter using legacy jobs.backend selection."""
         if self._backend_type == "local":
-            from goldfish.config import LocalStorageConfig
+            return self._create_local_storage(root)
 
-            # Use config values if available, or defaults
-            local_config = self._config.local
-            if local_config and local_config.storage:
-                storage_config = local_config.storage
-                config = LocalStorageConfig(
-                    consistency_delay_ms=storage_config.consistency_delay_ms,
-                    size_limit_mb=storage_config.size_limit_mb,
-                )
-                storage_root = root or Path(storage_config.root)
-            else:
-                config = LocalStorageConfig(
-                    consistency_delay_ms=0,
-                    size_limit_mb=None,
-                )
-                storage_root = root or Path(".local_gcs")
-            return LocalObjectStorage(root=storage_root, config=config)
+        if self._backend_type == "gce":
+            return self._create_gcs_storage()
 
-        elif self._backend_type == "gce":
-            from goldfish.cloud.adapters.gcp.storage import GCSStorage
+        raise ValueError(f"Unknown backend type: {self._backend_type}")
 
-            gce_config = self._config.gce
-            project = gce_config.project or gce_config.project_id if gce_config else None
-            return GCSStorage(project=project)
+    def _create_local_storage(self, root: Path | None = None) -> LocalObjectStorage:
+        """Create LocalObjectStorage with appropriate configuration."""
+        from goldfish.config import LocalStorageConfig
 
+        # Use config values if available, or defaults
+        local_config = self._config.local
+        if local_config and local_config.storage:
+            local_storage_config = local_config.storage
+            config = LocalStorageConfig(
+                consistency_delay_ms=local_storage_config.consistency_delay_ms,
+                size_limit_mb=local_storage_config.size_limit_mb,
+            )
+            storage_root = root or Path(local_storage_config.root)
         else:
-            raise ValueError(f"Unknown backend type: {self._backend_type}")
+            config = LocalStorageConfig(
+                consistency_delay_ms=0,
+                size_limit_mb=None,
+            )
+            storage_root = root or Path(".local_gcs")
+        return LocalObjectStorage(root=storage_root, config=config)
 
     def create_run_backend(self) -> RunBackend:
         """Create a RunBackend adapter.
@@ -134,9 +210,10 @@ class AdapterFactory:
         elif self._backend_type == "gce":
             from goldfish.cloud.adapters.gcp.run_backend import GCERunBackend
 
+            # Explicit parentheses for clarity (ternary has lower precedence than or)
             gce_config = self._config.gce
             gcs_config = self._config.gcs
-            project = gce_config.project or gce_config.project_id if gce_config else None
+            project = (gce_config.project or gce_config.project_id) if gce_config else None
             bucket = gcs_config.bucket if gcs_config else None
 
             return GCERunBackend(
@@ -161,6 +238,7 @@ class AdapterFactory:
         """
         if self._backend_type == "local":
             from goldfish.config import LocalSignalingConfig
+            from goldfish.infra.metadata.local import LocalMetadataBus
 
             local_config = self._config.local
             if local_config and local_config.signaling:

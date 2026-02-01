@@ -392,3 +392,93 @@ def test_wait_for_completion_launch_failure_no_exit_code(test_db, test_config, t
     row = test_db.get_stage_run(run_id)
     assert row is not None
     assert "not found" in row["error"].lower() or "failed to launch" in row["error"].lower()
+
+
+# =============================================================================
+# Tests for UNKNOWN status handling (GCS/API errors)
+# =============================================================================
+
+
+def test_refresh_status_once_unknown_status_logs_message(test_db, test_config, tmp_path, caplog):
+    """REGRESSION: UNKNOWN status should be logged with error details.
+
+    Bug: When run_backend.get_status() returned UNKNOWN (e.g., due to GCS error),
+    refresh_status_once silently ignored it without logging.
+
+    Fix: Log UNKNOWN status with the message from BackendStatus.
+    """
+    import logging
+
+    run_id = _create_running_stage_run(test_db)
+
+    config = test_config.model_copy(deep=True)
+    config.jobs.backend = "gce"
+
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(supports_gpu=True, supports_spot=True, has_launch_delay=True)
+    # Return UNKNOWN status with a message
+    mock_backend.get_status.return_value = BackendStatus(
+        status=RunStatus.UNKNOWN,
+        message="GCS error: Connection refused",
+    )
+
+    executor = StageExecutor(
+        db=test_db,
+        config=config,
+        workspace_manager=MagicMock(),
+        pipeline_manager=MagicMock(),
+        project_root=tmp_path,
+        dataset_registry=None,
+        run_backend=mock_backend,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        status = executor.refresh_status_once(run_id)
+
+    # Should return "unknown" status
+    assert status == "unknown"
+
+    # Key assertion: warning should be logged with the error message
+    assert any("UNKNOWN" in record.message for record in caplog.records)
+    assert any("GCS error" in record.message or "Connection refused" in record.message for record in caplog.records)
+
+
+def test_refresh_status_once_unknown_does_not_finalize(test_db, test_config, tmp_path):
+    """REGRESSION: UNKNOWN status should NOT finalize the run.
+
+    UNKNOWN means we couldn't determine the status (transient error).
+    The run might still be running, so we shouldn't finalize it.
+    """
+    run_id = _create_running_stage_run(test_db)
+
+    config = test_config.model_copy(deep=True)
+    config.jobs.backend = "gce"
+
+    mock_backend = MagicMock()
+    mock_backend.capabilities = MagicMock(supports_gpu=True, supports_spot=True, has_launch_delay=True)
+    mock_backend.get_status.return_value = BackendStatus(
+        status=RunStatus.UNKNOWN,
+        message="API timeout",
+    )
+
+    executor = StageExecutor(
+        db=test_db,
+        config=config,
+        workspace_manager=MagicMock(),
+        pipeline_manager=MagicMock(),
+        project_root=tmp_path,
+        dataset_registry=None,
+        run_backend=mock_backend,
+    )
+
+    executor._finalize_stage_run = MagicMock()
+
+    executor.refresh_status_once(run_id)
+
+    # Key assertion: should NOT call finalize
+    executor._finalize_stage_run.assert_not_called()
+
+    # Run should still be in RUNNING state
+    row = test_db.get_stage_run(run_id)
+    assert row is not None
+    assert row["state"] == StageState.RUNNING.value

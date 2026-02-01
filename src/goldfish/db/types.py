@@ -126,6 +126,8 @@ class StageRunRow(TypedDict):
     status: str
     started_at: str
     completed_at: str | None
+    build_context_hash: str | None
+    image_tag: str | None
 
 
 class MetricRow(TypedDict):
@@ -250,6 +252,14 @@ class DockerBuildRow(TypedDict):
     workspace_name: str | None  # Workspace name (for workspace builds only)
     version: str | None  # Workspace version (for workspace builds only)
     content_hash: str | None  # SHA256 of build context (for cache hit detection)
+    dockerfile_hash: str | None  # SHA256 of rendered Dockerfile content
+    git_sha: str | None  # Git commit SHA of workspace code
+    goldfish_runtime_hash: str | None  # Hash of Goldfish runtime files copied into build context
+    base_image: str | None  # Base image tag used for build
+    base_image_digest: str | None  # Resolved digest for base image (sha256:...)
+    requirements_hash: str | None  # SHA256 of requirements.txt (hash of empty string if missing)
+    build_args_json: str | None  # JSON build args passed to docker build (no secrets)
+    build_context_json: str | None  # JSON serialization of full BuildContext
     created_at: str
 
 

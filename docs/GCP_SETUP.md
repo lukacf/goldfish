@@ -28,7 +28,7 @@ This account runs Docker image builds via Cloud Build.
 |----------|------|---------|
 | Project | `roles/cloudbuild.builds.builder` | Run Cloud Build jobs |
 | Project | `roles/artifactregistry.writer` | Push images to Artifact Registry |
-| GCS Bucket (`mlm-artifacts-*`) | `roles/storage.objectViewer` | Download pre-built wheels (e.g., FA3) |
+| GCS Bucket (`{YOUR_PROJECT}-*`) | `roles/storage.objectViewer` | Download pre-built wheels (e.g., FA3) during image builds |
 
 **Grant GCS access:**
 ```bash
@@ -45,7 +45,7 @@ This account is used by GCE instances running Goldfish stages.
 
 | Resource | Role | Purpose |
 |----------|------|---------|
-| GCS Bucket (`mlm-artifacts-*`) | `roles/storage.objectAdmin` | Read inputs, write outputs |
+| GCS Bucket (`{YOUR_PROJECT}-*`) | `roles/storage.objectAdmin` | Read inputs, write outputs |
 | Artifact Registry | `roles/artifactregistry.reader` | Pull Docker images |
 
 ### 3. Cloud Build Service Agent
@@ -93,7 +93,7 @@ Some packages (like FlashAttention-3) require pre-built wheels because they can'
 
 ### FlashAttention-3 Wheel
 
-**Location**: `gs://your-bucket/wheels/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl`
+**Location**: `gs://{YOUR_PROJECT}-goldfish-artifacts/wheels/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl`
 
 **Built with**:
 - PyTorch 2.7.1
@@ -107,7 +107,7 @@ Some packages (like FlashAttention-3) require pre-built wheels because they can'
 ```yaml
 docker:
   cloud_build:
-    fa3_wheel_gcs: gs://your-bucket/wheels/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl
+    fa3_wheel_gcs: gs://{YOUR_PROJECT}-goldfish-artifacts/wheels/flash_attn_3-3.0.0b1-cp39-abi3-linux_x86_64.whl
 ```
 
 When `fa3_wheel_gcs` is set, GPU base image builds via Cloud Build will automatically download the wheel using Python SDK (google-cloud-storage) - no gcloud CLI required in the build image.
@@ -116,7 +116,7 @@ When `fa3_wheel_gcs` is set, GPU base image builds via Cloud Build will automati
 ```bash
 # Create H100 spot instance with Deep Learning VM
 gcloud compute instances create fa3-build-$(date +%s) \
-  --project=your-gcp-project \
+  --project=${PROJECT_ID} \
   --zone=us-central1-a \
   --machine-type=a3-highgpu-1g \
   --accelerator=type=nvidia-h100-80gb,count=1 \
@@ -133,7 +133,7 @@ gcloud compute ssh fa3-build-* --zone=us-central1-a --command='
   cd /tmp/fa3-repo/hopper
   export MAX_JOBS=20
   pip wheel . --no-build-isolation --no-deps -w /tmp/wheels/
-  gsutil cp /tmp/wheels/flash_attn_3*.whl gs://your-bucket/wheels/
+  gsutil cp /tmp/wheels/flash_attn_3*.whl gs://${PROJECT_ID}-goldfish-artifacts/wheels/
 '
 
 # Delete instance when done

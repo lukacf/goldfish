@@ -105,6 +105,8 @@ class Database:
                 ("preflight_warnings_json", "TEXT"),  # Preflight validation warnings
                 ("backend_type", "TEXT"),
                 ("backend_handle", "TEXT"),
+                ("build_context_hash", "TEXT"),  # SHA256 cache key of Docker build context
+                ("image_tag", "TEXT"),  # Docker tag used for the run image
                 ("artifact_uri", "TEXT"),
                 ("stage_version_id", "INTEGER"),  # Links to stage_versions
                 ("outcome", "TEXT"),  # NULL, 'success', 'bad_results' - semantic result quality
@@ -149,6 +151,14 @@ class Database:
                 ("workspace_name", "TEXT"),  # Workspace name (for workspace builds)
                 ("version", "TEXT"),  # Workspace version (for workspace builds)
                 ("content_hash", "TEXT"),  # SHA256 of build context (for cache hit detection)
+                ("dockerfile_hash", "TEXT"),  # SHA256 of rendered Dockerfile content
+                ("git_sha", "TEXT"),  # Git commit SHA of workspace code
+                ("goldfish_runtime_hash", "TEXT"),  # Hash of Goldfish runtime files copied into build context
+                ("base_image", "TEXT"),  # Base image tag used for build
+                ("base_image_digest", "TEXT"),  # Resolved digest for base image (sha256:...)
+                ("requirements_hash", "TEXT"),  # SHA256 of requirements.txt (hash of empty string if missing)
+                ("build_args_json", "TEXT"),  # JSON build args passed to docker build (no secrets)
+                ("build_context_json", "TEXT"),  # JSON serialization of full BuildContext
             ],
             "experiment_records": [
                 ("experiment_group", "TEXT"),  # Optional grouping for filtering
@@ -2257,6 +2267,8 @@ class Database:
         preflight_warnings: list[str] | None = None,
         backend_type: str | None = None,
         backend_handle: str | None = None,
+        build_context_hash: str | None = None,
+        image_tag: str | None = None,
     ) -> None:
         """Create a new stage run.
 
@@ -2277,6 +2289,8 @@ class Database:
             preflight_warnings: Preflight validation warnings (if any)
             backend_type: local|gce
             backend_handle: container_id or instance_name for cancel/logs
+            build_context_hash: SHA256 cache key of Docker build context
+            image_tag: Docker tag used for the run image
         """
         timestamp = datetime.now(UTC).isoformat()
         config_json = json.dumps(config) if config is not None else None
@@ -2303,9 +2317,9 @@ class Database:
                 (id, job_id, pipeline_run_id, workspace_name, pipeline_name, version, stage_name,
                  started_at, profile, hints_json, config_json, inputs_json, reason_json,
                  preflight_errors_json, preflight_warnings_json,
-                 backend_type, backend_handle, attempt_num,
+                 backend_type, backend_handle, build_context_hash, image_tag, attempt_num,
                  state, phase, state_entered_at, phase_updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     stage_run_id,
@@ -2325,6 +2339,8 @@ class Database:
                     preflight_warnings_json,
                     backend_type,
                     backend_handle,
+                    build_context_hash,
+                    image_tag,
                     attempt_num,
                     initial_state.value,
                     initial_phase,
@@ -2583,6 +2599,8 @@ class Database:
         outputs_json: dict | None = None,
         error: str | None = None,
         progress: str | None = None,
+        build_context_hash: str | None = None,
+        image_tag: str | None = None,
     ) -> None:
         """Update stage run metadata fields.
 
@@ -2598,6 +2616,8 @@ class Database:
             outputs_json: Outputs map
             error: Error message if failed
             progress: User-facing training progress string (e.g., "Epoch 10/10")
+            build_context_hash: SHA256 cache key of Docker build context
+            image_tag: Docker tag used for the run image
         """
         fields: list[str] = []
         params: list = []
@@ -2620,6 +2640,12 @@ class Database:
         if progress is not None:
             fields.append("progress = ?")
             params.append(progress)
+        if build_context_hash is not None:
+            fields.append("build_context_hash = ?")
+            params.append(build_context_hash)
+        if image_tag is not None:
+            fields.append("image_tag = ?")
+            params.append(image_tag)
 
         if not fields:
             return  # Nothing to update
@@ -4741,6 +4767,14 @@ class Database:
         workspace_name: str | None = None,
         version: str | None = None,
         content_hash: str | None = None,
+        dockerfile_hash: str | None = None,
+        git_sha: str | None = None,
+        goldfish_runtime_hash: str | None = None,
+        base_image: str | None = None,
+        base_image_digest: str | None = None,
+        requirements_hash: str | None = None,
+        build_args_json: str | None = None,
+        build_context_json: str | None = None,
     ) -> None:
         """Insert a new Docker build record.
 
@@ -4756,6 +4790,14 @@ class Database:
             workspace_name: Workspace name (for workspace builds only)
             version: Workspace version (for workspace builds only)
             content_hash: SHA256 of build context (for cache hit detection)
+            dockerfile_hash: SHA256 of rendered Dockerfile content
+            git_sha: Git commit SHA of workspace code
+            goldfish_runtime_hash: Hash of Goldfish runtime files copied into build context
+            base_image: Base image tag used for build
+            base_image_digest: Resolved digest for base image (sha256:...)
+            requirements_hash: SHA256 of requirements.txt content (hash of empty string if missing)
+            build_args_json: JSON build args passed to docker build (no secrets)
+            build_context_json: JSON serialization of full BuildContext
         """
         with self._conn() as conn:
             conn.execute(
@@ -4763,9 +4805,11 @@ class Database:
                 INSERT INTO docker_builds (
                     id, image_type, target, backend, cloud_build_id,
                     status, image_tag, registry_tag, started_at,
-                    workspace_name, version, content_hash
+                    workspace_name, version, content_hash,
+                    dockerfile_hash, git_sha, goldfish_runtime_hash, base_image,
+                    base_image_digest, requirements_hash, build_args_json, build_context_json
                 )
-                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     build_id,
@@ -4779,6 +4823,14 @@ class Database:
                     workspace_name,
                     version,
                     content_hash,
+                    dockerfile_hash,
+                    git_sha,
+                    goldfish_runtime_hash,
+                    base_image,
+                    base_image_digest,
+                    requirements_hash,
+                    build_args_json,
+                    build_context_json,
                 ),
             )
 
@@ -4799,7 +4851,10 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, content_hash, created_at
+                       version, content_hash,
+                       dockerfile_hash, git_sha, goldfish_runtime_hash, base_image,
+                       base_image_digest, requirements_hash, build_args_json, build_context_json,
+                       created_at
                 FROM docker_builds
                 WHERE id = ?
                 """,
@@ -4825,7 +4880,10 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, content_hash, created_at
+                       version, content_hash,
+                       dockerfile_hash, git_sha, goldfish_runtime_hash, base_image,
+                       base_image_digest, requirements_hash, build_args_json, build_context_json,
+                       created_at
                 FROM docker_builds
                 WHERE workspace_name = ? AND version = ?
                 ORDER BY started_at DESC
@@ -4855,7 +4913,10 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, content_hash, created_at
+                       version, content_hash,
+                       dockerfile_hash, git_sha, goldfish_runtime_hash, base_image,
+                       base_image_digest, requirements_hash, build_args_json, build_context_json,
+                       created_at
                 FROM docker_builds
                 WHERE workspace_name = ? AND status = 'completed' AND registry_tag IS NOT NULL
                 ORDER BY completed_at DESC
@@ -4886,7 +4947,10 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, content_hash, created_at
+                       version, content_hash,
+                       dockerfile_hash, git_sha, goldfish_runtime_hash, base_image,
+                       base_image_digest, requirements_hash, build_args_json, build_context_json,
+                       created_at
                 FROM docker_builds
                 WHERE workspace_name = ?
                   AND content_hash = ?
@@ -4909,6 +4973,7 @@ class Database:
         logs_uri: str | None = None,
         image_tag: str | None = None,
         registry_tag: str | None = None,
+        build_context_json: str | None = None,
     ) -> bool:
         """Update status and related fields for a Docker build.
 
@@ -4921,6 +4986,7 @@ class Database:
             logs_uri: GCS path to logs (for cloud builds)
             image_tag: Local Docker tag (on success)
             registry_tag: Full registry tag (on success)
+            build_context_json: Optional updated build context JSON
 
         Returns:
             True if updated, False if build not found
@@ -4948,6 +5014,9 @@ class Database:
             if registry_tag is not None:
                 fields.append("registry_tag = ?")
                 params.append(registry_tag)
+            if build_context_json is not None:
+                fields.append("build_context_json = ?")
+                params.append(build_context_json)
 
             params.append(build_id)
 
@@ -5005,7 +5074,10 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, content_hash, created_at
+                       version, content_hash,
+                       dockerfile_hash, git_sha, goldfish_runtime_hash, base_image,
+                       base_image_digest, requirements_hash, build_args_json, build_context_json,
+                       created_at
                 FROM docker_builds
                 WHERE {where_clause}
                 ORDER BY started_at DESC
@@ -5029,7 +5101,10 @@ class Database:
                 SELECT id, image_type, target, backend, cloud_build_id,
                        status, image_tag, registry_tag, started_at,
                        completed_at, error, logs_uri, workspace_name,
-                       version, content_hash, created_at
+                       version, content_hash,
+                       dockerfile_hash, git_sha, goldfish_runtime_hash, base_image,
+                       base_image_digest, requirements_hash, build_args_json, build_context_json,
+                       created_at
                 FROM docker_builds
                 WHERE status IN ('pending', 'building')
                 ORDER BY started_at DESC

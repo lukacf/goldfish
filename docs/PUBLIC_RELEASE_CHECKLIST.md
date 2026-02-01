@@ -296,10 +296,13 @@ The following items are planned for future releases but are **explicitly not in 
 - Provider-agnostic storage layer
 - Pluggable compute backends
 
-### Extended AI Provider Support
-- OpenAI Codex integration
-- Google Gemini integration
-- Provider-agnostic AI review system
+### Extended AI Provider Support (Future Consideration)
+
+> **Note**: Basic CLI-based integration for alternative AI providers already exists via subprocess calls. The items below are for deeper native integration.
+
+- OpenAI Codex deeper integration (beyond CLI)
+- Google Gemini deeper integration (beyond CLI)
+- Provider-agnostic AI review SDK abstraction
 
 ---
 

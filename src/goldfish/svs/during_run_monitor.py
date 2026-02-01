@@ -283,7 +283,14 @@ class DuringRunMonitor(threading.Thread):
             if not result.response_text:
                 # Only warn on first failure, then debug to reduce spam
                 log_fn = logger.warning if self.consecutive_failures == 0 else logger.debug
-                log_fn("During-run AI review returned empty response")
+                log_fn(
+                    "During-run AI review returned empty response "
+                    "(provider=%s, decision=%s, findings=%d, duration=%dms)",
+                    self.config.agent_provider,
+                    result.decision,
+                    len(result.findings),
+                    result.duration_ms,
+                )
                 return False
 
             # Parse findings
