@@ -2,8 +2,6 @@
   <img src="docs/assets/logo.png" alt="Goldfish" width="200">
 </p>
 
-<h1 align="center">Goldfish</h1>
-
 <p align="center"><strong>A backbone for Agentic ML R&D</strong></p>
 
 <p align="center">
@@ -21,8 +19,65 @@ Why can't agents just do ML? We're asking too much—ML logic, infrastructure, A
 
 **Goldfish is that backbone.** Contract-based runs. Deterministic validation. AI-powered review. Everything documented automatically. It transforms a coding agent into a research assistant with perfect recall, infinite patience, and documentation you'd never write yourself.
 
-> **Cloud Support**: Production-ready on Google Cloud Platform (GCE + GCS + Artifact Registry).
-> The cloud abstraction layer supports adding new backends (AWS, Azure, Kubernetes) by implementing protocols.
+<p align="center">
+  <em><!-- TODO: Add demo video here --></em>
+</p>
+
+---
+
+## Get Started
+
+```bash
+pip install goldfish-ml
+cd your-ml-project
+goldfish init
+```
+
+Connect your agent:
+
+<table>
+<tr>
+<td><strong>Claude Code</strong></td>
+<td><strong>Codex</strong></td>
+<td><strong>Gemini CLI</strong></td>
+</tr>
+<tr>
+<td>
+
+```bash
+claude mcp add goldfish \
+  -- goldfish serve
+```
+
+</td>
+<td>
+
+```bash
+# Add to .codex/config.json
+"mcpServers": {
+  "goldfish": {
+    "command": "goldfish",
+    "args": ["serve"]
+  }
+}
+```
+
+</td>
+<td>
+
+```bash
+# Add to ~/.gemini/settings.json
+"mcpServers": {
+  "goldfish": {
+    "command": "goldfish",
+    "args": ["serve"]
+  }
+}
+```
+
+</td>
+</tr>
+</table>
 
 ---
 
@@ -37,7 +92,7 @@ Tools like W&B and MLflow weren't designed for agents. Goldfish is—built aroun
 | **Silent failure detection** | Deterministic checks catch shape mismatches, NaN propagation, and data leakage. AI review catches logic errors. Problems surface before they corrupt results. |
 | **Institutional learning** | Failed experiments become searchable knowledge. Patterns are extracted, approved, and applied. The same mistake never happens twice. |
 | **Instant comparison** | What made run B better than run A? Config diff, metric deltas, outcome tracking—all captured automatically, recallable instantly. |
-| **One-line compute** | Write `profile: h100-spot` and run. Local Docker for iteration, cloud GPUs for training. Agents focus on research, not DevOps. |
+| **One-line compute** | Write `profile: h100-spot` and run. Local Docker for iteration, GCE for cloud GPUs. Backend-agnostic design supports AWS, Azure, Kubernetes. |
 
 ---
 
