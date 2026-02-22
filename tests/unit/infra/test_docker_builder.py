@@ -160,6 +160,9 @@ def test_build_context_cache_miss(test_db, test_config, tmp_path, monkeypatch) -
         image_builder=mock_image_builder,
     )
 
+    # Mock capture_pip_freeze_from_image to avoid real Docker calls
+    monkeypatch.setattr(executor.docker_builder, "capture_pip_freeze_from_image", lambda _tag: None)
+
     # Compute the expected build_context_hash for this workspace/version.
     with executor.docker_builder.prepare_build_context(workspace_path, "test_ws", "v1") as (
         build_ctx,

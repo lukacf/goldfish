@@ -6,9 +6,22 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from goldfish.cloud.contracts import StorageURI
+from goldfish.cloud.contracts import BackendCapabilities, StorageURI
 from goldfish.jobs.stage_executor import StageExecutor
 from goldfish.state_machine.types import StageState
+
+
+def _make_mock_run_backend():
+    """Create a mock RunBackend with local-like capabilities (no Docker calls)."""
+    mock_backend = MagicMock()
+    mock_backend.capabilities = BackendCapabilities(
+        ack_timeout_seconds=1.0,
+        has_launch_delay=False,
+        timeout_becomes_pending=False,
+        logs_unavailable_message="Logs not available",
+        zone_resolution_method="config",
+    )
+    return mock_backend
 
 
 def _create_mock_storage(size: int = 100, data: bytes = b"test data"):
@@ -90,6 +103,7 @@ def test_sync_metrics_if_running_skips_when_locked(test_db, test_config, tmp_pat
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        run_backend=_make_mock_run_backend(),
     )
 
     state = executor._get_metrics_sync_state(run_id)
@@ -114,6 +128,7 @@ def test_sync_metrics_file_resets_tempfile_on_zero_offset(test_db, test_config, 
         project_root=tmp_path,
         dataset_registry=None,
         storage=mock_storage,
+        run_backend=_make_mock_run_backend(),
     )
 
     data = b'{"type": "metric", "name": "loss", "value": 0.1, "timestamp": "2024-01-01T00:00:00Z"}\n'
@@ -157,6 +172,7 @@ def test_sync_metrics_file_storage_error_returns_warning(test_db, test_config, t
         project_root=tmp_path,
         dataset_registry=None,
         storage=mock_storage,
+        run_backend=_make_mock_run_backend(),
     )
 
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
@@ -186,6 +202,7 @@ def test_sync_metrics_if_running_warns_missing_gcs_bucket(test_db, test_config, 
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        run_backend=_make_mock_run_backend(),
     )
 
     warnings = executor.sync_metrics_if_running(run_id)
@@ -203,6 +220,7 @@ def test_sync_metrics_local_runs_skipped(test_db, test_config, tmp_path):
         pipeline_manager=MagicMock(),
         project_root=tmp_path,
         dataset_registry=None,
+        run_backend=_make_mock_run_backend(),
     )
 
     warnings = executor.sync_metrics_if_running(run_id)

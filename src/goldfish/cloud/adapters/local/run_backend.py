@@ -123,6 +123,7 @@ class LocalRunBackend:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=5,  # Fail fast if Docker daemon is unresponsive
             )
             return "nvidia" in result.stdout.lower()
         except Exception:
@@ -391,8 +392,10 @@ class LocalRunBackend:
         cmd.append(container_id)
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
             return result.stdout + result.stderr
+        except subprocess.TimeoutExpired:
+            return ""
         except subprocess.CalledProcessError:
             return ""
 

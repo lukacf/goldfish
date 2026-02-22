@@ -9,13 +9,22 @@ This module defines the core abstractions for agent-based code review:
 - AgentProvider: Protocol that all review agents must implement
 - NullProvider: Test double for unit testing
 
-The full AgentRequest/AgentResult types support swappable providers (Claude Code,
-Codex CLI, Gemini CLI). The simpler ReviewRequest/ReviewResult types are kept
-for backward compatibility with existing SVS code.
+Providers:
+- MeerkatProvider: Vendor-neutral default using Meerkat SDK (meerkat-sdk>=0.4)
+- AnthropicAPIProvider: Claude Agent SDK with tool access
+- CodexCLIProvider: OpenAI Codex CLI
+- GeminiCLIProvider: Google Gemini CLI
+
+The full AgentRequest/AgentResult types support swappable providers. The simpler
+ReviewRequest/ReviewResult types are kept for backward compatibility with
+existing SVS code.
 """
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import importlib.util
 import json
 import logging
 import os
@@ -932,6 +941,135 @@ class AnthropicAPIProvider:
             )
 
 
+def _import_meerkat() -> Any:
+    """Lazily import the meerkat SDK.
+
+    Returns:
+        The ``meerkat`` module.
+
+    Raises:
+        ImportError: If ``meerkat-sdk`` is not installed.
+    """
+    import meerkat  # type: ignore[import-untyped]
+
+    return meerkat
+
+
+class MeerkatProvider:
+    """Provider that uses the Meerkat SDK for vendor-neutral AI reviews.
+
+    Meerkat provides a unified interface to multiple LLM providers. The SDK
+    auto-downloads the ``rkat-rpc`` binary and manages credentials per model
+    provider, so no API key configuration is needed at the Goldfish level.
+
+    Requires:
+        - meerkat-sdk>=0.4 installed: pip install "meerkat-sdk>=0.4"
+
+    Environment variables:
+        - GOLDFISH_MEERKAT_MODEL: Optional model override (e.g., "claude-sonnet-4-5-20250514")
+    """
+
+    name: str = "meerkat"
+
+    def run(self, request: ReviewRequest) -> ReviewResult:
+        """Execute review using Meerkat SDK."""
+        try:
+            meerkat = _import_meerkat()
+        except ImportError:
+            logger.error("meerkat-sdk package not installed. Install with: pip install 'meerkat-sdk>=0.4'")
+            return ReviewResult(
+                decision="approved",
+                findings=["WARNING: meerkat-sdk not installed. Review skipped (fail-open)."],
+                response_text="",
+                duration_ms=0,
+            )
+
+        agent_request = _coerce_agent_request(request)
+        start = time.time()
+
+        try:
+            model = os.environ.get("GOLDFISH_MEERKAT_MODEL")
+
+            async def _run_session() -> tuple[str, str]:
+                """Create Meerkat session, read output, archive.
+
+                Returns:
+                    Tuple of (response_text, session_id).
+                """
+                client = meerkat.MeerkatClient()
+
+                create_kwargs: dict[str, Any] = {
+                    "system_prompt": (
+                        "You are an AI code reviewer for Goldfish ML experiments. "
+                        "Return findings as lines prefixed with ERROR:, WARNING:, or NOTE:. "
+                        "If nothing is wrong, say 'OK'."
+                    ),
+                    "user_prompt": agent_request.prompt,
+                }
+                if model:
+                    create_kwargs["model"] = model
+
+                session = await client.create_session(**create_kwargs)
+                text = session.text
+                session_id = session.id
+
+                # Archive session for cleanup
+                try:
+                    await client.archive_session(session_id)
+                except Exception as archive_err:
+                    logger.debug("Failed to archive Meerkat session %s: %s", session_id, archive_err)
+
+                return text, session_id
+
+            # Bridge async SDK to sync run() interface.
+            # If called from an existing async context (e.g., async MCP server),
+            # asyncio.run() would raise RuntimeError. Fall back to a thread.
+            try:
+                asyncio.get_running_loop()
+                # Already in async context — run in isolated thread
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    raw_output, session_id = pool.submit(asyncio.run, _run_session()).result(timeout=120)
+            except RuntimeError:
+                # No running loop — safe to use asyncio.run()
+                raw_output, session_id = asyncio.run(_run_session())
+
+            duration_ms = int((time.time() - start) * 1000)
+            logger.info(
+                "Meerkat review: %d chars in %dms (session=%s)",
+                len(raw_output),
+                duration_ms,
+                session_id,
+            )
+
+            if not raw_output.strip():
+                logger.warning("Meerkat returned empty response (session=%s)", session_id)
+                return ReviewResult(
+                    decision="approved",
+                    findings=["WARNING: Meerkat returned empty response. Failing open."],
+                    response_text="",
+                    duration_ms=duration_ms,
+                )
+
+            decision, findings = _parse_findings(raw_output)
+
+            return ReviewResult(
+                decision=decision,
+                findings=findings,
+                response_text=raw_output,
+                duration_ms=duration_ms,
+            )
+
+        except Exception as e:
+            duration_ms = int((time.time() - start) * 1000)
+            logger.exception("Meerkat SDK call failed: %s", e)
+            return ReviewResult(
+                decision="approved",
+                findings=[f"WARNING: Meerkat SDK call failed: {e}. Failing open."],
+                response_text="",
+                duration_ms=duration_ms,
+            )
+
+
 def get_agent_provider(provider_name: str) -> AgentProvider:
     """Return an AgentProvider instance for the given name.
 
@@ -958,6 +1096,15 @@ def get_agent_provider(provider_name: str) -> AgentProvider:
             logger.warning("Gemini CLI not found; falling back to NullProvider")
             return NullProvider()
         return gemini_provider
+    if provider_name == "meerkat":
+        # Note: find_spec is a fast check for SDK availability. If the spec exists
+        # but the actual import fails at runtime (broken install, missing native dep),
+        # MeerkatProvider.run() handles it via fail-open — same as all other providers.
+        if importlib.util.find_spec("meerkat") is not None:
+            logger.debug("Using MeerkatProvider (meerkat-sdk)")
+            return MeerkatProvider()
+        logger.warning("meerkat-sdk not installed; falling back to NullProvider")
+        return NullProvider()
     if provider_name == "anthropic_api":
         # Check if claude-agent-sdk package is available
         try:

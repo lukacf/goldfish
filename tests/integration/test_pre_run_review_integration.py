@@ -58,7 +58,7 @@ stages:
         )
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
-        svs_config = SVSConfig()
+        svs_config = SVSConfig(agent_provider="anthropic_api")
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,
@@ -94,7 +94,7 @@ def run():
         )
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
-        svs_config = SVSConfig()
+        svs_config = SVSConfig(agent_provider="anthropic_api")
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,
@@ -130,7 +130,7 @@ epochs: 100
         )
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
-        svs_config = SVSConfig()
+        svs_config = SVSConfig(agent_provider="anthropic_api")
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,
@@ -150,7 +150,7 @@ epochs: 100
         dev_repo.mkdir()
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
-        svs_config = SVSConfig()
+        svs_config = SVSConfig(agent_provider="anthropic_api")
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,
@@ -184,7 +184,7 @@ class TestPreRunReviewWithRunReason:
         (modules / "train.py").write_text("# train")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
-        svs_config = SVSConfig()
+        svs_config = SVSConfig(agent_provider="anthropic_api")
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,
@@ -461,7 +461,7 @@ class TestReviewTimeoutHandling:
 
         # Set a short integer timeout
         config = PreRunReviewConfig(enabled=True, timeout_seconds=1)
-        svs_config = SVSConfig()
+        svs_config = SVSConfig(agent_provider="anthropic_api")
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,
@@ -498,7 +498,7 @@ class TestReviewTimeoutHandling:
         (workspace / "pipeline.yaml").write_text("stages: []")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
-        svs_config = SVSConfig()
+        svs_config = SVSConfig(agent_provider="anthropic_api")
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,
@@ -533,7 +533,7 @@ class TestReviewDiffContext:
         (modules / "train.py").write_text("# code")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
-        svs_config = SVSConfig()
+        svs_config = SVSConfig(agent_provider="anthropic_api")
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,
@@ -579,7 +579,7 @@ diff --git a/modules/train.py b/modules/train.py
         (modules / "train.py").write_text("# code")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
-        svs_config = SVSConfig()
+        svs_config = SVSConfig(agent_provider="anthropic_api")
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,
@@ -619,7 +619,7 @@ class TestReviewMultipleStages:
         (modules / "evaluate.py").write_text("# evaluate code")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
-        svs_config = SVSConfig()
+        svs_config = SVSConfig(agent_provider="anthropic_api")
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,

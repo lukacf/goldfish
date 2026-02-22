@@ -105,10 +105,14 @@ def test_backend_capabilities_has_sync_behavior_fields() -> None:
 
 def test_local_backend_capabilities_sync_behavior() -> None:
     """Verify LocalRunBackend capabilities have correct sync behavior defaults."""
+    from unittest.mock import patch
+
     from goldfish.cloud.adapters.local.run_backend import LocalRunBackend
 
     backend = LocalRunBackend()
-    caps = backend.capabilities
+
+    with patch.object(backend, "_check_nvidia_runtime", return_value=False):
+        caps = backend.capabilities
 
     # Local backend should have shorter timeouts (runs locally)
     assert caps.ack_timeout_seconds == 1.0, "Local backend should have 1s ACK timeout"
