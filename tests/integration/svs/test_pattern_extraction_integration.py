@@ -35,6 +35,14 @@ def executor_with_mocks(test_db, test_config, setup_workspace_for_run):
     pipeline_manager = MagicMock()
     dataset_registry = MagicMock()
 
+    # Create a mock run_backend to avoid real Docker calls
+    mock_run_backend = MagicMock()
+    mock_run_backend.capabilities = MagicMock(
+        has_launch_delay=False,
+        timeout_becomes_pending=False,
+    )
+    mock_run_backend.get_logs.return_value = "Error: something went wrong"
+
     executor = StageExecutor(
         db=test_db,
         config=test_config,
@@ -42,6 +50,7 @@ def executor_with_mocks(test_db, test_config, setup_workspace_for_run):
         pipeline_manager=pipeline_manager,
         project_root=Path("/tmp"),
         dataset_registry=dataset_registry,
+        run_backend=mock_run_backend,
     )
 
     # Mock the local executor to return logs

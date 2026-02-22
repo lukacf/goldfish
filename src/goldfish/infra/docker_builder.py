@@ -253,6 +253,22 @@ class DockerBuilder:
         # Database for tracking Cloud Build workspace builds
         self.db = db
 
+    def _get_svs_provider_name(self) -> str | None:
+        """Return the active SVS agent provider name, or None if SVS reviews are disabled."""
+        svs = getattr(self.config, "svs", None) if self.config else None
+        if not svs or not getattr(svs, "enabled", False):
+            return None
+
+        during_run_enabled = getattr(svs, "ai_during_run_enabled", False)
+        post_run_enabled = getattr(svs, "ai_post_run_enabled", False)
+        if not (during_run_enabled or post_run_enabled):
+            return None
+
+        provider = getattr(svs, "agent_provider", None)
+        if not isinstance(provider, str):
+            return None
+        return provider
+
     def _get_agent_cli_packages(self) -> list[str]:
         """Return CLI packages to install based on SVS config.
 
@@ -260,19 +276,13 @@ class DockerBuilder:
         Code CLI. On Linux, the SDK's pure Python wheel (no bundled CLI) is installed,
         so we must install the CLI separately via npm.
         """
-        svs = getattr(self.config, "svs", None) if self.config else None
-        if not svs or not getattr(svs, "enabled", False):
+        provider = self._get_svs_provider_name()
+        if not provider:
             return []
 
-        # Check if either during-run or post-run AI reviews are enabled
-        # Both use the same agent provider and need the CLI installed
-        during_run_enabled = getattr(svs, "ai_during_run_enabled", False)
-        post_run_enabled = getattr(svs, "ai_post_run_enabled", False)
-        if not (during_run_enabled or post_run_enabled):
-            return []
-
-        provider = getattr(svs, "agent_provider", None)
-        if not isinstance(provider, str):
+        # Meerkat uses a Rust binary (rkat-rpc), not an npm package.
+        # It's handled separately via _render_meerkat_install_block().
+        if provider == "meerkat":
             return []
 
         # Map SVS agent provider names to npm package names
@@ -285,6 +295,31 @@ class DockerBuilder:
         }
         package = provider_map.get(provider)
         return [package] if package else []
+
+    def _is_meerkat_provider(self) -> bool:
+        """Check if the configured SVS agent provider is meerkat."""
+        return self._get_svs_provider_name() == "meerkat"
+
+    # Pin rkat-rpc version for reproducible Docker builds.
+    # Bump this when upgrading meerkat-sdk in pyproject.toml.
+    RKAT_RPC_VERSION = "v0.4.0"
+
+    def _render_meerkat_install_block(self, is_nonroot_image: bool) -> str:
+        """Render Dockerfile block to install rkat-rpc binary for Meerkat SDK."""
+        header = "# Install Meerkat rkat-rpc binary\n"
+        user_prefix = "USER root\n" if is_nonroot_image else ""
+        user_suffix = "USER 1000\n" if is_nonroot_image else ""
+        version = self.RKAT_RPC_VERSION
+        return (
+            f"{header}{user_prefix}"
+            "ARG TARGETARCH\n"
+            "# Map Docker TARGETARCH (amd64/arm64) to binary arch names (x86_64/aarch64)\n"
+            'RUN ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64;; *) echo ${TARGETARCH};; esac) && \\\n'
+            "    curl -fsSL -o /usr/local/bin/rkat-rpc \\\n"
+            f'      "https://github.com/meerkat-ai/rkat/releases/download/{version}/rkat-rpc-linux-${{ARCH}}" && \\\n'
+            "    chmod +x /usr/local/bin/rkat-rpc\n"
+            f"{user_suffix}\n"
+        )
 
     def _render_agent_install_block(self, is_nonroot_image: bool) -> str:
         """Render Dockerfile block to install agent CLI packages."""
@@ -337,6 +372,7 @@ class DockerBuilder:
         # - Other images default to root-compatible mode
         is_nonroot_image = "jupyter" in base.lower() or "goldfish-base" in base.lower()
         agent_cli_packages = self._get_agent_cli_packages()
+        use_meerkat = self._is_meerkat_provider()
 
         dockerfile = f"FROM {base}\n\n"
 
@@ -364,6 +400,10 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
         # Install agent CLI packages when SVS post-run reviews are enabled
         if agent_cli_packages:
             dockerfile += self._render_agent_install_block(is_nonroot_image)
+
+        # Install rkat-rpc binary when Meerkat is the SVS agent provider
+        if use_meerkat:
+            dockerfile += self._render_meerkat_install_block(is_nonroot_image)
 
         # Always use --chown=1000:100 for local execution compatibility
         # The local executor runs containers as --user 1000:1000 for security

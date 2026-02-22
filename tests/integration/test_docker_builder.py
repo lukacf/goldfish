@@ -100,6 +100,7 @@ def test_version_tag_retagged_on_hash_change(test_db, test_config, tmp_path, mon
         run_backend=mock_backend,
         image_builder=mock_image_builder,
     )
+    monkeypatch.setattr(executor.docker_builder, "capture_pip_freeze_from_image", lambda _tag: None)
 
     image_tag_1, hash_1 = executor._build_docker_image("test_ws", "v1", profile_name=None)
     image_tag_2, hash_2 = executor._build_docker_image("test_ws", "v1", profile_name=None)
@@ -177,6 +178,7 @@ def test_version_tag_mutable_alias(test_db, test_config, tmp_path, monkeypatch) 
         run_backend=mock_backend,
         image_builder=mock_image_builder,
     )
+    monkeypatch.setattr(executor.docker_builder, "capture_pip_freeze_from_image", lambda _tag: None)
 
     image_tag_1, hash_1 = executor._build_docker_image("test_ws", "v1", profile_name=None)
     image_tag_2, hash_2 = executor._build_docker_image("test_ws", "v1", profile_name=None)

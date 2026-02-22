@@ -51,11 +51,11 @@ class TestSVSConfigDefaults:
         assert config.ai_post_run_enabled is True
 
     def test_default_agent_provider(self):
-        """Default agent provider should be anthropic_api."""
+        """Default agent provider should be meerkat."""
         from goldfish.svs.config import SVSConfig
 
         config = SVSConfig()
-        assert config.agent_provider == "anthropic_api"
+        assert config.agent_provider == "meerkat"
 
     def test_default_agent_timeout(self):
         """Default agent timeout should be 120 seconds."""
@@ -174,7 +174,7 @@ class TestSVSConfigValidation:
         """Should accept valid agent providers."""
         from goldfish.svs.config import SVSConfig
 
-        for provider in ["anthropic_api", "codex_cli", "gemini_cli", "null"]:
+        for provider in ["meerkat", "anthropic_api", "codex_cli", "gemini_cli", "null"]:
             config = SVSConfig(agent_provider=provider)  # type: ignore[arg-type]
             assert config.agent_provider == provider
 
@@ -183,14 +183,14 @@ class TestSVSConfigValidation:
 
         Regression test: In YAML, writing `agent_provider: null` is parsed as
         Python None. This should NOT select NullProvider - instead it should
-        use the default (anthropic_api). To explicitly use NullProvider, users
+        use the default (meerkat). To explicitly use NullProvider, users
         must write `agent_provider: "null"` (quoted string).
         """
         from goldfish.svs.config import SVSConfig
 
         # Simulates YAML: `agent_provider: null` (unquoted)
         config = SVSConfig(agent_provider=None)  # type: ignore[arg-type]
-        assert config.agent_provider == "anthropic_api"
+        assert config.agent_provider == "meerkat"
 
         # Explicit "null" string should select NullProvider
         config_null = SVSConfig(agent_provider="null")

@@ -843,28 +843,34 @@ class TestLocalRunBackendCapabilities:
         """Capabilities returns BackendCapabilities dataclass."""
         from goldfish.cloud.contracts import BackendCapabilities
 
-        caps = backend.capabilities
+        with patch.object(backend, "_check_nvidia_runtime", return_value=False):
+            caps = backend.capabilities
         assert isinstance(caps, BackendCapabilities)
 
     def test_capabilities_supports_preemption(self, backend):
         """Local backend always supports preemption (SIGTERM)."""
-        assert backend.capabilities.supports_preemption is True
+        with patch.object(backend, "_check_nvidia_runtime", return_value=False):
+            assert backend.capabilities.supports_preemption is True
 
     def test_capabilities_supports_live_logs(self, backend):
         """Local backend supports live logs via docker logs."""
-        assert backend.capabilities.supports_live_logs is True
+        with patch.object(backend, "_check_nvidia_runtime", return_value=False):
+            assert backend.capabilities.supports_live_logs is True
 
     def test_capabilities_does_not_support_spot(self, backend):
         """Local backend doesn't support real spot pricing."""
-        assert backend.capabilities.supports_spot is False
+        with patch.object(backend, "_check_nvidia_runtime", return_value=False):
+            assert backend.capabilities.supports_spot is False
 
     def test_capabilities_does_not_support_metrics(self, backend):
         """Local backend doesn't support metrics collection."""
-        assert backend.capabilities.supports_metrics is False
+        with patch.object(backend, "_check_nvidia_runtime", return_value=False):
+            assert backend.capabilities.supports_metrics is False
 
     def test_capabilities_no_max_run_duration(self, backend):
         """Local backend has no max run duration limit."""
-        assert backend.capabilities.max_run_duration_hours is None
+        with patch.object(backend, "_check_nvidia_runtime", return_value=False):
+            assert backend.capabilities.max_run_duration_hours is None
 
     def test_capabilities_preemption_detection_when_configured(self):
         """Preemption detection is True when simulation is configured."""
@@ -878,11 +884,13 @@ class TestLocalRunBackendCapabilities:
 
         backend = LocalRunBackend(config=mock_config)
 
-        assert backend.capabilities.supports_preemption_detection is True
+        with patch.object(backend, "_check_nvidia_runtime", return_value=False):
+            assert backend.capabilities.supports_preemption_detection is True
 
     def test_capabilities_no_preemption_detection_when_not_configured(self, backend):
         """Preemption detection is False when simulation not configured."""
-        assert backend.capabilities.supports_preemption_detection is False
+        with patch.object(backend, "_check_nvidia_runtime", return_value=False):
+            assert backend.capabilities.supports_preemption_detection is False
 
     def test_capabilities_gpu_detection(self, backend):
         """GPU support depends on nvidia runtime availability."""

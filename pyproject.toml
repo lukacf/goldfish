@@ -40,6 +40,9 @@ dev = [
 wandb = [
     "wandb>=0.16.0",
 ]
+meerkat = [
+    "meerkat-sdk>=0.4",
+]
 
 [project.scripts]
 goldfish = "goldfish.__main__:main"
