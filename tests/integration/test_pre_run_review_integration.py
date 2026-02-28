@@ -26,7 +26,7 @@ from goldfish.models import (
 )
 from goldfish.pre_run_review import PreRunReviewer
 from goldfish.state_machine.types import StageState
-from goldfish.svs.agent import AnthropicAPIProvider
+from goldfish.svs.agent import ReviewRequest, ReviewResult
 from goldfish.svs.config import SVSConfig
 
 if TYPE_CHECKING:
@@ -199,21 +199,29 @@ class TestPreRunReviewWithRunReason:
             min_result="Lower loss variance during training",
         )
 
-        from goldfish.svs.agent import AgentResult
+        captured_requests: list[ReviewRequest] = []
 
-        mock_result = AgentResult(decision="approved", raw_output="## train\nNo issues found.")
+        def mock_run(request: ReviewRequest) -> ReviewResult:
+            captured_requests.append(request)
+            return ReviewResult(
+                decision="approved",
+                findings=[],
+                response_text="## train\nNo issues found.",
+                duration_ms=0,
+            )
 
-        # Mock API key to bypass early return
-        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(AnthropicAPIProvider, "run", return_value=mock_result) as mock_run:
-                await reviewer.review(["train"], reason=reason)
+        mock_agent = MagicMock()
+        mock_agent.run = mock_run
 
-                # Verify reason was included in prompt
-                call_args = mock_run.call_args[0][0]
-                prompt = call_args.context["prompt"]
-                assert "Increasing batch size should improve training stability" in prompt
-                assert "batch_size from 32 to 64" in prompt
-                assert "Lower loss variance" in prompt
+        with patch.object(reviewer, "_get_agent", return_value=mock_agent):
+            await reviewer.review(["train"], reason=reason)
+
+        # Verify reason was included in prompt
+        assert len(captured_requests) == 1
+        prompt = captured_requests[0].context["prompt"]
+        assert "Increasing batch size should improve training stability" in prompt
+        assert "batch_size from 32 to 64" in prompt
+        assert "Lower loss variance" in prompt
 
 
 class TestStageExecutorReviewIntegration:
@@ -469,19 +477,18 @@ class TestReviewTimeoutHandling:
             dev_repo_path=dev_repo,
         )
 
-        # Mock Claude to hang forever
-        def slow_run(request):
+        # Mock agent to hang longer than timeout_seconds
+        def slow_run(request: ReviewRequest) -> ReviewResult:
             import time
 
-            time.sleep(2)  # Much more than timeout_seconds
-            from goldfish.svs.agent import AgentResult
+            time.sleep(2)  # Much more than timeout_seconds=1
+            return ReviewResult(decision="approved", findings=[], response_text="OK", duration_ms=0)
 
-            return AgentResult(decision="approved", raw_output="OK")
+        mock_agent = MagicMock()
+        mock_agent.run = slow_run
 
-        # Mock API key to bypass early return
-        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(AnthropicAPIProvider, "run", side_effect=slow_run):
-                result = await reviewer.review(["train"])
+        with patch.object(reviewer, "_get_agent", return_value=mock_agent):
+            result = await reviewer.review(["train"])
 
         # Should approve due to timeout
         assert result.approved is True
@@ -498,7 +505,7 @@ class TestReviewTimeoutHandling:
         (workspace / "pipeline.yaml").write_text("stages: []")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
-        svs_config = SVSConfig(agent_provider="anthropic_api")
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,
@@ -506,10 +513,11 @@ class TestReviewTimeoutHandling:
             dev_repo_path=dev_repo,
         )
 
-        # Mock API key to bypass early return
-        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(AnthropicAPIProvider, "run", side_effect=RuntimeError("API connection failed")):
-                result = await reviewer.review(["train"])
+        mock_agent = MagicMock()
+        mock_agent.run = MagicMock(side_effect=RuntimeError("API connection failed"))
+
+        with patch.object(reviewer, "_get_agent", return_value=mock_agent):
+            result = await reviewer.review(["train"])
 
         # Should approve due to error
         assert result.approved is True
@@ -533,17 +541,13 @@ class TestReviewDiffContext:
         (modules / "train.py").write_text("# code")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
-        svs_config = SVSConfig(agent_provider="anthropic_api")
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,
             workspace_path=workspace,
             dev_repo_path=dev_repo,
         )
-
-        from goldfish.svs.agent import AgentResult
-
-        mock_result = AgentResult(decision="approved", raw_output="OK")
 
         diff_text = """\
 diff --git a/modules/train.py b/modules/train.py
@@ -556,14 +560,22 @@ diff --git a/modules/train.py b/modules/train.py
      return model
 """
 
-        # Mock API key to bypass early return
-        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(AnthropicAPIProvider, "run", return_value=mock_result) as mock_run:
-                await reviewer.review(["train"], diff_text=diff_text)
-                call_args = mock_run.call_args[0][0]
-                prompt = call_args.context["prompt"]
-                assert "lr = 0.01" in prompt
-                assert "Increased learning rate" in prompt
+        captured_requests: list[ReviewRequest] = []
+
+        def mock_run(request: ReviewRequest) -> ReviewResult:
+            captured_requests.append(request)
+            return ReviewResult(decision="approved", findings=[], response_text="OK", duration_ms=0)
+
+        mock_agent = MagicMock()
+        mock_agent.run = mock_run
+
+        with patch.object(reviewer, "_get_agent", return_value=mock_agent):
+            await reviewer.review(["train"], diff_text=diff_text)
+
+        assert len(captured_requests) == 1
+        prompt = captured_requests[0].context["prompt"]
+        assert "lr = 0.01" in prompt
+        assert "Increased learning rate" in prompt
 
     @pytest.mark.asyncio
     async def test_review_handles_empty_diff(self, tmp_path: Path) -> None:
@@ -579,7 +591,7 @@ diff --git a/modules/train.py b/modules/train.py
         (modules / "train.py").write_text("# code")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
-        svs_config = SVSConfig(agent_provider="anthropic_api")
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,
@@ -587,17 +599,21 @@ diff --git a/modules/train.py b/modules/train.py
             dev_repo_path=dev_repo,
         )
 
-        from goldfish.svs.agent import AgentResult
+        captured_requests: list[ReviewRequest] = []
 
-        mock_result = AgentResult(decision="approved", raw_output="OK")
+        def mock_run(request: ReviewRequest) -> ReviewResult:
+            captured_requests.append(request)
+            return ReviewResult(decision="approved", findings=[], response_text="OK", duration_ms=0)
 
-        # Mock API key to bypass early return
-        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(AnthropicAPIProvider, "run", return_value=mock_result) as mock_run:
-                await reviewer.review(["train"], diff_text="")
-                call_args = mock_run.call_args[0][0]
-                prompt = call_args.context["prompt"]
-                assert "first run" in prompt.lower() or "unavailable" in prompt.lower()
+        mock_agent = MagicMock()
+        mock_agent.run = mock_run
+
+        with patch.object(reviewer, "_get_agent", return_value=mock_agent):
+            await reviewer.review(["train"], diff_text="")
+
+        assert len(captured_requests) == 1
+        prompt = captured_requests[0].context["prompt"]
+        assert "first run" in prompt.lower() or "unavailable" in prompt.lower()
 
 
 class TestReviewMultipleStages:
@@ -619,7 +635,7 @@ class TestReviewMultipleStages:
         (modules / "evaluate.py").write_text("# evaluate code")
 
         config = PreRunReviewConfig(enabled=True, timeout_seconds=30)
-        svs_config = SVSConfig(agent_provider="anthropic_api")
+        svs_config = SVSConfig()
         reviewer = PreRunReviewer(
             config=config,
             svs_config=svs_config,
@@ -627,15 +643,19 @@ class TestReviewMultipleStages:
             dev_repo_path=dev_repo,
         )
 
-        from goldfish.svs.agent import AgentResult
+        captured_requests: list[ReviewRequest] = []
 
-        mock_result = AgentResult(decision="approved", raw_output="OK")
+        def mock_run(request: ReviewRequest) -> ReviewResult:
+            captured_requests.append(request)
+            return ReviewResult(decision="approved", findings=[], response_text="OK", duration_ms=0)
 
-        # Mock API key to bypass early return
-        with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
-            with patch.object(AnthropicAPIProvider, "run", return_value=mock_result) as mock_run:
-                await reviewer.review(["preprocess", "train"])
-                call_args = mock_run.call_args[0][0]
-                prompt = call_args.context["prompt"]
-                assert "preprocess" in prompt
-                assert "train" in prompt
+        mock_agent = MagicMock()
+        mock_agent.run = mock_run
+
+        with patch.object(reviewer, "_get_agent", return_value=mock_agent):
+            await reviewer.review(["preprocess", "train"])
+
+        assert len(captured_requests) == 1
+        prompt = captured_requests[0].context["prompt"]
+        assert "preprocess" in prompt
+        assert "train" in prompt
