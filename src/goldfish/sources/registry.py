@@ -10,7 +10,6 @@ The registry tracks:
 from goldfish.db.database import Database
 from goldfish.db.types import SourceRow
 from goldfish.errors import (
-    GoldfishError,
     SourceAlreadyExistsError,
     SourceNotFoundError,
 )
@@ -237,23 +236,6 @@ class SourceRegistry:
             parent_sources=parent_sources,
             job_id=job_id,
         )
-
-    def update_status(self, name: str, status: str) -> SourceInfo:
-        """Update source status.
-
-        Args:
-            name: Source name
-            status: New status (available, pending, failed)
-
-        Returns:
-            Updated SourceInfo
-        """
-        if not self.db.source_exists(name):
-            raise SourceNotFoundError(f"Source not found: {name}")
-
-        # TODO: Add update_source method to database
-        # For now, we don't support status updates
-        raise GoldfishError("Source status updates not yet implemented")
 
     def _dict_to_source_info(self, source: SourceRow) -> SourceInfo:
         """Convert database source dict to SourceInfo model."""

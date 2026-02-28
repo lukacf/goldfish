@@ -167,24 +167,22 @@ def _write_stats_manifest(stats: dict[str, dict[str, Any] | None]) -> None:
 
 def _load_svs_config():
     """Load SVSConfig from environment (best-effort)."""
-    import sys
-
     from goldfish.svs.config import SVSConfig
 
     config_json = os.environ.get("GOLDFISH_SVS_CONFIG")
     if not config_json:
-        print("[SVS-DEBUG] No GOLDFISH_SVS_CONFIG env var, using defaults", file=sys.stderr, flush=True)
+        logger.debug("No GOLDFISH_SVS_CONFIG env var, using defaults")
         return SVSConfig()
     try:
         config = SVSConfig.model_validate_json(config_json)
-        print(
-            f"[SVS-DEBUG] Loaded config: enabled={config.enabled}, during_run={config.ai_during_run_enabled}",
-            file=sys.stderr,
-            flush=True,
+        logger.debug(
+            "Loaded config: enabled=%s, during_run=%s",
+            config.enabled,
+            config.ai_during_run_enabled,
         )
         return config
     except Exception as exc:
-        print(f"[SVS-DEBUG] Failed to parse config: {exc}", file=sys.stderr, flush=True)
+        logger.debug("Failed to parse config: %s", exc)
         logger.warning(f"Failed to parse GOLDFISH_SVS_CONFIG: {exc}")
         return SVSConfig()
 
@@ -315,13 +313,12 @@ def run_stage_with_svs(module_main: Callable[[], int | None]) -> int:
 
     # Start during-run monitor if enabled (deferred to avoid fork issues)
     # Use global _during_run_monitor to coordinate with _ensure_monitor_started()
-    import sys as _sys  # Local import to avoid shadowing
 
-    print("[SVS-DEBUG] run_stage_with_svs() called", file=_sys.stderr, flush=True)
+    logger.debug("run_stage_with_svs() called")
 
     try:
         during_run_enabled = _during_run_enabled()
-        print(f"[SVS-DEBUG] _during_run_enabled() = {during_run_enabled}", file=_sys.stderr, flush=True)
+        logger.debug("_during_run_enabled() = %s", during_run_enabled)
         if during_run_enabled:
             outputs_dir = _get_outputs_dir()
 
@@ -362,26 +359,19 @@ def run_stage_with_svs(module_main: Callable[[], int | None]) -> int:
                     from goldfish.svs.during_run_monitor import DuringRunMonitor
 
                     # Small delay to let ML frameworks initialize (avoids issues with fork/multiprocessing)
-                    print("[SVS-DEBUG] Starting during-run monitor...", file=_sys.stderr, flush=True)
+                    logger.debug("Starting during-run monitor...")
                     time.sleep(1.0)
                     config = _load_svs_config()
-                    print(
-                        f"[SVS-DEBUG] Creating DuringRunMonitor with outputs_dir={outputs_dir}",
-                        file=_sys.stderr,
-                        flush=True,
-                    )
+                    logger.debug("Creating DuringRunMonitor with outputs_dir=%s", outputs_dir)
                     new_monitor = DuringRunMonitor(config, outputs_dir)
                     new_monitor.start()
                     with _during_run_monitor_lock:
                         _during_run_monitor = new_monitor
                         _during_run_monitor_started = True
-                    print("[SVS-DEBUG] During-run monitor started successfully", file=_sys.stderr, flush=True)
+                    logger.debug("During-run monitor started successfully")
                     logger.info("During-run SVS monitor started")
                 except Exception as e:
-                    import traceback
-
-                    print(f"[SVS-DEBUG] Failed to start during-run monitor: {e}", file=_sys.stderr, flush=True)
-                    traceback.print_exc(file=_sys.stderr)
+                    logger.debug("Failed to start during-run monitor: %s", e, exc_info=True)
                     logger.error(f"Failed to start during-run monitor: {e}")
                     _during_run_monitor_started = True  # Don't retry on failure
 

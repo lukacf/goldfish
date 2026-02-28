@@ -4,22 +4,92 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish_pypi:
+        description: "Publish to PyPI (use for retry if initial publish failed)"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Dry-run mode (validate without publishing)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
-  issues: write
-  pull-requests: write
+  id-token: write
+  attestations: write
 
 jobs:
-  release:
-    name: Create Release
+  validate:
+    name: Validate release
     runs-on: ubuntu-latest
-
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Fetch all history for changelog
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "Resolved version: $VERSION"
+
+      - name: Verify version consistency
+        run: |
+          PYPROJECT_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          INIT_VERSION=$(python -c "
+          import ast, pathlib
+          tree = ast.parse(pathlib.Path('src/goldfish/__init__.py').read_text())
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Assign):
+                  for target in node.targets:
+                      if isinstance(target, ast.Name) and target.id == '__version__':
+                          print(ast.literal_eval(node.value))
+          ")
+          echo "pyproject.toml: $PYPROJECT_VERSION"
+          echo "__init__.py:    $INIT_VERSION"
+          if [ "$PYPROJECT_VERSION" != "$INIT_VERSION" ]; then
+            echo "::error::Version mismatch between pyproject.toml ($PYPROJECT_VERSION) and __init__.py ($INIT_VERSION)"
+            exit 1
+          fi
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG_VERSION="${{ steps.version.outputs.version }}"
+            if [ "$PYPROJECT_VERSION" != "$TAG_VERSION" ]; then
+              echo "::error::Tag version ($TAG_VERSION) does not match pyproject.toml ($PYPROJECT_VERSION)"
+              exit 1
+            fi
+          fi
+          echo "Version consistency verified: $PYPROJECT_VERSION"
+
+      - name: Verify CHANGELOG has entry
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if ! grep -q "\[${VERSION}\]" CHANGELOG.md && ! grep -q "## ${VERSION}" CHANGELOG.md; then
+            echo "::warning::No CHANGELOG.md entry found for version $VERSION"
+          fi
+
+  build:
+    name: Build package
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,27 +101,47 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install dependencies
-        run: |
-          uv pip install --system -e .
+      - name: Build wheel and sdist
+        run: uv build
 
-      - name: Extract version from tag
-        id: version
+      - name: Verify package
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          pip install twine
+          twine check dist/*
 
-      - name: Verify version consistency
+      - name: Attest build provenance
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  github-release:
+    name: Create GitHub Release
+    needs: [validate, build]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Generate checksums
         run: |
-          PYPROJECT_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
-          if [ "$PYPROJECT_VERSION" != "${{ steps.version.outputs.version }}" ]; then
-            echo "Version mismatch: pyproject.toml has $PYPROJECT_VERSION but tag is ${{ steps.version.outputs.version }}"
-            exit 1
-          fi
-          echo "Version consistency verified: $PYPROJECT_VERSION"
+          cd dist
+          sha256sum * > checksums.sha256
+          cat checksums.sha256
 
-      - name: Extract changelog for this version
+      - name: Extract changelog
         id: changelog
         run: |
           python << 'EOF'
@@ -60,18 +150,14 @@ jobs:
           with open('CHANGELOG.md', 'r') as f:
               content = f.read()
 
-          version = "${{ steps.version.outputs.version }}"
-
-          # Extract the section for this version
+          version = "${{ needs.validate.outputs.version }}"
           pattern = rf'## \[?{re.escape(version)}\]?.*?(?=## \[?|\Z)'
           match = re.search(pattern, content, re.DOTALL)
 
           if match:
               section = match.group(0).strip()
-              # Remove the version header line
               lines = section.split('\n')[1:]
               changelog_content = '\n'.join(lines).strip()
-
               with open('changelog_excerpt.md', 'w') as f:
                   f.write(changelog_content)
               print("Changelog extracted successfully")
@@ -81,27 +167,45 @@ jobs:
                   f.write(f"Release {version}")
           EOF
 
-      - name: Create GitHub Release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: ${{ steps.version.outputs.tag }}
+          tag_name: ${{ needs.validate.outputs.tag }}
+          name: ${{ needs.validate.outputs.tag }}
           body_path: changelog_excerpt.md
           draft: false
           prerelease: false
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build package
-        run: |
-          uv build
-
-      - name: Upload build artifacts to release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
           files: |
             dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [validate, build]
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_pypi == 'true')
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install twine
+        run: pip install twine
+
+      - name: Publish (dry-run)
+        if: github.event.inputs.dry_run == 'true'
+        run: twine check dist/*
+
+      - name: Publish to PyPI
+        if: github.event.inputs.dry_run != 'true'
+        run: twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}

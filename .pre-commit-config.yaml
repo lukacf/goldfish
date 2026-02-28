@@ -23,6 +23,22 @@ repos:
     hooks:
       - id: gitleaks
 
+  # File hygiene (on push)
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        stages: [pre-push]
+      - id: end-of-file-fixer
+        stages: [pre-push]
+      - id: check-yaml
+        stages: [pre-push]
+      - id: check-toml
+        stages: [pre-push]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+
   # Local hooks using Makefile as single source of truth
   - repo: local
     hooks:
@@ -34,7 +50,7 @@ repos:
         pass_filenames: false
         always_run: true
 
-      # Full tests only on push (skip with --no-verify)
+      # Full tests only on push
       - id: pytest-unit-full
         name: pytest (full unit tests)
         entry: make test-unit

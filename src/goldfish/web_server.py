@@ -1176,12 +1176,6 @@ def get_index_html() -> str:
 </html>"""
 
 
-# NOTE: Old embedded HTML (~220 lines) has been moved to:
-# - templates/index.html
-# - static/css/index.css
-# - static/js/index.js
-
-
 def get_project_html(project: ProjectInfo) -> str:
     """Get the HTML for a specific project's provenance UI.
 
@@ -1228,73 +1222,6 @@ def get_project_html(project: ProjectInfo) -> str:
     <script src="/static/js/project.js"></script>
 </body>
 </html>"""
-
-
-def _get_project_html_fallback_stub() -> None:
-    """[DEPRECATED] Marker for where old embedded HTML was removed."""
-    # The old inline HTML (~1500 lines) has been moved to:
-    # - templates/project.html
-    # - static/css/project.css
-    # - static/js/project.js
-    pass
-
-
-# ====================================================================
-# OLD EMBEDDED PROJECT HTML REMOVED
-# The following ~1500 lines of embedded CSS/HTML/JS have been moved to:
-# - templates/project.html
-# - static/css/project.css
-# - static/js/project.js
-# ====================================================================
-
-# [OLD PROJECT HTML - ~1500 lines removed from here]
-# See: templates/project.html, static/css/project.css, static/js/project.js
-
-
-def _inline_project_html_backup_marker() -> None:
-    """[DEPRECATED] Marker showing old embedded HTML has been removed."""
-    # Original embedded HTML was ~1500 lines including:
-    # - Full CSS for project page styling (~700 lines)
-    # - HTML structure for workspaces, runs, graph views (~200 lines)
-    # - JavaScript for all interactive functionality (~600 lines)
-    #
-    # Now moved to external template files for:
-    # - Better maintainability
-    # - Easier testing
-    # - Cleaner separation of concerns
-    pass
-
-
-# ========== OLD HTML CONTENT DELETED HERE ==========
-# The following inline content was here:
-# - body {{ font-family... }} and other CSS
-# - HTML body, header, main, modals
-# - JavaScript loadWorkspaces(), renderGraph(), etc.
-#
-# All now in: templates/project.html, static/css/project.css, static/js/project.js
-# ==================================================
-
-# Approximately 1480 more lines of old embedded HTML were removed here.
-# The content included CSS styles, HTML structure, and JavaScript code.
-#
-# To delete the remaining old content programmatically, search for
-# the closing pattern '</html>"""' and delete everything up to spawn_web_server().
-#
-# For now, marking this as the location where old code was.
-
-# =====================================================================
-# NOTE: ~1500 lines of old embedded HTML/CSS/JS have been removed
-#
-# Templates and static files are now in:
-# - src/goldfish/web/templates/index.html
-# - src/goldfish/web/templates/project.html
-# - src/goldfish/web/static/css/index.css
-# - src/goldfish/web/static/css/project.css
-# - src/goldfish/web/static/js/index.js
-# - src/goldfish/web/static/js/project.js
-#
-# The get_index_html() and get_project_html() functions load these files.
-# =====================================================================
 
 
 def spawn_web_server(port: int = DEFAULT_WEB_PORT, open_browser: bool = True) -> int:

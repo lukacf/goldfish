@@ -299,29 +299,3 @@ class TestGetLineage:
 
         with pytest.raises(SourceNotFoundError, match="Source not found: missing"):
             registry.get_lineage("missing")
-
-
-class TestUpdateStatus:
-    """Test status updates."""
-
-    def test_update_status_not_implemented(self):
-        """update_status should raise GoldfishError (not implemented)."""
-        from goldfish.errors import GoldfishError
-
-        mock_db = MagicMock()
-        mock_db.source_exists.return_value = True
-
-        registry = SourceRegistry(db=mock_db)
-
-        with pytest.raises(GoldfishError, match="not yet implemented"):
-            registry.update_status("test_data", "pending")
-
-    def test_update_status_source_not_found(self):
-        """update_status should raise SourceNotFoundError for missing source."""
-        mock_db = MagicMock()
-        mock_db.source_exists.return_value = False
-
-        registry = SourceRegistry(db=mock_db)
-
-        with pytest.raises(SourceNotFoundError, match="Source not found: missing"):
-            registry.update_status("missing", "pending")

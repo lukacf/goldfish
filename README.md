@@ -19,10 +19,6 @@ Why can't agents just do ML? We're asking too much—ML logic, infrastructure, A
 
 **Goldfish is that backbone.** Contract-based runs. Deterministic validation. AI-powered review. Everything documented automatically. It transforms a coding agent into a research assistant with perfect recall, infinite patience, and documentation you'd never write yourself.
 
-<p align="center">
-  <em><!-- TODO: Add demo video here --></em>
-</p>
-
 ---
 
 ## Get Started

@@ -1,16 +1,44 @@
-name: CI Tests
+name: CI
 
 on:
   push:
-    branches: [main, feature/*]
+    branches: [main, feat/*, ci/*]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   PYTHON_VERSION: "3.11"
 
 jobs:
   lint:
+    name: Lint & static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Run ruff linter
+        run: pre-commit run ruff --all-files
+
+      - name: Run ruff formatter
+        run: pre-commit run ruff-format --all-files
+
+      - name: Run mypy
+        run: pre-commit run mypy --all-files
+
+  import-boundaries:
+    name: Import boundary checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,15 +50,33 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pre-commit
+          pip install uv
+          uv pip install --system -e ".[test]"
 
-      - name: Run linting and static analysis
+      - name: Run import-linter
+        run: make lint-imports
+
+  security-audit:
+    name: Dependency security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
         run: |
-          pre-commit run ruff --all-files
-          pre-commit run ruff-format --all-files
-          pre-commit run mypy --all-files
+          pip install uv
+          uv pip install --system -e ".[test]"
+
+      - name: Run pip-audit
+        run: pip-audit --strict --desc
 
   unit-tests:
+    name: Unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,7 +99,7 @@ jobs:
           pip install uv
           uv pip install --system -e ".[test]"
 
-      - name: Run unit tests
+      - name: Run unit tests with coverage
         run: make test-unit
 
       - name: Upload coverage
@@ -61,37 +107,11 @@ jobs:
         with:
           file: ./coverage.xml
           flags: unit
-          name: coverage
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
-  import-linter:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/uv
-          key: ${{ runner.os }}-uv-${{ env.PYTHON_VERSION }}-${{ hashFiles('pyproject.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-uv-${{ env.PYTHON_VERSION }}-
-
-      - name: Install dependencies
-        run: |
-          pip install uv
-          uv pip install --system -e ".[test]"
-
-      - name: Run import boundary checks
-        run: make lint-imports
-
   rust-tests:
+    name: Rust SDK tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -117,14 +137,13 @@ jobs:
         run: cargo test
 
   integration-tests:
+    name: Integration tests
     needs: [unit-tests, rust-tests]
     runs-on: ubuntu-latest
-    # Run on main, feature branches, or same-repo PRs
     if: >
       github.ref == 'refs/heads/main' ||
-      startsWith(github.ref, 'refs/heads/feature/') ||
+      startsWith(github.ref, 'refs/heads/feat/') ||
       github.event.pull_request.head.repo.full_name == github.repository
-
     steps:
       - uses: actions/checkout@v4
 
@@ -147,20 +166,36 @@ jobs:
         run: make test-integration
         timeout-minutes: 10
 
-  all-tests-passed:
-    # Gate job to ensure all tests pass before merge
-    needs: [lint, unit-tests, import-linter, rust-tests, integration-tests]
-    runs-on: ubuntu-latest
+  # Final gate - ensures all jobs pass before merge
+  gate:
+    name: CI gate
     if: always()
+    needs: [lint, import-boundaries, security-audit, unit-tests, rust-tests, integration-tests]
+    runs-on: ubuntu-latest
     steps:
-      - name: Check if all tests passed
+      - name: Check results
         run: |
-          if [[ "${{ needs.lint.result }}" != "success" || \
-                "${{ needs.unit-tests.result }}" != "success" || \
-                "${{ needs.import-linter.result }}" != "success" || \
-                "${{ needs.rust-tests.result }}" != "success" || \
-                "${{ needs.integration-tests.result }}" != "success" ]]; then
-            echo "One or more required tests failed"
+          failed=""
+          for job in lint import-boundaries security-audit unit-tests rust-tests integration-tests; do
+            case "$job" in
+              lint) result="${{ needs.lint.result }}" ;;
+              import-boundaries) result="${{ needs.import-boundaries.result }}" ;;
+              security-audit) result="${{ needs.security-audit.result }}" ;;
+              unit-tests) result="${{ needs.unit-tests.result }}" ;;
+              rust-tests) result="${{ needs.rust-tests.result }}" ;;
+              integration-tests) result="${{ needs.integration-tests.result }}" ;;
+            esac
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "FAIL: $job = $result"
+              failed="true"
+            else
+              echo "OK:   $job = $result"
+            fi
+          done
+          if [[ -n "$failed" ]]; then
+            echo ""
+            echo "One or more CI jobs failed"
             exit 1
           fi
-          echo "All required tests passed!"
+          echo ""
+          echo "All CI checks passed"

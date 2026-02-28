@@ -302,7 +302,7 @@ class DockerBuilder:
 
     # Pin rkat-rpc version for reproducible Docker builds.
     # Bump this when upgrading meerkat-sdk in pyproject.toml.
-    RKAT_RPC_VERSION = "v0.4.0"
+    RKAT_RPC_VERSION = "v0.4.1"
 
     # GitHub repo hosting rkat-rpc release artifacts.
     RKAT_REPO = "lukacf/meerkat"
