@@ -11,6 +11,26 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from goldfish.svs.agent import ReviewRequest
 
 
+def _make_mock_client(mock_session):
+    """Create a mock MeerkatClient that supports async context manager."""
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    async def mock_create(**kwargs):
+        return mock_session
+
+    mock_client.create_session = mock_create
+    return mock_client
+
+
+def _make_mock_module(mock_client):
+    """Create a mock meerkat module whose MeerkatClient() returns mock_client."""
+    mock_mod = MagicMock()
+    mock_mod.MeerkatClient = lambda: mock_client
+    return mock_mod
+
+
 class TestMeerkatProviderBasics:
     """Basic MeerkatProvider tests."""
 
@@ -35,23 +55,16 @@ class TestMeerkatProviderRun:
             context={"prompt": "Review this code"},
         )
 
-        # Mock the meerkat SDK
         mock_session = MagicMock()
         mock_session.text = "NOTE: Code looks clean\nWARNING: Consider adding tests"
         mock_session.id = "test-session-456"
+        mock_session.archive = AsyncMock()
 
-        mock_client = MagicMock()
-
-        async def mock_create_session(**kwargs):
-            return mock_session
-
-        mock_client.create_session = mock_create_session
-        mock_client.archive_session = AsyncMock()
+        mock_client = _make_mock_client(mock_session)
 
         with patch.dict(os.environ, {}, clear=False):
             with patch("goldfish.svs.agent._import_meerkat") as mock_import:
-                mock_import.return_value = MagicMock(MeerkatClient=lambda: mock_client)
-
+                mock_import.return_value = _make_mock_module(mock_client)
                 result = provider.run(request)
 
         assert isinstance(result, ReviewResult)
@@ -79,17 +92,17 @@ class TestMeerkatProviderRun:
         provider = MeerkatProvider()
         request = ReviewRequest(review_type="pre_run", context={})
 
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        async def exploding_create(**kwargs):
+            raise RuntimeError("Meerkat RPC failed")
+
+        mock_client.create_session = exploding_create
+
         with patch("goldfish.svs.agent._import_meerkat") as mock_import:
-            mock_mod = MagicMock()
-
-            async def exploding_create(**kwargs):
-                raise RuntimeError("Meerkat RPC failed")
-
-            mock_client = MagicMock()
-            mock_client.create_session = exploding_create
-            mock_mod.MeerkatClient = lambda: mock_client
-            mock_import.return_value = mock_mod
-
+            mock_import.return_value = _make_mock_module(mock_client)
             result = provider.run(request)
 
         assert result.decision == "approved"
@@ -104,20 +117,24 @@ class TestMeerkatProviderRun:
 
         mock_session = MagicMock()
         mock_session.text = "OK"
+        mock_session.id = "test-session"
+        mock_session.archive = AsyncMock()
+
+        captured_kwargs: dict = {}
 
         mock_client = MagicMock()
-        captured_kwargs: dict = {}
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
 
         async def capture_create(**kwargs):
             captured_kwargs.update(kwargs)
             return mock_session
 
         mock_client.create_session = capture_create
-        mock_client.archive_session = AsyncMock()
 
         with patch.dict(os.environ, {"GOLDFISH_MEERKAT_MODEL": "claude-sonnet-4-5-20250514"}, clear=False):
             with patch("goldfish.svs.agent._import_meerkat") as mock_import:
-                mock_import.return_value = MagicMock(MeerkatClient=lambda: mock_client)
+                mock_import.return_value = _make_mock_module(mock_client)
                 provider.run(request)
 
         assert captured_kwargs.get("model") == "claude-sonnet-4-5-20250514"
@@ -131,56 +148,55 @@ class TestMeerkatProviderRun:
 
         mock_session = MagicMock()
         mock_session.text = "OK"
+        mock_session.id = "test-session"
+        mock_session.archive = AsyncMock()
+
+        captured_kwargs: dict = {}
 
         mock_client = MagicMock()
-        captured_kwargs: dict = {}
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
 
         async def capture_create(**kwargs):
             captured_kwargs.update(kwargs)
             return mock_session
 
         mock_client.create_session = capture_create
-        mock_client.archive_session = AsyncMock()
 
         env = os.environ.copy()
         env.pop("GOLDFISH_MEERKAT_MODEL", None)
 
         with patch.dict(os.environ, env, clear=True):
             with patch("goldfish.svs.agent._import_meerkat") as mock_import:
-                mock_import.return_value = MagicMock(MeerkatClient=lambda: mock_client)
+                mock_import.return_value = _make_mock_module(mock_client)
                 provider.run(request)
 
         assert "model" not in captured_kwargs
 
     def test_meerkat_provider_archives_session_after_use(self):
-        """Should call archive_session for cleanup after review."""
+        """Should call session.archive() for cleanup after review."""
         from goldfish.svs.agent import MeerkatProvider
 
         provider = MeerkatProvider()
         request = ReviewRequest(review_type="pre_run", context={"prompt": "test"})
 
+        archive_called = []
+
+        async def mock_archive():
+            archive_called.append(True)
+
         mock_session = MagicMock()
         mock_session.text = "OK"
         mock_session.id = "sess-123"
+        mock_session.archive = mock_archive
 
-        mock_client = MagicMock()
-
-        async def mock_create(**kwargs):
-            return mock_session
-
-        archive_called_with = []
-
-        async def mock_archive(session_id):
-            archive_called_with.append(session_id)
-
-        mock_client.create_session = mock_create
-        mock_client.archive_session = mock_archive
+        mock_client = _make_mock_client(mock_session)
 
         with patch("goldfish.svs.agent._import_meerkat") as mock_import:
-            mock_import.return_value = MagicMock(MeerkatClient=lambda: mock_client)
+            mock_import.return_value = _make_mock_module(mock_client)
             provider.run(request)
 
-        assert archive_called_with == ["sess-123"]
+        assert archive_called == [True]
 
 
 class TestGetAgentProviderMeerkat:

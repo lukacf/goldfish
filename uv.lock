@@ -577,6 +577,9 @@ dev = [
     { name = "pytest-timeout" },
     { name = "ruff" },
 ]
+meerkat = [
+    { name = "meerkat-sdk" },
+]
 test = [
     { name = "import-linter" },
     { name = "numpy" },
@@ -598,6 +601,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2.0" },
     { name = "import-linter", marker = "extra == 'test'", specifier = ">=2.0" },
+    { name = "meerkat-sdk", marker = "extra == 'meerkat'", specifier = ">=0.4" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "numpy", marker = "extra == 'test'", specifier = ">=1.24" },
     { name = "pandas", marker = "extra == 'test'", specifier = ">=2.0" },
@@ -619,7 +623,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.4" },
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.16.0" },
 ]
-provides-extras = ["test", "dev", "wandb"]
+provides-extras = ["test", "dev", "wandb", "meerkat"]
 
 [[package]]
 name = "google-api-core"
@@ -1065,6 +1069,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
+]
+
+[[package]]
+name = "meerkat-sdk"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/39/2f/e309f41b1928dda94021560457c1f5f375793847a3cef12c2e0158f37b23/meerkat_sdk-0.4.0.tar.gz", hash = "sha256:cc0260d266051aa3cb139abd596d38539ee6d2f93c638c67263f1d9ced08549f", size = 32231, upload-time = "2026-02-23T23:43:40.805Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/25/ef/b06ddd62138817b1ae86b5e247b4e78018daaf22d4d7c4dee0cc7a96ee6e/meerkat_sdk-0.4.0-py3-none-any.whl", hash = "sha256:04bae3e52ea3547de7aef6c6b0e91124b12744011d232bc29357c0a19e5f5478", size = 20263, upload-time = "2026-02-23T23:43:39.492Z" },
 ]
 
 [[package]]

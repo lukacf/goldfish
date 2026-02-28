@@ -1,6 +1,7 @@
 """Unit tests for downstream lineage tracking and input fetching."""
 
 import time
+from unittest.mock import Mock
 
 from goldfish.lineage.manager import LineageManager
 from goldfish.utils.fingerprint import calculate_fingerprint
@@ -95,10 +96,10 @@ def test_list_inputs_for_runs(test_db):
     assert set(sources_c) == {run_a, run_b}
 
 
-def test_get_run_provenance_with_downstream(test_db, mocker):
+def test_get_run_provenance_with_downstream(test_db):
     """Test LineageManager.get_run_provenance includes downstream runs."""
     # Mock workspace_manager
-    mock_wm = mocker.Mock()
+    mock_wm = Mock()
     mgr = LineageManager(db=test_db, workspace_manager=mock_wm)
 
     run_a_id = "run-a"

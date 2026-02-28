@@ -996,30 +996,29 @@ class MeerkatProvider:
                 Returns:
                     Tuple of (response_text, session_id).
                 """
-                client = meerkat.MeerkatClient()
+                async with meerkat.MeerkatClient() as client:
+                    create_kwargs: dict[str, Any] = {
+                        "prompt": agent_request.prompt,
+                        "system_prompt": (
+                            "You are an AI code reviewer for Goldfish ML experiments. "
+                            "Return findings as lines prefixed with ERROR:, WARNING:, or NOTE:. "
+                            "If nothing is wrong, say 'OK'."
+                        ),
+                    }
+                    if model:
+                        create_kwargs["model"] = model
 
-                create_kwargs: dict[str, Any] = {
-                    "system_prompt": (
-                        "You are an AI code reviewer for Goldfish ML experiments. "
-                        "Return findings as lines prefixed with ERROR:, WARNING:, or NOTE:. "
-                        "If nothing is wrong, say 'OK'."
-                    ),
-                    "user_prompt": agent_request.prompt,
-                }
-                if model:
-                    create_kwargs["model"] = model
+                    session = await client.create_session(**create_kwargs)
+                    text = session.text
+                    session_id = session.id
 
-                session = await client.create_session(**create_kwargs)
-                text = session.text
-                session_id = session.id
+                    # Archive session for cleanup
+                    try:
+                        await session.archive()
+                    except Exception as archive_err:
+                        logger.debug("Failed to archive Meerkat session %s: %s", session_id, archive_err)
 
-                # Archive session for cleanup
-                try:
-                    await client.archive_session(session_id)
-                except Exception as archive_err:
-                    logger.debug("Failed to archive Meerkat session %s: %s", session_id, archive_err)
-
-                return text, session_id
+                    return text, session_id
 
             # Bridge async SDK to sync run() interface.
             # If called from an existing async context (e.g., async MCP server),

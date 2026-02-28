@@ -85,7 +85,7 @@ def test_reload_config_calls_reset_base_image_manager():
     from goldfish.server_tools.utility_tools import reload_config
 
     # Get the source code of the function
-    source = inspect.getsource(reload_config.fn)
+    source = inspect.getsource(reload_config)
 
     # Verify the import and reset call are in the function body
     assert (

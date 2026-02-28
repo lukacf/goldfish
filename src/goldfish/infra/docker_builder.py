@@ -304,20 +304,28 @@ class DockerBuilder:
     # Bump this when upgrading meerkat-sdk in pyproject.toml.
     RKAT_RPC_VERSION = "v0.4.0"
 
+    # GitHub repo hosting rkat-rpc release artifacts.
+    RKAT_REPO = "lukacf/meerkat"
+
     def _render_meerkat_install_block(self, is_nonroot_image: bool) -> str:
         """Render Dockerfile block to install rkat-rpc binary for Meerkat SDK."""
         header = "# Install Meerkat rkat-rpc binary\n"
         user_prefix = "USER root\n" if is_nonroot_image else ""
         user_suffix = "USER 1000\n" if is_nonroot_image else ""
-        version = self.RKAT_RPC_VERSION
+        version = self.RKAT_RPC_VERSION  # e.g. "v0.4.0"
+        semver = version.lstrip("v")  # e.g. "0.4.0"
+        repo = self.RKAT_REPO
         return (
             f"{header}{user_prefix}"
-            "ARG TARGETARCH\n"
-            "# Map Docker TARGETARCH (amd64/arm64) to binary arch names (x86_64/aarch64)\n"
-            'RUN ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64;; *) echo ${TARGETARCH};; esac) && \\\n'
-            "    curl -fsSL -o /usr/local/bin/rkat-rpc \\\n"
-            f'      "https://github.com/meerkat-ai/rkat/releases/download/{version}/rkat-rpc-linux-${{ARCH}}" && \\\n'
-            "    chmod +x /usr/local/bin/rkat-rpc\n"
+            "# Install meerkat-sdk Python package and rkat-rpc binary\n"
+            f"RUN pip install --no-cache-dir 'meerkat-sdk>={semver}'\n"
+            "# Detect architecture at build time using uname (works with standard docker build and buildx)\n"
+            "RUN MACHINE=$(uname -m) && \\\n"
+            '    case "${MACHINE}" in x86_64) ARCH=x86_64-unknown-linux-gnu;; aarch64) ARCH=aarch64-unknown-linux-gnu;; *) ARCH=${MACHINE};; esac && \\\n'
+            f'    curl -fsSL -o /tmp/rkat-rpc.tar.gz "https://github.com/{repo}/releases/download/{version}/rkat-rpc-{semver}-${{ARCH}}.tar.gz" && \\\n'
+            "    tar xzf /tmp/rkat-rpc.tar.gz -C /usr/local/bin/ rkat-rpc && \\\n"
+            "    chmod +x /usr/local/bin/rkat-rpc && \\\n"
+            "    rm /tmp/rkat-rpc.tar.gz\n"
             f"{user_suffix}\n"
         )
 
@@ -411,8 +419,8 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
         #
         # VERSION arg busts cache when workspace version changes
         #
-        # For non-root images: agent install ends with USER 1000, but chown requires root
-        if is_nonroot_image and agent_cli_packages:
+        # For non-root images: agent/meerkat install ends with USER 1000, but chown requires root
+        if is_nonroot_image and (agent_cli_packages or use_meerkat):
             dockerfile += """# Cache-bust: version changes invalidate subsequent layers
 ARG VERSION
 RUN echo "Building version: ${VERSION}"

@@ -3,7 +3,7 @@
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -28,7 +28,7 @@ def _transition_to_completed(db: Database, stage_run_id: str) -> None:
     transition(db, stage_run_id, StageEvent.USER_FINALIZE, finalize_ctx)
 
 
-def test_full_lineage_flow(test_db, test_config, temp_dir, mocker):
+def test_full_lineage_flow(test_db, test_config, temp_dir):
     """Verify that lineage tracking, fingerprinting, and tools work end-to-end."""
     # Setup
     workspace = "test-ws"
@@ -118,12 +118,14 @@ def test_full_lineage_flow(test_db, test_config, temp_dir, mocker):
     # Verify execution_tools.inspect_run (contains provenance with both inputs and downstream)
     from goldfish.server_tools import execution_tools
 
-    mocker.patch("goldfish.server_tools.execution_tools._get_db", return_value=test_db)
     # Configure mock to return None so workspace string is used directly
     mock_wm.get_workspace_for_slot.return_value = None
-    mocker.patch("goldfish.server_tools.execution_tools._get_workspace_manager", return_value=mock_wm)
-    # Using 'include=["provenance"]' to verify consolidation
-    inspect_result = execution_tools.inspect_run.fn(run_id=run_id_prep, include=["provenance"])
+    with (
+        patch("goldfish.server_tools.execution_tools._get_db", return_value=test_db),
+        patch("goldfish.server_tools.execution_tools._get_workspace_manager", return_value=mock_wm),
+    ):
+        # Using 'include=["provenance"]' to verify consolidation
+        inspect_result = execution_tools.inspect_run.fn(run_id=run_id_prep, include=["provenance"])
     provenance = inspect_result["provenance"]
 
     # Downstream should show the train run

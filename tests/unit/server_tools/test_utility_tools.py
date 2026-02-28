@@ -62,7 +62,7 @@ class TestDashboardImprovements:
             },
         ]
 
-        result = dashboard.fn()
+        result = dashboard()
 
         # Check that pending_finalization is in blocks section
         assert "blocks" in result
@@ -116,7 +116,7 @@ class TestDashboardImprovements:
 
         mock_exp_cls.return_value.list_unfinalized_runs.return_value = []
 
-        result = dashboard.fn()
+        result = dashboard()
 
         # Check workspaces structure
         assert "workspaces" in result
@@ -164,7 +164,7 @@ class TestDashboardImprovements:
 
         mock_exp_cls.return_value.list_unfinalized_runs.return_value = []
 
-        result = dashboard.fn()
+        result = dashboard()
 
         # Goal should be truncated
         goal = result["workspaces"]["mounted"][0]["goal"]
@@ -205,7 +205,7 @@ class TestDashboardImprovements:
 
         mock_exp_cls.return_value.list_unfinalized_runs.return_value = []
 
-        result = dashboard.fn()
+        result = dashboard()
 
         # Check that failed_recent uses "age" instead of "completed_at"
         assert "alerts" in result
@@ -247,7 +247,7 @@ class TestDashboardImprovements:
 
         mock_exp_cls.return_value.list_unfinalized_runs.return_value = []
 
-        result = dashboard.fn()
+        result = dashboard()
 
         # Check that reason is included
         failed_run = result["alerts"]["failed_recent"][0]

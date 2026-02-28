@@ -262,7 +262,7 @@ class TestListHistoryImprovements:
         mock_get_experiment_manager.return_value = mock_exp_manager
 
         # Call with no explicit limit - should use default of 20
-        list_history.fn("test-ws")
+        list_history("test-ws")
 
         # Verify the manager was called with limit=20
         mock_exp_manager.list_history.assert_called_once()
@@ -295,7 +295,7 @@ class TestListHistoryImprovements:
         }
         mock_get_experiment_manager.return_value = mock_exp_manager
 
-        result = list_history.fn("test-ws")
+        result = list_history("test-ws")
 
         # workspace_name should be removed from individual records
         assert "workspace_name" not in result["records"][0]
@@ -323,7 +323,7 @@ class TestListHistoryImprovements:
         }
         mock_get_experiment_manager.return_value = mock_exp_manager
 
-        result = list_history.fn("test-ws")
+        result = list_history("test-ws")
 
         # First record should not have tags key (was empty)
         assert "tags" not in result["records"][0]
@@ -351,7 +351,7 @@ class TestListHistoryImprovements:
         }
         mock_get_experiment_manager.return_value = mock_exp_manager
 
-        result = list_history.fn("test-ws")
+        result = list_history("test-ws")
 
         # First record should not have experiment_group key (was None)
         assert "experiment_group" not in result["records"][0]
@@ -373,7 +373,7 @@ class TestListHistoryImprovements:
         mock_get_experiment_manager.return_value = mock_exp_manager
 
         # Call with finalized_only=True
-        list_history.fn("test-ws", finalized_only=True)
+        list_history("test-ws", finalized_only=True)
 
         # Verify the manager was called with finalized_only=True
         mock_exp_manager.list_history.assert_called_once()
@@ -405,7 +405,7 @@ class TestListHistoryImprovements:
         }
         mock_get_experiment_manager.return_value = mock_exp_manager
 
-        result = list_history.fn("test-ws")
+        result = list_history("test-ws")
 
         # Should include reason field
         assert "reason" in result["records"][0]
@@ -436,7 +436,7 @@ class TestListHistoryImprovements:
         }
         mock_get_experiment_manager.return_value = mock_exp_manager
 
-        result = list_history.fn("test-ws")
+        result = list_history("test-ws")
 
         # Should include primary_metric field
         assert "primary_metric" in result["records"][0]
@@ -468,7 +468,7 @@ class TestListHistoryImprovements:
         }
         mock_get_experiment_manager.return_value = mock_exp_manager
 
-        result = list_history.fn("test-ws")
+        result = list_history("test-ws")
 
         # Should include age field (relative time)
         assert "age" in result["records"][0]
@@ -498,7 +498,7 @@ class TestListHistoryImprovements:
         }
         mock_get_experiment_manager.return_value = mock_exp_manager
 
-        result = list_history.fn("test-ws")
+        result = list_history("test-ws")
 
         # Type should be excluded (redundant - almost all records are "run")
         assert "type" not in result["records"][0]
