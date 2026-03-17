@@ -70,10 +70,10 @@ jobs:
       - name: Install dependencies
         run: |
           pip install uv
-          uv pip install --system -e ".[test]"
+          uv pip install --system ".[test]"
 
       - name: Run pip-audit
-        run: pip-audit --strict --desc --skip-editable
+        run: pip-audit --strict --desc
 
   unit-tests:
     name: Unit tests

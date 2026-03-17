@@ -1817,6 +1817,7 @@ class TestGCEPreemptionHandling:
             project_root=temp_dir,
             dataset_registry=None,
             run_backend=mock_backend,
+            storage=MagicMock(),
         )
 
         executor._finalize_stage_run = MagicMock()
@@ -1884,6 +1885,7 @@ class TestGCEPreemptionHandling:
             project_root=temp_dir,
             dataset_registry=None,
             run_backend=mock_backend,
+            storage=MagicMock(),
         )
 
         executor._finalize_stage_run = MagicMock()
@@ -1943,6 +1945,7 @@ class TestGCEPreemptionHandling:
             project_root=temp_dir,
             dataset_registry=None,
             run_backend=mock_backend,
+            storage=MagicMock(),
         )
 
         executor._finalize_stage_run = MagicMock()
@@ -2016,6 +2019,7 @@ class TestGCEPreemptionHandling:
             project_root=temp_dir,
             dataset_registry=None,
             run_backend=mock_backend,
+            storage=MagicMock(),
         )
 
         executor._finalize_stage_run = MagicMock()
@@ -2081,6 +2085,7 @@ class TestGCEPreemptionHandling:
             project_root=temp_dir,
             dataset_registry=None,
             run_backend=mock_backend,
+            storage=MagicMock(),
         )
 
         executor._finalize_stage_run = MagicMock()

@@ -4,15 +4,26 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-17
+
 ### Added
 - **Cloud Abstraction Layer** - Protocol-based backend abstraction (`RunBackend`, `ObjectStorage`, `SignalBus`)
 - **BackendCapabilities** - Centralized behavior config replacing scattered conditionals
 - **Local backend parity** - Full feature parity with GCE including preemption simulation
-- **Database-driven base images** - Version tracking for Docker base images
-- `docs/ARCHITECTURE.md` - Comprehensive architecture documentation
+- **Meerkat SVS integration** - Meerkat as default SVS agent provider for pre-run reviews
+- **CI/CD overhaul** - Security audit (pip-audit), import boundary checks, release preflight,
+  PyPI publishing, build provenance attestation, workflow_dispatch for retry/dry-run
+- **Pre-commit file hygiene** - Trailing whitespace, YAML/TOML validation, large file detection
+- Stage execution state machine with full audit trail
+- Zone tracking for GCE runs
+- Content-hash caching for Docker builds
+- ML outcome assessment in post-run reviews
+- Semantic context in MCP tools
+- Database-driven base images - Version tracking for Docker base images
 - `DefaultsConfig` for global stage execution defaults (timeout_seconds, log_sync_interval, backend)
 - `StorageConfig` for multi-backend storage configuration
 - `S3StorageConfig` and `AzureStorageConfig` for future cloud providers
+- Package metadata: authors, project URLs, keywords, classifiers
 
 ### Security
 - SSRF protection for S3 endpoint_url (blocks localhost, private IPs, metadata endpoints)
@@ -21,30 +32,24 @@ All notable changes to Goldfish.
 - **De-googlify refactor** - All GCP-specific code moved to `cloud/adapters/gcp/`
 - `infra/local_executor.py` → `cloud/adapters/local/run_backend.py`
 - `infra/gce_launcher.py` → `cloud/adapters/gcp/gce_launcher.py`
+- Upgraded meerkat-sdk to >=0.4.12 and rkat-rpc to v0.4.12
 - Documentation overhaul - consolidated docs, archived obsolete files
 - `GEMINI.md` now symlinks to `CLAUDE.md` (single source of truth)
+- Makefile: colored output, ci-smoke target, verify-version, release-preflight
 
 ### Fixed
+- SVS debug print() statements replaced with proper logger.debug() calls
+- Removed dead code: `_inline_project_html_backup_marker()`, incomplete `update_status()` stub
+- Instance verification uses zone-agnostic approach
+- Prevented INSTANCE_LOST race during post-run phase
+- Exit code retrieval from metadata (primary) with file fallback
 - `configure_server()` now sets `_project_root` for tools that need it
 - `skip_review` parameter works in async mode
 - `get_current_best()` matches bare "best" tags (not just "best-*")
 - `delete_workspace()` cleans up stale tmp-sync worktrees
 - Backup tools use correct dev_repo path (sibling, not subdirectory)
 - Daemon initialization sets `_project_root`
-
-## [0.2.0] - 2026-01-15
-
-### Added
-- Stage execution state machine with full audit trail
-- Zone tracking for GCE runs
-- Content-hash caching for Docker builds
-- ML outcome assessment in post-run reviews
-- Semantic context in MCP tools
-
-### Fixed
-- Instance verification uses zone-agnostic approach
-- Prevented INSTANCE_LOST race during post-run phase
-- Exit code retrieval from metadata (primary) with file fallback
+- Unit/integration tests inject mock storage to prevent GCP credential leaks in CI
 
 ## [0.1.0] - 2025-12-10
 
