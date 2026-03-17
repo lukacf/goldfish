@@ -205,8 +205,13 @@ jobs:
           echo "Packages to publish:"
           ls -la dist/
 
-      - name: Publish to PyPI (trusted publishing)
+      # Uses API token (PYPI_API_TOKEN secret) for initial releases.
+      # Once the package exists on PyPI, set up trusted publishing (OIDC):
+      #   PyPI > goldfish > Settings > Publishing > Add GitHub publisher
+      #   Then remove the password line below to use OIDC instead.
+      - name: Publish to PyPI
         if: github.event.inputs.dry_run != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
           print-hash: true
