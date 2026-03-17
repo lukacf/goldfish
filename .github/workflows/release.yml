@@ -183,12 +183,14 @@ jobs:
 
   publish-pypi:
     name: Publish to PyPI
-    needs: [validate, build]
+    needs: [validate, build, github-release]
     if: >-
       startsWith(github.ref, 'refs/tags/v') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_pypi == 'true')
     runs-on: ubuntu-latest
     environment: pypi
+    permissions:
+      id-token: write  # Required for trusted publishing (OIDC)
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -196,16 +198,15 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Install twine
-        run: pip install twine
+      - name: Verify package contents
+        run: |
+          pip install twine
+          twine check dist/*
+          echo "Packages to publish:"
+          ls -la dist/
 
-      - name: Publish (dry-run)
-        if: github.event.inputs.dry_run == 'true'
-        run: twine check dist/*
-
-      - name: Publish to PyPI
+      - name: Publish to PyPI (trusted publishing)
         if: github.event.inputs.dry_run != 'true'
-        run: twine upload dist/*
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          print-hash: true
