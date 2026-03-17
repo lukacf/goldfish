@@ -73,7 +73,7 @@ jobs:
           uv pip install --system -e ".[test]"
 
       - name: Run pip-audit
-        run: pip-audit --strict --desc
+        run: pip-audit --strict --desc --skip-editable
 
   unit-tests:
     name: Unit tests

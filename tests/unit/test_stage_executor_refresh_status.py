@@ -288,6 +288,7 @@ def test_wait_for_completion_preemption_with_running_state(test_db, test_config,
         project_root=tmp_path,
         dataset_registry=None,
         run_backend=mock_backend,
+        storage=MagicMock(),
     )
 
     executor._finalize_stage_run = MagicMock()
@@ -334,6 +335,7 @@ def test_wait_for_completion_preemption_with_launching_state_and_exit_code(test_
         project_root=tmp_path,
         dataset_registry=None,
         run_backend=mock_backend,
+        storage=MagicMock(),
     )
 
     executor._finalize_stage_run = MagicMock()
@@ -377,6 +379,7 @@ def test_wait_for_completion_launch_failure_no_exit_code(test_db, test_config, t
         project_root=tmp_path,
         dataset_registry=None,
         run_backend=mock_backend,
+        storage=MagicMock(),
     )
 
     executor._finalize_stage_run = MagicMock()

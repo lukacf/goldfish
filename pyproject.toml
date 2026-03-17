@@ -64,7 +64,7 @@ wandb = [
     "wandb>=0.16.0",
 ]
 meerkat = [
-    "meerkat-sdk>=0.4.1",
+    "meerkat-sdk>=0.4.12",
 ]
 
 [project.scripts]

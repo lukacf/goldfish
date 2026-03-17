@@ -52,7 +52,7 @@ lint-imports:
 
 audit:
 	@echo "$(GREEN)Running dependency security audit...$(NC)"
-	pip-audit --strict --desc
+	pip-audit --strict --desc --skip-editable
 
 test:
 	$(PYTEST) tests/unit tests/contracts -q --tb=short -m "not slow"
