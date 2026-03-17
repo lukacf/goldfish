@@ -44,6 +44,7 @@ def _docker_available() -> bool:
 # Skip entire module if Docker is not available
 pytestmark = [
     pytest.mark.requires_docker,
+    pytest.mark.skipif(not _docker_available(), reason="Docker daemon not available"),
 ]
 
 
