@@ -314,10 +314,13 @@ def _register_proxy_tools() -> None:
     """Register all tools as proxies to daemon."""
     # Import server which imports tools at module load time.
     # Do NOT import goldfish.server_tools first - causes circular import.
+    # For each tool in the original MCP, create a proxy version
+    import asyncio
+
     from goldfish.server import mcp as original_mcp
 
-    # For each tool in the original MCP, create a proxy version
-    for tool in original_mcp._tool_manager._tools.values():
+    tools = asyncio.run(original_mcp._list_tools())
+    for tool in tools:
         tool_name = tool.name
         original_fn = tool.fn
 
@@ -337,7 +340,7 @@ def _register_proxy_tools() -> None:
         # Register with our MCP
         mcp.tool()(wrapped_fn)
 
-    logger.info("Registered %d proxy tools", len(original_mcp._tool_manager._tools))
+    logger.info("Registered %d proxy tools", len(tools))
 
 
 def run_proxy(project_root: Path, force_restart: bool = False) -> None:

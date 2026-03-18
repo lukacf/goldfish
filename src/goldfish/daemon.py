@@ -400,12 +400,13 @@ class GoldfishDaemon:
 
     def _register_tools(self) -> None:
         """Register all tool handlers."""
-        # Import tools modules - they register with the context
-        # We'll build a dispatch table from the MCP tool registry
+        import asyncio
+
         from goldfish.server import mcp
 
-        # Get all registered tools from FastMCP
-        for tool in mcp._tool_manager._tools.values():
+        # Get all registered tools from FastMCP (3.x uses async _list_tools)
+        tools = asyncio.run(mcp._list_tools())
+        for tool in tools:
             self.tools[tool.name] = tool.fn
             logger.debug("Registered tool: %s", tool.name)
 
