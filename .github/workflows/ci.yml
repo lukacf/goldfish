@@ -76,7 +76,7 @@ jobs:
         run: |
           # Generate pinned requirements from installed deps, excluding goldfish
           # (not on PyPI yet). pip-audit -r mode only audits the file.
-          uv pip freeze --system | grep -vi "^goldfish==" > /tmp/audit-requirements.txt
+          uv pip freeze --system | grep -vi "^goldfish[ =@]" > /tmp/audit-requirements.txt
           pip-audit --strict --desc -r /tmp/audit-requirements.txt --no-deps
 
   unit-tests:
