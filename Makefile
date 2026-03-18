@@ -7,7 +7,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: help install-hooks lint lint-imports audit test test-unit test-integration test-e2e test-deluxe ci ci-smoke release-preflight clean
+.PHONY: help install-hooks lint lint-imports audit test test-unit test-integration test-e2e test-deluxe ci ci-smoke release-preflight release clean
 
 help:
 	@echo "$(GREEN)Goldfish Development$(NC)"
@@ -98,7 +98,35 @@ release-preflight: verify-version lint lint-imports audit test-unit test-integra
 	echo "$(YELLOW)Next steps:$(NC)"; \
 	echo "  1. Update CHANGELOG.md with release notes"; \
 	echo "  2. git add -A && git commit -m 'chore: prepare release v$$CURRENT'"; \
-	echo "  3. git tag v$$CURRENT && git push origin main --tags"
+	echo "  3. make release"
+
+release: verify-version
+	@CURRENT=$$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"); \
+	TAG="v$$CURRENT"; \
+	echo ""; \
+	if git rev-parse "$$TAG" >/dev/null 2>&1; then \
+		echo "$(RED)Tag $$TAG already exists!$(NC)"; exit 1; \
+	fi; \
+	if [ -n "$$(git status --porcelain)" ]; then \
+		echo "$(RED)Working tree is dirty — commit or stash changes first$(NC)"; exit 1; \
+	fi; \
+	echo "$(YELLOW)Creating release $$TAG$(NC)"; \
+	echo "  Commit: $$(git rev-parse --short HEAD)"; \
+	echo "  Branch: $$(git branch --show-current)"; \
+	echo ""; \
+	echo "This will:"; \
+	echo "  1. Create git tag $$TAG"; \
+	echo "  2. Push to origin (triggers GitHub Release + PyPI publish)"; \
+	echo ""; \
+	read -p "Proceed? [y/N] " confirm; \
+	if [ "$$confirm" != "y" ] && [ "$$confirm" != "Y" ]; then \
+		echo "Aborted."; exit 1; \
+	fi; \
+	git tag "$$TAG" && \
+	git push origin main --tags && \
+	echo "" && \
+	echo "$(GREEN)Tagged and pushed $$TAG$(NC)" && \
+	echo "Watch the release: gh run list -R lukacf/goldfish --limit 1"
 
 clean:
 	find . -type f -name "*.pyc" -delete
