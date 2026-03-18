@@ -440,7 +440,7 @@ from goldfish.io import should_stop
 
 for epoch in range(epochs):
     # ... training logic ...
-    
+
     if should_stop():
         print("SVS requested early termination. Saving best model and exiting.")
         save_output("model", best_model)

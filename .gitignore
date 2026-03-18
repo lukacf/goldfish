@@ -87,3 +87,4 @@ src/goldfish/infra/base_images/fa3_wheel/
 credentials.json
 service-account*.json
 *.p12
+nohup.out

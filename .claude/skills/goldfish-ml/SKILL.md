@@ -345,11 +345,11 @@ from goldfish.io import load_input, save_output, runtime_log, should_stop
 def main():
     # MANDATORY: Use goldfish.io for ALL signal I/O
     features = load_input("features")
-    
+
     for epoch in range(epochs):
         # 1. Logic
         # ...
-        
+
         # 2. Monitoring support (MANDATORY for AI oversight)
         runtime_log(f"Epoch {epoch} loss: {l:.4f}")
         if should_stop():

@@ -103,17 +103,17 @@ stats_json TEXT  -- JSON: {entropy, null_ratio, unique_count, min, max, mean, st
 
 ### 2. Schema as Contract, Metadata as Observation
 
-**Decision:** `pipeline.yaml` schema is the **contract (law)** for signals.  
+**Decision:** `pipeline.yaml` schema is the **contract (law)** for signals.
 Datasource metadata is the **observed reality** of registered artifacts.
 
 **Validation hierarchy:**
 1. **Pipeline schema** defines the signal contract (structure) → authoritative.
-2. **Registered input metadata** must be **compatible** with the input contract (if defined).  
+2. **Registered input metadata** must be **compatible** with the input contract (if defined).
    If metadata is missing (legacy), SVS warns and skips contract verification.
 3. **Stage outputs** must satisfy the output contract at `save_output` time.
 4. **Output metadata** (emitted post-run) is recorded as observation and must remain compatible with the contract.
 
-**Schema tag required:** Every input and output must include a `schema` field.  
+**Schema tag required:** Every input and output must include a `schema` field.
 Use `schema: null` only when you truly cannot define a contract yet; Goldfish emits a **non‑blocking runtime warning**
 to strongly encourage adding a real schema.
 
@@ -145,11 +145,11 @@ Resolution rules:
 
 ### 3. Hierarchy of Truth (Law vs Judgment)
 
-**Level 0 — Mechanistic Checks (Law):**  
-Defined in `pipeline.yaml` and enforced at runtime. If a mechanistic check is **blocking**, it **always** blocks execution.  
+**Level 0 — Mechanistic Checks (Law):**
+Defined in `pipeline.yaml` and enforced at runtime. If a mechanistic check is **blocking**, it **always** blocks execution.
 AI reviews cannot override these failures.
 
-**Level 1 — AI / Knowledge Checks (Judgment):**  
+**Level 1 — AI / Knowledge Checks (Judgment):**
 Derived from domain docs and failure pattern knowledge base. These produce **WARN/BLOCK** recommendations, but do not
 invalidate a passing mechanistic check unless policy explicitly allows blocking.
 
@@ -938,7 +938,7 @@ CREATE INDEX idx_failure_patterns_status ON failure_patterns(status);
 
 ### 2.4 Self-Learning System
 
-**Experimental:** The self-learning loop is opt‑in and disabled by default.  
+**Experimental:** The self-learning loop is opt‑in and disabled by default.
 Enable with `svs.auto_learn_failures: true` if you want auto‑extraction.
 
 After every failed run, extract learnings and **store in database with pending status**:

@@ -421,4 +421,3 @@ Reload configuration from `goldfish.yaml` without restarting the server.
 ### get_audit_log(limit, workspace)
 
 Get recent audit trail entries for compliance and history.
-

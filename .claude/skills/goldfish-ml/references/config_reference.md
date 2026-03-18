@@ -132,15 +132,15 @@ svs:
   domain: default                   # default, nlp_tokenizer, image_embeddings, tabular_features
   default_policy: warn              # fail, warn, ignore
   default_enforcement: warning      # blocking, warning, silent
-  
+
   # Statistics collection (mechanistic)
   stats_enabled: true
-  
+
   # AI reviews
   ai_pre_run_enabled: true
   ai_post_run_enabled: true
   ai_during_run_enabled: true
-  
+
   # During-run monitoring parameters
   ai_during_run_interval_seconds: 300
   ai_during_run_min_metrics: 1        # Trigger as soon as any metrics exist
