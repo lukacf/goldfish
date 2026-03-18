@@ -67,15 +67,17 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install dependencies and generate requirements
+      - name: Install dependencies
         run: |
-          pip install uv pip-audit
+          pip install uv
           uv pip install --system ".[test]"
-          # Export only third-party deps (excludes goldfish itself which isn't on PyPI yet)
-          uv pip freeze --system | grep -v "^goldfish==" > requirements-audit.txt
 
       - name: Run pip-audit
-        run: pip-audit --strict --desc -r requirements-audit.txt
+        run: |
+          # Generate pinned requirements from installed deps, excluding goldfish
+          # (not on PyPI yet). pip-audit -r mode only audits the file.
+          uv pip freeze --system | grep -vi "^goldfish==" > /tmp/audit-requirements.txt
+          pip-audit --strict --desc -r /tmp/audit-requirements.txt --no-deps
 
   unit-tests:
     name: Unit tests
