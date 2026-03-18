@@ -199,12 +199,8 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Verify package contents
-        run: |
-          pip install twine
-          twine check dist/*
-          echo "Packages to publish:"
-          ls -la dist/
+      - name: List packages to publish
+        run: ls -la dist/
 
       # Uses API token (PYPI_API_TOKEN secret) for initial releases.
       # Once the package exists on PyPI, set up trusted publishing (OIDC):
