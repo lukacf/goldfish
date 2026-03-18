@@ -4,6 +4,13 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-03-18
+
+### Fixed
+- **meerkat-sdk is now a core dependency** — SVS AI reviews (pre-run, during-run, post-run)
+  work out of the box. Previously meerkat-sdk was optional, causing silent fallback to
+  NullProvider with `pip install goldfish-ml`.
+
 ## [0.2.1] - 2026-03-18
 
 ### Fixed
