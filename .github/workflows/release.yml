@@ -112,6 +112,7 @@ jobs:
       - name: Attest build provenance
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: actions/attest-build-provenance@v2
+        continue-on-error: true  # Fails on private repos; succeeds once public
         with:
           subject-path: dist/*
 
