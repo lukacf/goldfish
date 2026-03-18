@@ -10,6 +10,16 @@ All notable changes to Goldfish.
 - **meerkat-sdk is now a core dependency** — SVS AI reviews (pre-run, during-run, post-run)
   work out of the box. Previously meerkat-sdk was optional, causing silent fallback to
   NullProvider with `pip install goldfish-ml`.
+- **Container exit detection** — local backend now saves Docker container ID to DB so
+  `wait_for_completion()` can find and monitor the container. Previously only saved for GCE.
+- **Entrypoint script execution** — use `bash -c` instead of `sh -c` for stage entrypoint
+  scripts. Fixes `Illegal option -o pipefail` on images where `/bin/sh` is dash.
+- **Entrypoint override** — clear base image ENTRYPOINT when running stage commands so
+  containers (e.g., jupyter) exit cleanly after the stage completes.
+
+### Added
+- API key check at daemon startup — logs which AI providers are available for SVS reviews,
+  or warns clearly if none are configured.
 
 ## [0.2.1] - 2026-03-18
 

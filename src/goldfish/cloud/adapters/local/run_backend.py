@@ -262,6 +262,11 @@ class LocalRunBackend:
             cmd.extend(["-v", f"{output_dir}:/mnt/outputs:rw"])
             cmd.extend(["-e", "GOLDFISH_OUTPUT_DIR=/mnt/outputs"])
 
+        # Override entrypoint to prevent base image entrypoints (e.g., jupyter)
+        # from wrapping the command and keeping the container alive after completion
+        if spec.command:
+            cmd.extend(["--entrypoint", ""])
+
         # Add image
         cmd.append(spec.image)
 

@@ -2522,15 +2522,14 @@ echo "Stage completed successfully"
         # Launch via run_backend protocol
         handle = self.run_backend.launch(run_spec)
 
-        # Store backend handle for monitoring/cleanup (for backends with launch delay)
-        caps = self.run_backend.capabilities
-        if caps.has_launch_delay:
-            self.db.set_stage_run_backend(
-                stage_run_id=stage_run_id,
-                backend_type=backend,
-                backend_handle=handle.backend_handle,
-                instance_zone=handle.zone,
-            )
+        # Store backend handle for monitoring/cleanup
+        # Required for all backends so wait_for_completion can resolve the handle
+        self.db.set_stage_run_backend(
+            stage_run_id=stage_run_id,
+            backend_type=backend,
+            backend_handle=handle.backend_handle,
+            instance_zone=handle.zone,
+        )
 
         # State machine: LAUNCHING → RUNNING (LAUNCH_OK)
         sm_transition(
