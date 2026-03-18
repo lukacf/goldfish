@@ -382,6 +382,9 @@ class GoldfishDaemon:
         # Register all tools
         self._register_tools()
 
+        # Check SVS API key availability
+        self._check_svs_credentials()
+
         logger.info("Daemon initialized successfully")
 
     def _configure_db(self, db: Database) -> None:
@@ -411,6 +414,41 @@ class GoldfishDaemon:
             logger.debug("Registered tool: %s", tool.name)
 
         logger.info("Registered %d tools", len(self.tools))
+
+    def _check_svs_credentials(self) -> None:
+        """Check if API keys are available for SVS AI reviews.
+
+        Logs a clear warning at startup if no AI provider keys are found,
+        so users know why pre-run/post-run reviews aren't working.
+        """
+        svs_config = getattr(self.config, "svs", None)
+        ai_enabled = svs_config and (
+            getattr(svs_config, "ai_pre_run_enabled", False)
+            or getattr(svs_config, "ai_post_run_enabled", False)
+            or getattr(svs_config, "ai_during_run_enabled", False)
+        )
+        if not ai_enabled:
+            return
+
+        # Check for any supported API key
+        supported_keys = [
+            ("ANTHROPIC_API_KEY", "Anthropic (Claude)"),
+            ("OPENAI_API_KEY", "OpenAI (GPT)"),
+            ("GEMINI_API_KEY", "Google (Gemini)"),
+        ]
+        found = [(name, desc) for name, desc in supported_keys if os.environ.get(name)]
+
+        if found:
+            names = ", ".join(desc for _, desc in found)
+            logger.info("SVS AI reviews enabled — API keys found: %s", names)
+        else:
+            key_names = ", ".join(name for name, _ in supported_keys)
+            logger.warning(
+                "SVS AI reviews are enabled but no API keys found. "
+                "Set one of: %s. "
+                "Reviews will fail-open (approve by default) until a key is configured.",
+                key_names,
+            )
 
     def execute_tool(self, tool_name: str, params: dict) -> Any:
         """Execute a tool by name with given parameters."""
