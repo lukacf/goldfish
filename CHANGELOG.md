@@ -4,6 +4,13 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-03-18
+
+### Fixed
+- **Critical:** Fix FastMCP 3.x compatibility — daemon and proxy crashed on startup with
+  `AttributeError: 'FastMCP' object has no attribute '_tool_manager'`
+- Renamed PyPI package from `goldfish` (taken) to `goldfish-ml`
+
 ## [0.2.0] - 2026-03-17
 
 ### Added
