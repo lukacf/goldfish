@@ -2472,7 +2472,7 @@ echo "Stage completed successfully"
 
         # Build command from entrypoint
         entrypoint_script = self._build_entrypoint_script(stage_name, runtime, entrypoint)
-        command = ["sh", "-c", entrypoint_script] if entrypoint_script else None
+        command = ["bash", "-c", entrypoint_script] if entrypoint_script else None
 
         # Convert inputs dict to StorageURI dict
         input_uris: dict[str, StorageURI] = {}
