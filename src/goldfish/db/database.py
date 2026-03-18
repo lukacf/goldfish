@@ -3066,7 +3066,7 @@ class Database:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO signal_lineage
+                INSERT OR REPLACE INTO signal_lineage
                 (stage_run_id, signal_name, signal_type, storage_location, size_bytes, is_artifact)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
@@ -3099,7 +3099,7 @@ class Database:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO signal_lineage
+                INSERT OR REPLACE INTO signal_lineage
                 (stage_run_id, signal_name, signal_type, storage_location,
                  source_stage_run_id, source_stage_version_id, size_bytes, is_artifact)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)

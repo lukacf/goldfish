@@ -1303,7 +1303,7 @@ class StageExecutor:
 
                 conn.execute(
                     """
-                    INSERT INTO signal_lineage
+                    INSERT OR REPLACE INTO signal_lineage
                     (stage_run_id, signal_name, signal_type, storage_location, is_artifact, stats_json)
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,

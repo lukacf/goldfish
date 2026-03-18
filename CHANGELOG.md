@@ -4,6 +4,14 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-03-18
+
+### Fixed
+- **signal_lineage UNIQUE constraint** — output recording crashed with
+  `UNIQUE constraint failed: signal_lineage.stage_run_id, signal_lineage.signal_name`
+  when outputs were recorded by both the container SVS hook and the finalization phase.
+  Use `INSERT OR REPLACE` to upsert instead of failing on duplicate.
+
 ## [0.2.2] - 2026-03-18
 
 ### Fixed
