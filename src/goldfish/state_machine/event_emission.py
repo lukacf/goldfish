@@ -481,24 +481,21 @@ def determine_instance_event(
     Returns:
         Tuple of (INSTANCE_LOST, context) if instance is gone, None otherwise.
     """
-    # Check instance status for RUNNING and LAUNCHING states.
-    # LAUNCHING is included because preemption can occur after instance creation
-    # but before ACK. The backend_handle check below guards against false positives.
+    # Check instance status for RUNNING state only.
     #
     # States where we should NOT emit INSTANCE_LOST:
     # - PREPARING: syncing code, no instance yet
     # - BUILDING: building Docker image, no instance yet
+    # - LAUNCHING: backend_handle is set but instance may not be visible in GCE
+    #   API yet (5+ second propagation delay on GPU VMs). The executor handles
+    #   launch timeouts via wait_for_completion(). See stage-3a4ce565 where the
+    #   daemon killed the instance 5s after launch due to this race.
     # - POST_RUN: instance stopping is EXPECTED after process exits
     # - AWAITING_USER_FINALIZATION: instance may have been cleaned up after post-run
     # - UNKNOWN: can't assume anything about instance existence
     #
     # States where we SHOULD check for INSTANCE_LOST:
     # - RUNNING: instance is confirmed running, should still exist
-    # - LAUNCHING: instance may be created and then preempted before ACK
-    #
-    # CRITICAL: LAUNCHING must be excluded because the instance creation is async.
-    # The executor emits LAUNCH_OK after verifying the instance is ready, but until
-    # then the daemon would incorrectly see "no instance" and emit INSTANCE_LOST.
     #
     # CRITICAL: POST_RUN must be excluded because the instance stopping is EXPECTED
     # after the process exits. The post-run phase handles output sync and finalization,
@@ -516,7 +513,11 @@ def determine_instance_event(
             states_skip_instance_lost = {
                 StageState.PREPARING,  # No instance yet
                 StageState.BUILDING,  # No instance yet
-                # LAUNCHING: removed - can detect preemption if backend_handle exists
+                StageState.LAUNCHING,  # Instance may not be visible in GCE API yet;
+                # executor handles launch timeouts via wait_for_completion().
+                # Removed in 075dc23 to detect preemption during launch, but
+                # that caused false INSTANCE_LOST within 5s of launch on GPU VMs
+                # where the GCE API has propagation delay for instance visibility.
                 StageState.POST_RUN,  # Instance stopping is EXPECTED after exit
                 StageState.AWAITING_USER_FINALIZATION,  # Instance may be cleaned up
                 StageState.UNKNOWN,  # Can't assume anything

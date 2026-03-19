@@ -649,18 +649,18 @@ class TestInstanceLostEvent:
             assert result is None  # Must not emit any event
             mock_verify.assert_not_called()  # Must not even check instance status
 
-    def test_launching_state_with_handle_can_detect_preemption(self) -> None:
-        """REGRESSION: LAUNCHING state with backend_handle should detect preemption.
+    def test_launching_state_with_handle_skips_instance_lost(self) -> None:
+        """LAUNCHING state must skip INSTANCE_LOST even with backend_handle.
 
-        Bug: Preemption during LAUNCHING (after instance created, before ACK) was
-        not detected. The run would timeout after 20 minutes instead of properly
-        reporting preemption.
+        Bug (stage-3a4ce565): Daemon emitted INSTANCE_LOST 5 seconds after launch
+        because gcloud couldn't find the instance yet (GCE API propagation delay).
+        GPU VMs (a3-highgpu-8g) can take 5+ seconds to appear in `gcloud instances list`.
 
-        Fix: Allow LAUNCHING to check instance status if backend_handle exists.
-        If the instance was created and then preempted, we should detect it.
+        The executor handles launch timeouts in wait_for_completion() with the
+        1200s launch_timeout. The daemon should not interfere during LAUNCHING.
         """
         from goldfish.state_machine.event_emission import determine_instance_event
-        from goldfish.state_machine.types import StageEvent, StageState
+        from goldfish.state_machine.types import StageState
 
         run = {
             "id": "stage-123",
@@ -669,23 +669,13 @@ class TestInstanceLostEvent:
             "backend_handle": "instance-123",  # Handle exists - instance was created
         }
 
-        with (
-            patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify,
-            patch("goldfish.state_machine.event_emission.detect_termination_cause") as mock_detect,
-        ):
-            from goldfish.state_machine.types import TerminationCause
-
-            mock_verify.return_value = True  # Instance is stopped
-            mock_detect.return_value = TerminationCause.PREEMPTED
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            mock_verify.return_value = True  # Would trigger INSTANCE_LOST if called
 
             result = determine_instance_event(run, project_id="test-project")
 
-            assert result is not None
-            event, context = result
-            assert event == StageEvent.INSTANCE_LOST
-            assert context.termination_cause == TerminationCause.PREEMPTED
-            mock_verify.assert_called_once()
-            mock_detect.assert_called_once()
+            assert result is None  # Must not emit any event during LAUNCHING
+            mock_verify.assert_not_called()  # Must not even check instance status
 
     def test_awaiting_user_finalization_state_never_emits_instance_lost(self) -> None:
         """AWAITING_USER_FINALIZATION state must never emit INSTANCE_LOST.
@@ -949,9 +939,9 @@ class TestStateBasedInstanceChecks:
     the daemon can incorrectly emit events for runs that haven't finished setup.
 
     General Rule:
-    - Only check for INSTANCE_LOST in states where an instance is CONFIRMED to exist
-    - Confirmed states: RUNNING, POST_RUN
-    - Unconfirmed states: PREPARING, BUILDING, LAUNCHING, AWAITING_USER_FINALIZATION, UNKNOWN
+    - Only check for INSTANCE_LOST in states where an instance is CONFIRMED running
+    - Confirmed states: RUNNING
+    - Skip states: PREPARING, BUILDING, LAUNCHING, POST_RUN, AWAITING_USER_FINALIZATION, UNKNOWN
 
     This pattern applies whenever:
     1. A background process (daemon) monitors state
@@ -973,7 +963,7 @@ class TestStateBasedInstanceChecks:
         states_skip_instance_check = {
             StageState.PREPARING,  # Code syncing, no instance
             StageState.BUILDING,  # Docker build, no instance
-            # LAUNCHING: removed - now checks for preemption if backend_handle exists
+            StageState.LAUNCHING,  # GCE API propagation delay; executor handles timeouts
             StageState.POST_RUN,  # Instance stopping is EXPECTED after exit
             StageState.AWAITING_USER_FINALIZATION,  # Instance may be cleaned up
             StageState.UNKNOWN,  # Can't assume anything
@@ -983,7 +973,6 @@ class TestStateBasedInstanceChecks:
         # These are states where an instance being lost is unexpected
         states_do_instance_check = {
             StageState.RUNNING,  # Instance must exist while code runs
-            StageState.LAUNCHING,  # Instance may be preempted before ACK
         }
 
         # Terminal states - no checks needed, run is done
