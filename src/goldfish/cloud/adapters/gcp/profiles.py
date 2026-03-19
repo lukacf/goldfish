@@ -271,17 +271,27 @@ def validate_profile(profile: dict[str, Any]) -> None:
     Raises:
         ProfileValidationError: If profile is invalid
     """
-    required_fields = ["machine_type", "zones", "boot_disk", "data_disk", "gpu"]
+    required_fields = ["machine_type", "zones", "boot_disk"]
 
     for field in required_fields:
         if field not in profile:
-            raise ProfileValidationError(f"Profile missing required field: {field}")
+            raise ProfileValidationError(
+                f"Profile missing required field: '{field}'. "
+                f"Required fields: machine_type, zones, boot_disk. "
+                f"Optional: gpu (default: none), data_disk."
+            )
 
     if not isinstance(profile["zones"], list) or len(profile["zones"]) == 0:
         raise ProfileValidationError("Profile 'zones' must be a non-empty list")
 
-    if not isinstance(profile["gpu"], dict):
-        raise ProfileValidationError("Profile 'gpu' must be a dictionary")
+    # Normalize gpu: null/missing → CPU-only default
+    if "gpu" not in profile or profile["gpu"] is None:
+        profile["gpu"] = {"type": "none", "accelerator": None, "count": 0}
+    elif not isinstance(profile["gpu"], dict):
+        raise ProfileValidationError(
+            "Profile 'gpu' must be a dictionary (e.g., {type: none, count: 0} for CPU) "
+            "or null/omitted for CPU-only profiles"
+        )
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
