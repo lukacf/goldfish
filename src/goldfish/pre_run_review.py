@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 # Security limits
 MAX_FILE_SIZE = 100_000  # 100KB per file
 MAX_TOTAL_CONTEXT_SIZE = 500_000  # 500KB total context
+MAX_CONTENTS_ITEMS = 1000  # Max items in input contents listing (avoids blowing context budget)
 
 
 def escape_for_prompt(text: str) -> str:
@@ -433,13 +434,12 @@ This is a test run to verify the AI review system works. You MUST:
 
             contents = ctx.get("contents")
             if contents:
-                max_contents = 5000
                 lines.append(f"  contents: ({len(contents)} items)")
-                for item in contents[:max_contents]:
+                for item in contents[:MAX_CONTENTS_ITEMS]:
                     lines.append(f"    - {item}")
-                if len(contents) > max_contents:
+                if len(contents) > MAX_CONTENTS_ITEMS:
                     lines.append(
-                        f"    - ... ({len(contents) - max_contents} more items NOT SHOWN — "
+                        f"    - ... ({len(contents) - MAX_CONTENTS_ITEMS} more items NOT SHOWN — "
                         f"do NOT treat unlisted files as absent)"
                     )
 

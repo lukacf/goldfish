@@ -91,6 +91,27 @@ def test_format_input_resolution_no_false_positive_on_subdirectory_files(reviewe
     assert "tokenizers/tokenizer.vocab" in formatted
 
 
+def test_format_input_resolution_caps_at_max_contents(reviewer):
+    """Contents beyond MAX_CONTENTS_ITEMS are truncated with a warning."""
+    from goldfish.pre_run_review import MAX_CONTENTS_ITEMS
+
+    contents = [f"shard_{i:05d}.bin" for i in range(MAX_CONTENTS_ITEMS + 200)]
+    input_context = [{"input": "big", "source_type": "stage", "storage_location": "/path", "contents": contents}]
+
+    formatted = reviewer._format_input_resolution(input_context)
+
+    # Items within the cap are shown
+    assert "shard_00000.bin" in formatted
+    assert f"shard_{MAX_CONTENTS_ITEMS - 1:05d}.bin" in formatted
+    # Items beyond the cap are NOT shown
+    assert f"shard_{MAX_CONTENTS_ITEMS:05d}.bin" not in formatted
+    # Warning message present
+    assert "NOT SHOWN" in formatted
+    assert "do NOT treat unlisted files as absent" in formatted
+    # Total count still shown
+    assert f"({MAX_CONTENTS_ITEMS + 200} items)" in formatted
+
+
 def test_stage_executor_list_storage_contents_cloud():
     """Test _list_storage_contents with cloud storage adapter."""
     from goldfish.cloud.contracts import StorageURI
