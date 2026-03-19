@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, is_dataclass
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import UnixStreamServer
@@ -385,7 +386,72 @@ class GoldfishDaemon:
         # Check SVS API key availability
         self._check_svs_credentials()
 
+        # Recover orphaned runs from previous daemon crash/restart.
+        # Runs stuck in non-terminal active states (building, launching) with no
+        # executor thread are dead — mark them failed so the user can retry.
+        self._recover_orphaned_runs()
+
         logger.info("Daemon initialized successfully")
+
+    def _recover_orphaned_runs(self) -> None:
+        """Recover runs orphaned by daemon crash/restart.
+
+        When the daemon restarts, any runs in active non-terminal states
+        (preparing, building, launching) have no executor thread driving them.
+        Mark them as failed so the user gets a clear error and can retry.
+
+        RUNNING state is NOT recovered here — the instance monitor handles those
+        via normal status polling (the GCE instance may still be running fine).
+        """
+        from goldfish.state_machine import EventContext as SMEventContext
+        from goldfish.state_machine import StageEvent
+        from goldfish.state_machine import transition as sm_transition
+        from goldfish.state_machine.types import StageState
+
+        orphan_states = (
+            StageState.PREPARING.value,
+            StageState.BUILDING.value,
+            StageState.LAUNCHING.value,
+        )
+
+        with self._db._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, state, stage_name FROM stage_runs WHERE state IN (?, ?, ?)",
+                orphan_states,
+            ).fetchall()
+
+        if not rows:
+            return
+
+        now = datetime.now(UTC)
+        for row in rows:
+            run_id = row[0]
+            state = row[1]
+            stage = row[2]
+            error_msg = (
+                f"Daemon restarted while run was in '{state}' state. " f"The executor thread was lost. Please retry."
+            )
+            logger.warning("Recovering orphaned run %s (state=%s, stage=%s)", run_id, state, stage)
+
+            # Try the appropriate fail event for the current state
+            ctx = SMEventContext(
+                timestamp=now,
+                source="daemon",
+                error_message=error_msg,
+            )
+            # Try events in order — state machine will accept the valid one
+            for event in (StageEvent.PREPARE_FAIL, StageEvent.BUILD_FAIL, StageEvent.LAUNCH_FAIL):
+                result = sm_transition(self._db, run_id, event, ctx)
+                if result.success:
+                    break
+
+            self._db.update_stage_run_status(
+                stage_run_id=run_id,
+                completed_at=now.isoformat(),
+                error=error_msg,
+            )
+
+        logger.info("Recovered %d orphaned run(s)", len(rows))
 
     def _configure_db(self, db: Database) -> None:
         """Configure database for concurrent access."""
