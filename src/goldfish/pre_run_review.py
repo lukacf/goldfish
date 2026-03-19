@@ -433,12 +433,15 @@ This is a test run to verify the AI review system works. You MUST:
 
             contents = ctx.get("contents")
             if contents:
-                lines.append("  contents:")
-                # List items, cap at 50 to keep prompt size manageable
-                for item in contents[:50]:
+                max_contents = 5000
+                lines.append(f"  contents: ({len(contents)} items)")
+                for item in contents[:max_contents]:
                     lines.append(f"    - {item}")
-                if len(contents) > 50:
-                    lines.append(f"    - ... ({len(contents) - 50} more items)")
+                if len(contents) > max_contents:
+                    lines.append(
+                        f"    - ... ({len(contents) - max_contents} more items NOT SHOWN — "
+                        f"do NOT treat unlisted files as absent)"
+                    )
 
         return "\n".join(lines)
 
