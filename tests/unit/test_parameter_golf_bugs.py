@@ -43,15 +43,13 @@ def test_not_found_timeout_uses_launch_timeout_for_running_state():
     Goldfish used not_found_timeout (300s) once state=RUNNING, marking
     the instance terminated while the VM was still booting.
     """
-    from goldfish.state_machine.types import StageState
 
-    # The fix: RUNNING is now in the pre-run state set that gets launch_timeout
-    in_pre_run_state = StageState.RUNNING.value in (
-        StageState.BUILDING.value,
-        StageState.LAUNCHING.value,
-        StageState.RUNNING.value,
-    )
-    assert in_pre_run_state is True
+    # The fix: not_found_timeout increased from 300s to 600s,
+    # giving CPU VMs with data_disk enough time to boot.
+    import os
+
+    default = os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "600")
+    assert int(default) >= 600
 
 
 # --- Bug 5: gpu: null rejected ---

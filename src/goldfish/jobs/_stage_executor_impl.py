@@ -2777,15 +2777,14 @@ echo "Stage completed successfully"
                 )
 
             # Check for early finalization — user already called finalize_run
-            early_finalized = False
+            # while the run was still RUNNING. results_status='finalized' means
+            # results are already recorded; skip AWAITING and go to COMPLETED.
             with self.db._conn() as conn:
                 row = conn.execute(
-                    "SELECT finalized_by FROM run_results WHERE stage_run_id = ?",
+                    "SELECT results_status FROM run_results WHERE stage_run_id = ?",
                     (stage_run_id,),
                 ).fetchone()
-                if row and row[0] == "early":
-                    early_finalized = True
-            if early_finalized:
+            if row and row[0] == "finalized":
                 logger.info("Early finalization detected for %s, auto-completing", stage_run_id)
                 sm_transition(
                     self.db,
@@ -2823,7 +2822,7 @@ echo "Stage completed successfully"
 
         start = time.time()
         last_log: float = 0.0
-        not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
+        not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "600"))
 
         # Get handle for status checks
         handle = self._get_run_handle(stage_run_id)
@@ -2889,18 +2888,16 @@ echo "Stage completed successfully"
                     state_val = row.get("state") if row else None
                     instance_ran = state_val == StageState.RUNNING.value
 
-                    # Longer timeout for BUILD/LAUNCH phases and recently-launched instances.
-                    # CPU VMs with data_disk provisioning can take >300s to boot fully.
+                    # Longer timeout for BUILD/LAUNCH phases.
+                    # not_found_timeout (600s) covers CPU VMs with data_disk provisioning.
                     launch_timeout = int(os.getenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "1200"))
                     if not_found_timeout <= 0:
                         effective_timeout = 0
                     else:
-                        in_pre_run_state = state_val in (
-                            StageState.BUILDING.value,
-                            StageState.LAUNCHING.value,
-                            StageState.RUNNING.value,  # Instance may still be booting
+                        in_pre_run_state = state_val in (StageState.BUILDING.value, StageState.LAUNCHING.value)
+                        effective_timeout = (
+                            launch_timeout if in_pre_run_state and not instance_ran else not_found_timeout
                         )
-                        effective_timeout = launch_timeout if in_pre_run_state else not_found_timeout
 
                     if elapsed >= effective_timeout:
                         if instance_ran:
@@ -2997,7 +2994,7 @@ echo "Stage completed successfully"
                 return status
 
             state_val = row.get("state")
-            not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
+            not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "600"))
             started_at = row.get("started_at")
             elapsed = float(not_found_timeout)
             if started_at:

@@ -765,12 +765,9 @@ class ExperimentRecordManager:
             StageState.POST_RUN.value,
         ):
             # Early finalization — run hasn't reached AWAITING yet.
-            # Store a flag so _finalize_stage_run can auto-complete instead of waiting.
-            with self.db._conn() as conn:
-                conn.execute(
-                    "UPDATE run_results SET finalized_by = 'early' WHERE stage_run_id = ? AND results_status = 'finalized'",
-                    (stage_run_id,),
-                )
+            # results_status is already 'finalized' from the UPDATE above.
+            # The executor checks this and auto-completes instead of waiting.
+            pass
 
         return {
             "record_id": record_id,
