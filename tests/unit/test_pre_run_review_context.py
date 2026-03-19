@@ -42,19 +42,74 @@ def test_format_input_resolution_includes_storage_and_contents(reviewer):
     assert "  - subdir/file2.txt" in formatted
 
 
-def test_format_input_resolution_truncates_contents(reviewer):
-    """Test that content listing is truncated if too long."""
-    long_contents = [f"file_{i}.txt" for i in range(60)]
+def test_format_input_resolution_shows_all_contents(reviewer):
+    """All contents must be listed — truncation caused SVS false positives."""
+    long_contents = [f"file_{i}.txt" for i in range(83)]
     input_context = [
         {"input": "test_input", "source_type": "stage", "storage_location": "/local/path", "contents": long_contents}
     ]
 
     formatted = reviewer._format_input_resolution(input_context)
 
+    # ALL files must be listed, not just the first 50
     assert "file_0.txt" in formatted
     assert "file_49.txt" in formatted
-    assert "file_50.txt" not in formatted
-    assert "... (10 more items)" in formatted
+    assert "file_50.txt" in formatted
+    assert "file_82.txt" in formatted
+    # Must NOT truncate
+    assert "more items" not in formatted
+    # Should show total count
+    assert "(83 items)" in formatted
+
+
+def test_format_input_resolution_no_false_positive_on_subdirectory_files(reviewer):
+    """Regression: files in subdirectories must be visible to SVS reviewer.
+
+    Bug: With 83+ files, SVS only saw the first 50 (all train shards),
+    missed tokenizer files in a subdirectory, and blocked with a false ERROR.
+    """
+    # Simulate the actual bug scenario: 80 train shards + tokenizer in subdirectory
+    contents = [f"fineweb_train_{i:03d}.bin" for i in range(80)]
+    contents.extend(["fineweb_val_000.bin", "fineweb_val_001.bin"])
+    contents.extend(["tokenizers/tokenizer.model", "tokenizers/tokenizer.vocab"])
+
+    input_context = [
+        {
+            "input": "fineweb",
+            "source_type": "stage",
+            "from_stage": "data",
+            "signal": "fineweb",
+            "storage_location": "gs://bucket/runs/stage-xxx/outputs/fineweb/",
+            "contents": contents,
+        }
+    ]
+
+    formatted = reviewer._format_input_resolution(input_context)
+
+    # The tokenizer files (which were beyond index 50) MUST be visible
+    assert "tokenizers/tokenizer.model" in formatted
+    assert "tokenizers/tokenizer.vocab" in formatted
+
+
+def test_format_input_resolution_caps_at_max_contents(reviewer):
+    """Contents beyond MAX_CONTENTS_ITEMS are truncated with a warning."""
+    from goldfish.pre_run_review import MAX_CONTENTS_ITEMS
+
+    contents = [f"shard_{i:05d}.bin" for i in range(MAX_CONTENTS_ITEMS + 200)]
+    input_context = [{"input": "big", "source_type": "stage", "storage_location": "/path", "contents": contents}]
+
+    formatted = reviewer._format_input_resolution(input_context)
+
+    # Items within the cap are shown
+    assert "shard_00000.bin" in formatted
+    assert f"shard_{MAX_CONTENTS_ITEMS - 1:05d}.bin" in formatted
+    # Items beyond the cap are NOT shown
+    assert f"shard_{MAX_CONTENTS_ITEMS:05d}.bin" not in formatted
+    # Warning message present
+    assert "NOT SHOWN" in formatted
+    assert "do NOT treat unlisted files as absent" in formatted
+    # Total count still shown
+    assert f"({MAX_CONTENTS_ITEMS + 200} items)" in formatted
 
 
 def test_stage_executor_list_storage_contents_cloud():
