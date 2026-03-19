@@ -117,7 +117,7 @@ def test_wandb_invalid_artifact_mode_defaults_to_file(tmp_path, monkeypatch, cap
     file_path = tmp_path / "model.pt"
     file_path.write_text("data")
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("WARNING", logger="goldfish.metrics.backends.wandb"):
         backend.log_artifact("model", file_path)
 
     assert any("GOLDFISH_WANDB_ARTIFACT_MODE" in record.message for record in caplog.records)

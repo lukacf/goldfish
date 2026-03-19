@@ -125,8 +125,32 @@ sync_final_logs() {
 }
 
 self_delete() {
-    echo "=== SELF-DELETING INSTANCE $INSTANCE_NAME in zone $INSTANCE_ZONE ==="
+    local trap_exit_code=${GOLDFISH_TRAP_EXIT_CODE:-$?}
+    echo "=== SELF-DELETING INSTANCE $INSTANCE_NAME in zone $INSTANCE_ZONE (exit=$trap_exit_code) ==="
     log_stage "self_delete_begin" || true
+
+    # CRITICAL: Write exit code to GCS BEFORE deletion so goldfish can detect failure
+    # immediately instead of waiting for the 300s not_found_timeout.
+    # This handles startup script failures (apt-get, docker pull, etc.) that occur
+    # before the Docker container runs and writes its own exit code.
+    if [[ -n "${EXIT_CODE_FILE:-}" && ! -f "${EXIT_CODE_FILE:-/dev/null}" ]]; then
+        echo "Writing startup failure exit code ($trap_exit_code) to GCS..."
+        echo "$trap_exit_code" > "${EXIT_CODE_FILE}" 2>/dev/null || true
+        # Also try direct GCS upload in case the fuse mount isn't available yet
+        if [[ -n "${GCS_EXIT_CODE_PATH:-}" ]]; then
+            echo "$trap_exit_code" | timeout 30 gsutil cp - "${GCS_EXIT_CODE_PATH}" 2>/dev/null || true
+        fi
+    fi
+
+    # Set exit code in instance metadata as fallback
+    if [[ -n "$INSTANCE_NAME" && -n "$INSTANCE_ZONE" && -n "$PROJECT_ID" ]]; then
+        gcloud compute instances add-metadata "$INSTANCE_NAME" \
+            --zone="$INSTANCE_ZONE" \
+            --project="$PROJECT_ID" \
+            --metadata "goldfish_exit_code=$trap_exit_code" \
+            --quiet 2>/dev/null || true
+    fi
+
     # CRITICAL: Sync final logs before deletion to capture any errors
     sync_final_logs || true
     sync || true
@@ -140,7 +164,7 @@ self_delete() {
 
 # Trap ensures cleanup runs on ANY exit: normal, error, or signal
 # This is the PRIMARY defense against orphaned instances
-trap 'echo "EXIT TRAP TRIGGERED (exit code: $?)"; self_delete' EXIT
+trap 'GOLDFISH_TRAP_EXIT_CODE=$?; echo "EXIT TRAP TRIGGERED (exit code: $GOLDFISH_TRAP_EXIT_CODE)"; self_delete' EXIT
 trap 'echo "SIGTERM received"; exit 143' SIGTERM
 trap 'echo "SIGINT received"; exit 130' SIGINT
 """
@@ -814,6 +838,11 @@ def build_startup_script(
         stage_log_section(stage_uri),
         # Self-deletion trap - MUST be early to catch failures in apt-get, driver install, etc.
         self_deletion_section(),
+        # Set exit code paths early so EXIT trap can write exit code on startup failures
+        # EXIT_CODE_FILE is the gcsfuse path (only works if gcsfuse is mounted)
+        # GCS_EXIT_CODE_PATH is the direct GCS path (always works if gcloud is available)
+        f'EXIT_CODE_FILE="{bucket_mount}/{bucket_path}/logs/exit_code.txt"',
+        f'GCS_EXIT_CODE_PATH="gs://{bucket}/{bucket_path}/logs/exit_code.txt"',
         # Log upload helper - retry and verify uploads before deletion
         upload_helper_section(),
         'log_stage "startup_begin"',

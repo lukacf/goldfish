@@ -95,6 +95,12 @@ def search_logs_sync(query: str) -> str:
     """
     settings = get_settings()
 
+    if not settings.logging.victoria_logs_enabled:
+        return (
+            "VictoriaLogs is disabled. To enable, set GOLDFISH_VICTORIA_LOGS_ENABLED=true "
+            "and ensure VictoriaLogs is running at the configured URL."
+        )
+
     if not query.strip():
         return "Missing required parameter: `query` (raw LogsQL string)"
 
@@ -124,6 +130,12 @@ async def search_logs(query: str) -> str:
         Formatted search results or error message
     """
     settings = get_settings()
+
+    if not settings.logging.victoria_logs_enabled:
+        return (
+            "VictoriaLogs is disabled. To enable, set GOLDFISH_VICTORIA_LOGS_ENABLED=true "
+            "and ensure VictoriaLogs is running at the configured URL."
+        )
 
     if not query.strip():
         return "Missing required parameter: `query` (raw LogsQL string)"

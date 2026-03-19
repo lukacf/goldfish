@@ -17,7 +17,7 @@ class LoggingSettings:
     """Logging configuration from environment variables."""
 
     level: str = "INFO"
-    victoria_logs_enabled: bool = True
+    victoria_logs_enabled: bool = False
     victoria_logs_url: str = "http://localhost:9428"
     loki_app_tag: str = "goldfish"
     project_path: str | None = None
@@ -50,7 +50,7 @@ def get_settings() -> Settings:
         GOLDFISH_CI_E2E: Running in E2E test mode (default: false)
     """
     log_level = os.environ.get("GOLDFISH_LOG_LEVEL", "INFO")
-    victoria_enabled = os.environ.get("GOLDFISH_VICTORIA_LOGS_ENABLED", "true").lower() == "true"
+    victoria_enabled = os.environ.get("GOLDFISH_VICTORIA_LOGS_ENABLED", "false").lower() == "true"
     victoria_url = os.environ.get("GOLDFISH_VICTORIA_LOGS_URL", "http://localhost:9428")
     ci_e2e = os.environ.get("CI_E2E", "0") == "1"
     project_path = os.environ.get("GOLDFISH_PROJECT_PATH")
