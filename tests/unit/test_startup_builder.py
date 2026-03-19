@@ -121,18 +121,20 @@ def test_disk_mount_section_rw_mode():
     assert "mount -t ext4 -o rw" in script
 
 
-def test_docker_run_section_gpu_detection():
-    """Test that Docker run section includes GPU detection."""
+def test_docker_run_section_gpu_from_profile():
+    """Test that Docker run section uses profile-based GPU flag, not runtime detection."""
     script = docker_run_section(
         image="gcr.io/project/image:tag",
         env_keys=["VAR1", "VAR2"],
         mounts=[("/host/path", "/container/path")],
         entrypoint="/bin/bash",
+        gpu_count=8,
     )
 
-    assert "nvidia-smi" in script
     assert "--gpus all" in script
     assert "DOCKER_GPU_ARGS" in script
+    # Must NOT rely on runtime nvidia-smi detection (race condition on GCE)
+    assert "nvidia-smi" not in script
 
 
 def test_docker_run_section_environment_variables():

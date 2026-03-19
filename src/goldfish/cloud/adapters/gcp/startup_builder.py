@@ -556,8 +556,9 @@ def docker_run_section(
     entrypoint: str,
     cmd: str = "",
     shm_size: str = DEFAULT_SHM_SIZE,
+    gpu_count: int = 0,
 ) -> str:
-    """Generate Docker run command with GPU detection.
+    """Generate Docker run command with GPU support.
 
     Args:
         image: Docker image to run
@@ -566,6 +567,7 @@ def docker_run_section(
         entrypoint: Container entrypoint command
         cmd: Command/script to pass to entrypoint (e.g., "/entrypoint.sh")
         shm_size: Shared memory size (default from DEFAULT_SHM_SIZE)
+        gpu_count: Number of GPUs requested by the profile (0 = CPU-only)
 
     Returns:
         Shell script fragment defining DOCKER_CMD array
@@ -574,11 +576,13 @@ def docker_run_section(
     mount_flags = " ".join(f"-v {host}:{target}" for host, target in mounts)
     cmd_part = f" {cmd}" if cmd else ""
 
+    # Use profile-based GPU flag, not runtime detection.
+    # NVIDIA drivers load asynchronously on GCE (~210s on a3-highgpu-8g).
+    # Runtime `nvidia-smi` checks race with driver loading and fail silently.
+    gpu_args = "--gpus all" if gpu_count > 0 else ""
+
     return f"""
-DOCKER_GPU_ARGS=""
-if command -v nvidia-smi >/dev/null 2>&1; then
-  DOCKER_GPU_ARGS="--gpus all"
-fi
+DOCKER_GPU_ARGS="{gpu_args}"
 
 DOCKER_CMD=(
   docker run --rm $DOCKER_GPU_ARGS \\
@@ -776,6 +780,7 @@ def build_startup_script(
     max_runtime_seconds: int | None = None,
     heartbeat_timeout_seconds: int | None = None,
     log_sync_interval: int | None = None,
+    gpu_count: int = 0,
 ) -> str:
     """Build complete startup script for GCE instance.
 
@@ -956,6 +961,7 @@ fi
             entrypoint=entrypoint,
             cmd=cmd,
             shm_size=shm_size,
+            gpu_count=gpu_count,
         )
     )
 
