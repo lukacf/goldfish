@@ -359,6 +359,7 @@ class GCELauncher:
                 gpu_type=gpu_type,
                 zones=zones,
                 preemptible=preemptible,
+                machine_type=machine_type,
             )
         else:
             # Simple launch without capacity search
@@ -379,6 +380,7 @@ class GCELauncher:
         gpu_type: str | None,
         zones: list[str] | None,
         preemptible: bool | None = None,
+        machine_type: str | None = None,
     ) -> GCELaunchResult:
         """Launch using ResourceLauncher for capacity search.
 
@@ -388,6 +390,7 @@ class GCELauncher:
             gpu_type: GPU type to filter resources
             zones: Zones to search
             preemptible: Force spot (True), on-demand (False), or auto (None)
+            machine_type: Exact machine type to match (e.g., "a3-highgpu-8g")
 
         Returns:
             GCELaunchResult with instance_name and zone
@@ -395,9 +398,10 @@ class GCELauncher:
         Raises:
             GoldfishError: If no capacity found
         """
-        # Filter resources by GPU accelerator type (e.g., "nvidia-h100-80gb")
-        # Profile structure: gpu.type = "h100" (short name), gpu.accelerator = "nvidia-h100-80gb" (GCE type)
-        # We compare against accelerator since that's what RunSpec.gpu_type contains.
+        # Filter resources to match the requested profile exactly.
+        # Without machine_type filtering, profiles with the same GPU type but
+        # different machine sizes (e.g., a3-highgpu-1g vs a3-highgpu-8g) would
+        # all match, and the capacity search could pick the wrong one.
         if gpu_type:
             filtered_resources = [
                 r for r in self.resources if (r.get("gpu", {}).get("accelerator") or "").lower() == gpu_type.lower()
@@ -409,6 +413,12 @@ class GCELauncher:
                 for r in self.resources
                 if not r.get("gpu", {}).get("type") or r.get("gpu", {}).get("type", "").lower() == "none"
             ]
+
+        # Further filter by machine_type if specified (critical for multi-GPU profiles)
+        if machine_type and filtered_resources:
+            exact = [r for r in filtered_resources if r.get("machine_type") == machine_type]
+            if exact:
+                filtered_resources = exact
 
         if not filtered_resources:
             raise GoldfishError(f"No resources found for GPU accelerator: {gpu_type or 'none'}")

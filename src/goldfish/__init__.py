@@ -3,4 +3,4 @@
 Solves the 'goldfish memory' problem: AI agents losing context after compaction.
 """
 
-__version__ = "0.2.8"
+__version__ = "0.2.9"
