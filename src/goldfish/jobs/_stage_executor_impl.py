@@ -2753,6 +2753,8 @@ echo "Stage completed successfully"
         )
 
         # State machine: post-run success path → AWAITING_USER_FINALIZATION (v1.2).
+        # If user already called finalize_run while RUNNING, skip AWAITING and go
+        # straight to COMPLETED (early finalization).
         if status == StageState.COMPLETED:
             if warnings:
                 sm_transition(
@@ -2771,6 +2773,23 @@ echo "Stage completed successfully"
                     self.db,
                     stage_run_id,
                     StageEvent.POST_RUN_OK,
+                    SMEventContext(timestamp=datetime.now(UTC), source="executor"),
+                )
+
+            # Check for early finalization — user already called finalize_run
+            # while the run was still RUNNING. results_status='finalized' means
+            # results are already recorded; skip AWAITING and go to COMPLETED.
+            with self.db._conn() as conn:
+                row = conn.execute(
+                    "SELECT results_status FROM run_results WHERE stage_run_id = ?",
+                    (stage_run_id,),
+                ).fetchone()
+            if row and row[0] == "finalized":
+                logger.info("Early finalization detected for %s, auto-completing", stage_run_id)
+                sm_transition(
+                    self.db,
+                    stage_run_id,
+                    StageEvent.USER_FINALIZE,
                     SMEventContext(timestamp=datetime.now(UTC), source="executor"),
                 )
 
@@ -2803,7 +2822,7 @@ echo "Stage completed successfully"
 
         start = time.time()
         last_log: float = 0.0
-        not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
+        not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "600"))
 
         # Get handle for status checks
         handle = self._get_run_handle(stage_run_id)
@@ -2869,7 +2888,8 @@ echo "Stage completed successfully"
                     state_val = row.get("state") if row else None
                     instance_ran = state_val == StageState.RUNNING.value
 
-                    # Longer timeout for BUILD/LAUNCH phases
+                    # Longer timeout for BUILD/LAUNCH phases.
+                    # not_found_timeout (600s) covers CPU VMs with data_disk provisioning.
                     launch_timeout = int(os.getenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "1200"))
                     if not_found_timeout <= 0:
                         effective_timeout = 0
@@ -2974,7 +2994,7 @@ echo "Stage completed successfully"
                 return status
 
             state_val = row.get("state")
-            not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "300"))
+            not_found_timeout = int(os.getenv("GOLDFISH_GCE_NOT_FOUND_TIMEOUT", "600"))
             started_at = row.get("started_at")
             elapsed = float(not_found_timeout)
             if started_at:

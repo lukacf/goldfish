@@ -749,14 +749,25 @@ class ExperimentRecordManager:
                 (results_json, "finalized", ml_outcome, finalized_by, finalized_at, comparison_json, stage_run_id),
             )
 
-        # Emit USER_FINALIZE state transition if in AWAITING_USER_FINALIZATION state
+        # Emit USER_FINALIZE state transition if in AWAITING_USER_FINALIZATION state.
+        # If the run is still RUNNING/POST_RUN, record that finalization was requested
+        # so the executor can skip AWAITING_USER_FINALIZATION and go straight to COMPLETED.
         stage_run = self.db.get_stage_run(stage_run_id)
-        if stage_run and stage_run.get("state") == StageState.AWAITING_USER_FINALIZATION.value:
+        current_state = stage_run.get("state") if stage_run else None
+        if current_state == StageState.AWAITING_USER_FINALIZATION.value:
             ctx = EventContext(
                 timestamp=datetime.now(UTC),
                 source="mcp_tool",
             )
             transition(self.db, stage_run_id, StageEvent.USER_FINALIZE, ctx)
+        elif current_state in (
+            StageState.RUNNING.value,
+            StageState.POST_RUN.value,
+        ):
+            # Early finalization — run hasn't reached AWAITING yet.
+            # results_status is already 'finalized' from the UPDATE above.
+            # The executor checks this and auto-completes instead of waiting.
+            pass
 
         return {
             "record_id": record_id,

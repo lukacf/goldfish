@@ -215,11 +215,25 @@ Missing or invalid metadata is rejected.
    ├── pipeline.yaml          # Define stages and signals
    ├── requirements.txt       # Optional: only for project-specific packages
    ├── configs/
-   │   ├── preprocess.yaml
-   │   └── train.yaml
+   │   ├── preprocess.yaml    # MUST contain compute.profile (e.g., cpu-small)
+   │   └── train.yaml         # MUST contain compute.profile (e.g., h100-spot)
    └── modules/
        ├── preprocess.py
        └── train.py
+
+**Config files (`configs/<stage>.yaml`)** are REQUIRED for each stage. At minimum:
+   ```yaml
+   compute:
+     profile: "cpu-small"     # Required: cpu-small, cpu-large, h100-spot, etc.
+   ```
+
+**Container layout:** Only `modules/`, `configs/`, and `entrypoints/` are copied
+   into the container at `/app/`. Code reads inputs from `/mnt/inputs/` and writes
+   outputs to `/mnt/outputs/`.
+
+**Output types:**
+   - `npy`/`csv`: Use `save_output(name, data)` — auto-serializes numpy/pandas
+   - `file`/`directory`: Use `get_output_path(name)` — returns a Path, you save manually
 
 **Note:** Stages automatically use pre-built images with common ML libraries
    (numpy, pandas, torch, scikit-learn, etc.). No setup required.
