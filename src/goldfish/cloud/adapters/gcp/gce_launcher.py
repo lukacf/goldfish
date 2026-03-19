@@ -347,6 +347,8 @@ class GCELauncher:
             heartbeat_timeout_seconds=heartbeat_timeout,
             # Real-time log visibility - sync logs to GCS every N seconds
             log_sync_interval=log_sync_interval,
+            # GPU flag - profile-based, not runtime nvidia-smi detection
+            gpu_count=gpu_count or 0,
         )
 
         if use_capacity_search and self.resources:
