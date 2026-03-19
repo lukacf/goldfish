@@ -59,9 +59,9 @@ MAX_REQUEST_BODY_SIZE = 1_000_000
 def _get_version() -> str:
     """Get goldfish package version."""
     try:
-        from importlib.metadata import version
+        from goldfish import __version__
 
-        return version("goldfish")
+        return __version__
     except Exception:
         return "unknown"
 
