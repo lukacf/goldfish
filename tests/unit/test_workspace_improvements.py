@@ -103,7 +103,14 @@ class TestFromRefValidation:
 
         validate_from_ref("abc123def")  # Should not raise
 
-    def test_validate_from_ref_rejects_remote_refs_full(self) -> None:
+    def test_validate_from_ref_accepts_slashed_local_branch(self) -> None:
+        """feature/foo, release/v1 are valid local branch names."""
+        from goldfish.validation import validate_from_ref
+
+        validate_from_ref("feature/foo")  # Should not raise
+        validate_from_ref("release/v1")  # Should not raise
+
+    def test_validate_from_ref_rejects_explicit_remote_refs(self) -> None:
         import pytest
 
         from goldfish.errors import GoldfishError
@@ -111,25 +118,6 @@ class TestFromRefValidation:
 
         with pytest.raises(GoldfishError):
             validate_from_ref("refs/remotes/origin/main")
-
-    def test_validate_from_ref_rejects_remote_refs_shorthand(self) -> None:
-        """origin/main must be rejected — it resolves to remote-tracking state."""
-        import pytest
-
-        from goldfish.errors import GoldfishError
-        from goldfish.validation import validate_from_ref
-
-        with pytest.raises(GoldfishError):
-            validate_from_ref("origin/main")
-
-    def test_validate_from_ref_rejects_upstream_shorthand(self) -> None:
-        import pytest
-
-        from goldfish.errors import GoldfishError
-        from goldfish.validation import validate_from_ref
-
-        with pytest.raises(GoldfishError):
-            validate_from_ref("upstream/feature")
 
     def test_validate_from_ref_rejects_empty_string(self) -> None:
         """Empty string must be rejected, not silently defaulted to main."""

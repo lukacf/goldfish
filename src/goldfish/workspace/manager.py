@@ -605,11 +605,19 @@ class WorkspaceManager:
         #   4. Nothing resolves → clear error
         reserved_refs = {"main", "master", "HEAD"}
         is_workspace_ref = False
+        parent_workspace_name: str | None = None
         if from_ref in reserved_refs:
             git_ref = from_ref
         elif self.git.branch_exists(from_ref):
+            # Unqualified workspace name → translate to goldfish/*
             git_ref = self.git._workspace_branch(from_ref)
             is_workspace_ref = True
+            parent_workspace_name = from_ref
+        elif from_ref.startswith("goldfish/") and self.git.ref_exists(from_ref):
+            # Fully qualified goldfish/<workspace> form
+            git_ref = from_ref
+            is_workspace_ref = True
+            parent_workspace_name = from_ref.removeprefix("goldfish/")
         elif self.git.ref_exists(from_ref):
             git_ref = from_ref
         else:
@@ -622,7 +630,7 @@ class WorkspaceManager:
 
         # Create workspace lineage record (tracks parent and history).
         # Only record parent_workspace for actual workspace names (FK constraint).
-        parent_ws = from_ref if is_workspace_ref else None
+        parent_ws = parent_workspace_name if is_workspace_ref else None
         self.db.create_workspace_lineage(
             workspace_name=name,
             parent_workspace=parent_ws,
