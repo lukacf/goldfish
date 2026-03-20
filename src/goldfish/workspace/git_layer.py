@@ -124,6 +124,14 @@ class GitLayer:
         except GoldfishError:
             return False
 
+    def ref_exists(self, ref: str) -> bool:
+        """Check if a git ref (branch, tag, SHA, HEAD) resolves."""
+        try:
+            self._run_git("rev-parse", "--verify", f"{ref}^{{commit}}")
+            return True
+        except GoldfishError:
+            return False
+
     def create_branch(self, workspace_name: str, from_ref: str = "main") -> None:
         """Create a new workspace branch from a reference.
 

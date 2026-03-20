@@ -597,21 +597,28 @@ class WorkspaceManager:
         if self.git.branch_exists(name):
             raise GoldfishError(f"Workspace '{name}' already exists")
 
-        # Translate workspace names to git branch refs.
-        # Symbolic refs (main, master, HEAD) and SHAs are passed through as-is.
-        symbolic_refs = {"main", "master", "HEAD"}
-        git_ref = from_ref
-        if from_ref not in symbolic_refs and self.git.branch_exists(from_ref):
+        # Resolve from_ref to a git-resolvable ref.
+        # If it's a workspace name, translate to goldfish/* namespace.
+        # Otherwise pass through as-is (branch, tag, SHA, main/master/HEAD).
+        is_workspace_ref = self.git.branch_exists(from_ref)
+        if is_workspace_ref:
             git_ref = self.git._workspace_branch(from_ref)
+        else:
+            git_ref = from_ref
+
+        # Verify the ref actually resolves before branching.
+        # This gives a clear Goldfish error instead of leaking raw git output.
+        if not self.git.ref_exists(git_ref):
+            raise GoldfishError(
+                f"Cannot create workspace from '{from_ref}': " f"not a known workspace, branch, tag, or commit"
+            )
 
         # Create the branch
         self.git.create_branch(name, git_ref)
 
         # Create workspace lineage record (tracks parent and history).
         # Only record parent_workspace for actual workspace names (FK constraint).
-        # Symbolic refs (main, master, HEAD) are not workspace names.
-        symbolic_refs = {"main", "master", "HEAD"}
-        parent_ws = from_ref if from_ref not in symbolic_refs and self.git.branch_exists(from_ref) else None
+        parent_ws = from_ref if is_workspace_ref else None
         self.db.create_workspace_lineage(
             workspace_name=name,
             parent_workspace=parent_ws,

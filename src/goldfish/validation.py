@@ -1271,18 +1271,10 @@ def validate_from_ref(ref: str) -> None:
     if ref.startswith("refs/remotes/"):
         raise InvalidRefNameError(ref, "remote references not allowed")
 
-    # Allow common refs
-    allowed_refs = {"main", "master", "HEAD"}
-    if ref in allowed_refs:
-        return
-
-    # Otherwise validate as workspace name (can branch from another workspace)
-    try:
-        validate_workspace_name(ref)
-    except InvalidWorkspaceNameError as e:
-        # Re-raise with proper error type
-        reason = e.message.split(": ", 1)[-1] if ": " in e.message else str(e)
-        raise InvalidRefNameError(ref, reason) from e
+    # If it passed the security checks above (no dangerous chars, no path traversal,
+    # no remote refs), accept it. It could be a workspace name, a branch like
+    # goldfish/baseline, a tag, or a SHA. The workspace manager will verify it
+    # actually resolves before branching.
 
 
 def validate_job_id(job_id: str) -> None:
