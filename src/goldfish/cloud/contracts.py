@@ -303,6 +303,7 @@ class RunHandle:
     # Optional metadata
     created_at: str | None = None  # ISO timestamp
     zone: str | None = None  # For multi-zone backends
+    warm_instance: bool = False  # True if dispatched to a warm pool instance
 
     def to_dict(self) -> dict[str, str | None]:
         """Serialize handle for storage."""
