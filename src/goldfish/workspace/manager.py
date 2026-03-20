@@ -590,6 +590,18 @@ class WorkspaceManager:
             pushed_to_remote=pushed,
         )
 
+    def _sync_mounted_workspace(self, workspace: str, reason: str) -> None:
+        """If workspace is mounted in any slot, sync its changes to the branch.
+
+        This ensures branching from a mounted workspace includes the user's
+        current edits, not just the last-committed state.
+        """
+        for slot_info in self.get_all_slots():
+            if slot_info.workspace == workspace and slot_info.state == SlotState.MOUNTED:
+                slot_path = self._slot_path(slot_info.slot)
+                self.git.sync_slot_to_branch(slot_path, workspace, f"Auto-sync before branch: {reason}")
+                return  # Only one mount per workspace
+
     def create_workspace(self, name: str, goal: str, reason: str, from_ref: str = "main") -> CreateWorkspaceResponse:
         """Create a new workspace from main (or another ref)."""
         validate_reason(reason, self.config.audit.min_reason_length)
@@ -610,14 +622,17 @@ class WorkspaceManager:
             git_ref = from_ref
         elif self.git.branch_exists(from_ref):
             # Unqualified workspace name → translate to goldfish/*
+            self._sync_mounted_workspace(from_ref, reason)
             git_ref = self.git._workspace_branch(from_ref)
             is_workspace_ref = True
             parent_workspace_name = from_ref
         elif from_ref.startswith("goldfish/") and self.git.ref_exists(from_ref):
             # Fully qualified goldfish/<workspace> form
+            ws_name = from_ref.removeprefix("goldfish/")
+            self._sync_mounted_workspace(ws_name, reason)
             git_ref = from_ref
             is_workspace_ref = True
-            parent_workspace_name = from_ref.removeprefix("goldfish/")
+            parent_workspace_name = ws_name
         elif self.git.ref_exists(from_ref):
             git_ref = from_ref
         else:
