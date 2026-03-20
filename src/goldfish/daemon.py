@@ -649,17 +649,11 @@ class GoldfishDaemon:
 
             stage_daemon = StageDaemon(db=self._db, config=self.config)
 
-            # Initialize warm pool reaper if enabled
-            warm_pool_reaper = self._create_warm_pool_reaper()
-
             while not self.shutdown_event.is_set():
                 try:
                     # NOTE: Legacy orphan checker is deprecated; state machine daemon drives state.
                     stage_daemon.poll_active_runs()
                     self._cleanup_stalled_pipelines()
-                    # Reap expired warm pool instances (cost protection)
-                    if warm_pool_reaper:
-                        warm_pool_reaper.reap_idle()
                 except Exception as e:
                     logger.exception("Instance monitor error: %s", e)
 
@@ -669,18 +663,6 @@ class GoldfishDaemon:
 
         self.instance_monitor_thread = threading.Thread(target=monitor_loop, daemon=True, name="instance-monitor")
         self.instance_monitor_thread.start()
-
-    def _create_warm_pool_reaper(self):
-        """Create a warm pool reaper if warm pool is enabled in config."""
-        if not self.config or not self.config.gce:
-            return None
-        warm_pool_config = self.config.gce.warm_pool
-        if not warm_pool_config.enabled:
-            return None
-
-        from goldfish.cloud.factory import create_warm_pool_manager
-
-        return create_warm_pool_manager(self.config, self._db)
 
     def _cleanup_stalled_pipelines(self) -> None:
         """Mark old running/pending pipelines as failed if they haven't progressed.

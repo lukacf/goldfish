@@ -300,10 +300,6 @@ from goldfish.server_tools.utility_tools import (  # noqa: F401, E402
     reload_config,
     validate_config,
 )
-from goldfish.server_tools.warm_pool_tools import (  # noqa: F401, E402
-    warm_pool_cleanup,
-    warm_pool_status,
-)
 from goldfish.server_tools.workspace_tools import (  # noqa: F401, E402
     create_workspace,
     delete_workspace,

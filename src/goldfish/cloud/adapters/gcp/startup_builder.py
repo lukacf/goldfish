@@ -761,180 +761,6 @@ start_metadata_syncer() {{
 """
 
 
-def idle_loop_section(idle_timeout_seconds: int, gcs_pool_path: str) -> str:
-    """Generate warm pool idle loop that replaces self-deletion after Docker exits.
-
-    Instead of deleting the instance, enters an idle loop that:
-    1. Signals idle status via instance metadata
-    2. Polls for new_job signals from the dev machine
-    3. On new_job: downloads spec from GCS, cleans workspace, runs new Docker container
-    4. On idle timeout: re-enables self-delete trap and exits
-    5. On SIGTERM (spot preemption): deregisters from pool via GCS flag
-
-    Args:
-        idle_timeout_seconds: Seconds to wait for new job before self-deleting
-        gcs_pool_path: GCS path for pool coordination (e.g., gs://bucket/warm_pool/instance)
-
-    Returns:
-        Shell script fragment
-    """
-    return f"""
-# === WARM POOL IDLE LOOP ===
-IDLE_TIMEOUT={idle_timeout_seconds}
-GCS_POOL_PATH="{gcs_pool_path}"
-
-warm_pool_idle_loop() {{
-    local idle_start=$(date +%s)
-
-    # Clear self-delete EXIT trap during idle — we don't want to die yet
-    trap '' EXIT
-
-    # Handle spot preemption during idle: deregister from pool and exit cleanly
-    trap 'echo "PREEMPTED during idle"; echo "preempted" | gsutil cp - "$GCS_POOL_PATH/preempted" 2>/dev/null || true; exit 143' SIGTERM
-
-    # Signal we're idle via instance metadata
-    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
-        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-        --metadata "goldfish_pool_status=idle,goldfish_idle_since=$(date +%s)" \\
-        --quiet 2>/dev/null || true
-
-    echo "=== ENTERING WARM POOL IDLE LOOP (timeout=${{IDLE_TIMEOUT}}s) ==="
-    log_stage "warm_pool_idle_begin" || true
-
-    while true; do
-        # Check idle timeout
-        local elapsed=$(($(date +%s) - idle_start))
-        if [[ $elapsed -gt $IDLE_TIMEOUT ]]; then
-            echo "=== IDLE TIMEOUT REACHED (${{elapsed}}s) - SELF-DELETING ==="
-            log_stage "warm_pool_idle_timeout" || true
-            # Re-enable self-delete trap and exit
-            trap 'GOLDFISH_TRAP_EXIT_CODE=$?; self_delete' EXIT
-            exit 0
-        fi
-
-        # Poll for new_job signal via metadata (reuse Overdrive pattern)
-        local sig_json
-        sig_json=$(curl -sf -H "Metadata-Flavor: Google" "$METADATA_SIGNAL_URL" 2>/dev/null || true)
-        if [[ -n "$sig_json" ]]; then
-            local cmd
-            cmd=$(echo "$sig_json" | grep -o '"command"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"command"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/' | tr -d '[:space:]')
-            local req_id
-            req_id=$(echo "$sig_json" | grep -o '"request_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"request_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/' | tr -d '[:space:]')
-
-            if [[ "$cmd" == "new_job" && -n "$req_id" && "$req_id" != "$LAST_WARM_REQ" ]]; then
-                echo "=== NEW JOB RECEIVED (request=$req_id) ==="
-                log_stage "warm_pool_new_job" || true
-                LAST_WARM_REQ="$req_id"
-
-                # ACK immediately so dev side knows we received it
-                gcloud compute instances add-metadata "$INSTANCE_NAME" \\
-                    --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                    --metadata "goldfish_ack=$req_id,goldfish_pool_status=running" \\
-                    --quiet 2>/dev/null || true
-
-                # Re-enable self-delete trap for the new job
-                trap 'GOLDFISH_TRAP_EXIT_CODE=$?; self_delete' EXIT
-
-                # Extract job spec GCS path from signal payload
-                local spec_path
-                spec_path=$(echo "$sig_json" | grep -o '"spec_gcs_path"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"spec_gcs_path"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/')
-
-                if [[ -z "$spec_path" ]]; then
-                    echo "ERROR: No spec_gcs_path in signal payload"
-                    exit 1
-                fi
-
-                # Download job spec from GCS
-                local spec_dir="/tmp/warm_job_spec"
-                rm -rf "$spec_dir"
-                mkdir -p "$spec_dir"
-                gsutil -m cp -r "$spec_path/*" "$spec_dir/" 2>&1 || {{ echo "Failed to download job spec"; exit 1; }}
-
-                # Clean workspace between runs
-                echo "Cleaning workspace for new job..."
-                rm -rf /mnt/outputs/* /tmp/triton* /tmp/torch* /tmp/pip* /tmp/stage_times.log
-                mkdir -p /mnt/outputs/.goldfish
-
-                # Source new environment
-                if [[ -f "$spec_dir/env.sh" ]]; then
-                    source "$spec_dir/env.sh"
-                fi
-
-                # Pull new image if different
-                local new_image
-                new_image=$(cat "$spec_dir/image_tag" 2>/dev/null || echo "")
-                if [[ -n "$new_image" && "$new_image" != "$CURRENT_IMAGE" ]]; then
-                    echo "Pulling new image: $new_image"
-                    log_stage "warm_pool_docker_pull" || true
-                    docker pull "$new_image" || {{ echo "Image pull failed"; exit 1; }}
-                    CURRENT_IMAGE="$new_image"
-                fi
-
-                # Stage new inputs
-                if [[ -f "$spec_dir/pre_run.sh" ]]; then
-                    bash "$spec_dir/pre_run.sh" || {{ echo "Pre-run staging failed"; exit 1; }}
-                fi
-
-                # Update log paths for new run
-                local new_run_path
-                new_run_path=$(cat "$spec_dir/run_path" 2>/dev/null || echo "")
-                if [[ -n "$new_run_path" ]]; then
-                    STDOUT_LOG="/tmp/stdout.log"
-                    STDERR_LOG="/tmp/stderr.log"
-                    : > "$STDOUT_LOG"
-                    : > "$STDERR_LOG"
-                fi
-
-                # Build and run new Docker command
-                if [[ -f "$spec_dir/docker_cmd.sh" ]]; then
-                    log_stage "warm_pool_docker_run_begin" || true
-                    bash "$spec_dir/docker_cmd.sh" > >(tee -a "$STDOUT_LOG") 2> >(tee -a "$STDERR_LOG") &
-                    DOCKER_PID=$!
-                    wait $DOCKER_PID
-                    EXIT_CODE=$?
-                    sleep 1
-                    log_stage "warm_pool_docker_run_end" || true
-                fi
-
-                # Upload outputs (post_run)
-                if [[ -f "$spec_dir/post_run.sh" ]]; then
-                    bash "$spec_dir/post_run.sh" || true
-                fi
-
-                # Write exit code
-                if [[ -n "$EXIT_CODE_FILE" ]]; then
-                    echo "$EXIT_CODE" > "$EXIT_CODE_FILE" 2>/dev/null || true
-                fi
-
-                # Upload logs
-                sync_final_logs || true
-
-                # Clear self-delete trap again for next idle cycle
-                trap '' EXIT
-
-                # Update metadata
-                gcloud compute instances add-metadata "$INSTANCE_NAME" \\
-                    --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                    --metadata "goldfish_pool_status=idle,goldfish_idle_since=$(date +%s)" \\
-                    --quiet 2>/dev/null || true
-
-                # Reset idle timer
-                idle_start=$(date +%s)
-                echo "=== JOB COMPLETE (exit=$EXIT_CODE), RETURNING TO IDLE ==="
-                log_stage "warm_pool_idle_begin" || true
-                continue
-            fi
-        fi
-
-        sleep 1  # Poll every 1s (same as metadata syncer)
-    done
-}}
-
-LAST_WARM_REQ=""
-CURRENT_IMAGE="{{}}"
-"""
-
-
 def build_startup_script(
     *,
     bucket: str,
@@ -955,7 +781,6 @@ def build_startup_script(
     heartbeat_timeout_seconds: int | None = None,
     log_sync_interval: int | None = None,
     gpu_count: int = 0,
-    warm_pool_idle_timeout_seconds: int | None = None,
 ) -> str:
     """Build complete startup script for GCE instance.
 
@@ -1205,20 +1030,9 @@ fi
     parts.append(f'upload_exit_code "$EXIT_CODE_FILE" gs://{bucket}/{bucket_path}/logs/exit_code.txt')
     parts.append('echo "Log upload attempts completed (instance will delete regardless for cost protection)"')
 
-    # Exit or enter warm pool idle loop
-    use_warm_pool = warm_pool_idle_timeout_seconds is not None and warm_pool_idle_timeout_seconds > 0
-    if use_warm_pool:
-        assert warm_pool_idle_timeout_seconds is not None  # Narrowing for mypy
-        gcs_pool_path = f"gs://{bucket}/warm_pool/{'{INSTANCE_NAME}'}"
-        parts.append(idle_loop_section(warm_pool_idle_timeout_seconds, gcs_pool_path))
-        parts.append(f'CURRENT_IMAGE="{image}"')
-        parts.append('log_stage "cleanup_begin"')
-        # If Docker exit code is 0, enter idle loop. On failure, self-delete.
-        parts.append('if [[ "$EXIT_CODE" == "0" ]]; then warm_pool_idle_loop; fi')
-        parts.append("exit $EXIT_CODE")
-    else:
-        # Standard flow: exit with docker exit code, EXIT trap handles self-deletion
-        parts.append('log_stage "cleanup_begin"')
-        parts.append("exit $EXIT_CODE")
+    # Exit with docker exit code - the EXIT trap will handle self-deletion
+    # Logs are already uploaded and verified at this point
+    parts.append('log_stage "cleanup_begin"')
+    parts.append("exit $EXIT_CODE")
 
     return "\n".join(parts) + "\n"

@@ -548,27 +548,3 @@ def resolve_profile_base_image(
     from goldfish.cloud.adapters.gcp.profiles import resolve_base_image
 
     return resolve_base_image(profile, artifact_registry, version)
-
-
-def create_warm_pool_manager(
-    config: GoldfishConfig,
-    db: Any,
-) -> Any | None:
-    """Create a WarmPoolManager if warm pool is enabled.
-
-    Returns None if not configured. This factory function isolates
-    the GCP adapter import behind the factory boundary.
-    """
-    if not config.gce:
-        return None
-    warm_pool_config = config.gce.warm_pool
-    if not warm_pool_config.enabled:
-        return None
-
-    from goldfish.cloud.adapters.gcp.warm_pool import WarmPoolManager
-
-    return WarmPoolManager(
-        db=db,
-        config=warm_pool_config,
-        project_id=config.gce.effective_project_id if config.gce else None,
-    )

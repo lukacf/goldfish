@@ -24,7 +24,6 @@ from goldfish.validation import ValidationError
 
 if TYPE_CHECKING:
     from goldfish.cloud.adapters.gcp.gce_launcher import GCELauncher
-    from goldfish.cloud.adapters.gcp.warm_pool import WarmPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +56,6 @@ class GCERunBackend:
     """
 
     _launcher: GCELauncher
-    _warm_pool: WarmPoolManager | None
 
     def __init__(
         self,
@@ -66,7 +64,6 @@ class GCERunBackend:
         bucket: str | None = None,
         gpu_preference: list[str] | None = None,
         service_account: str | None = None,
-        warm_pool: WarmPoolManager | None = None,
     ) -> None:
         """Initialize GCE backend.
 
@@ -99,7 +96,6 @@ class GCERunBackend:
         self._project_id = project_id
         self._zones = zones or [default_zone]
         self._bucket = bucket
-        self._warm_pool = warm_pool
 
     def _build_resources_from_profiles(self, global_zones: list[str] | None = None) -> list[dict]:
         """Build resources list from profile definitions.
@@ -390,17 +386,15 @@ class GCERunBackend:
     def cleanup(self, handle: RunHandle) -> None:
         """Clean up resources for a terminated instance.
 
-        For warm pool instances, release back to idle instead of deleting.
-        For regular instances, this is a no-op (terminate() already deleted).
+        For GCE, this is a no-op after terminate() since delete removes all resources.
 
         Args:
             handle: Handle to the instance.
         """
-        if handle.warm_instance and self._warm_pool:
-            # Release warm instance back to pool instead of deleting
-            self._warm_pool.release_instance(handle.backend_handle)
-            logger.info("Released warm instance %s back to pool", handle.backend_handle)
-        # Regular instances: no additional cleanup needed (terminate() handles deletion)
+        # GCE instances are fully cleaned up by delete
+        # No additional cleanup needed
+        _ = handle  # Acknowledge parameter for protocol compliance
+        pass
 
     def get_zone(self, handle: RunHandle) -> str | None:
         """Get the zone for a GCE instance.

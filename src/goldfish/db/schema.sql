@@ -660,28 +660,3 @@ CREATE TABLE IF NOT EXISTS project_image_versions (
 CREATE INDEX IF NOT EXISTS idx_project_image_versions_project_type ON project_image_versions(project_name, image_type);
 CREATE INDEX IF NOT EXISTS idx_project_image_versions_current ON project_image_versions(project_name, image_type, is_current)
     WHERE is_current = 1;
-
-
--- =============================================================================
--- Warm Pool (optional, for keeping GCE instances alive between runs)
--- =============================================================================
-
-CREATE TABLE IF NOT EXISTS warm_instances (
-    instance_name TEXT PRIMARY KEY,
-    zone TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    machine_type TEXT NOT NULL,
-    gpu_count INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'idle' CHECK(status IN ('idle', 'claimed', 'running', 'deleting')),
-    image_tag TEXT,                           -- Last Docker image (for cache hit detection)
-    idle_since TEXT,                          -- When instance became idle
-    last_job_at TEXT,                         -- When last job was dispatched
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    current_stage_run_id TEXT,               -- FK when running
-    FOREIGN KEY (current_stage_run_id) REFERENCES stage_runs(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_warm_instances_status ON warm_instances(status);
-CREATE INDEX IF NOT EXISTS idx_warm_instances_machine ON warm_instances(machine_type, gpu_count);
-CREATE INDEX IF NOT EXISTS idx_warm_instances_idle ON warm_instances(idle_since)
-    WHERE status = 'idle';

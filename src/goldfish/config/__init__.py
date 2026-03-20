@@ -446,18 +446,6 @@ class DockerConfig(BaseModel):
     cloud_build: CloudBuildConfig = Field(default_factory=CloudBuildConfig)
 
 
-class WarmPoolConfig(BaseModel):
-    """Configuration for warm pool (optional, off by default)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = False
-    max_instances: int = Field(default=2, ge=1, le=10)
-    idle_timeout_minutes: int = Field(default=30, ge=5, le=120)
-    profiles: list[str] = Field(default_factory=list)  # Empty = all profiles
-    watchdog_seconds: int = Field(default=21600, ge=3600)  # 1h min, 6h default
-
-
 class GCEConfig(BaseModel):
     """GCE (Google Compute Engine) configuration."""
 
@@ -490,9 +478,6 @@ class GCEConfig(BaseModel):
 
     # Service account (optional)
     service_account: str | None = None
-
-    # Warm pool (optional, off by default)
-    warm_pool: WarmPoolConfig = Field(default_factory=WarmPoolConfig)
 
     # Runtime preferences
     gpu_preference: list[str] = Field(default_factory=lambda: ["h100", "a100", "none"])
@@ -556,7 +541,6 @@ def _get_valid_fields_for_path(loc: Sequence[object]) -> list[str]:
         "metrics": list(MetricsConfig.model_fields.keys()),
         "docker": list(DockerConfig.model_fields.keys()),
         "svs": list(SVSConfig.model_fields.keys()),
-        "warm_pool": list(WarmPoolConfig.model_fields.keys()),
     }
 
     top_level_fields = [
