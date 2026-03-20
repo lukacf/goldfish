@@ -611,6 +611,8 @@ class GoldfishConfig(BaseModel):
             if isinstance(slots, bool):
                 pass  # Reject: let Pydantic raise validation error
             elif isinstance(slots, int):
+                if slots < 1:
+                    raise ValueError(f"slots must be >= 1, got {slots}")
                 data["slots"] = [f"w{i}" for i in range(1, slots + 1)]
         return data
 

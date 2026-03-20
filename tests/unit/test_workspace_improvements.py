@@ -61,6 +61,26 @@ class TestConfigurableSlots:
         with pytest.raises(ValidationError):
             GoldfishConfig(project_name="test", dev_repo_path="test-dev", slots=False)
 
+    def test_slots_rejects_zero(self) -> None:
+        """slots: 0 must be rejected — project needs at least one slot."""
+        import pytest
+        from pydantic import ValidationError
+
+        from goldfish.config import GoldfishConfig
+
+        with pytest.raises((ValidationError, ValueError)):
+            GoldfishConfig(project_name="test", dev_repo_path="test-dev", slots=0)
+
+    def test_slots_rejects_negative(self) -> None:
+        """slots: -1 must be rejected."""
+        import pytest
+        from pydantic import ValidationError
+
+        from goldfish.config import GoldfishConfig
+
+        with pytest.raises((ValidationError, ValueError)):
+            GoldfishConfig(project_name="test", dev_repo_path="test-dev", slots=-3)
+
 
 class TestFromRefValidation:
     def test_validate_from_ref_accepts_main(self) -> None:
