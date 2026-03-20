@@ -203,8 +203,10 @@ Missing or invalid metadata is rejected.
 ### 1. Starting a New Experiment
 
 ```
-1. Create workspace with clear goal
+1. Create workspace with clear goal (optionally branch from another workspace)
    create_workspace(name="lstm_baseline", goal="Train LSTM for price prediction", reason="Starting new baseline experiment")
+   # Or branch from an existing workspace:
+   create_workspace(name="lstm_v2", goal="Improve LSTM with attention", reason="Branching from baseline", from_ref="lstm_baseline")
 
 2. Mount to edit slot
    mount(workspace="lstm_baseline", slot="w1", reason="Begin preprocessing module development")
@@ -863,7 +865,7 @@ manage_base_images(action="push", image_type="gpu", target="project")
 
 
 
-| `create_workspace()` | New experiment from main | name, goal, reason |
+| `create_workspace()` | New experiment (optionally from another workspace) | name, goal, reason, from_ref? |
 
 
 

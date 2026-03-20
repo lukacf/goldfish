@@ -587,7 +587,7 @@ class GoldfishConfig(BaseModel):
     project_name: str
     dev_repo_path: str  # Relative path to the -dev repo
     workspaces_dir: str = "workspaces"
-    slots: list[str] = Field(default_factory=lambda: ["w1", "w2", "w3"])
+    slots: list[str] = Field(default_factory=lambda: ["w1", "w2", "w3"])  # Also accepts int in YAML
     state_md: StateMdConfig = Field(default_factory=StateMdConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
@@ -601,6 +601,18 @@ class GoldfishConfig(BaseModel):
     docker: DockerConfig = Field(default_factory=DockerConfig)
     svs: SVSConfig = Field(default_factory=SVSConfig)
     invariants: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_slots(cls, data: dict[str, object]) -> dict[str, object]:
+        """Convert integer slots to list: slots: 5 → [w1, w2, w3, w4, w5]."""
+        if isinstance(data, dict):
+            slots = data.get("slots")
+            if isinstance(slots, bool):
+                pass  # Reject: let Pydantic raise validation error
+            elif isinstance(slots, int):
+                data["slots"] = [f"w{i}" for i in range(1, slots + 1)]
+        return data
 
     @model_validator(mode="after")
     def validate_gce_config(self) -> "GoldfishConfig":

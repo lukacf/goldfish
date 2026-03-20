@@ -52,7 +52,7 @@ from goldfish.workspace.git_layer import GitLayer
 class WorkspaceManager:
     """Manages workspace slots and operations."""
 
-    SOFT_LIMIT = 3  # Warn but don't block above this
+    SOFT_LIMIT: int = 3  # Warn but don't block above this; updated in __init__
 
     def __init__(
         self,
@@ -65,6 +65,7 @@ class WorkspaceManager:
         self.project_root = project_root
         self.db = db
         self.state_manager = state_manager
+        self.SOFT_LIMIT = len(config.slots)
 
         # Resolve dev repo path (relative to project parent, not project itself)
         self.dev_repo = config.get_dev_repo_path(project_root)
