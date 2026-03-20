@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -111,8 +112,6 @@ class WarmPoolManager:
                 self._signal_bus.set_signal("goldfish", signal, target=instance_name)
 
                 # Wait for ACK (30s timeout)
-                import time
-
                 for _ in range(30):
                     ack = self._signal_bus.get_ack("goldfish", target=instance_name)
                     if ack == stage_run_id:

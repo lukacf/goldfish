@@ -850,6 +850,13 @@ warm_pool_idle_loop() {{
                 mkdir -p "$spec_dir"
                 gsutil -m cp -r "$spec_path/*" "$spec_dir/" 2>&1 || {{ echo "Failed to download job spec"; exit 1; }}
 
+                # Kill stale background processes from previous job
+                # Watchdog, supervisor, and log syncer track the old Docker PID
+                kill ${{WATCHDOG_PID:-0}} 2>/dev/null || true
+                kill ${{SUPERVISOR_PID:-0}} 2>/dev/null || true
+                kill ${{LOG_SYNCER_PID:-0}} 2>/dev/null || true
+                kill ${{METADATA_SYNCER_PID:-0}} 2>/dev/null || true
+
                 # Clean workspace between runs
                 echo "Cleaning workspace for new job..."
                 rm -rf /mnt/outputs/* /tmp/triton* /tmp/torch* /tmp/pip* /tmp/stage_times.log
@@ -894,6 +901,10 @@ warm_pool_idle_loop() {{
                     GCS_SVS_DURING_PATH="gs://${{GCS_BUCKET:-}}/runs/$new_run_path/outputs/.goldfish/svs_findings_during.json"
                     GCS_EXIT_CODE_PATH="gs://${{GCS_BUCKET:-}}/runs/$new_run_path/logs/exit_code.txt"
                 fi
+
+                # Restart metadata syncer for the new job (Overdrive log sync)
+                METADATA_SYNCER_STARTED=0
+                start_metadata_syncer
 
                 # Build and run new Docker command
                 if [[ -f "$spec_dir/docker_cmd.sh" ]]; then

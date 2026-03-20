@@ -135,6 +135,7 @@ class GCELauncher:
         goldfish_env: dict[str, str] | None = None,
         preemptible: bool | None = None,
         warm_pool_idle_timeout_seconds: int | None = None,
+        warm_pool_manager: Any | None = None,
     ) -> GCELaunchResult:
         """Launch GCE instance for stage run.
 
@@ -354,6 +355,31 @@ class GCELauncher:
             warm_pool_idle_timeout_seconds=warm_pool_idle_timeout_seconds,
         )
 
+        # Try warm pool reuse BEFORE creating a new instance.
+        # All scripts (pre_run, post_run, docker_cmd, env) are ready at this point.
+        if warm_pool_manager:
+            handle = warm_pool_manager.try_claim(
+                machine_type=machine_type,
+                gpu_count=gpu_count,
+                stage_run_id=stage_run_id,
+                image=image_tag,
+                env_map=env_map,
+                pre_run_script="\n".join(pre_run_cmds),
+                post_run_script="\n".join(post_run_cmds),
+                docker_cmd_script=self._build_docker_cmd_script(
+                    image_tag,
+                    env_map,
+                    docker_cmd,
+                    gpu_count,
+                ),
+                run_path=f"runs/{stage_run_id}",
+            )
+            if handle:
+                return GCELaunchResult(
+                    instance_name=handle.backend_handle,
+                    zone=handle.zone or "",
+                )
+
         if use_capacity_search and self.resources:
             # Use ResourceLauncher for capacity-aware search
             return self._launch_with_capacity_search(
@@ -375,6 +401,37 @@ class GCELauncher:
                 zone=zones[0] if zones else self.default_zone,
                 preemptible=preemptible,
             )
+
+    def _build_docker_cmd_script(
+        self,
+        image: str,
+        env_map: dict[str, str],
+        cmd: str,
+        gpu_count: int,
+    ) -> str:
+        """Build a standalone docker run script for warm pool reuse.
+
+        This generates the same docker run command that startup_builder creates,
+        but as a standalone bash script that the warm pool idle loop can execute.
+        """
+        import shlex
+
+        gpu_flag = "--gpus all" if gpu_count > 0 else ""
+        env_flags = " ".join(f"-e {k}={shlex.quote(v)}" for k, v in env_map.items())
+        mounts = "-v /mnt/entrypoint.sh:/entrypoint.sh -v /mnt/gcs:/mnt/gcs -v /mnt/inputs:/mnt/inputs -v /mnt/outputs:/mnt/outputs"
+        cmd_part = f" {cmd}" if cmd else ""
+
+        return f"""#!/bin/bash
+set -euo pipefail
+docker run --rm {gpu_flag} \\
+  --ipc=host \\
+  --ulimit memlock=-1 --ulimit stack=67108864 \\
+  --shm-size=16g \\
+  {env_flags} \\
+  {mounts} \\
+  --entrypoint /bin/bash \\
+  {image}{cmd_part}
+"""
 
     def _launch_with_capacity_search(
         self,
