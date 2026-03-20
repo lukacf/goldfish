@@ -290,11 +290,20 @@ class StageExecutor:
         backend_handle = row.get("backend_handle") or stage_run_id
         zone = row.get("instance_zone")
 
+        # Check if this is a warm pool instance
+        is_warm = False
+        warm_instances = self.db.list_warm_instances(status="running")
+        for wi in warm_instances:
+            if wi.get("current_stage_run_id") == stage_run_id:
+                is_warm = True
+                break
+
         return RunHandle(
             stage_run_id=stage_run_id,
             backend_type=backend_type,
             backend_handle=backend_handle,
             zone=zone,
+            warm_instance=is_warm,
         )
 
     def _backend_status_to_stage_state(self, backend_status: BackendStatus) -> StageState | str:

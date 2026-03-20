@@ -4,7 +4,7 @@ import json
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
@@ -5580,3 +5580,97 @@ class Database:
                 """,
             ).fetchall()
             return {row["tier"]: row["count"] for row in rows}
+
+    # =========================================================================
+    # Warm Pool
+    # =========================================================================
+
+    def register_warm_instance(
+        self,
+        instance_name: str,
+        zone: str,
+        project_id: str,
+        machine_type: str,
+        gpu_count: int = 0,
+        image_tag: str | None = None,
+    ) -> None:
+        """Register a new warm pool instance."""
+        now = datetime.now(UTC).isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO warm_instances
+                    (instance_name, zone, project_id, machine_type, gpu_count, image_tag, idle_since, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (instance_name, zone, project_id, machine_type, gpu_count, image_tag, now, now),
+            )
+
+    def claim_warm_instance(self, machine_type: str, gpu_count: int) -> dict | None:
+        """Atomically claim an idle warm instance matching the given spec.
+
+        Returns the claimed instance dict, or None if no match.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                UPDATE warm_instances
+                SET status = 'claimed', idle_since = NULL
+                WHERE instance_name = (
+                    SELECT instance_name FROM warm_instances
+                    WHERE status = 'idle' AND machine_type = ? AND gpu_count = ?
+                    LIMIT 1
+                )
+                RETURNING *
+                """,
+                (machine_type, gpu_count),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def release_warm_instance(self, instance_name: str) -> None:
+        """Release a warm instance back to idle."""
+        now = datetime.now(UTC).isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE warm_instances SET status = 'idle', idle_since = ?, current_stage_run_id = NULL WHERE instance_name = ?",
+                (now, instance_name),
+            )
+
+    def delete_warm_instance(self, instance_name: str) -> None:
+        """Remove a warm instance from the pool."""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM warm_instances WHERE instance_name = ?", (instance_name,))
+
+    def list_warm_instances(self, status: str | None = None) -> list[dict]:
+        """List warm instances, optionally filtered by status."""
+        with self._conn() as conn:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM warm_instances WHERE status = ? ORDER BY created_at", (status,)
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM warm_instances ORDER BY created_at").fetchall()
+            return [dict(r) for r in rows]
+
+    def count_warm_instances(self, statuses: tuple[str, ...] | None = None) -> int:
+        """Count warm instances, optionally filtered by statuses."""
+        with self._conn() as conn:
+            if statuses:
+                placeholders = ",".join("?" for _ in statuses)
+                row = conn.execute(
+                    f"SELECT COUNT(*) FROM warm_instances WHERE status IN ({placeholders})", statuses
+                ).fetchone()
+            else:
+                row = conn.execute("SELECT COUNT(*) FROM warm_instances").fetchone()
+            count: int = row[0] if row else 0
+            return count
+
+    def list_expired_warm_instances(self, idle_timeout_minutes: int) -> list[dict]:
+        """List idle instances that have exceeded the idle timeout."""
+        cutoff = (datetime.now(UTC) - timedelta(minutes=idle_timeout_minutes)).isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM warm_instances WHERE status = 'idle' AND idle_since < ? ORDER BY idle_since",
+                (cutoff,),
+            ).fetchall()
+            return [dict(r) for r in rows]
