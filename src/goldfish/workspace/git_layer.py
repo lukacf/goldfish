@@ -124,21 +124,13 @@ class GitLayer:
         except GoldfishError:
             return False
 
-    def ref_exists(self, ref: str) -> bool:
-        """Check if a git ref (branch, tag, SHA, HEAD) resolves."""
-        try:
-            self._run_git("rev-parse", "--verify", f"{ref}^{{commit}}")
-            return True
-        except GoldfishError:
-            return False
+    def resolve_ref(self, ref: str) -> str:
+        """Resolve a git ref to its commit SHA."""
+        stdout, _ = self._run_git("rev-parse", ref)
+        return stdout.strip()
 
     def create_branch(self, workspace_name: str, from_ref: str = "main") -> None:
-        """Create a new workspace branch from a reference.
-
-        The from_ref must be a git-resolvable ref (main, a SHA, or a full
-        goldfish/* branch name). Callers are responsible for translating
-        workspace names to goldfish/* — this layer does NOT guess.
-        """
+        """Create a new workspace branch from a reference."""
         branch = self._workspace_branch(workspace_name)
         self._run_git("branch", branch, from_ref)
 

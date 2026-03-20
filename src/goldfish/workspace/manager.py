@@ -52,7 +52,10 @@ from goldfish.workspace.git_layer import GitLayer
 class WorkspaceManager:
     """Manages workspace slots and operations."""
 
-    SOFT_LIMIT: int = 3  # Warn but don't block above this; updated in __init__
+    # Focus warning: suggest hibernating when this many slots are active.
+    # Independent of slot count — even with 10 slots, 3+ concurrent workspaces
+    # is a lot to juggle. The warning doesn't block, just nudges.
+    SOFT_LIMIT = 3
 
     def __init__(
         self,
@@ -65,7 +68,6 @@ class WorkspaceManager:
         self.project_root = project_root
         self.db = db
         self.state_manager = state_manager
-        self.SOFT_LIMIT = len(config.slots)
 
         # Resolve dev repo path (relative to project parent, not project itself)
         self.dev_repo = config.get_dev_repo_path(project_root)
@@ -590,72 +592,75 @@ class WorkspaceManager:
             pushed_to_remote=pushed,
         )
 
-    def _sync_mounted_workspace(self, workspace: str, reason: str) -> None:
-        """If workspace is mounted in any slot, sync its changes to the branch.
+    def create_workspace(
+        self,
+        name: str,
+        goal: str,
+        reason: str,
+        from_workspace: str | None = None,
+        from_version: str | None = None,
+    ) -> CreateWorkspaceResponse:
+        """Create a new workspace.
 
-        This ensures branching from a mounted workspace includes the user's
-        current edits, not just the last-committed state.
+        Branching rules (Goldfish terms only, no raw git refs):
+        - Neither provided: branch from main (default base).
+        - from_workspace only: branch from that workspace's current head.
+          If mounted, auto-syncs slot contents first.
+        - from_workspace + from_version: branch from that exact immutable version.
+        - from_version without from_workspace: invalid.
         """
-        for slot_info in self.get_all_slots():
-            if slot_info.workspace == workspace and slot_info.state == SlotState.MOUNTED:
-                slot_path = self._slot_path(slot_info.slot)
-                self.git.sync_slot_to_branch(slot_path, workspace, f"Auto-sync before branch: {reason}")
-                return  # Only one mount per workspace
-
-    def create_workspace(self, name: str, goal: str, reason: str, from_ref: str = "main") -> CreateWorkspaceResponse:
-        """Create a new workspace from main (or another ref)."""
         validate_reason(reason, self.config.audit.min_reason_length)
 
         if self.git.branch_exists(name):
             raise GoldfishError(f"Workspace '{name}' already exists")
 
-        # Resolve from_ref to a git-resolvable ref.
-        # Priority:
-        #   1. Reserved refs (main, master, HEAD) → always literal, never workspace
-        #   2. Existing workspace name → translate to goldfish/* namespace
-        #   3. Raw git ref (SHA, tag, local branch) → pass through
-        #   4. Nothing resolves → clear error
-        reserved_refs = {"main", "master", "HEAD"}
-        is_workspace_ref = False
-        parent_workspace_name: str | None = None
-        if from_ref in reserved_refs:
-            git_ref = from_ref
-        elif self.git.branch_exists(from_ref):
-            # Unqualified workspace name → translate to goldfish/*
-            self._sync_mounted_workspace(from_ref, reason)
-            git_ref = self.git._workspace_branch(from_ref)
-            # Only record lineage if workspace is tracked in DB
-            lineage = self.db.get_workspace_lineage(from_ref)
-            if lineage:
-                is_workspace_ref = True
-                parent_workspace_name = from_ref
-        elif from_ref.startswith("goldfish/") and self.git.ref_exists(from_ref):
-            # Fully qualified goldfish/<workspace> form — only record lineage
-            # if the workspace is actually tracked (has a lineage record).
-            ws_name = from_ref.removeprefix("goldfish/")
-            self._sync_mounted_workspace(ws_name, reason)
-            git_ref = from_ref
-            lineage = self.db.get_workspace_lineage(ws_name)
-            if lineage:
-                is_workspace_ref = True
-                parent_workspace_name = ws_name
-        elif self.git.ref_exists(from_ref):
-            git_ref = from_ref
-        else:
-            raise GoldfishError(
-                f"Cannot create workspace from '{from_ref}': " f"not a known workspace, branch, tag, or commit"
-            )
+        if from_version and not from_workspace:
+            raise GoldfishError("from_version requires from_workspace")
 
-        # Create the branch
+        # Resolve branch source
+        source_display: str
+        parent_workspace: str | None = None
+        parent_version: str | None = None
+
+        if from_workspace is None:
+            # Default: branch from main
+            git_ref = "main"
+            source_display = "main"
+
+        elif from_version is not None:
+            # Branch from specific version — uses immutable SHA from version record.
+            # The workspace branch doesn't need to exist (may have been deleted/archived).
+            version_row = self.db.get_version(from_workspace, from_version)
+            if not version_row:
+                raise GoldfishError(f"Version '{from_version}' not found in workspace '{from_workspace}'")
+            git_ref = str(version_row["git_sha"])
+            parent_workspace = from_workspace
+            parent_version = from_version
+            source_display = f"{from_workspace}@{from_version}"
+
+        else:
+            # Branch from workspace head (current state)
+            if not self.git.branch_exists(from_workspace):
+                raise GoldfishError(f"Source workspace '{from_workspace}' not found")
+            # Sync mounted slot so branch includes current edits
+            self._sync_mounted_workspace(from_workspace, reason)
+            # Resolve to exact SHA first — branch from SHA, not live ref (race-safe)
+            branch_name = self.git._workspace_branch(from_workspace)
+            fork_sha = self.git.resolve_ref(branch_name)
+            fork_version = self._ensure_version_for_sha(from_workspace, fork_sha, f"Fork point for {name}")
+            git_ref = fork_sha  # Branch from SHA, not branch ref (concurrent-safe)
+            parent_workspace = from_workspace
+            parent_version = fork_version
+            source_display = f"{from_workspace}@{fork_version}" if fork_version else f"{from_workspace} (head)"
+
+        # Create the branch from resolved ref
         self.git.create_branch(name, git_ref)
 
-        # Create workspace lineage record (tracks parent and history).
-        # Only record parent_workspace for actual workspace names (FK constraint).
-        parent_ws = parent_workspace_name if is_workspace_ref else None
+        # Record lineage
         self.db.create_workspace_lineage(
             workspace_name=name,
-            parent_workspace=parent_ws,
-            parent_version=None,
+            parent_workspace=parent_workspace,
+            parent_version=parent_version,
             description=goal,
         )
 
@@ -664,7 +669,7 @@ class WorkspaceManager:
             operation="create_workspace",
             workspace=name,
             reason=reason,
-            details={"goal": goal, "from": from_ref},
+            details={"goal": goal, "from": source_display},
         )
 
         # Update STATE.md
@@ -676,9 +681,47 @@ class WorkspaceManager:
         return CreateWorkspaceResponse(
             success=True,
             workspace=name,
-            forked_from=from_ref,
+            forked_from=source_display,
             state_md=state_md,
         )
+
+    def _ensure_version_for_sha(self, workspace: str, git_sha: str, description: str) -> str | None:
+        """Return an existing version for this SHA, or create one with a real git tag.
+
+        Returns the version string, or None if version creation fails.
+        """
+        # Check if a version already exists for this SHA
+        versions = self.db.list_versions(workspace)
+        for v in versions:
+            if v.get("git_sha") == git_sha:
+                return str(v["version"])
+
+        # Create a new version using the same pattern as save_version():
+        # get_next_version_number handles pruned versions correctly.
+        try:
+            version = self.db.get_next_version_number(workspace)
+            git_tag = f"{workspace}-{version}"
+            # Create real git tag so rollback/inspect can use it
+            self.git.create_tag(workspace, git_tag, git_sha)
+            self.db.create_version(
+                workspace_name=workspace,
+                version=version,
+                git_tag=git_tag,
+                git_sha=git_sha,
+                created_by="fork",  # Distinct from "save_version"/"run" — excluded from diff baselines
+                description=description,
+            )
+            return version
+        except Exception:
+            return None  # Best effort — don't block branching
+
+    def _sync_mounted_workspace(self, workspace: str, reason: str) -> None:
+        """If workspace is mounted, sync slot contents to branch first."""
+        for slot_info in self.get_all_slots():
+            if slot_info.workspace == workspace and slot_info.state == SlotState.MOUNTED:
+                slot_path = self._slot_path(slot_info.slot)
+                self.git.sync_slot_to_branch(slot_path, workspace, f"Auto-sync before branch: {reason}")
+                return
 
     def branch_workspace(
         self,

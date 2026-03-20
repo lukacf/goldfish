@@ -205,8 +205,10 @@ Missing or invalid metadata is rejected.
 ```
 1. Create workspace with clear goal (optionally branch from another workspace)
    create_workspace(name="lstm_baseline", goal="Train LSTM for price prediction", reason="Starting new baseline experiment")
-   # Or branch from an existing workspace:
-   create_workspace(name="lstm_v2", goal="Improve LSTM with attention", reason="Branching from baseline", from_ref="lstm_baseline")
+   # Branch from another workspace's current state:
+   create_workspace(name="lstm_v2", goal="Improve LSTM with attention", reason="Branching from baseline", from_workspace="lstm_baseline")
+   # Branch from a specific saved version:
+   create_workspace(name="lstm_v2_rollback", goal="Retry from v3", reason="Rolling back to v3", from_workspace="lstm_baseline", from_version="v3")
 
 2. Mount to edit slot
    mount(workspace="lstm_baseline", slot="w1", reason="Begin preprocessing module development")
@@ -865,7 +867,7 @@ manage_base_images(action="push", image_type="gpu", target="project")
 
 
 
-| `create_workspace()` | New experiment (optionally from another workspace) | name, goal, reason, from_ref? |
+| `create_workspace()` | New experiment (optionally from another workspace/version) | name, goal, reason, from_workspace?, from_version? |
 
 
 

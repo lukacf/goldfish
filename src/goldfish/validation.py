@@ -1267,12 +1267,22 @@ def validate_from_ref(ref: str) -> None:
     if _contains_path_traversal(ref):
         raise InvalidRefNameError(ref, "cannot contain path traversal")
 
-    # Reject explicit remote refs (refs/remotes/...).
-    # Shorthand remote refs (origin/main) and local slashed refs (feature/foo,
-    # goldfish/baseline, release/v1) are allowed — the workspace manager verifies
-    # they resolve locally before branching.
+    # Reject remote refs
     if ref.startswith("refs/remotes/"):
         raise InvalidRefNameError(ref, "remote references not allowed")
+
+    # Allow common refs
+    allowed_refs = {"main", "master", "HEAD"}
+    if ref in allowed_refs:
+        return
+
+    # Otherwise validate as workspace name (can branch from another workspace)
+    try:
+        validate_workspace_name(ref)
+    except InvalidWorkspaceNameError as e:
+        # Re-raise with proper error type
+        reason = e.message.split(": ", 1)[-1] if ": " in e.message else str(e)
+        raise InvalidRefNameError(ref, reason) from e
 
 
 def validate_job_id(job_id: str) -> None:

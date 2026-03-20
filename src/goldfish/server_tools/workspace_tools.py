@@ -32,7 +32,6 @@ from goldfish.server_core import (
 )
 from goldfish.server_tools.backup_tools import trigger_backup
 from goldfish.validation import (
-    validate_from_ref,
     validate_slot_name,
     validate_version,
     validate_workspace_name,
@@ -290,31 +289,40 @@ def manage_versions(
 
 
 @mcp.tool()
-def create_workspace(name: str, goal: str, reason: str, from_ref: str | None = None) -> CreateWorkspaceResponse:
-    """Create a new workspace, optionally branching from another workspace or ref.
+def create_workspace(
+    name: str,
+    goal: str,
+    reason: str,
+    from_workspace: str | None = None,
+    from_version: str | None = None,
+) -> CreateWorkspaceResponse:
+    """Create a new workspace, optionally branching from another workspace.
 
     Args:
         name: Workspace name (use descriptive names like "fix-tbpe-labels")
         goal: What you're trying to achieve in this workspace
         reason: Why this workspace is needed (min 15 chars)
-        from_ref: Branch from this ref instead of main. Can be another workspace name,
-                  "main", "master", or "HEAD". Default: "main".
+        from_workspace: Branch from this workspace instead of main.
+                        If mounted, its current edits are synced first.
+        from_version: Branch from a specific version (requires from_workspace).
+                      Example: from_workspace="baseline", from_version="v3"
 
     The workspace is created but not mounted. Use mount() to work in it.
     """
-    logger.info("create_workspace() called", extra={"workspace": name, "from_ref": from_ref})
+    logger.info("create_workspace() called", extra={"workspace": name, "from_workspace": from_workspace})
 
     workspace_manager = _get_workspace_manager()
     db = _get_db()
 
     # Validate inputs
     validate_workspace_name(name)
-    if from_ref is not None:
-        validate_from_ref(from_ref)  # Rejects empty string, remote refs, etc.
-    ref = from_ref if from_ref is not None else "main"
+    if from_workspace is not None:
+        validate_workspace_name(from_workspace)
 
     try:
-        result = workspace_manager.create_workspace(name, goal, reason, from_ref=ref)
+        result = workspace_manager.create_workspace(
+            name, goal, reason, from_workspace=from_workspace, from_version=from_version
+        )
 
         # Persist the goal in the database
         db.set_workspace_goal(name, goal)

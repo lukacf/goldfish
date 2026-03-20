@@ -1677,7 +1677,7 @@ class Database:
                 """
                 SELECT * FROM workspace_versions
                 WHERE workspace_name = ?
-                AND created_by != 'run'
+                AND created_by NOT IN ('run', 'fork')
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
