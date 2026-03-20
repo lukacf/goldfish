@@ -134,6 +134,7 @@ class GCELauncher:
         use_capacity_search: bool = True,
         goldfish_env: dict[str, str] | None = None,
         preemptible: bool | None = None,
+        warm_pool_idle_timeout_seconds: int | None = None,
     ) -> GCELaunchResult:
         """Launch GCE instance for stage run.
 
@@ -349,6 +350,8 @@ class GCELauncher:
             log_sync_interval=log_sync_interval,
             # GPU flag - profile-based, not runtime nvidia-smi detection
             gpu_count=gpu_count or 0,
+            # Warm pool: if set, instance enters idle loop after Docker exits instead of self-deleting
+            warm_pool_idle_timeout_seconds=warm_pool_idle_timeout_seconds,
         )
 
         if use_capacity_search and self.resources:

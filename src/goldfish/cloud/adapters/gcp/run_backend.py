@@ -236,6 +236,11 @@ class GCERunBackend:
                 # Use spec.gpu_type if provided, else default to T4
                 gpu_type = spec.gpu_type or "nvidia-tesla-t4"
 
+            # Determine warm pool idle timeout from config
+            warm_pool_timeout: int | None = None
+            if self._warm_pool and self._warm_pool.is_enabled_for(spec.profile):
+                warm_pool_timeout = self._warm_pool._config.idle_timeout_minutes * 60
+
             result = self._launcher.launch_instance(
                 image_tag=spec.image,
                 stage_run_id=spec.stage_run_id,
@@ -248,13 +253,26 @@ class GCERunBackend:
                 zones=self._zones,
                 goldfish_env=goldfish_env,
                 preemptible=spec.spot,  # Pass spot preference to launcher
+                warm_pool_idle_timeout_seconds=warm_pool_timeout,
             )
+
+            # Register instance in warm pool if eligible
+            is_warm = False
+            if warm_pool_timeout and self._warm_pool:
+                is_warm = self._warm_pool.register_instance(
+                    instance_name=result.instance_name,
+                    zone=result.zone,
+                    machine_type=machine_type,
+                    gpu_count=gpu_count,
+                    image_tag=spec.image,
+                )
 
             return RunHandle(
                 stage_run_id=spec.stage_run_id,
                 backend_type="gce",
                 backend_handle=result.instance_name,
                 zone=result.zone,
+                warm_instance=is_warm,
             )
 
         except Exception as e:
