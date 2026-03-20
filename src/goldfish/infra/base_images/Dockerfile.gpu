@@ -1,9 +1,9 @@
-# Goldfish Base Image - GPU (CUDA 12.8 + PyTorch 2.7.1 + FlashAttention-3)
+# Goldfish Base Image - GPU (CUDA 12.8 + PyTorch 2.9.1 + FlashAttention-3)
 # Uses pre-built flash-attn wheels for fast builds (seconds, not 60+ min)
 #
-# Build: docker build -f Dockerfile.gpu -t goldfish-base-gpu:v10 .
-# Push:  docker tag goldfish-base-gpu:v10 us-docker.pkg.dev/PROJECT/goldfish/goldfish-base-gpu:v10
-#        docker push us-docker.pkg.dev/PROJECT/goldfish/goldfish-base-gpu:v10
+# Build: docker build -f Dockerfile.gpu -t goldfish-base-gpu:v11 .
+# Push:  docker tag goldfish-base-gpu:v11 us-docker.pkg.dev/PROJECT/goldfish/goldfish-base-gpu:v11
+#        docker push us-docker.pkg.dev/PROJECT/goldfish/goldfish-base-gpu:v11
 #
 # NOTE: Using CUDA 12.8 to match driver 590.x (cu126 had "undefined symbol: cuDriverGetVersion")
 
@@ -12,20 +12,22 @@
 FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
 LABEL org.opencontainers.image.title="Goldfish Base GPU"
-LABEL org.opencontainers.image.description="CUDA 12.8 + PyTorch 2.7.1 + FlashAttention-3 (pre-built wheels)"
+LABEL org.opencontainers.image.description="CUDA 12.8 + PyTorch 2.9.1 + FlashAttention-3 (pre-built wheels)"
 LABEL org.opencontainers.image.vendor="Goldfish ML"
-LABEL org.opencontainers.image.version="v10"
+LABEL org.opencontainers.image.version="v11"
 
 # Avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
 # System dependencies for ML development
-# Note: No build-essential/ninja-build needed since we use pre-built flash-attn wheels
+# Python 3.12: fixes torch.compile segfault on 3.11, supports datetime.UTC
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-venv \
-    python3.11-dev \
-    python3-pip \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
     curl \
     git \
     libgomp1 \
@@ -38,51 +40,28 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable && \
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
-# Make python3.11 the default
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+# Make python3.12 the default and install pip
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
 
 # Upgrade pip
 RUN python -m pip install --upgrade pip
 
-# PyTorch with CUDA 12.8 support (cu128) - must be installed before flash-attn
-# Using cu128 to match driver 590.x
-# IMPORTANT: PyTorch 2.7.1 is required for FA3 GCS wheel compatibility (2.9.1 does NOT work)
-# torchvision/torchaudio versions must match PyTorch 2.7.1
+# PyTorch 2.9.1 with CUDA 12.8 support (cu128)
 RUN pip install --no-cache-dir \
-    torch==2.7.1 \
-    torchvision==0.22.1 \
-    torchaudio==2.7.1 \
+    torch==2.9.1 \
+    torchvision \
+    torchaudio \
     --index-url https://download.pytorch.org/whl/cu128
 
 # Other ML libraries (non-PyTorch dependencies)
 COPY requirements-gpu.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt
 
-# FlashAttention-3 - using pre-built wheels (installs in seconds, not 60+ min)
-#
-# Two sources available:
-# 1. GCS wheel (recommended for Cloud Build): Built from source on H100, tested working
-#    Set FA3_WHEEL_GCS build arg to the gs:// path
-# 2. GitHub wheel (fallback): From windreamer's repo, may have driver compatibility issues
-#
-# For Cloud Build, set: --build-arg FA3_WHEEL_GCS=gs://bucket/wheels/flash_attn_3-....whl
-ARG FA3_WHEEL_GCS=""
-ARG FA3_WHEEL_GITHUB="https://github.com/windreamer/flash-attention3-wheels/releases/download/2026.01.05-c947cd1/flash_attn_3-3.0.0b1+20260105.cu128torch291cxx11abitrue.9b6dba-cp39-abi3-linux_x86_64.whl"
-ARG FA3_WHEEL_FILE=""
-
-# Install FA3 wheel from build context (pre-downloaded by Cloud Build gsutil step)
-# FA3_WHEEL_FILE is set via --build-arg to the wheel filename (pip requires valid wheel names)
-# For local builds without wheel: falls back to GitHub URL
-COPY flash_attn*.whl /tmp/
-RUN if [ -n "$FA3_WHEEL_FILE" ] && [ -f "/tmp/$FA3_WHEEL_FILE" ]; then \
-        echo "Installing FA3 wheel: $FA3_WHEEL_FILE" && \
-        pip install --no-cache-dir "/tmp/$FA3_WHEEL_FILE" && \
-        rm -f "/tmp/$FA3_WHEEL_FILE"; \
-    else \
-        echo "Downloading FA3 wheel from GitHub: $FA3_WHEEL_GITHUB" && \
-        pip install --no-cache-dir "$FA3_WHEEL_GITHUB"; \
-    fi
+# FlashAttention-3 from PyTorch cu128 index (NOT flash-attn on PyPI, which is FA2)
+RUN pip install --no-deps --no-cache-dir \
+    https://download.pytorch.org/whl/cu128/flash_attn_3-3.0.0-cp39-abi3-manylinux_2_28_x86_64.whl
 
 # Verify FlashAttention-3 wheel installed correctly
 # Note: Can't import flash_attn_interface during build (no CUDA driver), so just check files exist
