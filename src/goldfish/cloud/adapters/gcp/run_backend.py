@@ -258,18 +258,11 @@ class GCERunBackend:
                 warm_pool_manager=self._warm_pool if warm_pool_timeout else None,
             )
 
-            # Check if launch_instance used a warm instance (zone != "" means it was warm)
-            # or register the fresh instance in the pool
+            # Fresh launch (warm pool claim happens inside launch_instance and
+            # returns early via GCELaunchResult — if we're here, it's fresh).
+            # Register in pool if eligible so the idle loop activates after this run.
             is_warm = False
-            # If the result came from warm pool claim, the instance is already registered
-            warm_instances = self._warm_pool._db.list_warm_instances(status="running") if self._warm_pool else []
-            for wi in warm_instances:
-                if wi.get("instance_name") == result.instance_name:
-                    is_warm = True
-                    break
-
-            # Register fresh instance in pool if eligible and not already warm
-            if not is_warm and warm_pool_timeout and self._warm_pool:
+            if warm_pool_timeout and self._warm_pool:
                 is_warm = self._warm_pool.register_instance(
                     instance_name=result.instance_name,
                     zone=result.zone,
