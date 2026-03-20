@@ -88,7 +88,7 @@ class TestWarmPoolDB:
         assert len(instances) == 1
         assert instances[0]["instance_name"] == "stage-abc123"
         assert instances[0]["machine_type"] == "a3-highgpu-1g"
-        assert instances[0]["status"] == "idle"
+        assert instances[0]["status"] == "running"  # Registered as running (first job active)
 
     def test_claim_warm_instance_returns_match(self, test_db) -> None:
         test_db.register_warm_instance(
@@ -98,6 +98,8 @@ class TestWarmPoolDB:
             machine_type="a3-highgpu-1g",
             gpu_count=1,
         )
+        # Register creates as 'running'; release to 'idle' so it's claimable
+        test_db.release_warm_instance("stage-abc")
 
         claimed = test_db.claim_warm_instance(machine_type="a3-highgpu-1g", gpu_count=1)
         assert claimed is not None
@@ -112,6 +114,7 @@ class TestWarmPoolDB:
             machine_type="a3-highgpu-1g",
             gpu_count=1,
         )
+        test_db.release_warm_instance("stage-abc")
 
         # Wrong machine type
         claimed = test_db.claim_warm_instance(machine_type="a3-highgpu-8g", gpu_count=8)
@@ -126,6 +129,7 @@ class TestWarmPoolDB:
             machine_type="a3-highgpu-1g",
             gpu_count=1,
         )
+        test_db.release_warm_instance("stage-abc")
 
         first = test_db.claim_warm_instance(machine_type="a3-highgpu-1g", gpu_count=1)
         second = test_db.claim_warm_instance(machine_type="a3-highgpu-1g", gpu_count=1)
@@ -140,7 +144,7 @@ class TestWarmPoolDB:
             machine_type="a3-highgpu-1g",
             gpu_count=1,
         )
-        test_db.claim_warm_instance(machine_type="a3-highgpu-1g", gpu_count=1)
+        # Already 'running' from register; release to idle
         test_db.release_warm_instance("stage-abc")
 
         instances = test_db.list_warm_instances(status="idle")
@@ -166,6 +170,10 @@ class TestWarmPoolDB:
                 machine_type="a3-highgpu-1g",
                 gpu_count=1,
             )
+        # All registered as 'running'; release 2 to 'idle', claim 1
+        test_db.release_warm_instance("stage-0")
+        test_db.release_warm_instance("stage-1")
+        test_db.release_warm_instance("stage-2")
         test_db.claim_warm_instance(machine_type="a3-highgpu-1g", gpu_count=1)
 
         assert test_db.count_warm_instances() == 3
@@ -181,7 +189,8 @@ class TestWarmPoolDB:
             machine_type="a3-highgpu-1g",
             gpu_count=1,
         )
-        # Backdate the idle_since to 2 hours ago
+        # Release to idle, then backdate idle_since to 2 hours ago
+        test_db.release_warm_instance("stage-old")
         with test_db._conn() as conn:
             old_time = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
             conn.execute(
@@ -193,7 +202,7 @@ class TestWarmPoolDB:
         assert len(expired) == 1
         assert expired[0]["instance_name"] == "stage-old"
 
-        # Fresh instance should not be expired
+        # Fresh instance (still running) should not be expired
         test_db.register_warm_instance(
             instance_name="stage-fresh",
             zone="us-central1-a",

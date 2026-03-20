@@ -94,3 +94,71 @@ def test_build_startup_script_warm_pool_sets_current_image() -> None:
         warm_pool_idle_timeout_seconds=900,
     )
     assert 'CURRENT_IMAGE="us-docker.pkg.dev/proj/repo/img:v5"' in script
+
+
+def test_idle_loop_updates_gcs_paths_for_new_run() -> None:
+    """Idle loop must update GCS log/exit paths for each new job.
+
+    Bug: Without this, logs from the second job would overwrite the first
+    job's logs in GCS because the paths were set once at script generation.
+    """
+    from goldfish.cloud.adapters.gcp.startup_builder import idle_loop_section
+
+    script = idle_loop_section(idle_timeout_seconds=900, gcs_pool_path="gs://bucket/warm_pool/test")
+    # Must update GCS paths from the new run_path
+    assert "GCS_STDOUT_PATH=" in script
+    assert "GCS_STDERR_PATH=" in script
+    assert "GCS_EXIT_CODE_PATH=" in script
+    assert "new_run_path" in script
+
+
+def test_idle_loop_writes_exit_code_to_gcs_directly() -> None:
+    """Exit code must be written to GCS directly, not via stale local path.
+
+    Bug: EXIT_CODE_FILE pointed to the first run's gcsfuse path. On subsequent
+    runs the exit code would go to the wrong location.
+    """
+    from goldfish.cloud.adapters.gcp.startup_builder import idle_loop_section
+
+    script = idle_loop_section(idle_timeout_seconds=900, gcs_pool_path="gs://bucket/warm_pool/test")
+    assert "gsutil cp -" in script  # Direct GCS upload, not local file write
+
+
+def test_build_startup_script_warm_pool_exports_bucket() -> None:
+    """Warm pool script must export GCS_BUCKET for idle loop path construction."""
+    from goldfish.cloud.adapters.gcp.startup_builder import build_startup_script
+
+    script = build_startup_script(
+        bucket="my-artifacts",
+        bucket_prefix="runs",
+        run_path="stage-abc",
+        image="img:v1",
+        entrypoint="/bin/bash",
+        env_map={},
+        warm_pool_idle_timeout_seconds=900,
+    )
+    assert 'GCS_BUCKET="my-artifacts"' in script
+
+
+def test_idle_loop_kills_stale_background_processes() -> None:
+    """Idle loop must kill watchdog/supervisor/log syncer between jobs.
+
+    Bug: These processes track the old Docker PID. Without killing them,
+    the watchdog could kill the instance mid-job, and the log syncer
+    would upload to stale GCS paths.
+    """
+    from goldfish.cloud.adapters.gcp.startup_builder import idle_loop_section
+
+    script = idle_loop_section(idle_timeout_seconds=900, gcs_pool_path="gs://bucket/warm_pool/test")
+    assert "WATCHDOG_PID" in script
+    assert "SUPERVISOR_PID" in script
+    assert "LOG_SYNCER_PID" in script
+    assert "METADATA_SYNCER_PID" in script
+
+
+def test_idle_loop_restarts_metadata_syncer() -> None:
+    """Metadata syncer must be restarted for each new job (Overdrive log sync)."""
+    from goldfish.cloud.adapters.gcp.startup_builder import idle_loop_section
+
+    script = idle_loop_section(idle_timeout_seconds=900, gcs_pool_path="gs://bucket/warm_pool/test")
+    assert "start_metadata_syncer" in script

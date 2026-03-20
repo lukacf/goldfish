@@ -850,6 +850,13 @@ warm_pool_idle_loop() {{
                 mkdir -p "$spec_dir"
                 gsutil -m cp -r "$spec_path/*" "$spec_dir/" 2>&1 || {{ echo "Failed to download job spec"; exit 1; }}
 
+                # Kill stale background processes from previous job.
+                # Guard: only kill if PID is set and non-zero (kill 0 = entire process group!)
+                [[ -n "${{WATCHDOG_PID:-}}" && "${{WATCHDOG_PID}}" != "0" ]] && kill "$WATCHDOG_PID" 2>/dev/null || true
+                [[ -n "${{SUPERVISOR_PID:-}}" && "${{SUPERVISOR_PID}}" != "0" ]] && kill "$SUPERVISOR_PID" 2>/dev/null || true
+                [[ -n "${{LOG_SYNCER_PID:-}}" && "${{LOG_SYNCER_PID}}" != "0" ]] && kill "$LOG_SYNCER_PID" 2>/dev/null || true
+                [[ -n "${{METADATA_SYNCER_PID:-}}" && "${{METADATA_SYNCER_PID}}" != "0" ]] && kill "$METADATA_SYNCER_PID" 2>/dev/null || true
+
                 # Clean workspace between runs
                 echo "Cleaning workspace for new job..."
                 rm -rf /mnt/outputs/* /tmp/triton* /tmp/torch* /tmp/pip* /tmp/stage_times.log
@@ -875,15 +882,29 @@ warm_pool_idle_loop() {{
                     bash "$spec_dir/pre_run.sh" || {{ echo "Pre-run staging failed"; exit 1; }}
                 fi
 
-                # Update log paths for new run
+                # Update ALL paths for the new run
                 local new_run_path
                 new_run_path=$(cat "$spec_dir/run_path" 2>/dev/null || echo "")
                 if [[ -n "$new_run_path" ]]; then
+                    # Reset log files
                     STDOUT_LOG="/tmp/stdout.log"
                     STDERR_LOG="/tmp/stderr.log"
                     : > "$STDOUT_LOG"
                     : > "$STDERR_LOG"
+                    : > /tmp/stage_times.log
+
+                    # CRITICAL: Update GCS paths for the NEW run so logs don't
+                    # go to the first run's location
+                    GCS_STDOUT_PATH="gs://${{GCS_BUCKET:-}}/runs/$new_run_path/logs/stdout.log"
+                    GCS_STDERR_PATH="gs://${{GCS_BUCKET:-}}/runs/$new_run_path/logs/stderr.log"
+                    GCS_METRICS_PATH="gs://${{GCS_BUCKET:-}}/runs/$new_run_path/logs/metrics.jsonl"
+                    GCS_SVS_DURING_PATH="gs://${{GCS_BUCKET:-}}/runs/$new_run_path/outputs/.goldfish/svs_findings_during.json"
+                    GCS_EXIT_CODE_PATH="gs://${{GCS_BUCKET:-}}/runs/$new_run_path/logs/exit_code.txt"
                 fi
+
+                # Restart metadata syncer for the new job (Overdrive log sync)
+                METADATA_SYNCER_STARTED=0
+                start_metadata_syncer
 
                 # Build and run new Docker command
                 if [[ -f "$spec_dir/docker_cmd.sh" ]]; then
@@ -901,12 +922,18 @@ warm_pool_idle_loop() {{
                     bash "$spec_dir/post_run.sh" || true
                 fi
 
-                # Write exit code
-                if [[ -n "$EXIT_CODE_FILE" ]]; then
-                    echo "$EXIT_CODE" > "$EXIT_CODE_FILE" 2>/dev/null || true
+                # Write exit code directly to GCS (not the stale local path)
+                if [[ -n "$GCS_EXIT_CODE_PATH" ]]; then
+                    echo "$EXIT_CODE" | gsutil cp - "$GCS_EXIT_CODE_PATH" 2>/dev/null || true
                 fi
 
-                # Upload logs
+                # Set exit code in instance metadata
+                gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+                    --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+                    --metadata "goldfish_exit_code=$EXIT_CODE" \\
+                    --quiet 2>/dev/null || true
+
+                # Upload logs to the new run's GCS paths
                 sync_final_logs || true
 
                 # Clear self-delete trap again for next idle cycle
@@ -1210,6 +1237,8 @@ fi
     if use_warm_pool:
         assert warm_pool_idle_timeout_seconds is not None  # Narrowing for mypy
         gcs_pool_path = f"gs://{bucket}/warm_pool/{'{INSTANCE_NAME}'}"
+        # Export bucket name so idle loop can construct GCS paths for subsequent runs
+        parts.append(f'GCS_BUCKET="{bucket}"')
         parts.append(idle_loop_section(warm_pool_idle_timeout_seconds, gcs_pool_path))
         parts.append(f'CURRENT_IMAGE="{image}"')
         parts.append('log_stage "cleanup_begin"')

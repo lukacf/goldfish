@@ -290,13 +290,15 @@ class StageExecutor:
         backend_handle = row.get("backend_handle") or stage_run_id
         zone = row.get("instance_zone")
 
-        # Check if this is a warm pool instance
+        # Check warm pool: single-row lookup by backend_handle (not a scan)
         is_warm = False
-        warm_instances = self.db.list_warm_instances(status="running")
-        for wi in warm_instances:
-            if wi.get("current_stage_run_id") == stage_run_id:
-                is_warm = True
-                break
+        if backend_handle:
+            with self.db._conn() as conn:
+                row_wp = conn.execute(
+                    "SELECT 1 FROM warm_instances WHERE instance_name = ? AND status = 'running'",
+                    (backend_handle,),
+                ).fetchone()
+                is_warm = row_wp is not None
 
         return RunHandle(
             stage_run_id=stage_run_id,
