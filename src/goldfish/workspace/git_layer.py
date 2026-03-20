@@ -127,15 +127,11 @@ class GitLayer:
     def create_branch(self, workspace_name: str, from_ref: str = "main") -> None:
         """Create a new workspace branch from a reference.
 
-        If from_ref is another workspace name (not main/master/HEAD), it's
-        translated to the goldfish/* namespace automatically.
+        The from_ref must be a git-resolvable ref (main, a SHA, or a full
+        goldfish/* branch name). Callers are responsible for translating
+        workspace names to goldfish/* — this layer does NOT guess.
         """
         branch = self._workspace_branch(workspace_name)
-        # Translate workspace names to goldfish/* branch namespace
-        special_refs = {"main", "master", "HEAD"}
-        if from_ref not in special_refs and not from_ref.startswith("goldfish/"):
-            if self.branch_exists(from_ref):
-                from_ref = self._workspace_branch(from_ref)
         self._run_git("branch", branch, from_ref)
 
     def delete_branch(self, workspace_name: str, force: bool = False) -> None:

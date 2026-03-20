@@ -222,6 +222,7 @@ class AdapterFactory:
                 bucket=bucket,
                 gpu_preference=gce_config.gpu_preference if gce_config else None,
                 service_account=gce_config.service_account if gce_config else None,
+                profile_overrides=gce_config.effective_profile_overrides if gce_config else None,
             )
 
         else:
