@@ -624,15 +624,21 @@ class WorkspaceManager:
             # Unqualified workspace name → translate to goldfish/*
             self._sync_mounted_workspace(from_ref, reason)
             git_ref = self.git._workspace_branch(from_ref)
-            is_workspace_ref = True
-            parent_workspace_name = from_ref
+            # Only record lineage if workspace is tracked in DB
+            lineage = self.db.get_workspace_lineage(from_ref)
+            if lineage:
+                is_workspace_ref = True
+                parent_workspace_name = from_ref
         elif from_ref.startswith("goldfish/") and self.git.ref_exists(from_ref):
-            # Fully qualified goldfish/<workspace> form
+            # Fully qualified goldfish/<workspace> form — only record lineage
+            # if the workspace is actually tracked (has a lineage record).
             ws_name = from_ref.removeprefix("goldfish/")
             self._sync_mounted_workspace(ws_name, reason)
             git_ref = from_ref
-            is_workspace_ref = True
-            parent_workspace_name = ws_name
+            lineage = self.db.get_workspace_lineage(ws_name)
+            if lineage:
+                is_workspace_ref = True
+                parent_workspace_name = ws_name
         elif self.git.ref_exists(from_ref):
             git_ref = from_ref
         else:
