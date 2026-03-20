@@ -1267,9 +1267,15 @@ def validate_from_ref(ref: str) -> None:
     if _contains_path_traversal(ref):
         raise InvalidRefNameError(ref, "cannot contain path traversal")
 
-    # Reject remote refs
-    if ref.startswith("refs/remotes/"):
-        raise InvalidRefNameError(ref, "remote references not allowed")
+    # Reject remote refs — both full form (refs/remotes/...) and shorthand (origin/main).
+    # The only slashed form allowed is goldfish/* (workspace namespace).
+    if ref.startswith("refs/"):
+        raise InvalidRefNameError(ref, "raw git refs not allowed (use workspace name, branch, tag, or SHA)")
+    if "/" in ref and not ref.startswith("goldfish/"):
+        raise InvalidRefNameError(
+            ref,
+            "slashed references not allowed (use workspace name or SHA; for workspace branches use goldfish/<name>)",
+        )
 
     # If it passed the security checks above (no dangerous chars, no path traversal,
     # no remote refs), accept it. It could be a workspace name, a branch like

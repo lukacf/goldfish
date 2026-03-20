@@ -598,17 +598,21 @@ class WorkspaceManager:
             raise GoldfishError(f"Workspace '{name}' already exists")
 
         # Resolve from_ref to a git-resolvable ref.
-        # If it's a workspace name, translate to goldfish/* namespace.
-        # Otherwise pass through as-is (branch, tag, SHA, main/master/HEAD).
-        is_workspace_ref = self.git.branch_exists(from_ref)
-        if is_workspace_ref:
-            git_ref = self.git._workspace_branch(from_ref)
-        else:
+        # Priority:
+        #   1. Reserved refs (main, master, HEAD) → always literal, never workspace
+        #   2. Existing workspace name → translate to goldfish/* namespace
+        #   3. Raw git ref (SHA, tag, local branch) → pass through
+        #   4. Nothing resolves → clear error
+        reserved_refs = {"main", "master", "HEAD"}
+        is_workspace_ref = False
+        if from_ref in reserved_refs:
             git_ref = from_ref
-
-        # Verify the ref actually resolves before branching.
-        # This gives a clear Goldfish error instead of leaking raw git output.
-        if not self.git.ref_exists(git_ref):
+        elif self.git.branch_exists(from_ref):
+            git_ref = self.git._workspace_branch(from_ref)
+            is_workspace_ref = True
+        elif self.git.ref_exists(from_ref):
+            git_ref = from_ref
+        else:
             raise GoldfishError(
                 f"Cannot create workspace from '{from_ref}': " f"not a known workspace, branch, tag, or commit"
             )
