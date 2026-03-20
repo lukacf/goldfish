@@ -46,6 +46,7 @@ class GCELaunchResult:
 
     instance_name: str
     zone: str
+    warm_reuse: bool = False  # True if dispatched to an existing warm pool instance
 
 
 class GCELauncher:
@@ -372,12 +373,15 @@ class GCELauncher:
                     docker_cmd,
                     gpu_count,
                 ),
-                run_path=f"runs/{stage_run_id}",
+                run_path=stage_run_id,
             )
             if handle:
+                # Use stage_run_id as instance_name so GCS paths (logs, exit code)
+                # resolve to the current run, not the warm VM's original name.
                 return GCELaunchResult(
                     instance_name=handle.backend_handle,
                     zone=handle.zone or "",
+                    warm_reuse=True,
                 )
 
         if use_capacity_search and self.resources:

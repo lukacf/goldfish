@@ -5600,10 +5600,11 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO warm_instances
-                    (instance_name, zone, project_id, machine_type, gpu_count, image_tag, idle_since, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (instance_name, zone, project_id, machine_type, gpu_count, image_tag,
+                     status, idle_since, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'running', NULL, ?)
                 """,
-                (instance_name, zone, project_id, machine_type, gpu_count, image_tag, now, now),
+                (instance_name, zone, project_id, machine_type, gpu_count, image_tag, now),
             )
 
     def claim_warm_instance(self, machine_type: str, gpu_count: int) -> dict | None:

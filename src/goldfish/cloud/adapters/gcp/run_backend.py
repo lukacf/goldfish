@@ -258,11 +258,12 @@ class GCERunBackend:
                 warm_pool_manager=self._warm_pool if warm_pool_timeout else None,
             )
 
-            # Fresh launch (warm pool claim happens inside launch_instance and
-            # returns early via GCELaunchResult — if we're here, it's fresh).
-            # Register in pool if eligible so the idle loop activates after this run.
-            is_warm = False
-            if warm_pool_timeout and self._warm_pool:
+            is_warm = getattr(result, "warm_reuse", False)
+
+            # Only register fresh launches (not warm reuse hits, which are already tracked).
+            # Registration uses status='running' so the reaper won't touch it mid-job.
+            # The startup script's idle loop calls release (→ idle) after Docker exits.
+            if not is_warm and warm_pool_timeout and self._warm_pool:
                 is_warm = self._warm_pool.register_instance(
                     instance_name=result.instance_name,
                     zone=result.zone,
@@ -312,6 +313,13 @@ class GCERunBackend:
 
             # Map Goldfish state to RunStatus
             if status_str == StageState.RUNNING:
+                # Warm pool: instance stays RUNNING after Docker exits (idle loop).
+                # Check for exit code in GCS to detect that the *job* finished
+                # even though the *instance* is still alive.
+                if handle.warm_instance:
+                    exit_result = self._launcher._get_exit_code(handle.stage_run_id)
+                    if exit_result.exists and exit_result.code is not None:
+                        return BackendStatus.from_exit_code(exit_result.code)
                 return BackendStatus(status=RunStatus.RUNNING)
             elif status_str == StageState.COMPLETED:
                 return BackendStatus(status=RunStatus.COMPLETED, exit_code=0)

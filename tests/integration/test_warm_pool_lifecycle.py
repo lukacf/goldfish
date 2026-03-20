@@ -37,16 +37,21 @@ class TestWarmPoolLifecycle:
         # Register
         assert manager.register_instance("stage-abc", "us-central1-a", "a3-highgpu-1g", 1)
 
-        # Verify idle
+        # Verify registered as running (first job active)
+        instances = test_db.list_warm_instances(status="running")
+        assert len(instances) == 1
+
+        # Release (simulates first job completing → idle loop)
+        test_db.release_warm_instance("stage-abc")
         instances = test_db.list_warm_instances(status="idle")
         assert len(instances) == 1
 
-        # Claim (without signal bus, falls through)
+        # Claim
         claimed = test_db.claim_warm_instance(machine_type="a3-highgpu-1g", gpu_count=1)
         assert claimed is not None
         assert claimed["status"] == "claimed"
 
-        # Release
+        # Release again
         test_db.release_warm_instance("stage-abc")
         instances = test_db.list_warm_instances(status="idle")
         assert len(instances) == 1
@@ -61,6 +66,7 @@ class TestWarmPoolLifecycle:
     def test_reap_idle_deletes_expired(self, test_db, manager) -> None:
         """Reaper should delete instances past idle timeout."""
         manager.register_instance("stage-old", "us-central1-a", "a3-highgpu-1g", 1)
+        test_db.release_warm_instance("stage-old")  # Must be idle to be reaped
 
         # Backdate idle_since
         with test_db._conn() as conn:
@@ -87,7 +93,7 @@ class TestWarmPoolLifecycle:
         """Emergency reap should delete all instances regardless of state."""
         manager.register_instance("stage-1", "zone-a", "a3-highgpu-1g", 1)
         manager.register_instance("stage-2", "zone-b", "a3-highgpu-1g", 1)
-        test_db.claim_warm_instance(machine_type="a3-highgpu-1g", gpu_count=1)
+        test_db.release_warm_instance("stage-1")  # One idle, one running
 
         with patch.object(manager, "_delete_gce_instance"):
             reaped = manager.reap_all()
@@ -97,6 +103,7 @@ class TestWarmPoolLifecycle:
     def test_try_claim_without_signal_bus_returns_none(self, test_db, manager) -> None:
         """Without signal bus, try_claim should release and return None."""
         manager.register_instance("stage-abc", "us-central1-a", "a3-highgpu-1g", 1)
+        test_db.release_warm_instance("stage-abc")  # Must be idle to claim
 
         result = manager.try_claim(
             machine_type="a3-highgpu-1g",
@@ -139,6 +146,7 @@ class TestWarmPoolLifecycle:
             project_id="test-project",
         )
         mgr.register_instance("stage-warm", "us-central1-a", "a3-highgpu-1g", 1)
+        test_db.release_warm_instance("stage-warm")  # Must be idle to claim
 
         with patch.object(mgr, "_upload_job_spec", return_value="gs://test-bucket/warm_pool/stage-warm/jobs/stage-new"):
             result = mgr.try_claim(
@@ -176,6 +184,7 @@ class TestWarmPoolLifecycle:
             project_id="test-project",
         )
         mgr.register_instance("stage-slow", "us-central1-a", "a3-highgpu-1g", 1)
+        test_db.release_warm_instance("stage-slow")  # Must be idle to claim
 
         with (
             patch.object(mgr, "_upload_job_spec", return_value="gs://bucket/spec"),

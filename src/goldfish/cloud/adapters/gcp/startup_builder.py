@@ -850,12 +850,12 @@ warm_pool_idle_loop() {{
                 mkdir -p "$spec_dir"
                 gsutil -m cp -r "$spec_path/*" "$spec_dir/" 2>&1 || {{ echo "Failed to download job spec"; exit 1; }}
 
-                # Kill stale background processes from previous job
-                # Watchdog, supervisor, and log syncer track the old Docker PID
-                kill ${{WATCHDOG_PID:-0}} 2>/dev/null || true
-                kill ${{SUPERVISOR_PID:-0}} 2>/dev/null || true
-                kill ${{LOG_SYNCER_PID:-0}} 2>/dev/null || true
-                kill ${{METADATA_SYNCER_PID:-0}} 2>/dev/null || true
+                # Kill stale background processes from previous job.
+                # Guard: only kill if PID is set and non-zero (kill 0 = entire process group!)
+                [[ -n "${{WATCHDOG_PID:-}}" && "${{WATCHDOG_PID}}" != "0" ]] && kill "$WATCHDOG_PID" 2>/dev/null || true
+                [[ -n "${{SUPERVISOR_PID:-}}" && "${{SUPERVISOR_PID}}" != "0" ]] && kill "$SUPERVISOR_PID" 2>/dev/null || true
+                [[ -n "${{LOG_SYNCER_PID:-}}" && "${{LOG_SYNCER_PID}}" != "0" ]] && kill "$LOG_SYNCER_PID" 2>/dev/null || true
+                [[ -n "${{METADATA_SYNCER_PID:-}}" && "${{METADATA_SYNCER_PID}}" != "0" ]] && kill "$METADATA_SYNCER_PID" 2>/dev/null || true
 
                 # Clean workspace between runs
                 echo "Cleaning workspace for new job..."
