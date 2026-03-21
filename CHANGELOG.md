@@ -4,6 +4,80 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-03-21
+
+### Fixed
+- **Workspace lineage idempotent** — `create_workspace_lineage` uses `INSERT OR IGNORE`
+  so retrying a failed `create_workspace` no longer crashes with UNIQUE constraint.
+
+## [0.3.2] - 2026-03-21
+
+### Added
+- **Workspace branching** — `create_workspace(from_workspace="baseline")` branches from
+  another workspace's current head. `from_version="v3"` branches from a specific saved
+  version. Mounted workspaces auto-synced before branching. Fork points recorded as
+  immutable versions with real git tags.
+- **Configurable slots** — `slots: 5` in goldfish.yaml generates [w1..w5]. Accepts
+  integer shorthand or explicit list. Rejects booleans, zero, negatives.
+- **Profile overrides in resource catalog** — custom profiles from goldfish.yaml are now
+  visible to the GCE capacity search. Non-GCE profiles filtered out.
+
+## [0.3.1] - 2026-03-19
+
+### Fixed
+- **Base image Python 3.11→3.12** — fixes torch.compile segfault on 3.11.
+- **PyTorch 2.7.1→2.9.1** cu128.
+- **FlashAttention-3** — beta GCS wheel replaced with official 3.0.0 from PyTorch cu128 index.
+
+## [0.2.9] - 2026-03-19
+
+### Fixed
+- **Capacity search picks wrong machine type** — profiles with same GPU but different
+  machine sizes (a3-highgpu-1g vs a3-highgpu-8g) now filtered by machine_type.
+
+## [0.2.8] - 2026-03-19
+
+### Fixed
+- **Orphaned runs recovered on daemon restart** — runs stuck in preparing/building/launching
+  after a daemon crash are now marked failed with a clear error on next startup.
+
+## [0.2.7] - 2026-03-19
+
+### Fixed
+- **Version detection broken in uvx** — `_get_version()` used `importlib.metadata.version("goldfish")`
+  which fails in uvx (package is `goldfish-ml`). Daemon was never restarted on upgrade.
+- **LAUNCHING skip restored** — daemon no longer kills instances during LAUNCHING state
+  (reverts de-googlify regression). GPU VMs need 5+ seconds for GCE API propagation.
+
+## [0.2.6] - 2026-03-19
+
+### Fixed
+- **LAUNCHING daemon skip** — restored from before de-googlify refactor. Daemon was killing
+  instances 5 seconds after launch due to GCE API propagation delay.
+
+## [0.2.5] - 2026-03-19
+
+### Fixed
+- **Early finalization** — `finalize_run` during RUNNING now auto-completes instead of
+  requiring a second call after AWAITING_USER_FINALIZATION.
+- **GCE boot timeout** — `not_found_timeout` increased from 300s to 600s for CPU VMs
+  with data_disk provisioning.
+- **gpu:null accepted** — CPU profiles no longer require `{type: none, count: 0}`.
+- **data_disk optional** — removed from required profile fields.
+- **SKILL.md** — config placement, container layout, output API docs.
+
+## [0.2.4] - 2026-03-19
+
+### Fixed
+- **VictoriaLogs optional** — defaults to disabled. No longer crashes goldfish when not running.
+- **GCE startup exit code in trap** — EXIT trap writes exit code to GCS before self-delete,
+  so goldfish detects startup failures immediately instead of waiting 300s.
+- **SVS truncated file listing** — shows all input contents (was capped at 50). Prevents
+  false-positive blocking when files are in subdirectories beyond the cutoff.
+- **GPU container race** — uses profile-based `--gpus all` flag instead of runtime
+  nvidia-smi detection that raced with async driver loading.
+- **Flaky wandb caplog test** — logger state pollution from setup_logging fixed.
+
 ## [0.2.3] - 2026-03-18
 
 ### Fixed
