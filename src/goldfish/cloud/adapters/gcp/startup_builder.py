@@ -142,13 +142,35 @@ self_delete() {
         fi
     fi
 
-    # Set exit code in instance metadata as fallback
+    # Write exit code to instance metadata (always — needed by daemon)
     if [[ -n "$INSTANCE_NAME" && -n "$INSTANCE_ZONE" && -n "$PROJECT_ID" ]]; then
         gcloud compute instances add-metadata "$INSTANCE_NAME" \
             --zone="$INSTANCE_ZONE" \
             --project="$PROJECT_ID" \
             --metadata "goldfish_exit_code=$trap_exit_code" \
             --quiet 2>/dev/null || true
+
+        # On FAILURE only: upload infra log (apt-get/driver output — no user data).
+        if [[ "$trap_exit_code" != "0" ]]; then
+            local crash_file="${INFRA_LOG:-/tmp/goldfish_infra.log}"
+            if [[ -s "$crash_file" && -n "${GCS_EXIT_CODE_PATH:-}" ]]; then
+                local gcs_crash_log="${GCS_EXIT_CODE_PATH%exit_code.txt}startup_crash.log"
+                timeout 30 gsutil cp "$crash_file" "$gcs_crash_log" 2>/dev/null || true
+            fi
+            local crash_context=""
+            if [[ -s "$crash_file" ]]; then
+                crash_context=$(tail -30 "$crash_file" 2>/dev/null | head -c 3000 || true)
+            elif [[ -s "$LOCAL_STAGE_LOG" ]]; then
+                crash_context=$(tail -20 "$LOCAL_STAGE_LOG" 2>/dev/null | head -c 2000 || true)
+            fi
+            if [[ -n "$crash_context" ]]; then
+                gcloud compute instances add-metadata "$INSTANCE_NAME" \
+                    --zone="$INSTANCE_ZONE" \
+                    --project="$PROJECT_ID" \
+                    --metadata-from-file "goldfish_crash_log=/dev/stdin" \
+                    --quiet 2>/dev/null <<< "$crash_context" || true
+            fi
+        fi
     fi
 
     # CRITICAL: Sync final logs before deletion to capture any errors
@@ -284,8 +306,16 @@ def watchdog_section(max_runtime_seconds: int) -> str:
     return f"""
 # === WATCHDOG TIMEOUT (Cost Protection Layer 2) ===
 # Background process that will force-delete after {max_runtime_seconds}s ({max_runtime_seconds // 3600}h {(max_runtime_seconds % 3600) // 60}m)
+# If the instance rebooted (kernel headers fallback), subtract elapsed time
+# so the total instance lifetime stays within the configured budget.
 (
-    sleep {max_runtime_seconds}
+    # GOLDFISH_FIRST_BOOT is set at script start (first or second boot).
+    # Subtract time already spent to enforce the original budget.
+    ELAPSED=$(($(date +%s) - ${{GOLDFISH_FIRST_BOOT:-$(date +%s)}}))
+    WATCHDOG_BUDGET=$(({max_runtime_seconds} - ELAPSED))
+    if [[ $WATCHDOG_BUDGET -lt 60 ]]; then WATCHDOG_BUDGET=60; fi
+    echo "Watchdog: budget=${{WATCHDOG_BUDGET}}s (elapsed=${{ELAPSED}}s, cap={max_runtime_seconds}s)"
+    sleep $WATCHDOG_BUDGET
     echo "=== WATCHDOG TIMEOUT REACHED ({max_runtime_seconds}s) - FORCING DELETION ==="
     log_stage "watchdog_timeout" || true
     # Write termination cause to GCS for daemon to detect
@@ -437,7 +467,37 @@ if [[ "$GPU_PRESENT" == "1" ]]; then
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     log_stage "driver_install"
     apt-get update -y
-    apt-get install -y linux-headers-$(uname -r) linux-headers-amd64 curl gnupg
+    # Install kernel headers — exact match first, fall back to cloud meta-package.
+    # GCE images sometimes ship a kernel newer than what's in the Debian repos
+    # (e.g., 6.1.0-43-cloud-amd64 when repos only have up to 6.1.0-42).
+    HEADERS_INSTALLED=0
+    if apt-get install -y linux-headers-$(uname -r) 2>/dev/null; then
+      HEADERS_INSTALLED=1
+    elif apt-get install -y linux-image-cloud-amd64 linux-headers-cloud-amd64 2>&1 | tee -a ${{INFRA_LOG:-/dev/null}}; then
+      HEADERS_INSTALLED=1
+      # The cloud meta-packages install a kernel+headers that may differ from the
+      # running kernel. DKMS needs headers matching the running kernel, so reboot
+      # into the newly installed one. Only reboot once (check metadata flag).
+      INSTALLED_KERNEL=$(dpkg -l 'linux-image-*-cloud-*' 2>/dev/null | awk '/^ii/ {{print $2}}' | sed 's/linux-image-//' | sort -V | tail -1)
+      ALREADY_REBOOTED=$(curl -sf -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/attributes/goldfish_kernel_reboot 2>/dev/null || echo "")
+      if [[ -n "$INSTALLED_KERNEL" && "$INSTALLED_KERNEL" != "$(uname -r)" && "$ALREADY_REBOOTED" != "1" ]]; then
+        echo "Kernel mismatch: running=$(uname -r), installed=$INSTALLED_KERNEL — rebooting once"
+        log_stage "kernel_reboot" || true
+        # Mark that we've rebooted (prevents infinite loop).
+        # Boot epoch was already set at script start for accurate watchdog budget.
+        gcloud compute instances add-metadata "$INSTANCE_NAME" \
+          --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \
+          --metadata "goldfish_kernel_reboot=1" \
+          --quiet 2>/dev/null || true
+        # Disable self-delete trap during intentional reboot
+        trap '' EXIT
+        reboot
+        exit 0
+      fi
+    else
+      echo "WARNING: Could not install kernel headers (DKMS may still work)"
+    fi
+    apt-get install -y curl gnupg
     DISTRO=$(lsb_release -cs 2>/dev/null || echo "bookworm")
     case "$DISTRO" in
       bookworm) CUDA_REPO="https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/" ;;
@@ -447,8 +507,8 @@ if [[ "$GPU_PRESENT" == "1" ]]; then
     esac
     curl -fsSL "${{CUDA_REPO}}/3bf863cc.pub" | gpg --dearmor -o /usr/share/keyrings/cuda-archive-keyring.gpg
     echo "deb [signed-by=/usr/share/keyrings/cuda-archive-keyring.gpg] ${{CUDA_REPO}} /" > /etc/apt/sources.list.d/cuda.list
-    apt-get update -y
-    apt-get install -y cuda-drivers nvidia-container-toolkit
+    apt-get update -y 2>&1 | tee -a ${{INFRA_LOG:-/dev/null}}
+    apt-get install -y cuda-drivers nvidia-container-toolkit 2>&1 | tee -a ${{INFRA_LOG:-/dev/null}}
     nvidia-ctk runtime configure --runtime=docker --set-as-default || true
     systemctl restart docker || true
     log_stage "driver_wait"
@@ -840,7 +900,18 @@ def build_startup_script(
         "#!/bin/bash",
         "set -euxo pipefail",
         "export DEBIAN_FRONTEND=noninteractive",
+        # Record first-boot epoch for watchdog budget calculation across reboots.
+        # Only set on first boot — second boot reads the existing value.
+        'GOLDFISH_FIRST_BOOT=$(curl -sf -H "Metadata-Flavor: Google" '
+        "http://metadata.google.internal/computeMetadata/v1/instance/attributes/goldfish_boot_epoch "
+        '2>/dev/null || echo "")',
+        'if [[ -z "$GOLDFISH_FIRST_BOOT" ]]; then ' "GOLDFISH_FIRST_BOOT=$(date +%s); fi",
         stage_log_section(stage_uri),
+        # Capture infrastructure command output (pre-Docker) for crash diagnosis.
+        # This file is safe to upload — it only contains apt-get, driver install, etc.
+        # Docker container output goes to STDOUT_LOG/STDERR_LOG instead.
+        "INFRA_LOG=/tmp/goldfish_infra.log",
+        ": > $INFRA_LOG",
         # Self-deletion trap - MUST be early to catch failures in apt-get, driver install, etc.
         self_deletion_section(),
         # Set exit code paths early so EXIT trap can write exit code on startup failures
@@ -890,11 +961,13 @@ GCS_TERMINATION_CAUSE_PATH="{gcs_termination_cause_path}"
 
     parts.extend(
         [
-            "apt-get update -y",
-            "apt-get install -y ca-certificates gnupg curl docker.io lsb-release",
+            "apt-get update -y 2>&1 | tee -a $INFRA_LOG",
+            "apt-get install -y ca-certificates gnupg curl docker.io lsb-release 2>&1 | tee -a $INFRA_LOG",
             "systemctl enable --now docker || true",
             'log_stage "docker_ready"',
+            "{ set +x; } 2>/dev/null  # Suppress xtrace for env exports (may contain secrets)",
             env_exports_block,
+            "set -x",
             path_exports,
             "start_metadata_syncer",
         ]

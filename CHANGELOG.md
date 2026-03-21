@@ -4,6 +4,19 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-03-21
+
+### Fixed
+- **Startup script crash on a3-megagpu** — `apt-get install linux-headers-$(uname -r)`
+  failed because the GCE image ships kernel 6.1.0-43 but Debian repos only have headers
+  up to 6.1.0-42. With `set -e`, this killed the script and the EXIT trap deleted the VM
+  before any logs could be captured. Now falls back to `linux-headers-cloud-amd64`
+  meta-package and reboots into the matching kernel if needed (DKMS requires headers
+  matching the running kernel). The startup script re-runs from the top after reboot.
+- **Startup crash diagnostics** — full script output captured to `/tmp/startup.log` and
+  uploaded to GCS (`startup_crash.log`) + instance metadata (`goldfish_crash_log`) before
+  self-delete. Previously, early startup failures were completely undiagnosable.
+
 ## [0.3.7] - 2026-03-21
 
 ### Fixed
