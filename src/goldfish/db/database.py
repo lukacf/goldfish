@@ -1449,7 +1449,7 @@ class Database:
         with self._conn() as conn:
             conn.execute(
                 """
-                INSERT INTO workspace_lineage
+                INSERT OR IGNORE INTO workspace_lineage
                 (workspace_name, parent_workspace, parent_version, created_at, description)
                 VALUES (?, ?, ?, ?, ?)
                 """,
