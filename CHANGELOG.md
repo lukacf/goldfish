@@ -4,12 +4,18 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-03-21
+
+### Fixed
+- **Capacity search zone rotation restored** — reverted `--async` instance creation
+  which silently swallowed capacity errors (503). Synchronous gcloud surfaces the
+  error so the retry loop tries the next zone. Timeout set to 600s for GPU VMs.
+- **Removed redundant 120s readiness wait** — `wait_for_instance_ready` was blocking
+  after creation. Now handled by gcloud's synchronous wait and goldfish's own polling.
+
 ## [0.3.6] - 2026-03-21
 
 ### Fixed
-- **Removed 120s instance readiness wait** — after `--async` instance creation,
-  `wait_for_instance_ready` blocked for 120s waiting for RUNNING. This is redundant
-  since goldfish's own `wait_for_completion()` handles provisioning.
 - **Spot VMs: --reservation-affinity=none** — required flag for spot instances.
 - **h100-on-demand profile: a3-highgpu-1g → a3-highgpu-8g** — GCP only allows
   a3-highgpu-1g/2g/4g as spot/flex-start. On-demand requires the full 8xH100 machine.
