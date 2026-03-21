@@ -707,12 +707,27 @@ class WorkspaceManager:
         return version
 
     def _sync_mounted_workspace(self, workspace: str, reason: str) -> None:
-        """If workspace is mounted, sync slot contents to branch first."""
-        for slot_info in self.get_all_slots():
-            if slot_info.workspace == workspace and slot_info.state == SlotState.MOUNTED:
-                slot_path = self._slot_path(slot_info.slot)
-                self.git.sync_slot_to_branch(slot_path, workspace, f"Auto-sync before branch: {reason}")
-                return
+        """If workspace is actively mounted, sync slot contents to branch first.
+
+        This trusts the database mount table as the source of truth. A slot can
+        still contain a stale `.goldfish-mount` file after a crash; those
+        abandoned directories must not be auto-synced back into the parent
+        branch when creating a child workspace.
+        """
+        mount = self.db.get_mount_by_workspace(workspace)
+        if not mount:
+            return
+
+        slot = mount.get("slot")
+        if not isinstance(slot, str):
+            return
+
+        slot_info = self._get_slot_state(slot)
+        if slot_info.workspace != workspace or slot_info.state != SlotState.MOUNTED:
+            return
+
+        slot_path = self._slot_path(slot)
+        self.git.sync_slot_to_branch(slot_path, workspace, f"Auto-sync before branch: {reason}")
 
     def _ensure_workspace_lineage(self, workspace: str, description: str) -> None:
         """Create a minimal lineage row for an existing workspace if missing."""

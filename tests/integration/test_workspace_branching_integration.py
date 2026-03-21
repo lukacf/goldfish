@@ -202,3 +202,34 @@ def test_branch_from_head_does_not_reuse_pruned_version(branching_setup) -> None
     assert child_lineage["parent_version"] == "v2"
     assert parent_versions[-1]["version"] == "v2"
     assert parent_versions[-1]["created_by"] == "fork"
+
+
+def test_branch_from_workspace_head_ignores_stale_crash_mount(branching_setup) -> None:
+    """Stale slot contents without an active mount row must not be auto-synced."""
+    manager = branching_setup["manager"]
+    db = branching_setup["db"]
+
+    assert isinstance(manager, WorkspaceManager)
+    assert isinstance(db, Database)
+
+    manager.create_workspace("parent", goal="Parent workspace", reason="Creating parent workspace")
+    manager.mount("parent", "w1", reason="Mounting parent workspace")
+
+    slot_path = manager._slot_path("w1")
+    (slot_path / "stale.txt").write_text("stale crash content\n")
+
+    # Simulate a crash: the slot still has files and .goldfish-mount, but the DB
+    # no longer considers it an active mount.
+    assert db.delete_mount("w1") is True
+
+    manager.create_workspace(
+        "child",
+        goal="Child workspace",
+        reason="Branching from parent after stale crash mount",
+        from_workspace="parent",
+    )
+
+    manager.mount("child", "w2", reason="Inspecting child workspace after branching")
+    child_path = manager._slot_path("w2")
+
+    assert not (child_path / "stale.txt").exists()

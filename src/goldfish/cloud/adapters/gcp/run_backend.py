@@ -124,6 +124,9 @@ class GCERunBackend:
         for profile_name in resolver.list_profiles():
             try:
                 profile = resolver.resolve(profile_name)
+                backend = profile.get("backend")
+                if backend not in (None, "gce"):
+                    continue
                 resources.append(profile)
             except Exception as e:
                 logger.warning("Failed to resolve profile '%s': %s", profile_name, e)
