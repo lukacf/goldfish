@@ -4,15 +4,19 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-03-21
+
+### Fixed
+- **Instance creation uses --async** — gcloud no longer blocks waiting for RUNNING
+  status. A3 (H100) VMs take 5+ minutes to provision, which caused gcloud to time out.
+  Now returns immediately; Goldfish's own polling handles the wait.
+
 ## [0.3.4] - 2026-03-21
 
 ### Fixed
 - **Spot VM flags** — `--restart-on-failure` was set for all GPU VMs including spot,
   causing a terminate-restart loop. Now only set for on-demand. Spot VMs get
   `--provisioning-model=SPOT --instance-termination-action=STOP`.
-- **Instance creation uses --async** — gcloud no longer blocks waiting for RUNNING
-  status. A3 (H100) VMs take 5+ minutes to provision, which caused gcloud to time out.
-  Now returns immediately; Goldfish's own polling handles the wait.
 
 ## [0.3.3] - 2026-03-21
 
