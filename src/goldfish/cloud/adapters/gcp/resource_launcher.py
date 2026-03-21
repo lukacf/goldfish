@@ -596,13 +596,14 @@ class ResourceLauncher:
         if self.project_id:
             cmd.append(f"--project={self.project_id}")
 
-        # Launch instance — timeout configurable per profile via launch_timeout_seconds.
-        # A3 (H100) VMs can take 5+ minutes in STAGING/PROVISIONING.
-        default_timeout = 600 if has_gpu else 120
-        instance_timeout = resource.get("launch_timeout_seconds", default_timeout)
+        # Launch instance with --async so gcloud returns immediately after the API
+        # accepts the request. Goldfish's own wait_for_completion() handles the
+        # provisioning wait. Without --async, gcloud hangs waiting for RUNNING
+        # which times out on A3 (H100) VMs that take 5+ minutes to provision.
+        cmd.append("--async")
         start = time.time()
         try:
-            run_gcloud(cmd, allow_capacity=True, project_id=self.project_id, timeout=instance_timeout)
+            run_gcloud(cmd, allow_capacity=True, project_id=self.project_id, timeout=60)
         except CapacityError:
             if scratch_attached and disk_name:
                 cleanup_disk(disk_name, zone)

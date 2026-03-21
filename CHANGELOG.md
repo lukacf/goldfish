@@ -10,11 +10,9 @@ All notable changes to Goldfish.
 - **Spot VM flags** — `--restart-on-failure` was set for all GPU VMs including spot,
   causing a terminate-restart loop. Now only set for on-demand. Spot VMs get
   `--provisioning-model=SPOT --instance-termination-action=STOP`.
-- **GPU instance creation timeout** — increased from 180s to 600s for GPU VMs.
-  A3 (H100) instances can take 5+ minutes in STAGING. CPU timeout increased
-  from 60s to 120s.
-- **Configurable launch timeout** — profiles can now set `launch_timeout_seconds`
-  to override the default per profile.
+- **Instance creation uses --async** — gcloud no longer blocks waiting for RUNNING
+  status. A3 (H100) VMs take 5+ minutes to provision, which caused gcloud to time out.
+  Now returns immediately; Goldfish's own polling handles the wait.
 
 ## [0.3.3] - 2026-03-21
 
