@@ -318,6 +318,8 @@ def create_workspace(
     validate_workspace_name(name)
     if from_workspace is not None:
         validate_workspace_name(from_workspace)
+    if from_version is not None:
+        validate_version(from_version)
 
     try:
         result = workspace_manager.create_workspace(

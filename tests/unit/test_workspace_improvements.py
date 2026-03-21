@@ -88,3 +88,34 @@ class TestCreateWorkspaceBranching:
                     "Testing version branching without workspace",
                     from_version="v3",
                 )
+
+    def test_branch_from_workspace_head_uses_resolved_sha(self) -> None:
+        """Workspace-head branching should create the child from the resolved fork SHA."""
+        from unittest.mock import MagicMock, patch
+
+        from goldfish.workspace.manager import WorkspaceManager
+
+        manager = MagicMock()
+        manager.config.audit.min_reason_length = 15
+        manager.git.branch_exists.side_effect = lambda name: name == "source"
+        manager.git._workspace_branch.return_value = "goldfish/source"
+        manager.git.resolve_ref.return_value = "abc123"
+        manager._sync_mounted_workspace = MagicMock()
+        manager._ensure_workspace_lineage = MagicMock()
+        manager._ensure_version_for_sha = MagicMock(return_value="v9")
+        manager.db.create_workspace_lineage = MagicMock()
+        manager.db.log_audit = MagicMock()
+        manager._regenerate_state_md = MagicMock(return_value="STATE")
+        manager.state_manager = None
+
+        with patch("goldfish.workspace.manager.validate_reason"):
+            result = WorkspaceManager.create_workspace(
+                manager,
+                "child",
+                "goal",
+                "Branching from workspace head",
+                from_workspace="source",
+            )
+
+        manager.git.create_branch.assert_called_once_with("child", "abc123")
+        assert result.forked_from == "source@v9"

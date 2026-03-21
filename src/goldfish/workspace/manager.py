@@ -633,6 +633,7 @@ class WorkspaceManager:
             version_row = self.db.get_version(from_workspace, from_version)
             if not version_row:
                 raise GoldfishError(f"Version '{from_version}' not found in workspace '{from_workspace}'")
+            self._ensure_workspace_lineage(from_workspace, "Auto-created for version-based branching")
             git_ref = str(version_row["git_sha"])
             parent_workspace = from_workspace
             parent_version = from_version
@@ -642,6 +643,7 @@ class WorkspaceManager:
             # Branch from workspace head (current state)
             if not self.git.branch_exists(from_workspace):
                 raise GoldfishError(f"Source workspace '{from_workspace}' not found")
+            self._ensure_workspace_lineage(from_workspace, "Auto-created for workspace branching")
             # Sync mounted slot so branch includes current edits
             self._sync_mounted_workspace(from_workspace, reason)
             # Resolve to exact SHA first — branch from SHA, not live ref (race-safe)
@@ -685,35 +687,24 @@ class WorkspaceManager:
             state_md=state_md,
         )
 
-    def _ensure_version_for_sha(self, workspace: str, git_sha: str, description: str) -> str | None:
-        """Return an existing version for this SHA, or create one with a real git tag.
+    def _ensure_version_for_sha(self, workspace: str, git_sha: str, description: str) -> str:
+        """Return a visible version for this SHA, creating a real fork marker if needed."""
+        existing = self.db.get_version_by_sha(workspace, git_sha)
+        if existing:
+            return str(existing["version"])
 
-        Returns the version string, or None if version creation fails.
-        """
-        # Check if a version already exists for this SHA
-        versions = self.db.list_versions(workspace)
-        for v in versions:
-            if v.get("git_sha") == git_sha:
-                return str(v["version"])
-
-        # Create a new version using the same pattern as save_version():
-        # get_next_version_number handles pruned versions correctly.
-        try:
-            version = self.db.get_next_version_number(workspace)
-            git_tag = f"{workspace}-{version}"
-            # Create real git tag so rollback/inspect can use it
-            self.git.create_tag(workspace, git_tag, git_sha)
-            self.db.create_version(
-                workspace_name=workspace,
-                version=version,
-                git_tag=git_tag,
-                git_sha=git_sha,
-                created_by="fork",  # Distinct from "save_version"/"run" — excluded from diff baselines
-                description=description,
-            )
-            return version
-        except Exception:
-            return None  # Best effort — don't block branching
+        version = self.db.get_next_version_number(workspace)
+        git_tag = f"{workspace}-{version}"
+        self.git.create_tag(workspace, git_tag, git_sha)
+        self.db.create_version(
+            workspace_name=workspace,
+            version=version,
+            git_tag=git_tag,
+            git_sha=git_sha,
+            created_by="fork",
+            description=description,
+        )
+        return version
 
     def _sync_mounted_workspace(self, workspace: str, reason: str) -> None:
         """If workspace is mounted, sync slot contents to branch first."""
@@ -722,6 +713,12 @@ class WorkspaceManager:
                 slot_path = self._slot_path(slot_info.slot)
                 self.git.sync_slot_to_branch(slot_path, workspace, f"Auto-sync before branch: {reason}")
                 return
+
+    def _ensure_workspace_lineage(self, workspace: str, description: str) -> None:
+        """Create a minimal lineage row for an existing workspace if missing."""
+        if self.db.workspace_exists(workspace):
+            return
+        self.db.create_workspace_lineage(workspace_name=workspace, description=description)
 
     def branch_workspace(
         self,
@@ -953,7 +950,7 @@ class WorkspaceManager:
         # 2. Check if a version with this SHA already exists (idempotent retry)
         # This handles retries after failed stage launches - same code = same version
         existing_version = self.db.get_version_by_sha(workspace, git_sha)
-        if existing_version:
+        if existing_version and existing_version["created_by"] != "fork":
             # Reuse existing version - code hasn't changed since last version
             return existing_version["version"], git_sha
 
