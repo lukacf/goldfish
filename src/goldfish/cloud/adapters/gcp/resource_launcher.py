@@ -579,11 +579,16 @@ class ResourceLauncher:
 
         if has_gpu:
             cmd.append("--maintenance-policy=TERMINATE")
-            cmd.append("--restart-on-failure")
             metadata_entries.append("install-nvidia-driver=True")
 
         if preemptible:
+            # Spot VMs: --provisioning-model=SPOT disables restart automatically.
+            # --instance-termination-action=STOP keeps the VM around for log retrieval.
             cmd.append("--provisioning-model=SPOT")
+            cmd.append("--instance-termination-action=STOP")
+        elif has_gpu:
+            # On-demand GPU VMs: restart on failure (not available for spot)
+            cmd.append("--restart-on-failure")
 
         if metadata_entries:
             cmd.append("--metadata=" + ",".join(metadata_entries))
@@ -591,9 +596,10 @@ class ResourceLauncher:
         if self.project_id:
             cmd.append(f"--project={self.project_id}")
 
-        # Launch instance
-        # GPU instances (especially H100) can take 2-3 minutes to create
-        instance_timeout = 180 if has_gpu else 60
+        # Launch instance — timeout configurable per profile via launch_timeout_seconds.
+        # A3 (H100) VMs can take 5+ minutes in STAGING/PROVISIONING.
+        default_timeout = 600 if has_gpu else 120
+        instance_timeout = resource.get("launch_timeout_seconds", default_timeout)
         start = time.time()
         try:
             run_gcloud(cmd, allow_capacity=True, project_id=self.project_id, timeout=instance_timeout)
