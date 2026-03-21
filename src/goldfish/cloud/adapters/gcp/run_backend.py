@@ -64,6 +64,7 @@ class GCERunBackend:
         bucket: str | None = None,
         gpu_preference: list[str] | None = None,
         service_account: str | None = None,
+        profile_overrides: dict[str, dict[str, object]] | None = None,
     ) -> None:
         """Initialize GCE backend.
 
@@ -73,13 +74,14 @@ class GCERunBackend:
             bucket: GCS bucket for logs/artifacts
             gpu_preference: Ordered list of preferred GPU types
             service_account: Service account email for instances
+            profile_overrides: Custom profile overrides from goldfish.yaml
         """
         default_zone = zones[0] if zones else "us-central1-a"
 
         # Build resources from profiles for capacity search.
         # Resources are profile dicts containing machine_type, zones, gpu config.
         # GCELauncher uses these for multi-zone capacity search.
-        resources = self._build_resources_from_profiles(global_zones=zones)
+        resources = self._build_resources_from_profiles(global_zones=zones, profile_overrides=profile_overrides)
 
         # Import here to keep adapter imports lazy (gce_launcher has server-side deps)
         from goldfish.cloud.adapters.gcp.gce_launcher import GCELauncher
@@ -97,7 +99,11 @@ class GCERunBackend:
         self._zones = zones or [default_zone]
         self._bucket = bucket
 
-    def _build_resources_from_profiles(self, global_zones: list[str] | None = None) -> list[dict]:
+    def _build_resources_from_profiles(
+        self,
+        global_zones: list[str] | None = None,
+        profile_overrides: dict[str, dict[str, object]] | None = None,
+    ) -> list[dict]:
         """Build resources list from profile definitions.
 
         Resources are used by GCELauncher for capacity search across zones.
@@ -105,18 +111,22 @@ class GCERunBackend:
 
         Args:
             global_zones: Optional zones override to apply to all profiles.
+            profile_overrides: Custom profiles from goldfish.yaml gce.profile_overrides.
 
         Returns:
             List of profile dicts ready for GCELauncher.
         """
         from goldfish.cloud.adapters.gcp.profiles import ProfileResolver
 
-        resolver = ProfileResolver(global_zones=global_zones)
+        resolver = ProfileResolver(global_zones=global_zones, profile_overrides=profile_overrides)
         resources: list[dict] = []
 
         for profile_name in resolver.list_profiles():
             try:
                 profile = resolver.resolve(profile_name)
+                backend = profile.get("backend")
+                if backend not in (None, "gce"):
+                    continue
                 resources.append(profile)
             except Exception as e:
                 logger.warning("Failed to resolve profile '%s': %s", profile_name, e)

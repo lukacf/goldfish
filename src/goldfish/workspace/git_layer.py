@@ -124,6 +124,11 @@ class GitLayer:
         except GoldfishError:
             return False
 
+    def resolve_ref(self, ref: str) -> str:
+        """Resolve a git ref to its commit SHA."""
+        stdout, _ = self._run_git("rev-parse", ref)
+        return stdout.strip()
+
     def create_branch(self, workspace_name: str, from_ref: str = "main") -> None:
         """Create a new workspace branch from a reference."""
         branch = self._workspace_branch(workspace_name)

@@ -289,26 +289,42 @@ def manage_versions(
 
 
 @mcp.tool()
-def create_workspace(name: str, goal: str, reason: str) -> CreateWorkspaceResponse:
-    """Create a new workspace from main.
+def create_workspace(
+    name: str,
+    goal: str,
+    reason: str,
+    from_workspace: str | None = None,
+    from_version: str | None = None,
+) -> CreateWorkspaceResponse:
+    """Create a new workspace, optionally branching from another workspace.
 
     Args:
         name: Workspace name (use descriptive names like "fix-tbpe-labels")
         goal: What you're trying to achieve in this workspace
         reason: Why this workspace is needed (min 15 chars)
+        from_workspace: Branch from this workspace instead of main.
+                        If mounted, its current edits are synced first.
+        from_version: Branch from a specific version (requires from_workspace).
+                      Example: from_workspace="baseline", from_version="v3"
 
     The workspace is created but not mounted. Use mount() to work in it.
     """
-    logger.info("create_workspace() called", extra={"workspace": name})
+    logger.info("create_workspace() called", extra={"workspace": name, "from_workspace": from_workspace})
 
     workspace_manager = _get_workspace_manager()
     db = _get_db()
 
     # Validate inputs
     validate_workspace_name(name)
+    if from_workspace is not None:
+        validate_workspace_name(from_workspace)
+    if from_version is not None:
+        validate_version(from_version)
 
     try:
-        result = workspace_manager.create_workspace(name, goal, reason)
+        result = workspace_manager.create_workspace(
+            name, goal, reason, from_workspace=from_workspace, from_version=from_version
+        )
 
         # Persist the goal in the database
         db.set_workspace_goal(name, goal)

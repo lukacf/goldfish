@@ -191,6 +191,44 @@ class TestGCERunBackendInit:
                     f"should include custom zones {custom_zones}"
                 )
 
+    def test_init_resources_exclude_non_gce_profiles(self, mock_launcher):
+        """Profiles assigned to another backend must not enter the GCE resource catalog."""
+        with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher") as mock_class:
+            GCERunBackend(
+                project_id="test-project",
+                zones=["us-central1-a"],
+                profile_overrides={
+                    "cpu-small": {"backend": "local"},
+                    "team-k8s": {
+                        "backend": "kubernetes",
+                        "machine_type": "n2-standard-4",
+                        "zones": ["us-central1-a"],
+                        "boot_disk": {"type": "pd-ssd", "size_gb": 100},
+                        "data_disk": {"type": "pd-ssd", "size_gb": 100},
+                        "gpu": {"type": "none", "count": 0},
+                    },
+                    "gpu-team": {
+                        "backend": "gce",
+                        "machine_type": "a2-highgpu-1g",
+                        "zones": ["us-central1-a"],
+                        "boot_disk": {"type": "pd-ssd", "size_gb": 100},
+                        "data_disk": {"type": "pd-ssd", "size_gb": 200},
+                        "gpu": {
+                            "type": "nvidia-tesla-a100",
+                            "accelerator": "nvidia-tesla-a100",
+                            "count": 1,
+                        },
+                    },
+                },
+            )
+
+            resources = mock_class.call_args.kwargs.get("resources", [])
+            names = {resource["name"] for resource in resources}
+
+            assert "cpu-small" not in names
+            assert "team-k8s" not in names
+            assert "gpu-team" in names
+
     def test_init_with_no_zones_uses_default(self, mock_launcher):
         """When no zones specified, default zone is used."""
         with patch("goldfish.cloud.adapters.gcp.gce_launcher.GCELauncher") as mock_class:
