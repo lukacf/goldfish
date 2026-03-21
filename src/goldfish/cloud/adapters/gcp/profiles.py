@@ -157,12 +157,14 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         },
     },
     "h100-on-demand": {
-        "base_image": BASE_IMAGE_GPU,  # Custom image with nvrtc for Flash Attention
-        "machine_type": "a3-highgpu-1g",
+        "base_image": BASE_IMAGE_GPU,
+        # a3-highgpu-8g is the smallest on-demand H100 machine.
+        # a3-highgpu-1g/2g/4g are spot/flex-start ONLY.
+        "machine_type": "a3-highgpu-8g",
         "gpu": {
             "type": "h100",
             "accelerator": "nvidia-h100-80gb",
-            "count": 1,
+            "count": 8,
         },
         "preemptible_allowed": False,
         "on_demand_allowed": True,

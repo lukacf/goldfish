@@ -584,8 +584,10 @@ class ResourceLauncher:
         if preemptible:
             # Spot VMs: --provisioning-model=SPOT disables restart automatically.
             # --instance-termination-action=STOP keeps the VM around for log retrieval.
+            # --reservation-affinity=none required (spot can't use reservations).
             cmd.append("--provisioning-model=SPOT")
             cmd.append("--instance-termination-action=STOP")
+            cmd.append("--reservation-affinity=none")
         elif has_gpu:
             # On-demand GPU VMs: restart on failure (not available for spot)
             cmd.append("--restart-on-failure")
@@ -615,25 +617,9 @@ class ResourceLauncher:
 
         timings["instance_create_sec"] = round(time.time() - start, 2)
 
-        # Wait for instance to be fully ready (RUNNING state)
-        # This is required before metadata operations (set_signal) can succeed.
-        # GPU instances can take 30-60+ seconds to provision after the API returns.
-        ready_start = time.time()
-        try:
-            wait_for_instance_ready(
-                instance_name=instance_name,
-                zone=zone,
-                project_id=self.project_id,
-                timeout_sec=120,  # 2 minutes for GPU instances
-                poll_interval=2.0,
-            )
-        except GoldfishError:
-            # If we can't verify readiness, clean up and re-raise
-            if scratch_attached and disk_name:
-                cleanup_disk(disk_name, zone)
-            raise
-
-        timings["instance_ready_sec"] = round(time.time() - ready_start, 2)
+        # With --async, the instance is not yet RUNNING. Goldfish's own
+        # wait_for_completion() handles the provisioning wait. The metadata
+        # syncer retries on its own. No blocking wait needed here.
 
         return (
             LaunchSelection(resource=resource["name"], zone=zone, preemptible=preemptible),

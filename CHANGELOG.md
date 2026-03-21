@@ -4,6 +4,16 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-03-21
+
+### Fixed
+- **Removed 120s instance readiness wait** — after `--async` instance creation,
+  `wait_for_instance_ready` blocked for 120s waiting for RUNNING. This is redundant
+  since goldfish's own `wait_for_completion()` handles provisioning.
+- **Spot VMs: --reservation-affinity=none** — required flag for spot instances.
+- **h100-on-demand profile: a3-highgpu-1g → a3-highgpu-8g** — GCP only allows
+  a3-highgpu-1g/2g/4g as spot/flex-start. On-demand requires the full 8xH100 machine.
+
 ## [0.3.5] - 2026-03-21
 
 ### Fixed
