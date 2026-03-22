@@ -30,6 +30,34 @@ def test_capacity_error_patterns():
         assert any(pattern in lowered for pattern in CAPACITY_PATTERNS), f"Pattern should match: {error_msg}"
 
 
+def test_capacity_error_patterns_match_actual_gce_messages():
+    """Test that capacity patterns match ACTUAL GCE error messages.
+
+    GCE uses 'enough resources' not 'sufficient resources' in zone
+    resource pool exhaustion errors. Missing this pattern causes spot
+    launches to fail on the first zone without retrying others.
+    """
+    actual_gce_messages = [
+        # ZONE_RESOURCE_POOL_EXHAUSTED — actual gcloud stderr output
+        "The zone 'projects/my-project/zones/us-central1-a' does not have enough resources available to fulfill the request. Try a different zone, or try again later.",
+        # Quota exceeded — standard format
+        "Quota 'NVIDIA_H100_80GB_GPUS' exceeded. Limit: 0.0 in region us-central1.",
+        "Quota 'PREEMPTIBLE_NVIDIA_H100_80GB_GPUS' exceeded. Limit: 8.0 in region us-central1.",
+        # ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS
+        "ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS: The zone 'us-central1-a' does not have enough resources.",
+        # Spot-specific stockout
+        "The zone does not have enough resources available to fulfill the request.",
+        # A3 machine type capacity
+        "resource 'a3-megagpu-8g' is not available in zone 'us-central1-a'",
+    ]
+
+    for error_msg in actual_gce_messages:
+        lowered = error_msg.lower()
+        assert any(
+            pattern in lowered for pattern in CAPACITY_PATTERNS
+        ), f"CAPACITY_PATTERNS should match actual GCE message: {error_msg}"
+
+
 def test_order_resources_by_gpu_preference():
     """Test that resources are ordered by GPU preference."""
     resources = [

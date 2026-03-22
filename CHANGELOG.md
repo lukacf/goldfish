@@ -4,6 +4,15 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-03-22
+
+### Fixed
+- **Spot launches fail without retrying zones** — GCE's zone resource pool exhaustion
+  error says "does not have enough resources" but `CAPACITY_PATTERNS` only matched
+  "does not have sufficient resources". This caused spot launches to fail on the first
+  unavailable zone without trying others, reporting "no capacity" even when other zones
+  had spot capacity. Added missing patterns for actual GCE error messages.
+
 ## [0.3.10] - 2026-03-22
 
 ### Fixed

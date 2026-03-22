@@ -17,13 +17,19 @@ from typing import Any
 from goldfish.errors import GoldfishError
 
 # Capacity error patterns from GCE
+# These are matched as substrings (lowered) against gcloud stderr.
+# IMPORTANT: GCE uses "enough resources" (not "sufficient") in zone
+# resource pool exhaustion errors. Missing patterns cause spot launches
+# to fail on the first zone without retrying others.
 CAPACITY_PATTERNS = (
     "zone_resource_pool_exhausted",
     "does not have sufficient resources",
+    "does not have enough resources",
     "quota",
     "was not able to fulfil",
     "resource is not available",
     "insufficient",
+    "is not available in zone",
 )
 
 
