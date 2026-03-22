@@ -7,27 +7,26 @@
 #
 # NOTE: Using CUDA 12.8 to match driver 590.x (cu126 had "undefined symbol: cuDriverGetVersion")
 
-# NVIDIA CUDA 12.8 devel image - required for FA3 pre-built wheels
-# The runtime image lacks libcuda.so symlink that FA3 wheel expects for symbol resolution
-FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
+# NVIDIA CUDA 12.8 devel image on Ubuntu 24.04 (glibc 2.39)
+# Ubuntu 24.04 required for rkat-rpc binary compatibility (needs glibc 2.39+).
+# The runtime image lacks libcuda.so symlink that FA3 wheel expects for symbol resolution.
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04
 
 LABEL org.opencontainers.image.title="Goldfish Base GPU"
 LABEL org.opencontainers.image.description="CUDA 12.8 + PyTorch 2.9.1 + FlashAttention-3 (pre-built wheels)"
 LABEL org.opencontainers.image.vendor="Goldfish ML"
-LABEL org.opencontainers.image.version="v11"
+LABEL org.opencontainers.image.version="v12"
 
 # Avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
 # System dependencies for ML development
-# Python 3.12: fixes torch.compile segfault on 3.11, supports datetime.UTC
+# Ubuntu 24.04 ships Python 3.12 natively (glibc 2.39 for rkat-rpc compatibility)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
-    python3.12-dev \
+    python3 \
+    python3-venv \
+    python3-dev \
+    python3-pip \
     curl \
     git \
     libgomp1 \
@@ -40,13 +39,13 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable && \
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
-# Make python3.12 the default and install pip
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
+# Ubuntu 24.04 PEP 668: allow pip to manage system packages
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
-# Upgrade pip
-RUN python -m pip install --upgrade pip
+# Ubuntu 24.04: create python symlink and fix pip
+RUN ln -sf /usr/bin/python3 /usr/bin/python && \
+    apt-get remove -y python3-pip && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3
 
 # PyTorch 2.9.1 with CUDA 12.8 support (cu128)
 RUN pip install --no-cache-dir \
@@ -65,7 +64,7 @@ RUN pip install --no-deps --no-cache-dir \
 
 # Verify FlashAttention-3 wheel installed correctly
 # Note: Can't import flash_attn_interface during build (no CUDA driver), so just check files exist
-RUN python -c "import importlib.util; \
+RUN python3 -c "import importlib.util; \
     assert importlib.util.find_spec('flash_attn_interface') is not None, 'flash_attn_interface not found'; \
     assert importlib.util.find_spec('flash_attn_3') is not None, 'flash_attn_3 not found'; \
     import os; \
@@ -74,8 +73,8 @@ RUN python -c "import importlib.util; \
     assert os.path.exists(so_file), f'{so_file} not found'; \
     print(f'FlashAttention-3: files OK (runtime verification needed)')"
 
-# Create non-root user for security
-RUN useradd -m -u 1000 goldfish
+# Create non-root user for security (UID 1000 may already exist on Ubuntu 24.04)
+RUN id -u 1000 >/dev/null 2>&1 && usermod -l goldfish -d /home/goldfish -m $(getent passwd 1000 | cut -d: -f1) || useradd -m -u 1000 goldfish
 USER goldfish
 
 # NVIDIA environment variables

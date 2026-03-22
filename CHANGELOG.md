@@ -4,6 +4,14 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-03-22
+
+### Fixed
+- **Base image Ubuntu 22.04→24.04** — `rkat-rpc` binary requires glibc 2.39+ which
+  Ubuntu 22.04 (glibc 2.35) doesn't have. Switched to
+  `nvidia/cuda:12.8.0-cudnn-devel-ubuntu24.04`. Python 3.12 is native on 24.04
+  (no deadsnakes PPA needed). CUDA driver repo updated to ubuntu2404.
+
 ## [0.3.8] - 2026-03-21
 
 ### Fixed
