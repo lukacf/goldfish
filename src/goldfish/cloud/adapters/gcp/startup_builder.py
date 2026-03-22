@@ -21,6 +21,10 @@ GPU_DRIVER_RETRY_SLEEP_SEC = 15  # Seconds to sleep between GPU driver retries
 GCSFUSE_MAX_ATTEMPTS = 5  # Maximum attempts to mount gcsfuse
 GCSFUSE_RETRY_SLEEP_SEC = 2  # Seconds to sleep between gcsfuse retries
 DEFAULT_SHM_SIZE = "16g"  # Default Docker shared memory size
+DOCKER_GPU_READINESS_MAX_ATTEMPTS = 10  # Attempts to verify Docker nvidia runtime
+DOCKER_GPU_READINESS_RETRY_SLEEP_SEC = 5  # Sleep between Docker nvidia runtime checks
+DOCKER_RUN_125_MAX_RETRIES = 3  # Max retries on Docker exit 125
+DOCKER_RUN_125_RETRY_SLEEP_SEC = 10  # Sleep between exit 125 retries
 
 
 def reboot_cleanup_section(bucket_mount: str, gcsfuse: bool = True) -> str:
@@ -536,6 +540,43 @@ fi
 """
 
 
+def docker_gpu_readiness_section() -> str:
+    """Verify Docker nvidia runtime is functional after driver install.
+
+    nvidia-smi passing doesn't guarantee Docker's nvidia runtime is registered.
+    After ``systemctl restart docker``, the daemon needs time to load the nvidia
+    runtime plugin.  Without this gate, ``docker run --gpus all`` can fail with
+    exit 125 ("daemon failed to start the container").
+
+    This is fail-open: if the runtime never appears we warn but proceed, letting
+    the docker run retry loop handle it.
+
+    Returns:
+        Shell script fragment (only runs on GPU nodes)
+    """
+    return f"""
+if [[ "$GPU_PRESENT" == "1" ]]; then
+  log_stage "docker_gpu_check"
+  DOCKER_GPU_READY=0
+  for attempt in $(seq 1 {DOCKER_GPU_READINESS_MAX_ATTEMPTS}); do
+    if docker info 2>/dev/null | grep -qi nvidia; then
+      DOCKER_GPU_READY=1
+      break
+    fi
+    echo "Docker nvidia runtime not ready (attempt $attempt/{DOCKER_GPU_READINESS_MAX_ATTEMPTS}); restarting docker and sleeping {DOCKER_GPU_READINESS_RETRY_SLEEP_SEC}s"
+    systemctl restart docker || true
+    sleep {DOCKER_GPU_READINESS_RETRY_SLEEP_SEC}
+  done
+  if [[ "$DOCKER_GPU_READY" -ne 1 ]]; then
+    echo "WARNING: Docker nvidia runtime not detected after {DOCKER_GPU_READINESS_MAX_ATTEMPTS} attempts" >&2
+    echo "Proceeding anyway — docker run retry loop will handle exit 125 if needed" >&2
+  else
+    log_stage "docker_gpu_ready"
+  fi
+fi
+"""
+
+
 def gcsfuse_section(bucket: str, mount_point: str) -> str:
     """Install and mount gcsfuse for GCS access.
 
@@ -977,6 +1018,9 @@ GCS_TERMINATION_CAUSE_PATH="{gcs_termination_cause_path}"
     # GPU driver installation
     parts.append(gpu_driver_section())
 
+    # Verify Docker nvidia runtime is registered (prevents exit 125 race)
+    parts.append(docker_gpu_readiness_section())
+
     # gcsfuse mounting
     if gcsfuse:
         parts.append('log_stage "gcsfuse_begin"')
@@ -1065,6 +1109,25 @@ fi
     parts.append("EXIT_CODE=$?")
     # Give tee processes a moment to flush (they close when Docker exits)
     parts.append("sleep 1")
+
+    # Retry on exit 125: Docker daemon failed to start the container.
+    # On GPU nodes this typically means the nvidia runtime isn't fully registered
+    # after driver install + docker restart. Restarting Docker and retrying fixes it.
+    # On CPU nodes exit 125 can indicate transient daemon issues (OOM, cgroup errors).
+    parts.append(f"""# Exit 125 retry: daemon failed to start container (nvidia runtime race condition)
+DOCKER_RUN_ATTEMPT=1
+while [[ "$EXIT_CODE" -eq 125 && "$DOCKER_RUN_ATTEMPT" -lt {DOCKER_RUN_125_MAX_RETRIES} ]]; do
+  DOCKER_RUN_ATTEMPT=$((DOCKER_RUN_ATTEMPT + 1))
+  echo "Docker exit 125 — retry $DOCKER_RUN_ATTEMPT/{DOCKER_RUN_125_MAX_RETRIES} (restarting docker daemon)" | tee -a "$STDERR_LOG"
+  log_stage "docker_retry_$DOCKER_RUN_ATTEMPT" || true
+  systemctl restart docker || true
+  sleep {DOCKER_RUN_125_RETRY_SLEEP_SEC}
+  "${{DOCKER_CMD[@]}}" > >(tee -a "$STDOUT_LOG") 2> >(tee -a "$STDERR_LOG") & DOCKER_PID=$!
+  wait $DOCKER_PID
+  EXIT_CODE=$?
+  sleep 1
+done""")
+
     parts.append('log_stage "docker_run_end"')
 
     # Post-run commands

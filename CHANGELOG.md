@@ -4,6 +4,17 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-03-22
+
+### Fixed
+- **Docker exit 125 on GPU VMs** — `docker run --gpus all` intermittently failed with
+  exit 125 ("daemon failed to start the container") due to a race condition: the startup
+  script waited for `nvidia-smi` (driver level) but not for Docker's nvidia runtime plugin
+  to register after `systemctl restart docker`. Two fixes: (1) new GPU runtime readiness
+  gate verifies `docker info` shows nvidia before launching the container, with retries and
+  Docker daemon restart; (2) exit 125 retry loop restarts Docker and re-attempts container
+  launch up to 3 times.
+
 ## [0.3.9] - 2026-03-22
 
 ### Fixed
