@@ -65,6 +65,10 @@ class GCERunBackend:
         gpu_preference: list[str] | None = None,
         service_account: str | None = None,
         profile_overrides: dict[str, dict[str, object]] | None = None,
+        search_timeout_sec: int = 600,
+        initial_backoff_sec: float = 5,
+        backoff_multiplier: float = 1.5,
+        max_attempts: int = 100,
     ) -> None:
         """Initialize GCE backend.
 
@@ -75,6 +79,10 @@ class GCERunBackend:
             gpu_preference: Ordered list of preferred GPU types
             service_account: Service account email for instances
             profile_overrides: Custom profile overrides from goldfish.yaml
+            search_timeout_sec: Default capacity search timeout
+            initial_backoff_sec: Initial backoff between retries
+            backoff_multiplier: Backoff multiplier per retry
+            max_attempts: Maximum launch attempts
         """
         default_zone = zones[0] if zones else "us-central1-a"
 
@@ -94,6 +102,10 @@ class GCERunBackend:
             gpu_preference=gpu_preference,
             service_account=service_account,
             resources=resources,
+            search_timeout_sec=search_timeout_sec,
+            initial_backoff_sec=initial_backoff_sec,
+            backoff_multiplier=backoff_multiplier,
+            max_attempts=max_attempts,
         )
         self._project_id = project_id
         self._zones = zones or [default_zone]
@@ -254,6 +266,7 @@ class GCERunBackend:
                 zones=self._zones,
                 goldfish_env=goldfish_env,
                 preemptible=spec.spot,  # Pass spot preference to launcher
+                capacity_wait_seconds=spec.capacity_wait_seconds,
             )
 
             return RunHandle(

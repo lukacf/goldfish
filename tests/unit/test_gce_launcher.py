@@ -730,6 +730,10 @@ class TestLaunchInstanceReturnsZone:
             launcher.gpu_preference = None
             launcher._project_number = None
             launcher.service_account = None
+            launcher.search_timeout_sec = 600
+            launcher.initial_backoff_sec = 5
+            launcher.backoff_multiplier = 1.5
+            launcher.max_attempts = 100
             return launcher
 
     def test_launch_simple_returns_gce_launch_result(self, launcher):
@@ -815,6 +819,10 @@ class TestCapacitySearchGpuFiltering:
             launcher.default_zone = "us-central1-a"
             launcher.zones = ["us-central1-a"]
             launcher.gpu_preference = ["h100", "a100"]
+            launcher.search_timeout_sec = 600
+            launcher.initial_backoff_sec = 5
+            launcher.backoff_multiplier = 1.5
+            launcher.max_attempts = 100
             # Resources with proper profile structure
             launcher.resources = [
                 {

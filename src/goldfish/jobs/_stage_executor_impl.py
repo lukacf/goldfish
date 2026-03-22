@@ -2462,13 +2462,19 @@ echo "Stage completed successfully"
         # Extract timeout from stage config (compute.max_runtime_seconds)
         # Falls back to defaults.timeout_seconds if not specified
         timeout_seconds: int | None = None
+        capacity_wait_seconds: int | None = None
         compute_config = stage_config_yaml.get("compute", {})
         if compute_config and isinstance(compute_config, dict):
             max_runtime = compute_config.get("max_runtime_seconds")
             if max_runtime is not None:
                 timeout_seconds = int(max_runtime)
+            capacity_wait = compute_config.get("capacity_wait_seconds")
+            if capacity_wait is not None:
+                capacity_wait_seconds = int(capacity_wait)
         if timeout_seconds is None:
             timeout_seconds = self.config.defaults.timeout_seconds
+        if capacity_wait_seconds is None:
+            capacity_wait_seconds = self.config.defaults.capacity_wait_seconds
 
         # Build command from entrypoint
         entrypoint_script = self._build_entrypoint_script(stage_name, runtime, entrypoint)
@@ -2517,6 +2523,7 @@ echo "Stage completed successfully"
             output_uri=output_uri,
             spot=spot,
             timeout_seconds=timeout_seconds,
+            capacity_wait_seconds=capacity_wait_seconds,
         )
 
         # Launch via run_backend protocol

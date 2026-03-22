@@ -64,6 +64,10 @@ class GCELauncher:
         zones: list[str] | None = None,
         gpu_preference: list[str] | None = None,
         service_account: str | None = None,
+        search_timeout_sec: int = 600,
+        initial_backoff_sec: float = 5,
+        backoff_multiplier: float = 1.5,
+        max_attempts: int = 100,
     ):
         """Initialize GCE launcher.
 
@@ -74,6 +78,10 @@ class GCELauncher:
             resources: Resource catalog (list of resource dicts)
             zones: List of all available zones (for multi-zone lookups)
             gpu_preference: Ordered list of preferred GPU types for capacity search
+            search_timeout_sec: Default capacity search timeout in seconds
+            initial_backoff_sec: Initial backoff between capacity retries
+            backoff_multiplier: Backoff multiplier per retry
+            max_attempts: Maximum launch attempts across all zones
         """
         self.project_id = project_id
         self.default_zone = zone
@@ -82,6 +90,10 @@ class GCELauncher:
         self.zones = zones or [zone]  # Default to list containing just default_zone
         self.gpu_preference = gpu_preference or ["h100", "a100", "none"]
         self.service_account = service_account
+        self.search_timeout_sec = search_timeout_sec
+        self.initial_backoff_sec = initial_backoff_sec
+        self.backoff_multiplier = backoff_multiplier
+        self.max_attempts = max_attempts
         self._project_number: str | None = None
         self._zone_cache: dict[str, str] = {}  # Cache for instance zones
 
@@ -134,6 +146,7 @@ class GCELauncher:
         use_capacity_search: bool = True,
         goldfish_env: dict[str, str] | None = None,
         preemptible: bool | None = None,
+        capacity_wait_seconds: int | None = None,
     ) -> GCELaunchResult:
         """Launch GCE instance for stage run.
 
@@ -360,6 +373,7 @@ class GCELauncher:
                 zones=zones,
                 preemptible=preemptible,
                 machine_type=machine_type,
+                capacity_wait_seconds=capacity_wait_seconds,
             )
         else:
             # Simple launch without capacity search
@@ -381,6 +395,7 @@ class GCELauncher:
         zones: list[str] | None,
         preemptible: bool | None = None,
         machine_type: str | None = None,
+        capacity_wait_seconds: int | None = None,
     ) -> GCELaunchResult:
         """Launch using ResourceLauncher for capacity search.
 
@@ -391,6 +406,7 @@ class GCELauncher:
             zones: Zones to search
             preemptible: Force spot (True), on-demand (False), or auto (None)
             machine_type: Exact machine type to match (e.g., "a3-highgpu-8g")
+            capacity_wait_seconds: Override search timeout (None = use launcher default)
 
         Returns:
             GCELaunchResult with instance_name and zone
@@ -433,6 +449,16 @@ class GCELauncher:
 
         # Create ResourceLauncher
         # Use instance gpu_preference for ordering, but force_gpu restricts to specific type
+        # Per-stage capacity_wait_seconds overrides the launcher default search timeout
+        search_timeout = capacity_wait_seconds if capacity_wait_seconds is not None else self.search_timeout_sec
+        zone_list = zones or self.zones
+        logger.info(
+            "Capacity search: timeout=%ds, zones=%s, gpu=%s, preemptible=%s",
+            search_timeout,
+            zone_list,
+            gpu_type,
+            force_preemptible,
+        )
         launcher = ResourceLauncher(
             resources=filtered_resources,
             gpu_preference=self.gpu_preference,
@@ -441,6 +467,10 @@ class GCELauncher:
             zones_override=zones,
             project_id=self.project_id,
             service_account=self._resolve_service_account(),
+            search_timeout_sec=search_timeout,
+            initial_backoff_sec=self.initial_backoff_sec,
+            backoff_multiplier=self.backoff_multiplier,
+            max_attempts=self.max_attempts,
         )
 
         # Launch with capacity search

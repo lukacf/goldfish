@@ -4,6 +4,22 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-03-22
+
+### Added
+- **`capacity_wait_seconds`** — Configurable GPU capacity search timeout. When GPU
+  capacity is tight, Goldfish now keeps retrying across zones automatically instead of
+  failing on the first unavailable zone. Set per-stage (`compute.capacity_wait_seconds`)
+  or globally (`defaults.capacity_wait_seconds`). Default: 600s (10 min). The capacity
+  search cycles back through all zones with reset backoff, so zone A gets retried after
+  zones B/C/D are exhausted.
+
+### Fixed
+- **GCEConfig search params were loaded but never used** — `gce.search_timeout_sec`,
+  `gce.initial_backoff_sec`, `gce.backoff_multiplier`, and `gce.max_attempts` from
+  `goldfish.yaml` were parsed into config but never wired to `ResourceLauncher`. Now
+  they are.
+
 ## [0.3.11] - 2026-03-22
 
 ### Fixed
