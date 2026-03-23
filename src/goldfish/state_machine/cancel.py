@@ -95,7 +95,7 @@ def cancel_run(
 
             controller = InstanceController(db)
             ctrl_result = controller.on_run_terminal(run_id, "canceled", source="controller")
-            if ctrl_result is not None:
+            if ctrl_result is not None and ctrl_result.success:
                 warm_pool_handled = True
         except Exception as e:
             logger.debug("Instance controller on_run_terminal skipped for %s: %s", run_id, e)

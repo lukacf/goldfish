@@ -187,21 +187,23 @@ class InstanceController:
         """Claim timed out: claimed → deleting, release lease."""
         ctx = self._ctx(source=source, stage_run_id=stage_run_id, reason="ACK timeout")
 
-        # Transition first, then release lease.
         result = instance_transition(
             self._db,
             instance_name,
             InstanceEvent.CLAIM_TIMEOUT,
             ctx,
         )
-        if result.success:
-            self._db.release_instance_lease(instance_name, stage_run_id)
-        else:
+        if not result.success:
             logger.warning(
                 "on_claim_timeout: CLAIM_TIMEOUT failed for %s: %s",
                 instance_name,
                 result.details,
             )
+
+        # Always release the lease on timeout — the caller has abandoned this claim.
+        # Even if the transition failed (e.g., instance left claimed state via a race),
+        # the lease must be released to avoid stranding it permanently.
+        self._db.release_instance_lease(instance_name, stage_run_id)
         return result
 
     # =========================================================================
@@ -292,18 +294,18 @@ class InstanceController:
         """
         ctx = self._ctx(source=source, reason="preempted/dead")
 
-        # Release any active lease
-        lease = self._db.get_active_lease_for_instance(instance_name)
-        if lease:
-            self._db.release_instance_lease(instance_name, lease["stage_run_id"])
-
+        # Transition first, then release lease.
         result = instance_transition(
             self._db,
             instance_name,
             InstanceEvent.PREEMPTED,
             ctx,
         )
-        if not result.success:
+        if result.success:
+            lease = self._db.get_active_lease_for_instance(instance_name)
+            if lease:
+                self._db.release_instance_lease(instance_name, lease["stage_run_id"])
+        else:
             logger.warning(
                 "on_preempted: PREEMPTED failed for %s: %s",
                 instance_name,
@@ -321,18 +323,18 @@ class InstanceController:
         """Request deletion (idle timeout, manual, etc.) → deleting."""
         ctx = self._ctx(source=source, reason=reason)
 
-        # Release any active lease
-        lease = self._db.get_active_lease_for_instance(instance_name)
-        if lease:
-            self._db.release_instance_lease(instance_name, lease["stage_run_id"])
-
+        # Transition first, then release lease.
         result = instance_transition(
             self._db,
             instance_name,
             InstanceEvent.DELETE_REQUESTED,
             ctx,
         )
-        if not result.success:
+        if result.success:
+            lease = self._db.get_active_lease_for_instance(instance_name)
+            if lease:
+                self._db.release_instance_lease(instance_name, lease["stage_run_id"])
+        else:
             logger.debug(
                 "on_delete_requested: DELETE_REQUESTED not accepted for %s: %s",
                 instance_name,

@@ -5731,7 +5731,7 @@ class Database:
         with self._conn() as conn:
             result = conn.execute(
                 """
-                INSERT INTO warm_instances
+                INSERT OR IGNORE INTO warm_instances
                     (instance_name, zone, project_id, machine_type, gpu_count,
                      image_family, image_project, preemptible, state, state_entered_at,
                      image_tag, created_at)

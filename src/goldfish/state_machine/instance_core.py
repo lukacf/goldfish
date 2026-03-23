@@ -85,9 +85,12 @@ def instance_transition(
 
         # 3. Handle idempotency
         if trans_def is None:
-            # Check if already in target state for this event
+            # Check if already in target state for this event.
+            # Only match transitions where a different from_state leads to
+            # current_state via this event — confirms the transition could
+            # have already happened (true replay idempotency).
             for t in INSTANCE_TRANSITIONS:
-                if t.event == event and t.to_state == current_state:
+                if t.event == event and t.to_state == current_state and t.from_state != current_state:
                     return InstanceTransitionResult(
                         success=True,
                         new_state=current_state,
