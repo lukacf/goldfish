@@ -922,11 +922,13 @@ warm_pool_idle_loop() {{
                     gsutil cp "$SPEC_PATH" /tmp/job_spec.json 2>/dev/null || {{
                         echo "ERROR: Failed to download job spec from $SPEC_PATH"
                         IDLE_START=$(date +%s)
+                        sleep 1
                         continue
                     }}
                 else
                     echo "ERROR: No spec_gcs_path in signal"
                     IDLE_START=$(date +%s)
+                    sleep 1
                     continue
                 fi
 
@@ -942,6 +944,7 @@ warm_pool_idle_loop() {{
                 if [[ -z "$NEW_IMAGE" || -z "$NEW_RUN_PATH" ]]; then
                     echo "ERROR: Job spec missing required fields (image or run_path)"
                     IDLE_START=$(date +%s)
+                    sleep 1
                     continue
                 fi
 

@@ -5767,7 +5767,7 @@ class Database:
             return cast(WarmInstanceRow, dict(row)) if row else None
 
     def delete_warm_instance(self, instance_name: str) -> None:
-        """Delete a warm instance row (only for gone instances)."""
+        """Delete a warm instance row from the table."""
         with self._conn() as conn:
             conn.execute(
                 "DELETE FROM warm_instances WHERE instance_name = ?",

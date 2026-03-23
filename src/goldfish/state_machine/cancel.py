@@ -86,18 +86,32 @@ def cancel_run(
     response = format_transition_result(result, run_id, previous_state)
 
     # Route through InstanceController for warm pool lifecycle.
+    warm_pool_handled = False
     if result.success:
         try:
             from goldfish.state_machine.instance_controller import InstanceController
 
             controller = InstanceController(db)
-            controller.on_run_terminal(run_id, "canceled", source="controller")
+            ctrl_result = controller.on_run_terminal(run_id, "canceled", source="controller")
+            if ctrl_result is not None and ctrl_result.success:
+                # Controller successfully transitioned the instance → DELETE_REQUESTED.
+                # The VM will be cleaned up, but we still issue direct cleanup below
+                # for immediate termination.
+                warm_pool_handled = True
         except Exception as e:
             logger.debug("Instance controller on_run_terminal skipped for %s: %s", run_id, e)
 
-    # Best-effort backend cleanup — always attempt for cancellation so the
-    # VM is killed immediately, not deferred to daemon polling.
-    if result.success and backend_type and backend_handle:
+    # Best-effort backend cleanup.
+    # Skip cleanup if the backend_handle is a warm-pool instance that this run
+    # no longer owns. The VM may have been recycled for another run — deleting
+    # it would kill that unrelated work.
+    skip_cleanup = False
+    if result.success and backend_handle and not warm_pool_handled:
+        inst = db.get_warm_instance(backend_handle)
+        if inst is not None:
+            skip_cleanup = True
+
+    if result.success and backend_type and backend_handle and not skip_cleanup:
         try:
             _cleanup_backend(run_id, backend_type, backend_handle)
         except Exception as e:
