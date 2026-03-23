@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 # This should match the latest stable goldfish-base-{cpu,gpu} version
 # NOTE: Only BASE images have defaults (Goldfish ships them).
 #       Project images do NOT have defaults - they're user-built.
-BASE_IMAGE_VERSION_DEFAULT = "v10"
+BASE_IMAGE_VERSION_DEFAULT = "v12"
 
 # Base image names (short names, resolved with artifact_registry)
 BASE_IMAGE_CPU = "goldfish-base-cpu"

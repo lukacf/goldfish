@@ -80,8 +80,8 @@ class TestImageVersionResolverImport:
         """
         from goldfish.cloud.image_versions import BASE_IMAGE_VERSION_DEFAULT
 
-        # v10 is current default from profiles.py
-        assert BASE_IMAGE_VERSION_DEFAULT == "v10"
+        # v12 is current default (Ubuntu 24.04 base with glibc 2.39)
+        assert BASE_IMAGE_VERSION_DEFAULT == "v12"
         # PROJECT_IMAGE_VERSION_DEFAULT does NOT exist - project images are user-built
 
 

@@ -12,8 +12,11 @@ from goldfish.svs.agent import ReviewRequest
 
 
 def _make_mock_client(mock_session):
-    """Create a mock MeerkatClient that supports async context manager."""
+    """Create a mock MeerkatClient that supports connect/close lifecycle."""
     mock_client = MagicMock()
+    mock_client.connect = AsyncMock(return_value=mock_client)
+    mock_client.close = AsyncMock()
+    # Also support async context manager for backward compat
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
 
@@ -93,8 +96,8 @@ class TestMeerkatProviderRun:
         request = ReviewRequest(review_type="pre_run", context={})
 
         mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.connect = AsyncMock(return_value=mock_client)
+        mock_client.close = AsyncMock()
 
         async def exploding_create(**kwargs):
             raise RuntimeError("Meerkat RPC failed")
@@ -123,8 +126,8 @@ class TestMeerkatProviderRun:
         captured_kwargs: dict = {}
 
         mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.connect = AsyncMock(return_value=mock_client)
+        mock_client.close = AsyncMock()
 
         async def capture_create(**kwargs):
             captured_kwargs.update(kwargs)
@@ -154,8 +157,8 @@ class TestMeerkatProviderRun:
         captured_kwargs: dict = {}
 
         mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.connect = AsyncMock(return_value=mock_client)
+        mock_client.close = AsyncMock()
 
         async def capture_create(**kwargs):
             captured_kwargs.update(kwargs)
