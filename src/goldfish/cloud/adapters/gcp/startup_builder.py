@@ -864,7 +864,10 @@ def idle_loop_section(
                 # Clean ALL previous stage outputs to prevent leaking into next run.
                 # gsutil rsync uploads everything in /mnt/outputs/, so stale signals
                 # from the previous run would be attributed to the new run.
-                rm -rf /mnt/outputs/* /tmp/goldfish_* 2>/dev/null || true
+                # Use find instead of rm -rf * because shell glob skips dotfiles
+                # (e.g. .goldfish/ with metrics/SVS artifacts).
+                find /mnt/outputs -mindepth 1 -maxdepth 1 -exec rm -rf {} \\; 2>/dev/null || true
+                rm -rf /tmp/goldfish_* 2>/dev/null || true
                 find /tmp -maxdepth 1 \\( -name "*.log" -o -name "*.json" \\) ! -name "job_spec.json" 2>/dev/null | xargs rm -f 2>/dev/null || true"""
 
     return f"""

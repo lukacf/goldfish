@@ -484,12 +484,15 @@ class StageDaemon:
                     continue
 
                 if state == InstanceState.DELETING:
-                    # Retry gcloud delete
-                    if warm_pool.delete_gce_instance(name, zone):
+                    # Issue async delete, then verify the VM is actually gone.
+                    # delete_gce_instance uses --async, so success only means
+                    # the request was accepted, not that the VM is deleted.
+                    warm_pool.delete_gce_instance(name, zone)
+                    if not warm_pool.check_instance_alive(name, zone):
+                        # VM is confirmed gone (or was never found)
                         controller.on_delete_confirmed(name)
                         self._db.delete_warm_instance(name)
-                    else:
-                        controller.on_delete_failed(name, error="gcloud delete retry failed")
+                    # else: still alive/deleting — leave in deleting, retry next poll
                     continue
 
                 if state == InstanceState.DRAINING:
@@ -548,6 +551,28 @@ class StageDaemon:
                     continue
 
                 if state == InstanceState.BUSY:
+                    # If the owning run is already terminal but the executor
+                    # crashed before calling on_run_terminal, finalize here.
+                    lease = self._db.get_active_lease_for_instance(name)
+                    if lease:
+                        run = self._db.get_stage_run(lease["stage_run_id"])
+                        run_state = run.get("state", "") if run else ""
+                        terminal_values = {s.value for s in TERMINAL_STATES}
+                        non_owning = terminal_values | {"awaiting_user_finalization"}
+                        if run_state in non_owning:
+                            logger.info(
+                                "Finalizing stale busy instance %s (run %s in %s)",
+                                name,
+                                lease["stage_run_id"],
+                                run_state,
+                            )
+                            controller.on_run_terminal(
+                                lease["stage_run_id"],
+                                run_state,
+                                source="daemon",
+                            )
+                            continue
+
                     # Check if VM is dead (require consecutive failures)
                     if not warm_pool.check_instance_alive(name, zone):
                         self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
