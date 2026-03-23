@@ -338,11 +338,21 @@ class InstanceController:
             return dict(row) if row else None
 
     def _force_release_lease(self, instance_name: str) -> None:
-        """Unconditionally clear current_lease_run_id. Used as fallback."""
+        """Unconditionally clear current_lease_run_id and audit table. Used as fallback."""
+        from datetime import UTC, datetime
+
+        now = datetime.now(UTC).isoformat()
         with self._db._conn() as conn:
+            # Clear the authoritative lease column
             conn.execute(
                 "UPDATE warm_instances SET current_lease_run_id = NULL WHERE instance_name = ?",
                 (instance_name,),
+            )
+            # Also release any active audit rows to keep them consistent
+            conn.execute(
+                "UPDATE instance_leases SET lease_state = 'released', released_at = ? "
+                "WHERE instance_name = ? AND lease_state = 'active'",
+                (now, instance_name),
             )
 
     def _ctx(

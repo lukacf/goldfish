@@ -496,25 +496,26 @@ class StageDaemon:
                     # delete_gce_instance uses --async, so success only means
                     # the request was accepted, not that the VM is deleted.
                     warm_pool.delete_gce_instance(name, zone)
-                    if not warm_pool.check_instance_alive(name, zone):
-                        # VM is confirmed gone (or was never found)
+                    status = warm_pool.check_instance_status(name, zone)
+                    if status in ("not_found", "dead"):
+                        # VM confirmed gone or terminated — safe to remove
                         controller.on_delete_confirmed(name)
                         self._db.delete_warm_instance(name)
-                    # else: still alive/deleting — leave in deleting, retry next poll
+                    # "alive" or "error" — leave in deleting, retry next poll.
+                    # Don't treat transient gcloud errors as "gone".
                     continue
 
                 if state == InstanceState.DRAINING:
                     lease_run_id = inst.get("current_lease_run_id")
 
                     # If the lease is still active but the owning run is already
-                    # terminal, the executor crashed before calling on_run_terminal.
-                    # Finalize via controller (releases lease atomically).
+                    # terminal (or missing/purged), finalize via controller.
                     if lease_run_id:
                         run = self._db.get_stage_run(lease_run_id)
                         run_state = run.get("state", "") if run else ""
                         terminal_values = {s.value for s in TERMINAL_STATES}
                         non_owning = terminal_values | {"awaiting_user_finalization"}
-                        if run_state in non_owning:
+                        if run is None or run_state in non_owning:
                             logger.info(
                                 "Finalizing stale draining instance %s (run %s in %s)",
                                 name,
@@ -560,15 +561,16 @@ class StageDaemon:
                     continue
 
                 if state == InstanceState.BUSY:
-                    # If the owning run is already terminal but the executor
-                    # crashed before calling on_run_terminal, finalize here.
+                    # If the owning run is already terminal (or missing/purged)
+                    # but the executor crashed before calling on_run_terminal, finalize here.
                     lease_run_id = inst.get("current_lease_run_id")
                     if lease_run_id:
                         run = self._db.get_stage_run(lease_run_id)
                         run_state = run.get("state", "") if run else ""
                         terminal_values = {s.value for s in TERMINAL_STATES}
                         non_owning = terminal_values | {"awaiting_user_finalization"}
-                        if run_state in non_owning:
+                        # Treat missing run (run is None) as terminal — it was deleted/purged
+                        if run is None or run_state in non_owning:
                             logger.info(
                                 "Finalizing stale busy instance %s (run %s in %s)",
                                 name,

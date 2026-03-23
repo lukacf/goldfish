@@ -244,7 +244,23 @@ class WarmPoolManager:
     # =========================================================================
 
     def check_instance_alive(self, instance_name: str, zone: str) -> bool:
-        """Check if GCE instance is alive via gcloud."""
+        """Check if GCE instance is alive via gcloud.
+
+        Returns True if alive, False if dead/not-found/error.
+        For callers that need to distinguish "not found" from "transient error",
+        use check_instance_status() instead.
+        """
+        status = self.check_instance_status(instance_name, zone)
+        return status == "alive"
+
+    def check_instance_status(self, instance_name: str, zone: str) -> str:
+        """Check GCE instance status with tri-state return.
+
+        Returns:
+            "alive" — VM exists and is RUNNING/STAGING/PROVISIONING
+            "not_found" — VM confirmed not to exist (404 / "not found" in stderr)
+            "error" — transient/unknown failure (auth, network, timeout, etc.)
+        """
         try:
             result = subprocess.run(
                 [
@@ -263,13 +279,24 @@ class WarmPoolManager:
                 timeout=30,
                 text=True,
             )
-            if result.returncode != 0:
-                return False
-            status = result.stdout.strip().upper()
-            return status in ("RUNNING", "STAGING", "PROVISIONING")
+            if result.returncode == 0:
+                status = result.stdout.strip().upper()
+                if status in ("RUNNING", "STAGING", "PROVISIONING"):
+                    return "alive"
+                # TERMINATED, STOPPED, SUSPENDED — VM exists but not usable.
+                # Return "dead" (distinct from "not_found" which means the VM
+                # doesn't exist at all). Both mean "not alive" but callers may
+                # care about the difference for deletion confirmation.
+                return "dead"
+            # Non-zero exit: check if it's "not found" vs transient error
+            stderr = result.stderr.lower()
+            if "not found" in stderr or "was not found" in stderr:
+                return "not_found"
+            logger.warning("GCE describe failed for %s (rc=%d): %s", instance_name, result.returncode, stderr[:200])
+            return "error"
         except Exception as e:
             logger.warning("GCE liveness check failed for %s: %s", instance_name, e)
-            return False
+            return "error"
 
     def get_instance_metadata(self, instance_name: str, zone: str) -> dict:
         """Get instance metadata as a dict of key→value."""

@@ -351,17 +351,21 @@ class GCERunBackend:
                 )
                 if not ctrl_result.success:
                     # Controller couldn't take ownership. Remove the pre-registered
-                    # row directly so the daemon doesn't later kill the live VM as
-                    # "stuck launching". Do NOT call on_launch_failed — that would
-                    # transition to deleting and eventually delete the running VM.
-                    # The run still proceeds; it just won't be warm-pool tracked.
+                    # row and disable the idle loop via metadata so the VM self-deletes
+                    # after the first job instead of entering the untracked idle loop.
                     logger.warning(
-                        "Controller on_fresh_launch failed for %s: %s — removing warm pool row",
+                        "Controller on_fresh_launch failed for %s: %s — disabling idle loop",
                         actual_name,
                         ctrl_result.details,
                     )
                     try:
                         self._warm_pool._db.delete_warm_instance(actual_name)
+                        self._warm_pool._set_instance_metadata(
+                            actual_name,
+                            actual_zone,
+                            "goldfish_warm_pool_disabled",
+                            "true",
+                        )
                     except Exception:
                         pass
 
