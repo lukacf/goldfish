@@ -4,6 +4,12 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.15] - 2026-03-23
+
+### Added
+- **`goldfish_version` MCP tool** — Returns the running server version so you stop
+  guessing whether a fix is deployed.
+
 ## [0.3.14] - 2026-03-23
 
 ### Fixed
