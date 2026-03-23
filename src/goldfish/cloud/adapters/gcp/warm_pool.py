@@ -167,7 +167,19 @@ class WarmPoolManager:
                     zone=zone,
                 )
             else:
-                # 7. ACK timeout → claimed → deleting
+                # 7. ACK timeout → claimed → deleting.
+                # Clear the goldfish metadata FIRST so the VM can't ACK late
+                # and start the job after we fall back to a fresh launch.
+                # Without this, both VMs run the same stage_run_id.
+                try:
+                    self._set_instance_metadata(
+                        instance_name,
+                        zone,
+                        "goldfish",
+                        "",
+                    )
+                except Exception:
+                    pass  # Best-effort — VM may be unreachable
                 logger.warning(
                     "ACK timeout for warm instance %s — deleting to prevent double-dispatch",
                     instance_name,
@@ -177,6 +189,15 @@ class WarmPoolManager:
 
         except Exception as e:
             logger.warning("Warm pool claim failed for %s: %s — deleting instance", instance_name, e)
+            try:
+                self._set_instance_metadata(
+                    instance_name,
+                    zone,
+                    "goldfish",
+                    "",
+                )
+            except Exception:
+                pass
             self._controller.on_claim_timeout(instance_name, stage_run_id)
             return None
 
