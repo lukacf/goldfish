@@ -4,6 +4,18 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-03-23
+
+### Fixed
+- **rkat-rpc crash in production (glibc 2.35 vs 2.39)** — `BASE_IMAGE_VERSION_DEFAULT`
+  was never bumped from `v10` to `v12` when the base GPU image was rebuilt on Ubuntu 24.04
+  (0.3.9). The v12 image existed in Artifact Registry but workspace images kept using
+  `goldfish-base-gpu:v10` (Ubuntu 22.04, glibc 2.35). rkat-rpc requires glibc 2.39 and
+  crashed on every during-run AI review attempt, disabling SVS after 3 failures.
+- **rkat-rpc crash diagnostics** — Captures rkat-rpc stderr on crash. The Meerkat SDK
+  pipes stderr but never reads it, so crash reasons were lost. Now logged as
+  `rkat-rpc crashed (exit=N): <stderr>`.
+
 ## [0.3.12] - 2026-03-22
 
 ### Added
