@@ -54,15 +54,21 @@ class InstanceController:
         # Create lease first (binds run to instance).
         # If lease creation fails, do NOT transition to busy — a busy instance
         # without a lease can never be released by on_run_terminal, stranding it.
+        # Handle idempotency: if this exact lease already exists, continue.
         try:
             self._db.create_instance_lease(instance_name, stage_run_id)
         except Exception as e:
-            logger.warning("Failed to create lease for %s/%s: %s", instance_name, stage_run_id, e)
-            return InstanceTransitionResult(
-                success=False,
-                reason="lease_failed",
-                details=f"Could not create lease: {e}",
-            )
+            # Check if this is a duplicate — same (instance, run) pair already leased
+            existing = self._db.get_active_lease_for_run(stage_run_id)
+            if existing and existing["instance_name"] == instance_name:
+                logger.debug("Lease already exists for %s/%s — idempotent", instance_name, stage_run_id)
+            else:
+                logger.warning("Failed to create lease for %s/%s: %s", instance_name, stage_run_id, e)
+                return InstanceTransitionResult(
+                    success=False,
+                    reason="lease_failed",
+                    details=f"Could not create lease: {e}",
+                )
 
         result = instance_transition(
             self._db,
