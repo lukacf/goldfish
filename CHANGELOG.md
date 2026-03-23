@@ -4,6 +4,17 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-03-23
+
+### Fixed
+- **Base image upgrades blocked by stale DB entries** — The image version resolver used
+  precedence config → DB → default. When Goldfish bumped `BASE_IMAGE_VERSION_DEFAULT`
+  (v10→v12 for Ubuntu 24.04/glibc 2.39), existing DB entries (`v10`) took priority and
+  blocked the upgrade. Every run kept building `FROM goldfish-base-gpu:v10` despite the
+  code shipping v12. Fix: DB version is now capped at `max(DB, shipped_default)` so
+  base image upgrades propagate automatically. This was the root cause of the rkat-rpc
+  glibc crash — the 0.3.9 base image fix and 0.3.13 constant bump never took effect.
+
 ## [0.3.13] - 2026-03-23
 
 ### Fixed
