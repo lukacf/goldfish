@@ -85,23 +85,28 @@ def cancel_run(
     # Format response
     response = format_transition_result(result, run_id, previous_state)
 
-    # Route through InstanceController for warm pool lifecycle
+    # Route through InstanceController for warm pool lifecycle.
+    # If the controller handles it (active lease found → DELETE_REQUESTED emitted),
+    # skip direct backend cleanup to avoid redundant synchronous gcloud deletes.
+    warm_pool_handled = False
     if result.success:
         try:
             from goldfish.state_machine.instance_controller import InstanceController
 
             controller = InstanceController(db)
-            controller.on_run_terminal(run_id, "canceled", source="controller")
+            ctrl_result = controller.on_run_terminal(run_id, "canceled", source="controller")
+            if ctrl_result is not None:
+                warm_pool_handled = True
         except Exception as e:
             logger.debug("Instance controller on_run_terminal skipped for %s: %s", run_id, e)
 
-    # Best-effort backend cleanup (only if transition succeeded)
-    if result.success and backend_type and backend_handle:
+    # Best-effort backend cleanup (only if transition succeeded AND warm pool
+    # didn't already handle it — avoids redundant synchronous gcloud delete)
+    if result.success and backend_type and backend_handle and not warm_pool_handled:
         try:
             _cleanup_backend(run_id, backend_type, backend_handle)
         except Exception as e:
             logger.warning("Failed to cleanup backend for %s (%s:%s): %s", run_id, backend_type, backend_handle, e)
-            # Sanitized error - don't expose raw exception details to API response
             response["cleanup_error"] = "Backend cleanup failed"
 
     return response

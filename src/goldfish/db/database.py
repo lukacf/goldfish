@@ -752,8 +752,7 @@ class Database:
                         error_message TEXT,
                         reason TEXT,
                         source TEXT NOT NULL CHECK(source IN ('controller', 'daemon', 'executor', 'warm_pool')),
-                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                        FOREIGN KEY (instance_name) REFERENCES warm_instances(instance_name) ON DELETE CASCADE
+                        created_at TEXT NOT NULL DEFAULT (datetime('now'))
                     );
                     CREATE INDEX IF NOT EXISTS idx_instance_transitions_name
                         ON instance_state_transitions(instance_name, created_at);
@@ -5805,14 +5804,19 @@ class Database:
         with self._conn() as conn:
             row = conn.execute(
                 """
-                SELECT * FROM warm_instances
-                WHERE state = 'idle_ready'
-                  AND machine_type = ?
-                  AND gpu_count = ?
-                  AND image_family = ?
-                  AND image_project = ?
-                  AND preemptible = ?
-                ORDER BY state_entered_at ASC
+                SELECT * FROM warm_instances w
+                WHERE w.state = 'idle_ready'
+                  AND w.machine_type = ?
+                  AND w.gpu_count = ?
+                  AND w.image_family = ?
+                  AND w.image_project = ?
+                  AND w.preemptible = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM instance_leases l
+                      WHERE l.instance_name = w.instance_name
+                        AND l.lease_state = 'active'
+                  )
+                ORDER BY w.state_entered_at ASC
                 LIMIT 1
                 """,
                 (machine_type, gpu_count, image_family, image_project, preemptible_int),

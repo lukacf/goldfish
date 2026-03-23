@@ -95,17 +95,17 @@ class InstanceController:
         """
         ctx = self._ctx(source=source, stage_run_id=stage_run_id, error_message=error)
 
-        # Release lease if one exists
-        if stage_run_id:
-            self._db.release_instance_lease(instance_name, stage_run_id)
-
+        # Transition first, then release lease.
         result = instance_transition(
             self._db,
             instance_name,
             InstanceEvent.LAUNCH_FAILED,
             ctx,
         )
-        if not result.success:
+        if result.success:
+            if stage_run_id:
+                self._db.release_instance_lease(instance_name, stage_run_id)
+        else:
             logger.warning(
                 "on_launch_failed: LAUNCH_FAILED failed for %s: %s",
                 instance_name,
@@ -187,16 +187,16 @@ class InstanceController:
         """Claim timed out: claimed → deleting, release lease."""
         ctx = self._ctx(source=source, stage_run_id=stage_run_id, reason="ACK timeout")
 
-        # Release lease
-        self._db.release_instance_lease(instance_name, stage_run_id)
-
+        # Transition first, then release lease.
         result = instance_transition(
             self._db,
             instance_name,
             InstanceEvent.CLAIM_TIMEOUT,
             ctx,
         )
-        if not result.success:
+        if result.success:
+            self._db.release_instance_lease(instance_name, stage_run_id)
+        else:
             logger.warning(
                 "on_claim_timeout: CLAIM_TIMEOUT failed for %s: %s",
                 instance_name,
@@ -229,9 +229,6 @@ class InstanceController:
         instance_name = lease["instance_name"]
         ctx = self._ctx(source=source, stage_run_id=stage_run_id, reason=f"run {terminal_state}")
 
-        # Release the lease
-        self._db.release_instance_lease(instance_name, stage_run_id)
-
         # Choose event based on terminal state
         delete_states = ("terminated", "canceled")
         if terminal_state in delete_states:
@@ -240,8 +237,13 @@ class InstanceController:
             # completed, failed, awaiting_user_finalization
             event = InstanceEvent.JOB_FINISHED
 
+        # Transition FIRST, then release lease. If transition fails, the lease
+        # stays active (correct — the run still owns the instance). If transition
+        # succeeds but release fails, the daemon's stale-lease detection handles it.
         result = instance_transition(self._db, instance_name, event, ctx)
-        if not result.success:
+        if result.success:
+            self._db.release_instance_lease(instance_name, stage_run_id)
+        else:
             logger.warning(
                 "on_run_terminal: %s failed for %s (run=%s, terminal=%s): %s",
                 event.name,

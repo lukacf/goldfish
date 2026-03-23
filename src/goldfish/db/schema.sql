@@ -701,8 +701,7 @@ CREATE TABLE IF NOT EXISTS instance_state_transitions (
     error_message TEXT,
     reason TEXT,
     source TEXT NOT NULL CHECK(source IN ('controller', 'daemon', 'executor', 'warm_pool')),
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (instance_name) REFERENCES warm_instances(instance_name) ON DELETE CASCADE
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_instance_transitions_name

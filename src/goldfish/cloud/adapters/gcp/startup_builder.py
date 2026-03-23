@@ -943,6 +943,14 @@ warm_pool_idle_loop() {{
                     continue
                 fi
 
+                # Clear stale idle_ready metadata BEFORE ACKing. This metadata is
+                # sticky from the previous cycle — without clearing it, the daemon
+                # can see the old value during the next draining phase and prematurely
+                # promote the instance to idle_ready before the new job has finished.
+                gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+                    --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+                    --metadata "goldfish_instance_state=busy" --quiet 2>/dev/null || true
+
                 # ACK AFTER spec download + parse validation.
                 # This ensures the claim only succeeds when the VM has a valid job to run.
                 if command -v gcloud >/dev/null 2>&1; then

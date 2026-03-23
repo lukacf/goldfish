@@ -208,6 +208,11 @@ class GCERunBackend:
                 return warm_handle
             logger.info("Warm pool claim failed for %s, falling through to fresh launch", spec.stage_run_id)
 
+        # Initialize warm-pool tracking variables BEFORE the try block so the
+        # exception handler can safely reference them without UnboundLocalError.
+        warm_pool_pre_registered = False
+        expected_instance_name = ""
+
         try:
             # Serialize StorageURIs to strings for GCELauncher
             # GCELauncher expects inputs as strings (gs://...), not StorageURI objects
@@ -266,7 +271,6 @@ class GCERunBackend:
             warm_pool_idle_timeout_seconds: int | None = None
             warm_pool_preserve_paths: list[str] | None = None
             warm_pool_watchdog_seconds: int | None = None
-            warm_pool_pre_registered = False
             if self._warm_pool and self._warm_pool.is_enabled_for(spec.profile):
                 from goldfish.cloud.adapters.gcp.gce_launcher import GCELauncher
                 from goldfish.cloud.adapters.gcp.profiles import ProfileResolver
@@ -346,11 +350,22 @@ class GCERunBackend:
                     spec.stage_run_id,
                 )
                 if not ctrl_result.success:
+                    # Controller couldn't take ownership. Clean up the pre-registered
+                    # row so the daemon doesn't later kill the VM as "stuck launching".
+                    # The run still proceeds — it just won't be warm-pool tracked.
                     logger.warning(
-                        "Controller on_fresh_launch failed for %s: %s",
+                        "Controller on_fresh_launch failed for %s: %s — removing warm pool row",
                         actual_name,
                         ctrl_result.details,
                     )
+                    try:
+                        self._warm_pool.controller.on_launch_failed(
+                            actual_name,
+                            spec.stage_run_id,
+                            error="controller registration failed",
+                        )
+                    except Exception:
+                        pass
 
             return handle
 

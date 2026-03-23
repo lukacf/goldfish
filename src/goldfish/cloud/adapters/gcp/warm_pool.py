@@ -151,7 +151,15 @@ class WarmPoolManager:
 
             if ack:
                 # 6. ACK received → claimed → busy
-                self._controller.on_claim_acked(instance_name, stage_run_id)
+                ack_result = self._controller.on_claim_acked(instance_name, stage_run_id)
+                if not ack_result.success:
+                    logger.warning(
+                        "on_claim_acked failed for %s: %s — deleting instance",
+                        instance_name,
+                        ack_result.details,
+                    )
+                    self._controller.on_claim_timeout(instance_name, stage_run_id)
+                    return None
                 return RunHandle(
                     stage_run_id=stage_run_id,
                     backend_type="gce",
@@ -177,15 +185,25 @@ class WarmPoolManager:
         return self._db.get_warm_instance(instance_name)
 
     def delete_instance(self, instance_name: str) -> None:
-        """Delete VM via gcloud and remove from DB.
+        """Delete VM via gcloud, routing through the instance controller.
 
-        Only removes the DB row if gcloud delete succeeds.
+        Transitions through the state machine (DELETE_REQUESTED → deleting,
+        then DELETE_CONFIRMED → gone) to maintain audit trail. Falls back
+        to direct deletion if the instance is already in a terminal state.
         """
         instance = self._db.get_warm_instance(instance_name)
         if not instance:
             return
+
+        state = instance["state"]
+
+        # If not already deleting/gone, request deletion through controller
+        if state not in ("deleting", "gone"):
+            self._controller.on_delete_requested(instance_name, reason="delete_instance called")
+
         gce_ok = self._delete_gce_instance(instance_name, instance["zone"])
         if gce_ok:
+            self._controller.on_delete_confirmed(instance_name)
             self._db.delete_warm_instance(instance_name)
         else:
             logger.warning(
@@ -371,7 +389,7 @@ class WarmPoolManager:
                     "--quiet",
                 ],
                 capture_output=True,
-                timeout=60,
+                timeout=15,  # Short timeout — daemon retries on next poll if this times out
                 text=True,
             )
             if result.returncode == 0:

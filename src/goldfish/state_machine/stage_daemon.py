@@ -96,6 +96,10 @@ class StageDaemon:
 
         self._leader = DaemonLeaderElection(db)
 
+        # Consecutive liveness failure counts per instance.
+        # Prevents transient gcloud/API errors from marking live VMs as preempted.
+        self._liveness_fail_counts: dict[str, int] = {}
+
     def poll_active_runs(self) -> None:
         """Poll active runs and emit events.
 
@@ -459,6 +463,7 @@ class StageDaemon:
                 if state == InstanceState.GONE:
                     # Clean up gone rows
                     self._db.delete_warm_instance(name)
+                    self._liveness_fail_counts.pop(name, None)
                     continue
 
                 if state == InstanceState.IDLE_READY:
@@ -515,9 +520,15 @@ class StageDaemon:
                             controller.on_drain_complete(name)
                             continue
 
-                    # Check if VM is dead
+                    # Check if VM is dead (require consecutive failures to
+                    # avoid marking live VMs as preempted on transient errors)
                     if not warm_pool.check_instance_alive(name, zone):
-                        controller.on_preempted(name)
+                        self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
+                        if self._liveness_fail_counts[name] >= 3:
+                            controller.on_preempted(name)
+                            self._liveness_fail_counts.pop(name, None)
+                    else:
+                        self._liveness_fail_counts.pop(name, None)
                     continue
 
                 if state == InstanceState.LAUNCHING:
@@ -537,9 +548,14 @@ class StageDaemon:
                     continue
 
                 if state == InstanceState.BUSY:
-                    # Check if VM is dead (preemption/crash)
+                    # Check if VM is dead (require consecutive failures)
                     if not warm_pool.check_instance_alive(name, zone):
-                        controller.on_preempted(name)
+                        self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
+                        if self._liveness_fail_counts[name] >= 3:
+                            controller.on_preempted(name)
+                            self._liveness_fail_counts.pop(name, None)
+                    else:
+                        self._liveness_fail_counts.pop(name, None)
                     continue
 
             except Exception as e:
