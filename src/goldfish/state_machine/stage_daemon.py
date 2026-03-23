@@ -471,14 +471,17 @@ class StageDaemon:
                     if self._instance_timed_out(inst, warm_pool._config.idle_timeout_minutes * 60):
                         controller.on_delete_requested(name, reason="idle timeout")
                         continue
-                    # Check liveness — spot VMs can be preempted while idle
-                    if not warm_pool.check_instance_alive(name, zone):
+                    # Check liveness — spot VMs can be preempted while idle.
+                    # Only count confirmed dead/not-found, not transient errors.
+                    vm_status = warm_pool.check_instance_status(name, zone)
+                    if vm_status in ("not_found", "dead"):
                         self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
                         if self._liveness_fail_counts[name] >= 3:
                             controller.on_preempted(name)
                             self._liveness_fail_counts.pop(name, None)
-                    else:
+                    elif vm_status == "alive":
                         self._liveness_fail_counts.pop(name, None)
+                    # "error" — don't count, don't reset. Wait for a definitive answer.
                     continue
 
                 if state == InstanceState.CLAIMED:
@@ -492,9 +495,9 @@ class StageDaemon:
                     continue
 
                 if state == InstanceState.DELETING:
-                    # Issue async delete, then verify the VM is actually gone.
-                    # delete_gce_instance uses --async, so success only means
-                    # the request was accepted, not that the VM is deleted.
+                    # Issue delete (15s timeout), then verify the VM is gone.
+                    # Success only means gcloud accepted the request, not that
+                    # deletion completed, so we verify via liveness check.
                     warm_pool.delete_gce_instance(name, zone)
                     status = warm_pool.check_instance_status(name, zone)
                     if status in ("not_found", "dead"):
@@ -512,10 +515,12 @@ class StageDaemon:
                     # terminal (or missing/purged), finalize via controller.
                     if lease_run_id:
                         run = self._db.get_stage_run(lease_run_id)
-                        run_state = run.get("state", "") if run else ""
+                        run_state = run.get("state", "") if run else None
                         terminal_values = {s.value for s in TERMINAL_STATES}
                         non_owning = terminal_values | {"awaiting_user_finalization"}
-                        if run is None or run_state in non_owning:
+                        if run is None:
+                            run_state = "terminated"
+                        if run_state in non_owning:
                             logger.info(
                                 "Finalizing stale draining instance %s (run %s in %s)",
                                 name,
@@ -533,14 +538,14 @@ class StageDaemon:
                             controller.on_drain_complete(name)
                             continue
 
-                    # Check if VM is dead (require consecutive failures to
-                    # avoid marking live VMs as preempted on transient errors)
-                    if not warm_pool.check_instance_alive(name, zone):
+                    # Check if VM is dead (only count confirmed dead/not-found)
+                    vm_status = warm_pool.check_instance_status(name, zone)
+                    if vm_status in ("not_found", "dead"):
                         self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
                         if self._liveness_fail_counts[name] >= 3:
                             controller.on_preempted(name)
                             self._liveness_fail_counts.pop(name, None)
-                    else:
+                    elif vm_status == "alive":
                         self._liveness_fail_counts.pop(name, None)
                     continue
 
@@ -566,11 +571,14 @@ class StageDaemon:
                     lease_run_id = inst.get("current_lease_run_id")
                     if lease_run_id:
                         run = self._db.get_stage_run(lease_run_id)
-                        run_state = run.get("state", "") if run else ""
+                        run_state = run.get("state", "") if run else None
                         terminal_values = {s.value for s in TERMINAL_STATES}
                         non_owning = terminal_values | {"awaiting_user_finalization"}
-                        # Treat missing run (run is None) as terminal — it was deleted/purged
-                        if run is None or run_state in non_owning:
+                        # Missing run → treat as "terminated" (not "completed") so
+                        # the controller emits DELETE_REQUESTED instead of JOB_FINISHED
+                        if run is None:
+                            run_state = "terminated"
+                        if run_state in non_owning:
                             logger.info(
                                 "Finalizing stale busy instance %s (run %s in %s)",
                                 name,
@@ -584,13 +592,14 @@ class StageDaemon:
                             )
                             continue
 
-                    # Check if VM is dead (require consecutive failures)
-                    if not warm_pool.check_instance_alive(name, zone):
+                    # Check if VM is dead (only count confirmed dead/not-found)
+                    vm_status = warm_pool.check_instance_status(name, zone)
+                    if vm_status in ("not_found", "dead"):
                         self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
                         if self._liveness_fail_counts[name] >= 3:
                             controller.on_preempted(name)
                             self._liveness_fail_counts.pop(name, None)
-                    else:
+                    elif vm_status == "alive":
                         self._liveness_fail_counts.pop(name, None)
                     continue
 
