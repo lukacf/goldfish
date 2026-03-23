@@ -4,6 +4,14 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.16] - 2026-03-23
+
+### Fixed
+- **MCP tools registered but not wired** — `goldfish_version`, `dashboard`,
+  `get_workspace_thoughts`, and `get_lineage` were decorated with `@mcp.tool()` but
+  not imported in `server.py`, causing "Unknown tool" errors. Added regression test
+  that catches any `@mcp.tool()` function missing from `server.py` imports.
+
 ## [0.3.15] - 2026-03-23
 
 ### Added
