@@ -1008,6 +1008,9 @@ for name, uri in spec.get('inputs', {{}}).items():
                     echo "1" | gsutil cp - "$GCS_EXIT_CODE_PATH" 2>/dev/null || true
                     upload_logs_with_retry "$LOCAL_STDOUT" "$GCS_STDOUT_PATH" || true
                     upload_logs_with_retry "$LOCAL_STDERR" "$GCS_STDERR_PATH" || true
+                    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+                        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+                        --metadata "goldfish_instance_state=idle_ready" --quiet 2>/dev/null || true
                     IDLE_START=$(date +%s)
                     continue
                 }}
@@ -1024,6 +1027,9 @@ for name, uri in spec.get('inputs', {{}}).items():
                         echo "1" | gsutil cp - "$GCS_EXIT_CODE_PATH" 2>/dev/null || true
                         upload_logs_with_retry "$LOCAL_STDOUT" "$GCS_STDOUT_PATH" || true
                         upload_logs_with_retry "$LOCAL_STDERR" "$GCS_STDERR_PATH" || true
+                        gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+                            --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+                            --metadata "goldfish_instance_state=idle_ready" --quiet 2>/dev/null || true
                         IDLE_START=$(date +%s)
                         continue
                     }}

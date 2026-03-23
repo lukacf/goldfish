@@ -676,11 +676,11 @@ class Database:
 
             if current_version < 8:
                 # Warm pool v2: state-machine-driven instances + leases
-                # Migrate warm_instances: status→state, add state_entered_at, drop old columns
-                table_exists = conn.execute(
+                # Step 1: Migrate old warm_instances (status→state) if it exists
+                old_table_exists = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='warm_instances'",
                 ).fetchone()
-                if table_exists:
+                if old_table_exists:
                     existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(warm_instances)")}
                     if "status" in existing_cols and "state" not in existing_cols:
                         # Old schema → new schema: recreate table
@@ -701,7 +701,6 @@ class Database:
                                 created_at TEXT NOT NULL
                             );
                         """)
-                        # Migrate existing rows with status→state mapping
                         conn.execute("""
                             INSERT INTO warm_instances_v2
                                 (instance_name, zone, project_id, machine_type, gpu_count,
@@ -724,8 +723,25 @@ class Database:
                         conn.execute("DROP TABLE warm_instances")
                         conn.execute("ALTER TABLE warm_instances_v2 RENAME TO warm_instances")
 
-                # Create new tables (idempotent)
+                # Step 2: Create warm_instances v2 if it doesn't exist at all
+                # (covers fresh upgrades from main where no warm pool table existed)
                 conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS warm_instances (
+                        instance_name TEXT PRIMARY KEY,
+                        zone TEXT NOT NULL,
+                        project_id TEXT NOT NULL,
+                        machine_type TEXT NOT NULL,
+                        gpu_count INTEGER NOT NULL DEFAULT 0,
+                        image_family TEXT NOT NULL DEFAULT 'debian-12',
+                        image_project TEXT NOT NULL DEFAULT 'debian-cloud',
+                        preemptible INTEGER NOT NULL DEFAULT 0,
+                        state TEXT NOT NULL DEFAULT 'launching'
+                            CHECK(state IN ('launching', 'busy', 'draining', 'idle_ready', 'claimed', 'deleting', 'gone')),
+                        image_tag TEXT,
+                        state_entered_at TEXT,
+                        created_at TEXT NOT NULL
+                    );
+
                     CREATE TABLE IF NOT EXISTS instance_state_transitions (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         instance_name TEXT NOT NULL,
@@ -754,21 +770,14 @@ class Database:
                         ON instance_leases(instance_name) WHERE lease_state = 'active';
                     CREATE INDEX IF NOT EXISTS idx_instance_leases_run
                         ON instance_leases(stage_run_id);
-                """)
 
-                # Create new indexes for warm_instances (only if table exists)
-                wi_exists = conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='warm_instances'",
-                ).fetchone()
-                if wi_exists:
-                    conn.executescript("""
-                        CREATE INDEX IF NOT EXISTS idx_warm_instances_state ON warm_instances(state);
-                        CREATE INDEX IF NOT EXISTS idx_warm_instances_match
-                            ON warm_instances(machine_type, gpu_count, image_family, image_project, preemptible)
-                            WHERE state = 'idle_ready';
-                        CREATE INDEX IF NOT EXISTS idx_warm_instances_idle ON warm_instances(state_entered_at)
-                            WHERE state = 'idle_ready';
-                    """)
+                    CREATE INDEX IF NOT EXISTS idx_warm_instances_state ON warm_instances(state);
+                    CREATE INDEX IF NOT EXISTS idx_warm_instances_match
+                        ON warm_instances(machine_type, gpu_count, image_family, image_project, preemptible)
+                        WHERE state = 'idle_ready';
+                    CREATE INDEX IF NOT EXISTS idx_warm_instances_idle ON warm_instances(state_entered_at)
+                        WHERE state = 'idle_ready';
+                """)
 
                 new_version = 8
 
