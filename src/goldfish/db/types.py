@@ -389,6 +389,7 @@ class WarmInstanceRow(TypedDict):
     state: str
     image_tag: str | None
     state_entered_at: str | None
+    current_lease_run_id: str | None
     created_at: str
 
 

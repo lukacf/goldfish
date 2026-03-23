@@ -679,6 +679,7 @@ CREATE TABLE IF NOT EXISTS warm_instances (
         CHECK(state IN ('launching', 'busy', 'draining', 'idle_ready', 'claimed', 'deleting', 'gone')),
     image_tag TEXT,
     state_entered_at TEXT,
+    current_lease_run_id TEXT,
     created_at TEXT NOT NULL
 );
 

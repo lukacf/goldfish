@@ -2,6 +2,9 @@
 
 Implements instance_transition() — the single entry point for all
 warm_instances state changes. Mirrors the CAS pattern in core.py.
+
+Lease operations (acquire/release) are performed atomically in the same
+UPDATE statement as the state transition, eliminating partial-failure windows.
 """
 
 from __future__ import annotations
@@ -25,26 +28,32 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Sentinel: "don't touch the lease column"
+_LEASE_UNCHANGED = object()
+
 
 def instance_transition(
     db: Database,
     instance_name: str,
     event: InstanceEvent,
     context: InstanceEventContext,
+    *,
+    set_lease_run_id: str | None | object = _LEASE_UNCHANGED,
 ) -> InstanceTransitionResult:
     """Atomically transition a warm instance's state using CAS semantics.
 
-    1. Read current state INSIDE transaction
-    2. Find valid transition for (state, event)
-    3. Update state with WHERE clause checking expected state
-    4. Insert audit record in same transaction
-    5. Return result
+    The state change and optional lease operation happen in a single UPDATE,
+    so there is no window where state and lease are inconsistent.
 
     Args:
         db: Database instance.
         instance_name: Warm instance name.
         event: Event to process.
         context: Event context for audit trail.
+        set_lease_run_id: Optional lease operation performed atomically:
+            - _LEASE_UNCHANGED (default): don't touch current_lease_run_id
+            - "stage-xxx": set current_lease_run_id to this value (acquire lease)
+            - None: clear current_lease_run_id (release lease)
 
     Returns:
         InstanceTransitionResult with success status.
@@ -52,7 +61,7 @@ def instance_transition(
     with db._conn() as conn:
         # 1. Read current state
         row = conn.execute(
-            "SELECT state FROM warm_instances WHERE instance_name = ?",
+            "SELECT state, current_lease_run_id FROM warm_instances WHERE instance_name = ?",
             (instance_name,),
         ).fetchone()
 
@@ -85,10 +94,6 @@ def instance_transition(
 
         # 3. Handle idempotency
         if trans_def is None:
-            # Check if already in target state for this event.
-            # Only match transitions where a different from_state leads to
-            # current_state via this event — confirms the transition could
-            # have already happened (true replay idempotency).
             for t in INSTANCE_TRANSITIONS:
                 if t.event == event and t.to_state == current_state and t.from_state != current_state:
                     return InstanceTransitionResult(
@@ -106,15 +111,26 @@ def instance_transition(
         to_state = trans_def.to_state
         timestamp_str = context.timestamp.isoformat()
 
-        # 4. CAS UPDATE
-        result = conn.execute(
-            """
-            UPDATE warm_instances
-            SET state = ?, state_entered_at = ?
-            WHERE instance_name = ? AND state = ?
-            """,
-            (to_state.value, timestamp_str, instance_name, current_state.value),
-        )
+        # 4. CAS UPDATE — state + lease in one atomic operation
+        if set_lease_run_id is _LEASE_UNCHANGED:
+            result = conn.execute(
+                """
+                UPDATE warm_instances
+                SET state = ?, state_entered_at = ?
+                WHERE instance_name = ? AND state = ?
+                """,
+                (to_state.value, timestamp_str, instance_name, current_state.value),
+            )
+        else:
+            # Acquire (set to run_id) or release (set to NULL) the lease
+            result = conn.execute(
+                """
+                UPDATE warm_instances
+                SET state = ?, state_entered_at = ?, current_lease_run_id = ?
+                WHERE instance_name = ? AND state = ?
+                """,
+                (to_state.value, timestamp_str, set_lease_run_id, instance_name, current_state.value),
+            )
 
         if result.rowcount == 0:
             return InstanceTransitionResult(
@@ -143,6 +159,31 @@ def instance_transition(
                 timestamp_str,
             ),
         )
+
+        # 6. Append to instance_leases audit log if lease changed
+        if set_lease_run_id is not _LEASE_UNCHANGED:
+            if set_lease_run_id is not None:
+                # Acquiring lease — insert active record
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO instance_leases
+                        (instance_name, stage_run_id, lease_state, claimed_at)
+                    VALUES (?, ?, 'active', ?)
+                    """,
+                    (instance_name, set_lease_run_id, timestamp_str),
+                )
+            else:
+                # Releasing lease — mark any active lease as released
+                old_lease_run_id = row["current_lease_run_id"]
+                if old_lease_run_id:
+                    conn.execute(
+                        """
+                        UPDATE instance_leases
+                        SET lease_state = 'released', released_at = ?
+                        WHERE instance_name = ? AND stage_run_id = ? AND lease_state = 'active'
+                        """,
+                        (timestamp_str, instance_name, old_lease_run_id),
+                    )
 
         return InstanceTransitionResult(
             success=True,

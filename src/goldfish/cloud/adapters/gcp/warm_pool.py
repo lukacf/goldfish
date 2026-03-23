@@ -219,7 +219,6 @@ class WarmPoolManager:
         for inst in instances:
             state = inst["state"]
             by_state[state] = by_state.get(state, 0) + 1
-            lease = self._db.get_active_lease_for_instance(inst["instance_name"])
             instance_details.append(
                 {
                     "instance_name": inst["instance_name"],
@@ -228,7 +227,7 @@ class WarmPoolManager:
                     "gpu_count": inst["gpu_count"],
                     "state": state,
                     "state_entered_at": inst.get("state_entered_at"),
-                    "active_lease_run": lease["stage_run_id"] if lease else None,
+                    "active_lease_run": inst.get("current_lease_run_id"),
                 }
             )
         return {

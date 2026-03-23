@@ -20,18 +20,19 @@ def test_db(tmp_path) -> Database:
     return Database(tmp_path / "test_fin.db")
 
 
-def _insert_instance(db, name="inst-1", state="busy"):
+def _insert_instance(db, name="inst-1", state="busy", lease_run_id=None):
     now = datetime.now(UTC).isoformat()
     with db._conn() as conn:
         conn.execute(
             """
             INSERT INTO warm_instances
                 (instance_name, zone, project_id, machine_type, gpu_count,
-                 image_family, image_project, preemptible, state, state_entered_at, created_at)
+                 image_family, image_project, preemptible, state, state_entered_at,
+                 current_lease_run_id, created_at)
             VALUES (?, 'us-central1-a', 'proj', 'n1-standard-1', 0,
-                    'debian-12', 'debian-cloud', 0, ?, ?, ?)
+                    'debian-12', 'debian-cloud', 0, ?, ?, ?, ?)
             """,
-            (name, state, now, now),
+            (name, state, now, lease_run_id, now),
         )
 
 
@@ -39,8 +40,7 @@ class TestWarmPoolFinalization:
     """Test that run terminal states correctly route through InstanceController."""
 
     def test_completed_run_emits_job_finished(self, test_db):
-        _insert_instance(test_db, "inst-1", "busy")
-        test_db.create_instance_lease("inst-1", "stage-abc")
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-abc")
         ctrl = InstanceController(test_db)
 
         result = ctrl.on_run_terminal("stage-abc", "completed")
@@ -49,8 +49,7 @@ class TestWarmPoolFinalization:
         assert result.new_state == InstanceState.DRAINING
 
     def test_failed_run_emits_job_finished(self, test_db):
-        _insert_instance(test_db, "inst-1", "busy")
-        test_db.create_instance_lease("inst-1", "stage-abc")
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-abc")
         ctrl = InstanceController(test_db)
 
         result = ctrl.on_run_terminal("stage-abc", "failed")
@@ -59,8 +58,7 @@ class TestWarmPoolFinalization:
         assert result.new_state == InstanceState.DRAINING
 
     def test_awaiting_user_finalization_emits_job_finished(self, test_db):
-        _insert_instance(test_db, "inst-1", "busy")
-        test_db.create_instance_lease("inst-1", "stage-abc")
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-abc")
         ctrl = InstanceController(test_db)
 
         result = ctrl.on_run_terminal("stage-abc", "awaiting_user_finalization")
@@ -69,8 +67,7 @@ class TestWarmPoolFinalization:
         assert result.new_state == InstanceState.DRAINING
 
     def test_terminated_run_emits_delete_requested(self, test_db):
-        _insert_instance(test_db, "inst-1", "busy")
-        test_db.create_instance_lease("inst-1", "stage-abc")
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-abc")
         ctrl = InstanceController(test_db)
 
         result = ctrl.on_run_terminal("stage-abc", "terminated")
@@ -79,8 +76,7 @@ class TestWarmPoolFinalization:
         assert result.new_state == InstanceState.DELETING
 
     def test_canceled_run_emits_delete_requested(self, test_db):
-        _insert_instance(test_db, "inst-1", "busy")
-        test_db.create_instance_lease("inst-1", "stage-abc")
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-abc")
         ctrl = InstanceController(test_db)
 
         result = ctrl.on_run_terminal("stage-abc", "canceled")
@@ -95,9 +91,11 @@ class TestWarmPoolFinalization:
         assert result is None
 
     def test_lease_released_after_terminal(self, test_db):
-        _insert_instance(test_db, "inst-1", "busy")
-        test_db.create_instance_lease("inst-1", "stage-abc")
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-abc")
         ctrl = InstanceController(test_db)
 
         ctrl.on_run_terminal("stage-abc", "completed")
-        assert test_db.get_active_lease_for_instance("inst-1") is None
+
+        inst = test_db.get_warm_instance("inst-1")
+        assert inst is not None
+        assert inst["current_lease_run_id"] is None

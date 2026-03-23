@@ -475,10 +475,9 @@ class StageDaemon:
                 if state == InstanceState.CLAIMED:
                     # Check stale claims (30s ACK timeout + 60s buffer = 90s)
                     if self._instance_timed_out(inst, 90):
-                        # Release lease for stale claims
-                        lease = self._db.get_active_lease_for_instance(name)
-                        if lease:
-                            controller.on_claim_timeout(name, lease["stage_run_id"])
+                        lease_run_id = inst.get("current_lease_run_id")
+                        if lease_run_id:
+                            controller.on_claim_timeout(name, lease_run_id)
                         else:
                             controller.on_delete_requested(name, reason="stale claim, no lease")
                     continue
@@ -496,28 +495,29 @@ class StageDaemon:
                     continue
 
                 if state == InstanceState.DRAINING:
-                    lease = self._db.get_active_lease_for_instance(name)
+                    lease_run_id = inst.get("current_lease_run_id")
 
                     # If the lease is still active but the owning run is already
                     # terminal, the executor crashed before calling on_run_terminal.
-                    # Release the stale lease so draining can proceed.
-                    if lease is not None:
-                        run = self._db.get_stage_run(lease["stage_run_id"])
+                    # Finalize via controller (releases lease atomically).
+                    if lease_run_id:
+                        run = self._db.get_stage_run(lease_run_id)
                         run_state = run.get("state", "") if run else ""
                         terminal_values = {s.value for s in TERMINAL_STATES}
                         non_owning = terminal_values | {"awaiting_user_finalization"}
                         if run_state in non_owning:
                             logger.info(
-                                "Releasing stale lease for draining instance %s (run %s in %s)",
+                                "Finalizing stale draining instance %s (run %s in %s)",
                                 name,
-                                lease["stage_run_id"],
+                                lease_run_id,
                                 run_state,
                             )
-                            self._db.release_instance_lease(name, lease["stage_run_id"])
-                            lease = None  # Allow drain check below
+                            controller.on_run_terminal(lease_run_id, run_state, source="daemon")
+                            # Re-read: on_run_terminal may have already transitioned
+                            lease_run_id = None
 
                     # Check if VM reports idle_ready metadata AND no active lease
-                    if lease is None:
+                    if not lease_run_id:
                         metadata = warm_pool.get_instance_metadata(name, zone)
                         if metadata.get("goldfish_instance_state") == "idle_ready":
                             controller.on_drain_complete(name)
@@ -553,9 +553,9 @@ class StageDaemon:
                 if state == InstanceState.BUSY:
                     # If the owning run is already terminal but the executor
                     # crashed before calling on_run_terminal, finalize here.
-                    lease = self._db.get_active_lease_for_instance(name)
-                    if lease:
-                        run = self._db.get_stage_run(lease["stage_run_id"])
+                    lease_run_id = inst.get("current_lease_run_id")
+                    if lease_run_id:
+                        run = self._db.get_stage_run(lease_run_id)
                         run_state = run.get("state", "") if run else ""
                         terminal_values = {s.value for s in TERMINAL_STATES}
                         non_owning = terminal_values | {"awaiting_user_finalization"}
@@ -563,11 +563,11 @@ class StageDaemon:
                             logger.info(
                                 "Finalizing stale busy instance %s (run %s in %s)",
                                 name,
-                                lease["stage_run_id"],
+                                lease_run_id,
                                 run_state,
                             )
                             controller.on_run_terminal(
-                                lease["stage_run_id"],
+                                lease_run_id,
                                 run_state,
                                 source="daemon",
                             )

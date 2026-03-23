@@ -2,6 +2,9 @@
 
 All warm pool instance lifecycle decisions go through this controller.
 No code should UPDATE warm_instances.state directly.
+
+Lease operations are atomic with state transitions — both happen in the
+same CAS UPDATE via instance_transition(set_lease_run_id=...).
 """
 
 from __future__ import annotations
@@ -45,40 +48,19 @@ class InstanceController:
         *,
         source: InstanceSourceType = "controller",
     ) -> InstanceTransitionResult:
-        """Fresh launch succeeded: launching → busy, create lease.
+        """Fresh launch succeeded: launching → busy + acquire lease.
 
-        Called after gcloud create succeeds for a pre-registered instance.
+        Atomically transitions state AND sets current_lease_run_id.
         """
         ctx = self._ctx(source=source, stage_run_id=stage_run_id)
-
-        # Create lease first (binds run to instance).
-        # If lease creation fails, do NOT transition to busy — a busy instance
-        # without a lease can never be released by on_run_terminal, stranding it.
-        # Handle idempotency: if this exact lease already exists, continue.
-        try:
-            self._db.create_instance_lease(instance_name, stage_run_id)
-        except Exception as e:
-            # Check if this is a duplicate — same (instance, run) pair already leased
-            existing = self._db.get_active_lease_for_run(stage_run_id)
-            if existing and existing["instance_name"] == instance_name:
-                logger.debug("Lease already exists for %s/%s — idempotent", instance_name, stage_run_id)
-            else:
-                logger.warning("Failed to create lease for %s/%s: %s", instance_name, stage_run_id, e)
-                return InstanceTransitionResult(
-                    success=False,
-                    reason="lease_failed",
-                    details=f"Could not create lease: {e}",
-                )
-
         result = instance_transition(
             self._db,
             instance_name,
             InstanceEvent.BOOT_REGISTERED,
             ctx,
+            set_lease_run_id=stage_run_id,
         )
         if not result.success:
-            # Roll back the lease since we didn't transition
-            self._db.release_instance_lease(instance_name, stage_run_id)
             logger.warning(
                 "on_fresh_launch: BOOT_REGISTERED failed for %s: %s",
                 instance_name,
@@ -94,30 +76,19 @@ class InstanceController:
         error: str | None = None,
         source: InstanceSourceType = "controller",
     ) -> InstanceTransitionResult:
-        """Fresh launch failed: launching → deleting.
+        """Fresh launch failed: launching → deleting + release lease.
 
         The instance may be partially created, so we go to deleting
         (not gone) to let the daemon retry gcloud delete.
         """
         ctx = self._ctx(source=source, stage_run_id=stage_run_id, error_message=error)
-
-        # Transition first, then release lease.
-        result = instance_transition(
+        return instance_transition(
             self._db,
             instance_name,
             InstanceEvent.LAUNCH_FAILED,
             ctx,
+            set_lease_run_id=None,  # Release lease atomically
         )
-        if result.success:
-            if stage_run_id:
-                self._db.release_instance_lease(instance_name, stage_run_id)
-        else:
-            logger.warning(
-                "on_launch_failed: LAUNCH_FAILED failed for %s: %s",
-                instance_name,
-                result.details,
-            )
-        return result
 
     # =========================================================================
     # Claim (reuse)
@@ -130,29 +101,16 @@ class InstanceController:
         *,
         source: InstanceSourceType = "controller",
     ) -> InstanceTransitionResult:
-        """Claim initiated: idle_ready → claimed, create lease."""
+        """Claim initiated: idle_ready → claimed + acquire lease."""
         ctx = self._ctx(source=source, stage_run_id=stage_run_id)
-
-        # Create lease
-        try:
-            self._db.create_instance_lease(instance_name, stage_run_id)
-        except Exception as e:
-            logger.warning("Failed to create lease for claim %s/%s: %s", instance_name, stage_run_id, e)
-            return InstanceTransitionResult(
-                success=False,
-                reason="lease_failed",
-                details=str(e),
-            )
-
         result = instance_transition(
             self._db,
             instance_name,
             InstanceEvent.CLAIM_SENT,
             ctx,
+            set_lease_run_id=stage_run_id,
         )
         if not result.success:
-            # Roll back lease
-            self._db.release_instance_lease(instance_name, stage_run_id)
             logger.warning(
                 "on_claim_start: CLAIM_SENT failed for %s: %s",
                 instance_name,
@@ -167,7 +125,7 @@ class InstanceController:
         *,
         source: InstanceSourceType = "controller",
     ) -> InstanceTransitionResult:
-        """Claim ACKed: claimed → busy."""
+        """Claim ACKed: claimed → busy (lease already held)."""
         ctx = self._ctx(source=source, stage_run_id=stage_run_id)
         result = instance_transition(
             self._db,
@@ -190,14 +148,14 @@ class InstanceController:
         *,
         source: InstanceSourceType = "controller",
     ) -> InstanceTransitionResult:
-        """Claim timed out: claimed → deleting, release lease."""
+        """Claim timed out: claimed → deleting + release lease."""
         ctx = self._ctx(source=source, stage_run_id=stage_run_id, reason="ACK timeout")
-
         result = instance_transition(
             self._db,
             instance_name,
             InstanceEvent.CLAIM_TIMEOUT,
             ctx,
+            set_lease_run_id=None,  # Release lease atomically
         )
         if not result.success:
             logger.warning(
@@ -205,11 +163,8 @@ class InstanceController:
                 instance_name,
                 result.details,
             )
-
-        # Always release the lease on timeout — the caller has abandoned this claim.
-        # Even if the transition failed (e.g., instance left claimed state via a race),
-        # the lease must be released to avoid stranding it permanently.
-        self._db.release_instance_lease(instance_name, stage_run_id)
+            # Always release even if transition failed — caller abandoned the claim
+            self._force_release_lease(instance_name)
         return result
 
     # =========================================================================
@@ -223,35 +178,31 @@ class InstanceController:
         *,
         source: InstanceSourceType = "controller",
     ) -> InstanceTransitionResult | None:
-        """Run reached terminal state → release lease, emit instance event.
+        """Run reached terminal state → transition + release lease atomically.
 
         For COMPLETED/FAILED/AWAITING: JOB_FINISHED (busy → draining)
         For TERMINATED/CANCELED: DELETE_REQUESTED (→ deleting)
         """
-        # Find the lease for this run
-        lease = self._db.get_active_lease_for_run(stage_run_id)
-        if lease is None:
-            logger.debug("on_run_terminal: no active lease for run %s", stage_run_id)
+        # Find the instance via the lease column
+        inst = self._find_instance_for_run(stage_run_id)
+        if inst is None:
+            logger.debug("on_run_terminal: no leased instance for run %s", stage_run_id)
             return None
 
-        instance_name = lease["instance_name"]
+        instance_name = inst["instance_name"]
         ctx = self._ctx(source=source, stage_run_id=stage_run_id, reason=f"run {terminal_state}")
 
-        # Choose event based on terminal state
         delete_states = ("terminated", "canceled")
-        if terminal_state in delete_states:
-            event = InstanceEvent.DELETE_REQUESTED
-        else:
-            # completed, failed, awaiting_user_finalization
-            event = InstanceEvent.JOB_FINISHED
+        event = InstanceEvent.DELETE_REQUESTED if terminal_state in delete_states else InstanceEvent.JOB_FINISHED
 
-        # Transition FIRST, then release lease. If transition fails, the lease
-        # stays active (correct — the run still owns the instance). If transition
-        # succeeds but release fails, the daemon's stale-lease detection handles it.
-        result = instance_transition(self._db, instance_name, event, ctx)
-        if result.success:
-            self._db.release_instance_lease(instance_name, stage_run_id)
-        else:
+        result = instance_transition(
+            self._db,
+            instance_name,
+            event,
+            ctx,
+            set_lease_run_id=None,  # Release lease atomically
+        )
+        if not result.success:
             logger.warning(
                 "on_run_terminal: %s failed for %s (run=%s, terminal=%s): %s",
                 event.name,
@@ -294,24 +245,16 @@ class InstanceController:
         *,
         source: InstanceSourceType = "daemon",
     ) -> InstanceTransitionResult:
-        """VM is dead (preemption/crash/not found) → gone.
-
-        Also releases any active lease.
-        """
+        """VM is dead (preemption/crash/not found) → gone + release lease."""
         ctx = self._ctx(source=source, reason="preempted/dead")
-
-        # Transition first, then release lease.
         result = instance_transition(
             self._db,
             instance_name,
             InstanceEvent.PREEMPTED,
             ctx,
+            set_lease_run_id=None,  # Release lease atomically
         )
-        if result.success:
-            lease = self._db.get_active_lease_for_instance(instance_name)
-            if lease:
-                self._db.release_instance_lease(instance_name, lease["stage_run_id"])
-        else:
+        if not result.success:
             logger.warning(
                 "on_preempted: PREEMPTED failed for %s: %s",
                 instance_name,
@@ -326,21 +269,16 @@ class InstanceController:
         reason: str = "",
         source: InstanceSourceType = "daemon",
     ) -> InstanceTransitionResult:
-        """Request deletion (idle timeout, manual, etc.) → deleting."""
+        """Request deletion (idle timeout, manual, etc.) → deleting + release lease."""
         ctx = self._ctx(source=source, reason=reason)
-
-        # Transition first, then release lease.
         result = instance_transition(
             self._db,
             instance_name,
             InstanceEvent.DELETE_REQUESTED,
             ctx,
+            set_lease_run_id=None,  # Release lease atomically
         )
-        if result.success:
-            lease = self._db.get_active_lease_for_instance(instance_name)
-            if lease:
-                self._db.release_instance_lease(instance_name, lease["stage_run_id"])
-        else:
+        if not result.success:
             logger.debug(
                 "on_delete_requested: DELETE_REQUESTED not accepted for %s: %s",
                 instance_name,
@@ -389,6 +327,23 @@ class InstanceController:
     # =========================================================================
     # Helpers
     # =========================================================================
+
+    def _find_instance_for_run(self, stage_run_id: str) -> dict | None:
+        """Find the warm instance currently leased to a run."""
+        with self._db._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM warm_instances WHERE current_lease_run_id = ?",
+                (stage_run_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def _force_release_lease(self, instance_name: str) -> None:
+        """Unconditionally clear current_lease_run_id. Used as fallback."""
+        with self._db._conn() as conn:
+            conn.execute(
+                "UPDATE warm_instances SET current_lease_run_id = NULL WHERE instance_name = ?",
+                (instance_name,),
+            )
 
     def _ctx(
         self,

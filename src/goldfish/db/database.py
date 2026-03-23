@@ -698,6 +698,7 @@ class Database:
                                     CHECK(state IN ('launching', 'busy', 'draining', 'idle_ready', 'claimed', 'deleting', 'gone')),
                                 image_tag TEXT,
                                 state_entered_at TEXT,
+                                current_lease_run_id TEXT,
                                 created_at TEXT NOT NULL
                             );
                         """)
@@ -739,6 +740,7 @@ class Database:
                             CHECK(state IN ('launching', 'busy', 'draining', 'idle_ready', 'claimed', 'deleting', 'gone')),
                         image_tag TEXT,
                         state_entered_at TEXT,
+                        current_lease_run_id TEXT,
                         created_at TEXT NOT NULL
                     );
 
@@ -5804,19 +5806,15 @@ class Database:
         with self._conn() as conn:
             row = conn.execute(
                 """
-                SELECT * FROM warm_instances w
-                WHERE w.state = 'idle_ready'
-                  AND w.machine_type = ?
-                  AND w.gpu_count = ?
-                  AND w.image_family = ?
-                  AND w.image_project = ?
-                  AND w.preemptible = ?
-                  AND NOT EXISTS (
-                      SELECT 1 FROM instance_leases l
-                      WHERE l.instance_name = w.instance_name
-                        AND l.lease_state = 'active'
-                  )
-                ORDER BY w.state_entered_at ASC
+                SELECT * FROM warm_instances
+                WHERE state = 'idle_ready'
+                  AND machine_type = ?
+                  AND gpu_count = ?
+                  AND image_family = ?
+                  AND image_project = ?
+                  AND preemptible = ?
+                  AND current_lease_run_id IS NULL
+                ORDER BY state_entered_at ASC
                 LIMIT 1
                 """,
                 (machine_type, gpu_count, image_family, image_project, preemptible_int),

@@ -25,18 +25,19 @@ def controller(test_db) -> InstanceController:
     return InstanceController(test_db)
 
 
-def _insert_instance(db, name, state="busy"):
+def _insert_instance(db, name, state="busy", lease_run_id=None):
     now = datetime.now(UTC).isoformat()
     with db._conn() as conn:
         conn.execute(
             """
             INSERT INTO warm_instances
                 (instance_name, zone, project_id, machine_type, gpu_count,
-                 image_family, image_project, preemptible, state, state_entered_at, created_at)
+                 image_family, image_project, preemptible, state, state_entered_at,
+                 current_lease_run_id, created_at)
             VALUES (?, 'us-central1-a', 'proj', 'n1-standard-1', 0,
-                    'debian-12', 'debian-cloud', 0, ?, ?, ?)
+                    'debian-12', 'debian-cloud', 0, ?, ?, ?, ?)
             """,
-            (name, state, now, now),
+            (name, state, now, lease_run_id, now),
         )
 
 
@@ -67,23 +68,23 @@ class TestCleanupRespectsOwnership:
     def test_on_delete_requested_releases_active_lease(self, test_db, controller):
         """on_delete_requested releases the lease — the fix is at the caller level
         (warm_pool_cleanup cancels the run first)."""
-        _insert_instance(test_db, "inst-1", "busy")
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-abc")
         _insert_stage_run(test_db, "stage-abc", "running")
-        test_db.create_instance_lease("inst-1", "stage-abc")
 
         result = controller.on_delete_requested("inst-1", reason="test")
         assert result.success
         assert result.new_state == InstanceState.DELETING
 
-        # Lease was released by on_delete_requested
-        assert test_db.get_active_lease_for_instance("inst-1") is None
+        # Lease was released atomically by on_delete_requested
+        inst = test_db.get_warm_instance("inst-1")
+        assert inst is not None
+        assert inst["current_lease_run_id"] is None
 
     def test_on_run_terminal_then_delete_is_safe(self, test_db, controller):
         """Proper pattern: cancel run first → on_run_terminal releases lease + transitions,
         then instance is in deleting state. No orphaned run."""
-        _insert_instance(test_db, "inst-1", "busy")
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-abc")
         _insert_stage_run(test_db, "stage-abc", "running")
-        test_db.create_instance_lease("inst-1", "stage-abc")
 
         # Step 1: Run canceled first
         from goldfish.state_machine.cancel import cancel_run
@@ -97,7 +98,7 @@ class TestCleanupRespectsOwnership:
         assert run["state"] == "canceled"
 
         # cancel_run calls on_run_terminal which:
-        # - releases the lease
+        # - releases the lease atomically (current_lease_run_id = NULL)
         # - emits DELETE_REQUESTED (for canceled runs)
         # So the instance should already be in deleting state
         inst = test_db.get_warm_instance("inst-1")
@@ -105,7 +106,7 @@ class TestCleanupRespectsOwnership:
         assert inst["state"] == "deleting"
 
         # No active lease remains
-        assert test_db.get_active_lease_for_instance("inst-1") is None
+        assert inst["current_lease_run_id"] is None
 
     def test_idle_instance_no_lease_can_delete_directly(self, test_db, controller):
         """Instances without active leases can be deleted directly."""

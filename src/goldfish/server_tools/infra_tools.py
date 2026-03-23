@@ -328,11 +328,11 @@ def warm_pool_cleanup() -> dict:
             # For instances with active leases, cancel the owning run first.
             # This synchronizes the run state machine before releasing the lease,
             # preventing orphaned runs that think they still have a VM.
-            lease = mgr._db.get_active_lease_for_instance(name)
-            if lease:
+            lease_run_id = inst.get("current_lease_run_id")
+            if lease_run_id:
                 from goldfish.state_machine.cancel import cancel_run
 
-                run_id = lease["stage_run_id"]
+                run_id = lease_run_id
                 cancel_result = cancel_run(
                     mgr._db,
                     run_id,

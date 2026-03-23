@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest
-
 from goldfish.state_machine.instance_core import instance_transition
 from goldfish.state_machine.instance_transitions import (
     ACTIVE_INSTANCE_STATES,
@@ -138,7 +136,7 @@ def _make_ctx(
     )
 
 
-def _insert_instance(db, name="inst-1", state="launching"):
+def _insert_instance(db, name="inst-1", state="launching", lease_run_id=None):
     """Helper to insert a warm instance directly."""
     now = datetime.now(UTC).isoformat()
     with db._conn() as conn:
@@ -146,11 +144,12 @@ def _insert_instance(db, name="inst-1", state="launching"):
             """
             INSERT INTO warm_instances
                 (instance_name, zone, project_id, machine_type, gpu_count,
-                 image_family, image_project, preemptible, state, state_entered_at, created_at)
+                 image_family, image_project, preemptible, state, state_entered_at,
+                 current_lease_run_id, created_at)
             VALUES (?, 'us-central1-a', 'proj', 'n1-standard-1', 0,
-                    'debian-12', 'debian-cloud', 0, ?, ?, ?)
+                    'debian-12', 'debian-cloud', 0, ?, ?, ?, ?)
             """,
-            (name, state, now, now),
+            (name, state, now, lease_run_id, now),
         )
 
 
@@ -258,63 +257,66 @@ class TestInstanceTransitionCAS:
 
 
 class TestInstanceLeases:
-    def test_create_and_get_lease(self, test_db):
+    """Verify atomic lease tracking via current_lease_run_id on warm_instances."""
+
+    def test_instance_with_lease(self, test_db):
+        """Setting current_lease_run_id on insert tracks ownership."""
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-abc")
+
+        inst = test_db.get_warm_instance("inst-1")
+        assert inst is not None
+        assert inst["current_lease_run_id"] == "stage-abc"
+
+    def test_instance_without_lease(self, test_db):
+        """Default insert has no lease."""
         _insert_instance(test_db, "inst-1", "busy")
-        lease = test_db.create_instance_lease("inst-1", "stage-abc")
-        assert lease["lease_state"] == "active"
-        assert lease["instance_name"] == "inst-1"
-        assert lease["stage_run_id"] == "stage-abc"
 
-        # Verify via get
-        active = test_db.get_active_lease_for_instance("inst-1")
-        assert active is not None
-        assert active["stage_run_id"] == "stage-abc"
+        inst = test_db.get_warm_instance("inst-1")
+        assert inst is not None
+        assert inst["current_lease_run_id"] is None
 
-    def test_release_lease(self, test_db):
-        _insert_instance(test_db, "inst-1", "busy")
-        test_db.create_instance_lease("inst-1", "stage-abc")
+    def test_release_lease_via_sql(self, test_db):
+        """Clearing current_lease_run_id releases the lease."""
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-abc")
 
-        released = test_db.release_instance_lease("inst-1", "stage-abc")
-        assert released is True
+        with test_db._conn() as conn:
+            conn.execute("UPDATE warm_instances SET current_lease_run_id = NULL WHERE instance_name = 'inst-1'")
 
-        # No active lease
-        assert test_db.get_active_lease_for_instance("inst-1") is None
+        inst = test_db.get_warm_instance("inst-1")
+        assert inst is not None
+        assert inst["current_lease_run_id"] is None
 
-    def test_release_idempotent(self, test_db):
-        _insert_instance(test_db, "inst-1", "busy")
-        test_db.create_instance_lease("inst-1", "stage-abc")
-        test_db.release_instance_lease("inst-1", "stage-abc")
+    def test_lease_replaced_after_release(self, test_db):
+        """After clearing a lease, a new one can be set."""
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-aaa")
 
-        # Second release is a no-op
-        released = test_db.release_instance_lease("inst-1", "stage-abc")
-        assert released is False
+        with test_db._conn() as conn:
+            conn.execute("UPDATE warm_instances SET current_lease_run_id = 'stage-bbb' WHERE instance_name = 'inst-1'")
 
-    def test_at_most_one_active_lease_per_instance(self, test_db):
-        _insert_instance(test_db, "inst-1", "busy")
-        test_db.create_instance_lease("inst-1", "stage-aaa")
+        inst = test_db.get_warm_instance("inst-1")
+        assert inst is not None
+        assert inst["current_lease_run_id"] == "stage-bbb"
 
-        with pytest.raises(Exception, match="UNIQUE constraint"):
-            # Unique index violation
-            test_db.create_instance_lease("inst-1", "stage-bbb")
+    def test_find_instance_by_lease_run_id(self, test_db):
+        """Can find instance by its current_lease_run_id."""
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-abc")
 
-    def test_released_then_new_lease(self, test_db):
-        """After releasing a lease, a new one can be created."""
-        _insert_instance(test_db, "inst-1", "busy")
-        test_db.create_instance_lease("inst-1", "stage-aaa")
-        test_db.release_instance_lease("inst-1", "stage-aaa")
-        lease = test_db.create_instance_lease("inst-1", "stage-bbb")
-        assert lease["stage_run_id"] == "stage-bbb"
-        assert lease["lease_state"] == "active"
+        with test_db._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM warm_instances WHERE current_lease_run_id = ?",
+                ("stage-abc",),
+            ).fetchone()
+            assert row is not None
+            assert row["instance_name"] == "inst-1"
 
-    def test_get_lease_by_run(self, test_db):
-        _insert_instance(test_db, "inst-1", "busy")
-        test_db.create_instance_lease("inst-1", "stage-abc")
-        lease = test_db.get_active_lease_for_run("stage-abc")
-        assert lease is not None
-        assert lease["instance_name"] == "inst-1"
-
-    def test_get_lease_by_run_returns_none(self, test_db):
-        assert test_db.get_active_lease_for_run("nonexistent") is None
+    def test_no_instance_for_unknown_run(self, test_db):
+        """No instance found for a non-existent run."""
+        with test_db._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM warm_instances WHERE current_lease_run_id = ?",
+                ("nonexistent",),
+            ).fetchone()
+            assert row is None
 
 
 # =============================================================================
@@ -414,8 +416,7 @@ class TestReuseOrderingGate:
         Even if the VM reports idle_ready while the instance is still busy,
         the state machine prevents skipping to idle_ready.
         """
-        _insert_instance(test_db, "inst-1", "busy")
-        test_db.create_instance_lease("inst-1", "stage-run1")
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-run1")
 
         # Attempt DRAIN_COMPLETE while in busy → rejected
         result = instance_transition(
@@ -438,19 +439,23 @@ class TestReuseOrderingGate:
 
     def test_full_ordering_gate_lifecycle(self, test_db):
         """After run terminalization, JOB_FINISHED → draining, then DRAIN_COMPLETE → idle_ready."""
-        _insert_instance(test_db, "inst-1", "busy")
-        test_db.create_instance_lease("inst-1", "stage-run1")
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-run1")
 
-        # Step 1: Run goes terminal → controller releases lease, emits JOB_FINISHED
-        test_db.release_instance_lease("inst-1", "stage-run1")
+        # Step 1: Run goes terminal → JOB_FINISHED releases lease atomically
         result = instance_transition(
             test_db,
             "inst-1",
             InstanceEvent.JOB_FINISHED,
             _make_ctx(),
+            set_lease_run_id=None,  # Release lease atomically
         )
         assert result.success
         assert result.new_state == InstanceState.DRAINING
+
+        # Lease released
+        inst = test_db.get_warm_instance("inst-1")
+        assert inst is not None
+        assert inst["current_lease_run_id"] is None
 
         # Step 2: Daemon observes idle_ready metadata, emits DRAIN_COMPLETE
         result = instance_transition(
@@ -475,22 +480,23 @@ class TestReuseOrderingGate:
 
 class TestCancelDuringLaunching:
     def test_cancel_launching_instance(self, test_db):
-        _insert_instance(test_db, "inst-1", "launching")
-        test_db.create_instance_lease("inst-1", "stage-run1")
+        _insert_instance(test_db, "inst-1", "launching", lease_run_id="stage-run1")
 
-        # Cancel → DELETE_REQUESTED
+        # Cancel → DELETE_REQUESTED + release lease atomically
         result = instance_transition(
             test_db,
             "inst-1",
             InstanceEvent.DELETE_REQUESTED,
             _make_ctx(reason="run canceled"),
+            set_lease_run_id=None,  # Release lease atomically
         )
         assert result.success
         assert result.new_state == InstanceState.DELETING
 
-        # Release lease
-        test_db.release_instance_lease("inst-1", "stage-run1")
-        assert test_db.get_active_lease_for_instance("inst-1") is None
+        # Lease released
+        inst = test_db.get_warm_instance("inst-1")
+        assert inst is not None
+        assert inst["current_lease_run_id"] is None
 
         # Daemon retries delete → DELETE_CONFIRMED
         result = instance_transition(
