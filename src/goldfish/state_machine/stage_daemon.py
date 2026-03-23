@@ -470,6 +470,15 @@ class StageDaemon:
                     # Check idle timeout
                     if self._instance_timed_out(inst, warm_pool._config.idle_timeout_minutes * 60):
                         controller.on_delete_requested(name, reason="idle timeout")
+                        continue
+                    # Check liveness — spot VMs can be preempted while idle
+                    if not warm_pool.check_instance_alive(name, zone):
+                        self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
+                        if self._liveness_fail_counts[name] >= 3:
+                            controller.on_preempted(name)
+                            self._liveness_fail_counts.pop(name, None)
+                    else:
+                        self._liveness_fail_counts.pop(name, None)
                     continue
 
                 if state == InstanceState.CLAIMED:

@@ -571,16 +571,18 @@ class GCERunBackend:
         Returns:
             Log content as string.
         """
-        instance_name = handle.backend_handle
+        # Use stage_run_id for GCS log paths, not instance_name.
+        # Warm-pool reuse uploads logs under runs/<stage_run_id>/, not runs/<instance_name>/.
+        log_key = handle.stage_run_id or handle.backend_handle
 
         try:
             return self._launcher.get_instance_logs(
-                instance_name=instance_name,
+                instance_name=log_key,
                 tail_lines=tail if tail > 0 else None,
                 since=since,
             )
         except Exception as e:
-            logger.warning("Error getting logs for %s: %s", instance_name, e)
+            logger.warning("Error getting logs for %s: %s", log_key, e)
             return f"[Error fetching logs: {e}]"
 
     def terminate(self, handle: RunHandle) -> None:

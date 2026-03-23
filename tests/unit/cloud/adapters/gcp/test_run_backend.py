@@ -338,7 +338,7 @@ class TestGCERunBackendLaunch:
     def test_launch_passes_image_to_launcher(self, backend, mock_launcher, sample_run_spec):
         """Launch passes correct image tag to GCELauncher."""
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -350,7 +350,7 @@ class TestGCERunBackendLaunch:
     def test_launch_passes_stage_run_id(self, backend, mock_launcher, sample_run_spec):
         """Launch passes stage_run_id to GCELauncher."""
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -362,7 +362,7 @@ class TestGCERunBackendLaunch:
     def test_launch_builds_entrypoint_from_command(self, backend, mock_launcher, sample_run_spec):
         """Launch builds entrypoint script from command list."""
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -379,7 +379,7 @@ class TestGCERunBackendLaunch:
         which breaks argument boundaries.
         """
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -408,7 +408,7 @@ class TestGCERunBackendLaunch:
         """Launch with no command uses echo as fallback."""
         sample_run_spec.command = None
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -420,7 +420,7 @@ class TestGCERunBackendLaunch:
     def test_launch_passes_environment_variables(self, backend, mock_launcher, sample_run_spec):
         """Launch passes env vars to GCELauncher."""
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -433,7 +433,7 @@ class TestGCERunBackendLaunch:
     def test_launch_passes_gpu_count(self, backend, mock_launcher, sample_run_spec):
         """Launch passes GPU count to GCELauncher."""
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -521,7 +521,7 @@ class TestGCERunBackendLaunch:
         """Launch with no GPU sets gpu_count=0."""
         sample_run_spec.gpu_count = 0
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -618,7 +618,7 @@ class TestGCERunBackendLaunch:
         This maintains backward compatibility for simple cases without profiles.
         """
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -639,7 +639,7 @@ class TestGCERunBackendLaunch:
     def test_launch_passes_spot_preference(self, backend, mock_launcher, sample_run_spec):
         """Launch passes spot/preemptible preference."""
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -651,7 +651,7 @@ class TestGCERunBackendLaunch:
     def test_launch_passes_zones_list(self, backend, mock_launcher, sample_run_spec):
         """Launch passes zones list for multi-zone capacity search."""
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -900,7 +900,7 @@ class TestGCERunBackendGetLogs:
         backend.get_logs(sample_handle, tail=50)
 
         mock_launcher.get_instance_logs.assert_called_once_with(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             tail_lines=50,
             since=None,
         )
@@ -912,7 +912,7 @@ class TestGCERunBackendGetLogs:
         backend.get_logs(sample_handle, tail=100, since="2024-01-01T00:00:00Z")
 
         mock_launcher.get_instance_logs.assert_called_once_with(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             tail_lines=100,
             since="2024-01-01T00:00:00Z",
         )
@@ -933,7 +933,7 @@ class TestGCERunBackendGetLogs:
         backend.get_logs(sample_handle, tail=0)
 
         mock_launcher.get_instance_logs.assert_called_once_with(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             tail_lines=None,
             since=None,
         )
@@ -1116,7 +1116,7 @@ class TestGCERunBackendStorageURISerialization:
         input staging code only handles str or dict types, skipping others.
         """
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -1137,7 +1137,7 @@ class TestGCERunBackendStorageURISerialization:
     def test_launch_serializes_multiple_storage_uris(self, backend, mock_launcher):
         """Launch serializes all StorageURI objects in inputs."""
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -1189,7 +1189,7 @@ class TestGCERunBackendStorageURISerialization:
     def test_launch_handles_empty_inputs(self, backend, mock_launcher):
         """Launch handles empty inputs dict."""
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -1250,7 +1250,7 @@ class TestGCERunBackendTempDirCleanup:
         dummy Path("/tmp") to satisfy the signature.
         """
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -1348,7 +1348,7 @@ class TestGCERunBackendInputSchemeValidation:
     def test_launch_accepts_all_gcs_inputs(self, backend, mock_launcher):
         """Launch accepts inputs when all have gs:// scheme."""
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
@@ -1370,7 +1370,7 @@ class TestGCERunBackendInputSchemeValidation:
     def test_launch_accepts_empty_inputs(self, backend, mock_launcher):
         """Launch accepts empty inputs dict (no validation needed)."""
         mock_launcher.launch_instance.return_value = self.MockLaunchResult(
-            instance_name="goldfish-stage-abc123",
+            instance_name="stage-abc123",
             zone="us-central1-a",
         )
 
