@@ -446,6 +446,19 @@ class DockerConfig(BaseModel):
     cloud_build: CloudBuildConfig = Field(default_factory=CloudBuildConfig)
 
 
+class WarmPoolConfig(BaseModel):
+    """Warm VM pool configuration (optional, off by default)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    max_instances: int = Field(default=2, ge=1, le=10)
+    idle_timeout_minutes: int = Field(default=30, ge=5, le=120)
+    profiles: list[str] = Field(default_factory=list)
+    watchdog_seconds: int = Field(default=21600, ge=3600)
+    preserve_paths: list[str] = Field(default_factory=list)
+
+
 class GCEConfig(BaseModel):
     """GCE (Google Compute Engine) configuration."""
 
@@ -486,6 +499,9 @@ class GCEConfig(BaseModel):
     initial_backoff_sec: int = 10
     backoff_multiplier: float = 1.5
     max_attempts: int = 150
+
+    # Warm pool (optional, off by default)
+    warm_pool: WarmPoolConfig = Field(default_factory=WarmPoolConfig)
 
     @property
     def effective_project_id(self) -> str:

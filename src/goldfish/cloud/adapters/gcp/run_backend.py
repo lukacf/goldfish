@@ -24,6 +24,7 @@ from goldfish.validation import ValidationError
 
 if TYPE_CHECKING:
     from goldfish.cloud.adapters.gcp.gce_launcher import GCELauncher
+    from goldfish.cloud.adapters.gcp.warm_pool import WarmPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class GCERunBackend:
         gpu_preference: list[str] | None = None,
         service_account: str | None = None,
         profile_overrides: dict[str, dict[str, object]] | None = None,
+        warm_pool: WarmPoolManager | None = None,
     ) -> None:
         """Initialize GCE backend.
 
@@ -75,6 +77,7 @@ class GCERunBackend:
             gpu_preference: Ordered list of preferred GPU types
             service_account: Service account email for instances
             profile_overrides: Custom profile overrides from goldfish.yaml
+            warm_pool: Optional WarmPoolManager for instance reuse
         """
         default_zone = zones[0] if zones else "us-central1-a"
 
@@ -98,6 +101,13 @@ class GCERunBackend:
         self._project_id = project_id
         self._zones = zones or [default_zone]
         self._bucket = bucket
+        self._warm_pool = warm_pool
+        self._profile_overrides = profile_overrides
+
+    @property
+    def warm_pool_manager(self) -> WarmPoolManager | None:
+        """Access the warm pool manager for executor finalization decisions."""
+        return self._warm_pool
 
     def _build_resources_from_profiles(
         self,
@@ -190,6 +200,14 @@ class GCERunBackend:
                     field=input_name,
                 )
 
+        # Try warm pool first — reuse an idle VM matching hardware spec
+        if self._warm_pool and self._warm_pool.is_enabled_for(spec.profile):
+            warm_handle = self._try_warm_pool_claim(spec)
+            if warm_handle is not None:
+                logger.info("Warm pool claim succeeded: %s → %s", spec.stage_run_id, warm_handle.backend_handle)
+                return warm_handle
+            logger.info("Warm pool claim failed for %s, falling through to fresh launch", spec.stage_run_id)
+
         try:
             # Serialize StorageURIs to strings for GCELauncher
             # GCELauncher expects inputs as strings (gs://...), not StorageURI objects
@@ -242,6 +260,47 @@ class GCERunBackend:
                 # Use spec.gpu_type if provided, else default to T4
                 gpu_type = spec.gpu_type or "nvidia-tesla-t4"
 
+            # Only enable warm pool idle mode if the pool has capacity for this instance.
+            # Pre-register atomically BEFORE generating the startup script so unregisterable
+            # VMs self-delete normally instead of idling with no warm_instances row.
+            warm_pool_idle_timeout_seconds: int | None = None
+            warm_pool_preserve_paths: list[str] | None = None
+            warm_pool_watchdog_seconds: int | None = None
+            warm_pool_pre_registered = False
+            if self._warm_pool and self._warm_pool.is_enabled_for(spec.profile):
+                from goldfish.cloud.adapters.gcp.gce_launcher import GCELauncher
+                from goldfish.cloud.adapters.gcp.profiles import ProfileResolver
+
+                resolver = ProfileResolver(
+                    profile_overrides=self._profile_overrides,
+                    global_zones=self._zones,
+                )
+                profile = resolver.resolve(spec.profile)
+                image_family = profile.get("boot_disk", {}).get("image_family", "debian-12")
+                image_project = profile.get("boot_disk", {}).get("image_project", "debian-cloud")
+
+                # Use the launcher's exact naming logic so the pre-registered name
+                # matches the actual GCE instance name. This prevents the daemon from
+                # looking up the wrong name and marking a live VM as preempted.
+                expected_instance_name = GCELauncher._sanitize_name(spec.stage_run_id)
+
+                warm_pool_pre_registered = self._warm_pool.pre_register(
+                    instance_name=expected_instance_name,
+                    zone=self._zones[0] if self._zones else "us-central1-a",
+                    machine_type=spec.machine_type or "n1-standard-4",
+                    gpu_count=gpu_count,
+                    image_family=image_family,
+                    image_project=image_project,
+                    image_tag=spec.image,
+                    preemptible=spec.spot,
+                )
+                if warm_pool_pre_registered:
+                    warm_pool_idle_timeout_seconds = self._warm_pool._config.idle_timeout_minutes * 60
+                    warm_pool_preserve_paths = self._warm_pool._config.preserve_paths or None
+                    warm_pool_watchdog_seconds = self._warm_pool._config.watchdog_seconds
+                else:
+                    logger.info("Warm pool full — fresh launch will self-delete normally")
+
             result = self._launcher.launch_instance(
                 image_tag=spec.image,
                 stage_run_id=spec.stage_run_id,
@@ -253,17 +312,66 @@ class GCERunBackend:
                 gpu_count=gpu_count,
                 zones=self._zones,
                 goldfish_env=goldfish_env,
-                preemptible=spec.spot,  # Pass spot preference to launcher
+                preemptible=spec.spot,
+                warm_pool_idle_timeout_seconds=warm_pool_idle_timeout_seconds,
+                warm_pool_preserve_paths=warm_pool_preserve_paths,
+                warm_pool_watchdog_seconds=warm_pool_watchdog_seconds,
             )
 
-            return RunHandle(
+            handle = RunHandle(
                 stage_run_id=spec.stage_run_id,
                 backend_type="gce",
                 backend_handle=result.instance_name,
                 zone=result.zone,
             )
 
+            # After successful fresh launch, transition pre-registered instance to busy.
+            # The pre-registered name matches the launcher's naming (both use _sanitize_name).
+            # Only update zone if the launcher chose a different zone (capacity search).
+            if self._warm_pool and warm_pool_pre_registered:
+                actual_name = result.instance_name  # type: ignore[attr-defined]
+                actual_zone = result.zone  # type: ignore[attr-defined]
+
+                # Update zone if launcher picked a different one during capacity search
+                inst = self._warm_pool._db.get_warm_instance(actual_name)
+                if inst and inst["zone"] != actual_zone:
+                    with self._warm_pool._db._conn() as conn:
+                        conn.execute(
+                            "UPDATE warm_instances SET zone = ? WHERE instance_name = ?",
+                            (actual_zone, actual_name),
+                        )
+
+                ctrl_result = self._warm_pool.controller.on_fresh_launch(
+                    actual_name,
+                    spec.stage_run_id,
+                )
+                if not ctrl_result.success:
+                    logger.warning(
+                        "Controller on_fresh_launch failed for %s: %s",
+                        actual_name,
+                        ctrl_result.details,
+                    )
+
+            return handle
+
         except Exception as e:
+            # If we pre-registered a warm pool row, tell the controller so it
+            # transitions launching → deleting (daemon will retry gcloud delete).
+            # Without this the row sits in launching forever, leaking capacity.
+            if self._warm_pool and warm_pool_pre_registered:
+                try:
+                    self._warm_pool.controller.on_launch_failed(
+                        expected_instance_name,
+                        spec.stage_run_id,
+                        error=str(e),
+                    )
+                except Exception as ctrl_err:
+                    logger.warning(
+                        "on_launch_failed failed for %s: %s",
+                        expected_instance_name,
+                        ctrl_err,
+                    )
+
             error_msg = str(e).lower()
             if "quota" in error_msg or "capacity" in error_msg or "exhausted" in error_msg:
                 raise CapacityError(
@@ -275,6 +383,82 @@ class GCERunBackend:
                 stage_run_id=spec.stage_run_id,
                 cause="gce_error",
             ) from e
+
+    def _try_warm_pool_claim(self, spec: RunSpec) -> RunHandle | None:
+        """Try to claim a warm pool instance for the given spec."""
+        assert self._warm_pool is not None
+
+        from goldfish.cloud.adapters.gcp.profiles import ProfileResolver
+
+        resolver = ProfileResolver(
+            profile_overrides=self._profile_overrides,
+            global_zones=self._zones,
+        )
+        profile = resolver.resolve(spec.profile)
+        image_family = profile.get("boot_disk", {}).get("image_family", "debian-12")
+        image_project = profile.get("boot_disk", {}).get("image_project", "debian-cloud")
+
+        # Build job spec matching the normal launch contract in gce_launcher.py.
+        # The idle loop uses this to replicate what build_startup_script does for
+        # first-boot: write entrypoint, stage inputs, mount volumes, run Docker,
+        # and rsync outputs to GCS.
+
+        # Extract entrypoint script (same logic as normal launch at lines 240-243)
+        if spec.command and len(spec.command) == 3 and spec.command[:2] == ["sh", "-c"]:
+            entrypoint_script = spec.command[2]
+        elif spec.command:
+            entrypoint_script = shlex.join(spec.command)
+        else:
+            entrypoint_script = "echo 'No command'"
+
+        # Serialize inputs for staging
+        serialized_inputs = {name: str(uri) for name, uri in spec.inputs.items()}
+
+        # GPU CUDA symlink wrapper (same as gce_launcher.py lines 324-332)
+        if spec.gpu_count and spec.gpu_count > 0:
+            docker_cmd = (
+                "-c '"
+                "mkdir -p /tmp/cuda-symlinks && "
+                "ln -sf /usr/lib/x86_64-linux-gnu/libcuda.so.1 /tmp/cuda-symlinks/libcuda.so && "
+                "exec /entrypoint.sh'"
+            )
+        else:
+            docker_cmd = "/entrypoint.sh"
+
+        # Build env for the warm-pool job — must include LD_LIBRARY_PATH for GPU
+        # (same as gce_launcher.py line 211: FA3 wheels need libcuda.so at import time)
+        warm_env = dict(spec.env)
+        if spec.gpu_count and spec.gpu_count > 0:
+            warm_env["LD_LIBRARY_PATH"] = "/tmp/cuda-symlinks:/usr/lib/x86_64-linux-gnu"
+
+        job_spec = {
+            "image": spec.image,
+            "run_path": f"runs/{spec.stage_run_id}",
+            "entrypoint_script": entrypoint_script,
+            "docker_entrypoint": "/bin/bash",
+            "docker_cmd": docker_cmd,
+            "env": warm_env,
+            "inputs": serialized_inputs,
+            "mounts": [
+                ["/mnt/entrypoint.sh", "/entrypoint.sh"],
+                ["/mnt/gcs", "/mnt/gcs"],
+                ["/mnt/inputs", "/mnt/inputs"],
+                ["/mnt/outputs", "/mnt/outputs"],
+            ],
+            "shm_size": "16g",
+            "gpu_count": spec.gpu_count,
+            "max_runtime_seconds": spec.timeout_seconds,
+        }
+
+        return self._warm_pool.try_claim(
+            machine_type=spec.machine_type or "n1-standard-4",
+            gpu_count=spec.gpu_count,
+            image_family=image_family,
+            image_project=image_project,
+            preemptible=spec.spot,
+            stage_run_id=spec.stage_run_id,
+            job_spec=job_spec,
+        )
 
     def get_status(self, handle: RunHandle) -> BackendStatus:
         """Get current status of a GCE instance.
@@ -296,12 +480,21 @@ class GCERunBackend:
 
             # Map Goldfish state to RunStatus
             if status_str == StageState.RUNNING:
+                # Check GCS for exit code — works for both regular and warm instances:
+                # - Regular: exit code appears just before self-delete (early detection)
+                # - Warm: exit code appears, VM enters idle loop instead of self-deleting
+                # CRITICAL: Use stage_run_id (not instance_name) because warm instances
+                # reuse the same VM for different stage_run_ids.
+                exit_result = self._launcher._get_exit_code(handle.stage_run_id)
+                if exit_result.exists and exit_result.code is not None:
+                    return BackendStatus.from_exit_code(exit_result.code)
                 return BackendStatus(status=RunStatus.RUNNING)
-            elif status_str == StageState.COMPLETED:
-                return BackendStatus(status=RunStatus.COMPLETED, exit_code=0)
-            elif status_str == StageState.FAILED:
-                # Try to get exit code for more detail
-                exit_result = self._launcher._get_exit_code(instance_name)
+            elif status_str in (StageState.COMPLETED, StageState.FAILED):
+                # GCE instance is TERMINATED/STOPPED. get_instance_status derives
+                # COMPLETED/FAILED from the instance_name's exit code path, but for
+                # warm-pool instances that's the FIRST job's exit code, not the current one.
+                # Always re-check using the current stage_run_id to get the right exit code.
+                exit_result = self._launcher._get_exit_code(handle.stage_run_id)
                 if exit_result.exists and exit_result.code is not None:
                     return BackendStatus.from_exit_code(exit_result.code)
                 # Propagate GCS error info in message for visibility
@@ -321,7 +514,7 @@ class GCERunBackend:
             elif status_str == "not_found":
                 # Instance is gone - try to recover exit code from GCS
                 # This handles spot preemption where instance disappears but wrote exit code
-                exit_result = self._launcher._get_exit_code(instance_name)
+                exit_result = self._launcher._get_exit_code(handle.stage_run_id)
                 if exit_result.exists and exit_result.code is not None:
                     # Exit code found - instance ran and terminated
                     return BackendStatus.from_exit_code(
@@ -396,14 +589,20 @@ class GCERunBackend:
     def cleanup(self, handle: RunHandle) -> None:
         """Clean up resources for a terminated instance.
 
-        For GCE, this is a no-op after terminate() since delete removes all resources.
+        For warm pool instances, this is a no-op — finalization handles
+        the release/delete decision based on terminal state.
+        For regular GCE instances, this is also a no-op since delete removes all resources.
 
         Args:
             handle: Handle to the instance.
         """
-        # GCE instances are fully cleaned up by delete
-        # No additional cleanup needed
-        _ = handle  # Acknowledge parameter for protocol compliance
+        if self._warm_pool:
+            instance = self._warm_pool.get_instance(handle.backend_handle)
+            if instance:
+                # No-op for warm instances — finalization handles release/delete
+                logger.debug("Skipping cleanup for warm instance %s", handle.backend_handle)
+                return
+        # Regular instances: no additional cleanup needed (GCE delete handles everything)
         pass
 
     def get_zone(self, handle: RunHandle) -> str | None:

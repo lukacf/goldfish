@@ -705,8 +705,11 @@ class TestGCERunBackendGetStatus:
     """Tests for get_status method."""
 
     def test_get_status_running_returns_running(self, backend, mock_launcher, sample_handle):
-        """Running instance returns RUNNING status."""
+        """Running instance returns RUNNING status when no exit code in GCS."""
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
         mock_launcher.get_instance_status.return_value = StageState.RUNNING
+        mock_launcher._get_exit_code.return_value = ExitCodeResult(exists=False, code=None, gcs_error=False, error=None)
 
         status = backend.get_status(sample_handle)
 
@@ -715,7 +718,11 @@ class TestGCERunBackendGetStatus:
 
     def test_get_status_completed_returns_completed_with_exit_0(self, backend, mock_launcher, sample_handle):
         """Completed instance returns COMPLETED with exit_code=0."""
+        from goldfish.state_machine.exit_code import ExitCodeResult
+
         mock_launcher.get_instance_status.return_value = StageState.COMPLETED
+        # get_status now always re-checks exit code via stage_run_id (warm pool safety)
+        mock_launcher._get_exit_code.return_value = ExitCodeResult.from_code(0)
 
         status = backend.get_status(sample_handle)
 

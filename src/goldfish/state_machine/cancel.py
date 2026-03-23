@@ -85,6 +85,16 @@ def cancel_run(
     # Format response
     response = format_transition_result(result, run_id, previous_state)
 
+    # Route through InstanceController for warm pool lifecycle
+    if result.success:
+        try:
+            from goldfish.state_machine.instance_controller import InstanceController
+
+            controller = InstanceController(db)
+            controller.on_run_terminal(run_id, "canceled", source="controller")
+        except Exception as e:
+            logger.debug("Instance controller on_run_terminal skipped for %s: %s", run_id, e)
+
     # Best-effort backend cleanup (only if transition succeeded)
     if result.success and backend_type and backend_handle:
         try:

@@ -669,10 +669,11 @@ def stage_log_section(gcs_uri: str) -> str:
     """
     return f"""
 LOCAL_STAGE_LOG=/tmp/stage_times.log
+GCS_STAGE_LOG_PATH="{gcs_uri}"
 : > "$LOCAL_STAGE_LOG"
 log_stage() {{
   echo "$(date --iso-8601=seconds) :: $1" | tee -a "$LOCAL_STAGE_LOG"
-  gsutil cp "$LOCAL_STAGE_LOG" {gcs_uri} >/dev/null 2>&1 || true
+  gsutil cp "$LOCAL_STAGE_LOG" "$GCS_STAGE_LOG_PATH" >/dev/null 2>&1 || true
 }}
 """
 
@@ -720,6 +721,12 @@ GCS_METRICS_PATH="{gcs_metrics}"
 GCS_SVS_DURING_PATH="{gcs_svs_during}"
 
 start_log_syncer() {{
+    # Capture current GCS paths into local vars for the subshell.
+    # These may be reset between warm-pool jobs; the subshell needs a snapshot.
+    local _GCS_STDOUT="$GCS_STDOUT_PATH"
+    local _GCS_STDERR="$GCS_STDERR_PATH"
+    local _GCS_METRICS="$GCS_METRICS_PATH"
+    local _GCS_SVS_DURING="$GCS_SVS_DURING_PATH"
     (
         # Wait for Docker to start and create initial logs
         sleep 5
@@ -731,31 +738,31 @@ start_log_syncer() {{
 
             # Sync metrics.jsonl FIRST if it exists (needed for dashboard)
             if [[ -f "$LOCAL_METRICS" ]]; then
-                gcloud storage cp "$LOCAL_METRICS" {gcs_metrics} --quiet 2>/dev/null || true
+                gcloud storage cp "$LOCAL_METRICS" "$_GCS_METRICS" --quiet 2>/dev/null || true
             fi
 
             # Sync during-run SVS findings SECOND (needed for dashboard)
             if [[ -f "$LOCAL_SVS_DURING" ]]; then
-                gcloud storage cp "$LOCAL_SVS_DURING" {gcs_svs_during} --quiet 2>/dev/null || true
+                gcloud storage cp "$LOCAL_SVS_DURING" "$_GCS_SVS_DURING" --quiet 2>/dev/null || true
             fi
 
             # Sync stdout/stderr LAST (can be large, less time-critical)
-            gcloud storage cp "$LOCAL_STDOUT" {gcs_stdout} --quiet 2>/dev/null || true
-            gcloud storage cp "$LOCAL_STDERR" {gcs_stderr} --quiet 2>/dev/null || true
+            gcloud storage cp "$LOCAL_STDOUT" "$_GCS_STDOUT" --quiet 2>/dev/null || true
+            gcloud storage cp "$LOCAL_STDERR" "$_GCS_STDERR" --quiet 2>/dev/null || true
         done
 
         # Final sync after Docker exits to capture last logs
         sleep 2
         # Final sync of metrics and SVS findings FIRST
         if [[ -f "$LOCAL_METRICS" ]]; then
-            gcloud storage cp "$LOCAL_METRICS" {gcs_metrics} --quiet 2>/dev/null || true
+            gcloud storage cp "$LOCAL_METRICS" "$_GCS_METRICS" --quiet 2>/dev/null || true
         fi
         if [[ -f "$LOCAL_SVS_DURING" ]]; then
-            gcloud storage cp "$LOCAL_SVS_DURING" {gcs_svs_during} --quiet 2>/dev/null || true
+            gcloud storage cp "$LOCAL_SVS_DURING" "$_GCS_SVS_DURING" --quiet 2>/dev/null || true
         fi
         # Then logs
-        gcloud storage cp "$LOCAL_STDOUT" {gcs_stdout} --quiet 2>/dev/null || true
-        gcloud storage cp "$LOCAL_STDERR" {gcs_stderr} --quiet 2>/dev/null || true
+        gcloud storage cp "$LOCAL_STDOUT" "$_GCS_STDOUT" --quiet 2>/dev/null || true
+        gcloud storage cp "$LOCAL_STDERR" "$_GCS_STDERR" --quiet 2>/dev/null || true
     ) &
     LOG_SYNCER_PID=$!
     echo "Log syncer started (PID=$LOG_SYNCER_PID, interval={sync_interval}s)"
@@ -822,6 +829,357 @@ start_metadata_syncer() {{
 """
 
 
+def idle_loop_section(
+    idle_timeout_seconds: int,
+    preserve_paths: list[str] | None = None,
+) -> str:
+    """Generate shell script fragment for the warm pool idle loop.
+
+    After the first Docker container exits, instead of self-deleting, the VM
+    enters an idle loop that polls for new job commands via instance metadata.
+
+    Args:
+        idle_timeout_seconds: Seconds to wait idle before self-deleting.
+        preserve_paths: Glob patterns for paths to preserve between jobs
+            (e.g., ["/tmp/triton*", "/mnt/cache/model*"]).
+
+    Returns:
+        Shell script fragment defining warm_pool_idle_loop() function.
+    """
+    # Build cleanup logic based on preserve_paths
+    if preserve_paths:
+        # Use find-based cleanup that excludes preserve_paths
+        exclude_args = ""
+        for path in preserve_paths:
+            exclude_args += f' ! -path "{path}"'
+        cleanup_block = f"""\
+                # Clean ALL previous stage outputs to prevent leaking into next run.
+                # gsutil rsync uploads everything in /mnt/outputs/, so stale signals
+                # from the previous run would be attributed to the new run.
+                find /mnt/outputs -mindepth 1 -maxdepth 1{exclude_args} -exec rm -rf {{}} \\; 2>/dev/null || true
+                rm -rf /tmp/goldfish_* 2>/dev/null || true
+                find /tmp -maxdepth 1 \\( -name "*.log" -o -name "*.json" \\) ! -name "job_spec.json"{exclude_args} 2>/dev/null | xargs rm -f 2>/dev/null || true"""
+    else:
+        cleanup_block = """\
+                # Clean ALL previous stage outputs to prevent leaking into next run.
+                # gsutil rsync uploads everything in /mnt/outputs/, so stale signals
+                # from the previous run would be attributed to the new run.
+                rm -rf /mnt/outputs/* /tmp/goldfish_* 2>/dev/null || true
+                find /tmp -maxdepth 1 \\( -name "*.log" -o -name "*.json" \\) ! -name "job_spec.json" 2>/dev/null | xargs rm -f 2>/dev/null || true"""
+
+    return f"""
+# === WARM POOL IDLE LOOP ===
+warm_pool_idle_loop() {{
+    local IDLE_TIMEOUT={idle_timeout_seconds}
+    local IDLE_START=$(date +%s)
+
+    # Suspend self-delete EXIT trap during idle
+    trap '' EXIT
+
+    # SIGTERM handler for spot preemption during idle
+    trap 'echo "PREEMPTED during idle"; exit 143' SIGTERM
+
+    echo "=== ENTERING WARM POOL IDLE LOOP (timeout=${{IDLE_TIMEOUT}}s) ==="
+
+    while true; do
+        # Check idle timeout
+        local ELAPSED=$(($(date +%s) - IDLE_START))
+        if [[ $ELAPSED -gt $IDLE_TIMEOUT ]]; then
+            echo "=== IDLE TIMEOUT REACHED (${{ELAPSED}}s > ${{IDLE_TIMEOUT}}s) - SELF-DELETING ==="
+            # Re-enable self-delete trap
+            trap 'GOLDFISH_TRAP_EXIT_CODE=$?; self_delete' EXIT
+            exit 0
+        fi
+
+        # Poll metadata for new_job command (reuse Overdrive pattern)
+        local SIG_JSON=$(curl -sf -H "Metadata-Flavor: Google" \\
+            "http://metadata.google.internal/computeMetadata/v1/instance/attributes/goldfish" 2>/dev/null || true)
+
+        if [[ -n "$SIG_JSON" ]]; then
+            local CMD=$(echo "$SIG_JSON" | grep -o '"command"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"command"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/' | tr -d '[:space:]')
+            local REQ_ID=$(echo "$SIG_JSON" | grep -o '"request_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"request_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/' | tr -d '[:space:]')
+            local SPEC_PATH=$(echo "$SIG_JSON" | grep -o '"spec_gcs_path"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"spec_gcs_path"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/' | tr -d '[:space:]')
+
+            if [[ "$CMD" == "new_job" && -n "$REQ_ID" && "$REQ_ID" != "$LAST_JOB_REQ_ID" ]]; then
+                echo "=== NEW JOB RECEIVED: $REQ_ID ==="
+                LAST_JOB_REQ_ID="$REQ_ID"
+
+                # Kill stale background processes with PID guards.
+                # KEEP watchdog alive — it tracks total instance lifetime from boot
+                # and should NOT be restarted per job. Kill only per-job processes.
+                for pid_var in SUPERVISOR_PID LOG_SYNCER_PID METADATA_SYNCER_PID; do
+                    local PID_VAL="${{!pid_var:-}}"
+                    if [[ -n "$PID_VAL" && "$PID_VAL" != "0" ]]; then
+                        kill "$PID_VAL" 2>/dev/null || true
+                    fi
+                done
+
+                # Download job spec from GCS BEFORE ACKing.
+                # ACK signals "ready to run" — must not fire until the spec is validated.
+                if [[ -n "$SPEC_PATH" ]]; then
+                    gsutil cp "$SPEC_PATH" /tmp/job_spec.json 2>/dev/null || {{
+                        echo "ERROR: Failed to download job spec from $SPEC_PATH"
+                        IDLE_START=$(date +%s)
+                        continue
+                    }}
+                else
+                    echo "ERROR: No spec_gcs_path in signal"
+                    IDLE_START=$(date +%s)
+                    continue
+                fi
+
+                # Parse job spec (uses python for JSON parsing — already installed)
+                local NEW_IMAGE=$(python3 -c "import json; print(json.load(open('/tmp/job_spec.json'))['image'])" 2>/dev/null)
+                local NEW_RUN_PATH=$(python3 -c "import json; print(json.load(open('/tmp/job_spec.json'))['run_path'])" 2>/dev/null)
+                local NEW_ENTRYPOINT=$(python3 -c "import json; print(json.load(open('/tmp/job_spec.json')).get('docker_entrypoint', '/bin/bash'))" 2>/dev/null)
+                local NEW_CMD=$(python3 -c "import json; print(json.load(open('/tmp/job_spec.json')).get('docker_cmd', '/entrypoint.sh'))" 2>/dev/null)
+                local NEW_SHM_SIZE=$(python3 -c "import json; print(json.load(open('/tmp/job_spec.json')).get('shm_size', '16g'))" 2>/dev/null)
+                local NEW_GPU_COUNT=$(python3 -c "import json; print(json.load(open('/tmp/job_spec.json')).get('gpu_count', 0))" 2>/dev/null)
+
+                # Validate required fields before ACKing
+                if [[ -z "$NEW_IMAGE" || -z "$NEW_RUN_PATH" ]]; then
+                    echo "ERROR: Job spec missing required fields (image or run_path)"
+                    IDLE_START=$(date +%s)
+                    continue
+                fi
+
+                # ACK AFTER spec download + parse validation.
+                # This ensures the claim only succeeds when the VM has a valid job to run.
+                if command -v gcloud >/dev/null 2>&1; then
+                    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+                        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+                        --metadata "goldfish_ack=$REQ_ID" --quiet 2>/dev/null || true
+                fi
+
+                # CRITICAL: Reset ALL GCS paths for new run BEFORE input staging.
+                # Early failures (input staging, image pull) need correct paths to
+                # write exit codes and logs for the current run, not the previous one.
+                # Also reset log_stage and log_syncer destinations so they don't
+                # upload to the first-boot run's paths.
+                GCS_STDOUT_PATH="gs://$GCS_BUCKET/$NEW_RUN_PATH/logs/stdout.log"
+                GCS_STDERR_PATH="gs://$GCS_BUCKET/$NEW_RUN_PATH/logs/stderr.log"
+                GCS_EXIT_CODE_PATH="gs://$GCS_BUCKET/$NEW_RUN_PATH/logs/exit_code.txt"
+                GCS_METRICS_PATH="gs://$GCS_BUCKET/$NEW_RUN_PATH/logs/metrics.jsonl"
+                GCS_SVS_DURING_PATH="gs://$GCS_BUCKET/$NEW_RUN_PATH/outputs/.goldfish/svs_findings_during.json"
+                GCS_TERMINATION_CAUSE_PATH="gs://$GCS_BUCKET/$NEW_RUN_PATH/logs/termination_cause.txt"
+                GCS_STAGE_LOG_PATH="gs://$GCS_BUCKET/$NEW_RUN_PATH/logs/stage_times.log"
+                GCS_LOG_PATH="gs://$GCS_BUCKET/$NEW_RUN_PATH/logs"
+                EXIT_CODE_FILE="/mnt/gcs/$NEW_RUN_PATH/logs/exit_code.txt"
+                LOCAL_STDOUT=/tmp/stdout.log
+                LOCAL_STDERR=/tmp/stderr.log
+                LOCAL_METRICS=/mnt/outputs/.goldfish/metrics.jsonl
+                LOCAL_SVS_DURING=/mnt/outputs/.goldfish/svs_findings_during.json
+                : > "$LOCAL_STDOUT"
+                : > "$LOCAL_STDERR"
+
+                # Write entrypoint script (same as first-boot: gce_launcher writes to /mnt/entrypoint.sh)
+                python3 -c "
+import json
+spec = json.load(open('/tmp/job_spec.json'))
+script = spec.get('entrypoint_script', 'echo No entrypoint')
+with open('/mnt/entrypoint.sh', 'w') as f:
+    f.write(script)
+" 2>/dev/null
+                chmod +x /mnt/entrypoint.sh
+
+                # Stage inputs from GCS to /mnt/inputs/ (replicates gce_launcher input staging)
+                rm -rf /mnt/inputs/* 2>/dev/null || true
+                mkdir -p /mnt/inputs /mnt/outputs
+                python3 -c "
+import json, subprocess, os
+spec = json.load(open('/tmp/job_spec.json'))
+bucket = os.environ.get('GCS_BUCKET', '')
+for name, uri in spec.get('inputs', {{}}).items():
+    if not uri.startswith('gs://'):
+        continue
+    uri_parts = uri.replace('gs://', '').split('/', 1)
+    if len(uri_parts) == 2:
+        input_bucket, input_path = uri_parts
+        gcsfuse_path = f'/mnt/gcs/{{input_path.rstrip(\"/\")}}'
+        target = f'/mnt/inputs/{{name}}'
+        if input_bucket == bucket and os.path.exists(gcsfuse_path):
+            os.symlink(gcsfuse_path, target)
+            print(f'Symlinked {{name}} -> {{gcsfuse_path}}')
+        else:
+            subprocess.run(['gsutil', '-m', 'cp', '-r', uri.rstrip('/'), target], check=True)
+            print(f'Copied {{name}} from {{uri}}')
+" 2>&1 || {{
+                    echo "ERROR: Input staging failed — aborting job"
+                    echo "1" | gsutil cp - "$GCS_EXIT_CODE_PATH" 2>/dev/null || true
+                    upload_logs_with_retry "$LOCAL_STDOUT" "$GCS_STDOUT_PATH" || true
+                    upload_logs_with_retry "$LOCAL_STDERR" "$GCS_STDERR_PATH" || true
+                    IDLE_START=$(date +%s)
+                    continue
+                }}
+                chown 1000:100 /mnt/inputs /mnt/outputs 2>/dev/null || true
+                chown -h 1000:100 /mnt/inputs/* 2>/dev/null || true
+
+{cleanup_block}
+
+                # Pull image if different (Docker layer cache makes this fast for shared base)
+                if [[ "$NEW_IMAGE" != "$CURRENT_IMAGE" ]]; then
+                    echo "Pulling new image: $NEW_IMAGE (was: $CURRENT_IMAGE)"
+                    docker pull "$NEW_IMAGE" || {{
+                        echo "ERROR: Failed to pull $NEW_IMAGE"
+                        echo "1" | gsutil cp - "$GCS_EXIT_CODE_PATH" 2>/dev/null || true
+                        upload_logs_with_retry "$LOCAL_STDOUT" "$GCS_STDOUT_PATH" || true
+                        upload_logs_with_retry "$LOCAL_STDERR" "$GCS_STDERR_PATH" || true
+                        IDLE_START=$(date +%s)
+                        continue
+                    }}
+                    CURRENT_IMAGE="$NEW_IMAGE"
+                fi
+
+                # Restore self-delete EXIT trap during job execution
+                trap 'GOLDFISH_TRAP_EXIT_CODE=$?; echo "EXIT TRAP TRIGGERED (exit code: $GOLDFISH_TRAP_EXIT_CODE)"; self_delete' EXIT
+
+                # Restart per-job background monitors.
+                # Watchdog is NOT restarted — it stays alive across jobs, tracking total
+                # VM lifetime from GOLDFISH_FIRST_BOOT (hard cap on instance existence).
+                METADATA_SYNCER_STARTED=0
+                start_metadata_syncer
+                # Restart supervisor if heartbeat monitoring was enabled
+                if type start_supervisor &>/dev/null 2>&1; then
+                    start_supervisor
+                fi
+
+                # Build and run Docker command
+                local DOCKER_GPU_ARGS=""
+                if [[ "$NEW_GPU_COUNT" -gt 0 ]]; then
+                    DOCKER_GPU_ARGS="--gpus all"
+                fi
+
+                # Build mounts from job spec
+                local MOUNT_FLAGS=$(python3 -c "
+import json
+spec = json.load(open('/tmp/job_spec.json'))
+for host, container in spec.get('mounts', []):
+    print(f'-v {{host}}:{{container}}')
+" 2>/dev/null | tr '\\n' ' ')
+
+                log_stage "docker_run_begin"
+
+                # Build the full docker run command via Python to preserve quoting.
+                # NEW_CMD may contain embedded quotes (e.g., GPU CUDA wrapper:
+                # -c 'mkdir -p /tmp/cuda-symlinks && ... && exec /entrypoint.sh')
+                # that would be broken by shell word splitting if used unquoted.
+                python3 -c "
+import json, shlex
+spec = json.load(open('/tmp/job_spec.json'))
+parts = ['docker', 'run', '--rm']
+gpu = spec.get('gpu_count', 0)
+if int(gpu) > 0:
+    parts.extend(['--gpus', 'all'])
+parts.extend(['--ipc=host', '--ulimit', 'memlock=-1', '--ulimit', 'stack=67108864'])
+parts.extend(['--shm-size=' + spec.get('shm_size', '16g')])
+for k, v in spec.get('env', {{}}).items():
+    parts.extend(['-e', f'{{k}}={{v}}'])
+for host, container in spec.get('mounts', []):
+    parts.extend(['-v', f'{{host}}:{{container}}'])
+parts.extend(['--entrypoint', spec.get('docker_entrypoint', '/bin/bash')])
+parts.append(spec['image'])
+cmd = spec.get('docker_cmd', '')
+if cmd:
+    # docker_cmd is already shell-formatted (e.g., \"/entrypoint.sh\" or
+    # \"-c 'mkdir ... && exec /entrypoint.sh'\"). Write as-is for eval.
+    pass
+# Write command for eval (preserves quoting in docker_cmd)
+with open('/tmp/docker_cmd.sh', 'w') as f:
+    f.write(' '.join(shlex.quote(p) for p in parts))
+    if cmd:
+        f.write(' ' + cmd)  # Append unquoted — already shell-formatted
+    f.write(' > >(tee -a \"$LOCAL_STDOUT\") 2> >(tee -a \"$LOCAL_STDERR\") &')
+" 2>/dev/null
+                eval "$(cat /tmp/docker_cmd.sh)"
+                DOCKER_PID=$!
+
+                # Per-job timeout enforcement (separate from instance-level watchdog).
+                # The watchdog guards total VM lifetime; this guards individual job runtime.
+                local JOB_TIMEOUT=$(python3 -c "import json; print(json.load(open('/tmp/job_spec.json')).get('max_runtime_seconds') or 0)" 2>/dev/null)
+                local JOB_TIMER_PID=""
+                if [[ "$JOB_TIMEOUT" -gt 0 ]]; then
+                    (
+                        sleep "$JOB_TIMEOUT"
+                        echo "=== PER-JOB TIMEOUT (${{JOB_TIMEOUT}}s) — KILLING DOCKER ==="
+                        docker kill $(docker ps -q) 2>/dev/null || true
+                    ) &
+                    JOB_TIMER_PID=$!
+                fi
+
+                # Start log syncer (needs DOCKER_PID)
+                start_log_syncer
+
+                # Wait for Docker. Capture exit code without triggering set -e.
+                # Plain `wait $PID` under set -e aborts on non-zero, skipping the
+                # post-run upload path and triggering the self-delete trap.
+                EXIT_CODE=0
+                wait $DOCKER_PID || EXIT_CODE=$?
+
+                # Clean up job timer if it's still running
+                if [[ -n "$JOB_TIMER_PID" ]]; then
+                    kill "$JOB_TIMER_PID" 2>/dev/null || true
+                fi
+                sleep 1
+                log_stage "docker_run_end"
+
+                # Upload stage outputs to GCS (same rsync pattern as first-boot post_run_cmds)
+                # This is CRITICAL — without it, downstream stages would see missing outputs.
+                local OUTPUTS_GCS_PATH="gs://$GCS_BUCKET/$NEW_RUN_PATH/outputs"
+                echo "Uploading outputs to GCS..."
+                for i in {{1..3}}; do
+                    if timeout 600 gsutil -m rsync -r /mnt/outputs/ "$OUTPUTS_GCS_PATH/"; then
+                        echo "Outputs uploaded successfully"
+                        break
+                    else
+                        echo "Output upload attempt $i failed"
+                        [[ $i -lt 3 ]] && sleep 5
+                    fi
+                done
+
+                # Upload logs FIRST (before exit code).
+                # The daemon treats exit_code as the completion signal, so it must be
+                # written LAST — after outputs, logs, and trap suspension. Otherwise
+                # finalization can release the VM to idle before it enters the poll loop,
+                # causing the next claim's ACK to time out.
+                upload_logs_with_retry "$LOCAL_STDOUT" "$GCS_STDOUT_PATH" || true
+                upload_logs_with_retry "$LOCAL_STDERR" "$GCS_STDERR_PATH" || true
+
+                # Suspend EXIT trap BEFORE writing exit code — the VM is about to go
+                # idle, not self-delete. If we wrote exit code with trap active, a
+                # transient failure could trigger self-delete after a successful job.
+                trap '' EXIT
+
+                # Reset idle timer BEFORE writing exit code — the VM is ready to accept
+                # new jobs as soon as the exit code is visible to the daemon.
+                IDLE_START=$(date +%s)
+
+                # NOW write exit code — this is the completion signal for the daemon.
+                # Everything above (outputs, logs, trap suspension) must happen first.
+                echo "$EXIT_CODE" > "$EXIT_CODE_FILE" 2>/dev/null || true
+                echo "$EXIT_CODE" | timeout 30 gsutil cp - "$GCS_EXIT_CODE_PATH" 2>/dev/null || true
+                gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+                    --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+                    --metadata "goldfish_exit_code=$EXIT_CODE" --quiet 2>/dev/null || true
+                upload_exit_code "$EXIT_CODE_FILE" "$GCS_EXIT_CODE_PATH" || true
+
+                # Signal the daemon that this instance is ready for reuse.
+                # The daemon's poll_warm_instances checks this metadata on draining
+                # instances to trigger DRAIN_COMPLETE → idle_ready transition.
+                # Without this, instances get stuck in draining forever.
+                gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+                    --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+                    --metadata "goldfish_instance_state=idle_ready" --quiet 2>/dev/null || true
+
+                echo "=== JOB $REQ_ID COMPLETE (exit=$EXIT_CODE) - RETURNING TO IDLE ==="
+            fi
+        fi
+
+        sleep 1
+    done
+}}
+"""
+
+
 def build_startup_script(
     *,
     bucket: str,
@@ -842,6 +1200,9 @@ def build_startup_script(
     heartbeat_timeout_seconds: int | None = None,
     log_sync_interval: int | None = None,
     gpu_count: int = 0,
+    warm_pool_idle_timeout_seconds: int | None = None,
+    warm_pool_preserve_paths: list[str] | None = None,
+    warm_pool_first_job_timeout: int | None = None,
 ) -> str:
     """Build complete startup script for GCE instance.
 
@@ -863,6 +1224,11 @@ def build_startup_script(
         max_runtime_seconds: Maximum runtime before watchdog kills instance (None=no limit)
         heartbeat_timeout_seconds: Heartbeat timeout for supervisor (None=no supervisor)
         log_sync_interval: Seconds between log syncs to GCS (None=use gcsfuse, >0=use syncer)
+        gpu_count: Number of GPUs requested by the profile (0 = CPU-only)
+        warm_pool_idle_timeout_seconds: If set, VM enters idle loop after first
+            job instead of self-deleting. Value is idle timeout in seconds.
+        warm_pool_preserve_paths: Glob patterns for paths to preserve between
+            warm pool jobs (e.g., ["/tmp/triton*"]).
 
     Returns:
         Complete startup script as string
@@ -1022,6 +1388,13 @@ fi
 """)
     parts.append('log_stage "docker_pull"')
 
+    # Warm pool variables — must be set after Docker pull
+    warm_pool_enabled = warm_pool_idle_timeout_seconds is not None and warm_pool_idle_timeout_seconds > 0
+    if warm_pool_enabled:
+        parts.append(f'export GCS_BUCKET="{bucket}"')
+        parts.append(f'CURRENT_IMAGE="{image}"')
+        parts.append('LAST_JOB_REQ_ID=""')
+
     # Pre-run commands
     for pre_cmd in pre_run_cmds:
         parts.append(pre_cmd)
@@ -1056,13 +1429,33 @@ fi
     # Run Docker in background to avoid waiting for watchdog
     parts.append('"${DOCKER_CMD[@]}" > >(tee -a "$STDOUT_LOG") 2> >(tee -a "$STDERR_LOG") & DOCKER_PID=$!')
 
+    # For warm pool VMs: per-stage timeout kills Docker (not the VM).
+    # The instance-level watchdog uses watchdog_seconds; this timer enforces the
+    # individual job's max_runtime so the first job doesn't run until the watchdog.
+    if warm_pool_enabled and warm_pool_first_job_timeout and warm_pool_first_job_timeout > 0:
+        parts.append(f"""
+# Per-stage timeout for first warm pool job (kills Docker, not VM)
+FIRST_JOB_TIMEOUT={warm_pool_first_job_timeout}
+(
+    sleep $FIRST_JOB_TIMEOUT
+    echo "=== FIRST JOB TIMEOUT (${{FIRST_JOB_TIMEOUT}}s) — KILLING DOCKER ==="
+    docker kill $(docker ps -q) 2>/dev/null || true
+) &
+FIRST_JOB_TIMER_PID=$!
+""")
+
     # Start log syncer after Docker begins (needs DOCKER_PID)
     if use_log_syncer:
         parts.append("start_log_syncer")
 
-    # Wait for Docker and capture its exit code (no || true - we need real exit code)
-    parts.append("wait $DOCKER_PID")
-    parts.append("EXIT_CODE=$?")
+    # Wait for Docker. Capture exit code without triggering set -e.
+    # Plain `wait $PID` under set -e aborts on non-zero, skipping post-run uploads.
+    parts.append("EXIT_CODE=0")
+    parts.append("wait $DOCKER_PID || EXIT_CODE=$?")
+
+    # Clean up first-job timer if warm pool
+    if warm_pool_enabled and warm_pool_first_job_timeout and warm_pool_first_job_timeout > 0:
+        parts.append('if [[ -n "${FIRST_JOB_TIMER_PID:-}" ]]; then kill "$FIRST_JOB_TIMER_PID" 2>/dev/null || true; fi')
     # Give tee processes a moment to flush (they close when Docker exits)
     parts.append("sleep 1")
     parts.append('log_stage "docker_run_end"')
@@ -1107,6 +1500,36 @@ fi
     # Exit with docker exit code - the EXIT trap will handle self-deletion
     # Logs are already uploaded and verified at this point
     parts.append('log_stage "cleanup_begin"')
-    parts.append("exit $EXIT_CODE")
+
+    if warm_pool_enabled:
+        # Include the idle loop function definition and call it instead of exiting
+        parts.append(
+            idle_loop_section(
+                idle_timeout_seconds=warm_pool_idle_timeout_seconds,  # type: ignore[arg-type]
+                preserve_paths=warm_pool_preserve_paths,
+            )
+        )
+        # Check metadata flag: if registration failed (pool full race), skip idle mode
+        parts.append("""
+# Check if warm pool was disabled post-launch (registration failed due to race)
+WARM_DISABLED=$(curl -sf -H "Metadata-Flavor: Google" \
+    http://metadata.google.internal/computeMetadata/v1/instance/attributes/goldfish_warm_pool_disabled 2>/dev/null || echo "")
+if [[ "$WARM_DISABLED" == "true" ]]; then
+    echo "Warm pool disabled by metadata — self-deleting normally"
+    exit $EXIT_CODE
+fi
+""")
+        # Signal idle_ready BEFORE entering the loop. The daemon's poll_warm_instances
+        # checks this metadata on draining instances to trigger DRAIN_COMPLETE → idle_ready.
+        # Without this on first boot, the instance gets stuck in draining forever.
+        parts.append("""
+# Signal the daemon that first-boot job is done and VM is entering idle loop
+gcloud compute instances add-metadata "$INSTANCE_NAME" \
+    --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \
+    --metadata "goldfish_instance_state=idle_ready" --quiet 2>/dev/null || true
+""")
+        parts.append("warm_pool_idle_loop")
+    else:
+        parts.append("exit $EXIT_CODE")
 
     return "\n".join(parts) + "\n"

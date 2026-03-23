@@ -134,6 +134,9 @@ class GCELauncher:
         use_capacity_search: bool = True,
         goldfish_env: dict[str, str] | None = None,
         preemptible: bool | None = None,
+        warm_pool_idle_timeout_seconds: int | None = None,
+        warm_pool_preserve_paths: list[str] | None = None,
+        warm_pool_watchdog_seconds: int | None = None,
     ) -> GCELaunchResult:
         """Launch GCE instance for stage run.
 
@@ -152,6 +155,10 @@ class GCELauncher:
             use_capacity_search: Use ResourceLauncher for capacity search
             goldfish_env: Goldfish environment variables (metrics, provenance, etc.)
             preemptible: Force spot (True), on-demand (False), or auto (None)
+            warm_pool_idle_timeout_seconds: If set, VM enters idle loop after
+                first job instead of self-deleting. Value is idle timeout in seconds.
+            warm_pool_preserve_paths: Glob patterns for paths to preserve between
+                warm pool jobs.
 
         Returns:
             GCELaunchResult with instance_name and zone
@@ -342,13 +349,24 @@ class GCELauncher:
             gcsfuse=True,
             pre_run_cmds=pre_run_cmds,
             post_run_cmds=post_run_cmds,
-            # Cost protection - ALWAYS set max_runtime to prevent runaway instances
-            max_runtime_seconds=max_runtime,
+            # Cost protection for warm pool VMs:
+            # - Watchdog = warm_pool_watchdog_seconds (total VM lifetime, e.g. 6h).
+            #   Must NOT be per-stage max_runtime or the VM dies after the first job.
+            # - Per-stage timeout = enforced by the idle loop's JOB_TIMER for reused jobs,
+            #   AND by build_startup_script for the first job (see first_job_timeout below).
+            # For non-warm-pool: single watchdog = per-stage max_runtime (existing behavior).
+            max_runtime_seconds=(warm_pool_watchdog_seconds if warm_pool_watchdog_seconds else max_runtime),
             heartbeat_timeout_seconds=heartbeat_timeout,
             # Real-time log visibility - sync logs to GCS every N seconds
             log_sync_interval=log_sync_interval,
             # GPU flag - profile-based, not runtime nvidia-smi detection
             gpu_count=gpu_count or 0,
+            # Warm pool - VM enters idle loop after first job instead of self-deleting
+            warm_pool_idle_timeout_seconds=warm_pool_idle_timeout_seconds,
+            warm_pool_preserve_paths=warm_pool_preserve_paths,
+            # Per-stage timeout for the first job on a warm pool VM.
+            # The instance-level watchdog uses watchdog_seconds; this kills just Docker.
+            warm_pool_first_job_timeout=max_runtime if warm_pool_idle_timeout_seconds else None,
         )
 
         if use_capacity_search and self.resources:

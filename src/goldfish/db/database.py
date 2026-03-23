@@ -14,6 +14,7 @@ from goldfish.db.types import (
     BackupRow,
     DockerBuildRow,
     FailurePatternRow,
+    InstanceLeaseRow,
     JobInputWithSource,
     JobRow,
     LineageRow,
@@ -24,6 +25,7 @@ from goldfish.db.types import (
     StageVersionRow,
     SVSReviewRow,
     VersionTagRow,
+    WarmInstanceRow,
 )
 from goldfish.errors import DatabaseError
 from goldfish.models import JobStatus, PipelineStatus
@@ -671,6 +673,104 @@ class Database:
 
             if current_version < 7:
                 new_version = 7
+
+            if current_version < 8:
+                # Warm pool v2: state-machine-driven instances + leases
+                # Migrate warm_instances: status→state, add state_entered_at, drop old columns
+                table_exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='warm_instances'",
+                ).fetchone()
+                if table_exists:
+                    existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(warm_instances)")}
+                    if "status" in existing_cols and "state" not in existing_cols:
+                        # Old schema → new schema: recreate table
+                        conn.executescript("""
+                            CREATE TABLE IF NOT EXISTS warm_instances_v2 (
+                                instance_name TEXT PRIMARY KEY,
+                                zone TEXT NOT NULL,
+                                project_id TEXT NOT NULL,
+                                machine_type TEXT NOT NULL,
+                                gpu_count INTEGER NOT NULL DEFAULT 0,
+                                image_family TEXT NOT NULL DEFAULT 'debian-12',
+                                image_project TEXT NOT NULL DEFAULT 'debian-cloud',
+                                preemptible INTEGER NOT NULL DEFAULT 0,
+                                state TEXT NOT NULL DEFAULT 'launching'
+                                    CHECK(state IN ('launching', 'busy', 'draining', 'idle_ready', 'claimed', 'deleting', 'gone')),
+                                image_tag TEXT,
+                                state_entered_at TEXT,
+                                created_at TEXT NOT NULL
+                            );
+                        """)
+                        # Migrate existing rows with status→state mapping
+                        conn.execute("""
+                            INSERT INTO warm_instances_v2
+                                (instance_name, zone, project_id, machine_type, gpu_count,
+                                 image_family, image_project, preemptible, state, image_tag,
+                                 state_entered_at, created_at)
+                            SELECT instance_name, zone, project_id, machine_type, gpu_count,
+                                   image_family, image_project, preemptible,
+                                   CASE status
+                                       WHEN 'idle' THEN 'idle_ready'
+                                       WHEN 'running' THEN 'busy'
+                                       WHEN 'claimed' THEN 'claimed'
+                                       WHEN 'deleting' THEN 'deleting'
+                                       ELSE 'deleting'
+                                   END,
+                                   image_tag,
+                                   COALESCE(idle_since, claimed_at, created_at),
+                                   created_at
+                            FROM warm_instances
+                        """)
+                        conn.execute("DROP TABLE warm_instances")
+                        conn.execute("ALTER TABLE warm_instances_v2 RENAME TO warm_instances")
+
+                # Create new tables (idempotent)
+                conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS instance_state_transitions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        instance_name TEXT NOT NULL,
+                        from_state TEXT NOT NULL,
+                        to_state TEXT NOT NULL,
+                        event TEXT NOT NULL,
+                        stage_run_id TEXT,
+                        error_message TEXT,
+                        reason TEXT,
+                        source TEXT NOT NULL CHECK(source IN ('controller', 'daemon', 'executor', 'warm_pool')),
+                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        FOREIGN KEY (instance_name) REFERENCES warm_instances(instance_name) ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_instance_transitions_name
+                        ON instance_state_transitions(instance_name, created_at);
+
+                    CREATE TABLE IF NOT EXISTS instance_leases (
+                        instance_name TEXT NOT NULL,
+                        stage_run_id TEXT NOT NULL,
+                        lease_state TEXT NOT NULL CHECK(lease_state IN ('active', 'released')),
+                        claimed_at TEXT NOT NULL,
+                        released_at TEXT,
+                        PRIMARY KEY (instance_name, stage_run_id)
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_instance_leases_active
+                        ON instance_leases(instance_name) WHERE lease_state = 'active';
+                    CREATE INDEX IF NOT EXISTS idx_instance_leases_run
+                        ON instance_leases(stage_run_id);
+                """)
+
+                # Create new indexes for warm_instances (only if table exists)
+                wi_exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='warm_instances'",
+                ).fetchone()
+                if wi_exists:
+                    conn.executescript("""
+                        CREATE INDEX IF NOT EXISTS idx_warm_instances_state ON warm_instances(state);
+                        CREATE INDEX IF NOT EXISTS idx_warm_instances_match
+                            ON warm_instances(machine_type, gpu_count, image_family, image_project, preemptible)
+                            WHERE state = 'idle_ready';
+                        CREATE INDEX IF NOT EXISTS idx_warm_instances_idle ON warm_instances(state_entered_at)
+                            WHERE state = 'idle_ready';
+                    """)
+
+                new_version = 8
 
             # Bump schema version if needed
             if new_version != current_version:
@@ -5581,3 +5681,216 @@ class Database:
                 """,
             ).fetchall()
             return {row["tier"]: row["count"] for row in rows}
+
+    # =========================================================================
+    # Warm Pool Instances
+    # =========================================================================
+
+    def pre_register_warm_instance(
+        self,
+        instance_name: str,
+        zone: str,
+        project_id: str,
+        machine_type: str,
+        gpu_count: int,
+        image_family: str,
+        image_project: str,
+        max_instances: int,
+        image_tag: str | None = None,
+        preemptible: bool = False,
+    ) -> bool:
+        """Atomically pre-register a warm instance if pool has capacity.
+
+        Uses conditional INSERT: only succeeds if the number of non-gone
+        instances is below max_instances. This is the single atomic capacity gate.
+
+        Args:
+            instance_name: GCE instance name.
+            zone: GCE zone.
+            project_id: GCP project ID.
+            machine_type: GCE machine type.
+            gpu_count: Number of GPUs.
+            image_family: Boot disk image family.
+            image_project: Boot disk image project.
+            max_instances: Maximum pool size.
+            image_tag: Docker image tag (cache hint).
+            preemptible: Whether instance is spot/preemptible.
+
+        Returns:
+            True if inserted (capacity available), False if pool full.
+        """
+        now = datetime.now(UTC).isoformat()
+        with self._conn() as conn:
+            result = conn.execute(
+                """
+                INSERT INTO warm_instances
+                    (instance_name, zone, project_id, machine_type, gpu_count,
+                     image_family, image_project, preemptible, state, state_entered_at,
+                     image_tag, created_at)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'launching', ?, ?, ?
+                WHERE (SELECT COUNT(*) FROM warm_instances WHERE state != 'gone') < ?
+                """,
+                (
+                    instance_name,
+                    zone,
+                    project_id,
+                    machine_type,
+                    gpu_count,
+                    image_family,
+                    image_project,
+                    1 if preemptible else 0,
+                    now,
+                    image_tag,
+                    now,
+                    max_instances,
+                ),
+            )
+            return result.rowcount > 0
+
+    def get_warm_instance(self, instance_name: str) -> WarmInstanceRow | None:
+        """Get a warm instance by name."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM warm_instances WHERE instance_name = ?",
+                (instance_name,),
+            ).fetchone()
+            return cast(WarmInstanceRow, dict(row)) if row else None
+
+    def delete_warm_instance(self, instance_name: str) -> None:
+        """Delete a warm instance row (only for gone instances)."""
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM warm_instances WHERE instance_name = ?",
+                (instance_name,),
+            )
+
+    def list_warm_instances(self, state: str | None = None) -> list[WarmInstanceRow]:
+        """List warm instances with optional state filter."""
+        with self._conn() as conn:
+            if state:
+                rows = conn.execute(
+                    "SELECT * FROM warm_instances WHERE state = ?",
+                    (state,),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM warm_instances").fetchall()
+            return [cast(WarmInstanceRow, dict(row)) for row in rows]
+
+    def find_claimable_instance(
+        self,
+        machine_type: str,
+        gpu_count: int,
+        image_family: str,
+        image_project: str,
+        preemptible: bool = False,
+    ) -> WarmInstanceRow | None:
+        """Find an idle_ready instance matching hardware spec.
+
+        Does NOT modify state — caller must use instance_transition() for
+        the CLAIM_SENT event.
+
+        Returns:
+            WarmInstanceRow if found, None otherwise.
+        """
+        preemptible_int = 1 if preemptible else 0
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM warm_instances
+                WHERE state = 'idle_ready'
+                  AND machine_type = ?
+                  AND gpu_count = ?
+                  AND image_family = ?
+                  AND image_project = ?
+                  AND preemptible = ?
+                ORDER BY state_entered_at ASC
+                LIMIT 1
+                """,
+                (machine_type, gpu_count, image_family, image_project, preemptible_int),
+            ).fetchone()
+            return cast(WarmInstanceRow, dict(row)) if row else None
+
+    # =========================================================================
+    # Instance Leases
+    # =========================================================================
+
+    def create_instance_lease(
+        self,
+        instance_name: str,
+        stage_run_id: str,
+    ) -> InstanceLeaseRow:
+        """Create an active lease binding a run to an instance.
+
+        The unique index on (instance_name) WHERE lease_state='active'
+        enforces at-most-one-active-lease-per-instance.
+        """
+        now = datetime.now(UTC).isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO instance_leases
+                    (instance_name, stage_run_id, lease_state, claimed_at)
+                VALUES (?, ?, 'active', ?)
+                """,
+                (instance_name, stage_run_id, now),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM instance_leases
+                WHERE instance_name = ? AND stage_run_id = ?
+                """,
+                (instance_name, stage_run_id),
+            ).fetchone()
+            return cast(InstanceLeaseRow, dict(row))
+
+    def release_instance_lease(
+        self,
+        instance_name: str,
+        stage_run_id: str,
+    ) -> bool:
+        """Release a lease (active → released). Idempotent.
+
+        Returns:
+            True if a lease was released, False if not found or already released.
+        """
+        now = datetime.now(UTC).isoformat()
+        with self._conn() as conn:
+            result = conn.execute(
+                """
+                UPDATE instance_leases
+                SET lease_state = 'released', released_at = ?
+                WHERE instance_name = ? AND stage_run_id = ? AND lease_state = 'active'
+                """,
+                (now, instance_name, stage_run_id),
+            )
+            return result.rowcount > 0
+
+    def get_active_lease_for_instance(
+        self,
+        instance_name: str,
+    ) -> InstanceLeaseRow | None:
+        """Get the active lease for an instance (at most one)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM instance_leases
+                WHERE instance_name = ? AND lease_state = 'active'
+                """,
+                (instance_name,),
+            ).fetchone()
+            return cast(InstanceLeaseRow, dict(row)) if row else None
+
+    def get_active_lease_for_run(
+        self,
+        stage_run_id: str,
+    ) -> InstanceLeaseRow | None:
+        """Get the active lease for a stage run."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM instance_leases
+                WHERE stage_run_id = ? AND lease_state = 'active'
+                """,
+                (stage_run_id,),
+            ).fetchone()
+            return cast(InstanceLeaseRow, dict(row)) if row else None

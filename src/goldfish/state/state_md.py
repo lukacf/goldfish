@@ -272,6 +272,17 @@ class StateManager:
                         pass
             lines.append("")
 
+        # Warm Pool (only shown when enabled)
+        if self.config.gce and self.config.gce.warm_pool.enabled:
+            lines.append("## Warm Pool")
+            max_inst = self.config.gce.warm_pool.max_instances
+            timeout = self.config.gce.warm_pool.idle_timeout_minutes
+            profiles = self.config.gce.warm_pool.profiles or ["all"]
+            lines.append(
+                f"- Enabled: max {max_inst} instances, " f"idle timeout {timeout}m, " f"profiles: {', '.join(profiles)}"
+            )
+            lines.append("")
+
         # Recent Actions
         lines.append("## Recent Actions")
         if self._recent_actions:

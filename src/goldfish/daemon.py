@@ -332,7 +332,7 @@ class GoldfishDaemon:
 
         # Initialize MetadataBus using AdapterFactory (Cloud-native or Local simulation)
         # The factory creates the appropriate adapter based on config.jobs.backend
-        adapter_factory = AdapterFactory(self.config)
+        adapter_factory = AdapterFactory(self.config, db=db)
         local_metadata_bus: LocalMetadataBus | None = None
 
         # Create signal bus (MetadataBus) via factory
@@ -380,6 +380,13 @@ class GoldfishDaemon:
         self._pipeline_manager = pipeline_manager
         self._stage_executor = stage_executor
 
+        # Initialize warm pool manager if enabled
+        from goldfish.cloud.factory import create_warm_pool_manager
+
+        self._warm_pool_manager = create_warm_pool_manager(db, self.config)
+        if self._warm_pool_manager and self.config.gce:
+            logger.info("Warm pool manager initialized (max=%d)", self.config.gce.warm_pool.max_instances)
+
         # Register all tools
         self._register_tools()
 
@@ -390,6 +397,10 @@ class GoldfishDaemon:
         # Runs stuck in non-terminal active states (building, launching) with no
         # executor thread are dead — mark them failed so the user can retry.
         self._recover_orphaned_runs()
+
+        # Warm pool v2: no explicit recovery needed — poll_warm_instances handles it
+        if self._warm_pool_manager:
+            logger.info("Warm pool initialized (state-machine-driven, recovery via daemon polling)")
 
         logger.info("Daemon initialized successfully")
 
@@ -654,6 +665,8 @@ class GoldfishDaemon:
                     # NOTE: Legacy orphan checker is deprecated; state machine daemon drives state.
                     stage_daemon.poll_active_runs()
                     self._cleanup_stalled_pipelines()
+                    # Warm pool v2: instance lifecycle handled by poll_warm_instances
+                    # in stage_daemon.poll_active_runs() — no separate reap/retry needed
                 except Exception as e:
                     logger.exception("Instance monitor error: %s", e)
 

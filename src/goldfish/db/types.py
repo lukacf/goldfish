@@ -368,3 +368,50 @@ class StageStateTransitionRow(TypedDict):
     error_message: str | None
     source: str
     created_at: str
+
+
+# =============================================================================
+# Warm Pool Types
+# =============================================================================
+
+
+class WarmInstanceRow(TypedDict):
+    """Row from the warm_instances table (v2: state-machine-driven)."""
+
+    instance_name: str
+    zone: str
+    project_id: str
+    machine_type: str
+    gpu_count: int
+    image_family: str
+    image_project: str
+    preemptible: int
+    state: str
+    image_tag: str | None
+    state_entered_at: str | None
+    created_at: str
+
+
+class InstanceLeaseRow(TypedDict):
+    """Row from the instance_leases table."""
+
+    instance_name: str
+    stage_run_id: str
+    lease_state: str  # 'active' | 'released'
+    claimed_at: str
+    released_at: str | None
+
+
+class InstanceStateTransitionRow(TypedDict):
+    """Row from the instance_state_transitions table."""
+
+    id: int
+    instance_name: str
+    from_state: str
+    to_state: str
+    event: str
+    stage_run_id: str | None
+    error_message: str | None
+    reason: str | None
+    source: str
+    created_at: str
