@@ -273,14 +273,16 @@ class TestImageTypeResolution:
 
     def test_get_version_independent_types(self, test_db, mock_config_no_version: GoldfishConfig) -> None:
         """CPU and GPU versions should be resolved independently."""
-        from goldfish.cloud.image_versions import ImageVersionResolver
+        from goldfish.cloud.image_versions import BASE_IMAGE_VERSION_DEFAULT, ImageVersionResolver
 
         test_db.set_base_image_version("cpu", "v10", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-cpu:v10")
         test_db.set_base_image_version("gpu", "v15", "us-docker.pkg.dev/my-project/goldfish/goldfish-base-gpu:v15")
 
         resolver = ImageVersionResolver(mock_config_no_version, test_db)
 
-        assert resolver.get_version("cpu", "base").version == "v10"
+        # CPU v10 < shipped default v12 → default wins (prevents stale DB pinning)
+        assert resolver.get_version("cpu", "base").version == BASE_IMAGE_VERSION_DEFAULT
+        # GPU v15 >= shipped default → DB version used
         assert resolver.get_version("gpu", "base").version == "v15"
 
 
