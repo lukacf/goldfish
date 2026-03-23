@@ -350,20 +350,18 @@ class GCERunBackend:
                     spec.stage_run_id,
                 )
                 if not ctrl_result.success:
-                    # Controller couldn't take ownership. Clean up the pre-registered
-                    # row so the daemon doesn't later kill the VM as "stuck launching".
-                    # The run still proceeds — it just won't be warm-pool tracked.
+                    # Controller couldn't take ownership. Remove the pre-registered
+                    # row directly so the daemon doesn't later kill the live VM as
+                    # "stuck launching". Do NOT call on_launch_failed — that would
+                    # transition to deleting and eventually delete the running VM.
+                    # The run still proceeds; it just won't be warm-pool tracked.
                     logger.warning(
                         "Controller on_fresh_launch failed for %s: %s — removing warm pool row",
                         actual_name,
                         ctrl_result.details,
                     )
                     try:
-                        self._warm_pool.controller.on_launch_failed(
-                            actual_name,
-                            spec.stage_run_id,
-                            error="controller registration failed",
-                        )
+                        self._warm_pool._db.delete_warm_instance(actual_name)
                     except Exception:
                         pass
 

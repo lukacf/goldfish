@@ -902,7 +902,6 @@ warm_pool_idle_loop() {{
 
             if [[ "$CMD" == "new_job" && -n "$REQ_ID" && "$REQ_ID" != "$LAST_JOB_REQ_ID" ]]; then
                 echo "=== NEW JOB RECEIVED: $REQ_ID ==="
-                LAST_JOB_REQ_ID="$REQ_ID"
 
                 # Kill stale background processes with PID guards.
                 # KEEP watchdog alive — it tracks total instance lifetime from boot
@@ -958,6 +957,10 @@ warm_pool_idle_loop() {{
                         --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
                         --metadata "goldfish_ack=$REQ_ID" --quiet 2>/dev/null || true
                 fi
+
+                # Commit the REQ_ID AFTER ACK so transient spec-download failures
+                # don't permanently suppress retries for the same request.
+                LAST_JOB_REQ_ID="$REQ_ID"
 
                 # CRITICAL: Reset ALL GCS paths for new run BEFORE input staging.
                 # Early failures (input staging, image pull) need correct paths to
