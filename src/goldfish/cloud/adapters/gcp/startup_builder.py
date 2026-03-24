@@ -848,17 +848,26 @@ def idle_loop_section(
     """
     # Build cleanup logic based on preserve_paths
     if preserve_paths:
-        # Use find-based cleanup that excludes preserve_paths
-        exclude_args = ""
+        # Build root-specific exclude args: only apply exclusions to
+        # the find command that shares the same root directory.
+        outputs_excludes = ""
+        tmp_excludes = ""
         for path in preserve_paths:
-            exclude_args += f' ! -path "{path}"'
+            if path.startswith("/mnt/outputs"):
+                outputs_excludes += f' ! -path "{path}"'
+            elif path.startswith("/tmp"):
+                tmp_excludes += f' ! -path "{path}"'
+            else:
+                # Unknown root — add to both as a safety measure
+                outputs_excludes += f' ! -path "{path}"'
+                tmp_excludes += f' ! -path "{path}"'
         cleanup_block = f"""\
                 # Clean ALL previous stage outputs to prevent leaking into next run.
                 # gsutil rsync uploads everything in /mnt/outputs/, so stale signals
                 # from the previous run would be attributed to the new run.
-                find /mnt/outputs -mindepth 1 -maxdepth 1{exclude_args} -exec rm -rf {{}} \\; 2>/dev/null || true
+                find /mnt/outputs -mindepth 1 -maxdepth 1{outputs_excludes} -exec rm -rf {{}} \\; 2>/dev/null || true
                 rm -rf /tmp/goldfish_* 2>/dev/null || true
-                find /tmp -maxdepth 1 \\( -name "*.log" -o -name "*.json" \\) ! -name "job_spec.json"{exclude_args} 2>/dev/null | xargs rm -f 2>/dev/null || true"""
+                find /tmp -maxdepth 1 \\( -name "*.log" -o -name "*.json" \\) ! -name "job_spec.json"{tmp_excludes} 2>/dev/null | xargs rm -f 2>/dev/null || true"""
     else:
         cleanup_block = """\
                 # Clean ALL previous stage outputs to prevent leaking into next run.
