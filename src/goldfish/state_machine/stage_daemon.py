@@ -500,15 +500,28 @@ class StageDaemon:
                     # deletion completed, so we verify via liveness check.
                     warm_pool.delete_gce_instance(name, zone)
                     status = warm_pool.check_instance_status(name, zone)
-                    if status in ("not_found", "dead"):
-                        # VM confirmed gone or terminated — safe to remove
+                    if status == "not_found":
+                        # VM confirmed gone — safe to remove tracking
                         controller.on_delete_confirmed(name)
                         self._db.delete_warm_instance(name)
-                    # "alive" or "error" — leave in deleting, retry next poll.
-                    # Don't treat transient gcloud errors as "gone".
+                        self._liveness_fail_counts.pop(name, None)
+                    # "alive", "dead" (terminated but still exists), or "error" —
+                    # leave in deleting, retry next poll.
                     continue
 
                 if state == InstanceState.DRAINING:
+                    # Timeout: if draining for too long (metadata update may have
+                    # failed while VM stays alive), delete to avoid permanent leak.
+                    _DRAINING_TIMEOUT_SECONDS = 1800  # 30 minutes
+                    if self._instance_timed_out(inst, _DRAINING_TIMEOUT_SECONDS):
+                        logger.warning(
+                            "Instance %s stuck in draining for >%ds — deleting",
+                            name,
+                            _DRAINING_TIMEOUT_SECONDS,
+                        )
+                        controller.on_delete_requested(name, reason="draining timeout")
+                        continue
+
                     lease_run_id = inst.get("current_lease_run_id")
 
                     # If the lease is still active but the owning run is already

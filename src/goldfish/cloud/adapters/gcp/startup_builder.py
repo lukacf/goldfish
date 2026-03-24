@@ -1036,22 +1036,21 @@ for name, uri in spec.get('inputs', {{}}).items():
 
 {cleanup_block}
 
-                # Pull image if different (Docker layer cache makes this fast for shared base)
-                if [[ "$NEW_IMAGE" != "$CURRENT_IMAGE" ]]; then
-                    echo "Pulling new image: $NEW_IMAGE (was: $CURRENT_IMAGE)"
-                    docker pull "$NEW_IMAGE" || {{
-                        echo "ERROR: Failed to pull $NEW_IMAGE"
-                        echo "1" | gsutil cp - "$GCS_EXIT_CODE_PATH" 2>/dev/null || true
-                        upload_logs_with_retry "$LOCAL_STDOUT" "$GCS_STDOUT_PATH" || true
-                        upload_logs_with_retry "$LOCAL_STDERR" "$GCS_STDERR_PATH" || true
-                        gcloud compute instances add-metadata "$INSTANCE_NAME" \\
-                            --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                            --metadata "goldfish_instance_state=idle_ready" --quiet 2>/dev/null || true
-                        IDLE_START=$(date +%s)
-                        continue
-                    }}
-                    CURRENT_IMAGE="$NEW_IMAGE"
-                fi
+                # Always refresh the requested image. Cold launches pull on every run,
+                # and warm reuse must not diverge for mutable tags like :latest.
+                echo "Pulling image for warm job: $NEW_IMAGE (previous: $CURRENT_IMAGE)"
+                docker pull "$NEW_IMAGE" || {{
+                    echo "ERROR: Failed to pull $NEW_IMAGE"
+                    echo "1" | gsutil cp - "$GCS_EXIT_CODE_PATH" 2>/dev/null || true
+                    upload_logs_with_retry "$LOCAL_STDOUT" "$GCS_STDOUT_PATH" || true
+                    upload_logs_with_retry "$LOCAL_STDERR" "$GCS_STDERR_PATH" || true
+                    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+                        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+                        --metadata "goldfish_instance_state=idle_ready" --quiet 2>/dev/null || true
+                    IDLE_START=$(date +%s)
+                    continue
+                }}
+                CURRENT_IMAGE="$NEW_IMAGE"
 
                 # Restore self-delete EXIT trap during job execution
                 trap 'GOLDFISH_TRAP_EXIT_CODE=$?; echo "EXIT TRAP TRIGGERED (exit code: $GOLDFISH_TRAP_EXIT_CODE)"; self_delete' EXIT

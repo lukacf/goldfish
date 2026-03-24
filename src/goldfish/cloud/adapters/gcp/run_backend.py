@@ -6,6 +6,7 @@ All GCE-specific code is contained in this adapter.
 
 from __future__ import annotations
 
+import json
 import logging
 import shlex
 from pathlib import Path
@@ -457,9 +458,23 @@ class GCERunBackend:
         else:
             docker_cmd = "/entrypoint.sh"
 
-        # Build env for the warm-pool job — must include LD_LIBRARY_PATH for GPU
-        # (same as gce_launcher.py line 211: FA3 wheels need libcuda.so at import time)
+        # Build env for the warm-pool job. This must preserve the same Goldfish
+        # runtime contract as a cold launch so goldfish.io and runtime helpers
+        # see the expected stage config, run id, and input/output mount paths.
         warm_env = dict(spec.env)
+        warm_env.update(
+            {
+                "GOLDFISH_STAGE_CONFIG": json.dumps(
+                    {
+                        "inputs": serialized_inputs,
+                        "compute": {"max_runtime_seconds": spec.timeout_seconds},
+                    }
+                ),
+                "GOLDFISH_RUN_ID": spec.stage_run_id,
+                "GOLDFISH_INPUTS_DIR": "/mnt/inputs",
+                "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
+            }
+        )
         if spec.gpu_count and spec.gpu_count > 0:
             warm_env["LD_LIBRARY_PATH"] = "/tmp/cuda-symlinks:/usr/lib/x86_64-linux-gnu"
 

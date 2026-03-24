@@ -108,7 +108,9 @@ def cancel_run(
     skip_cleanup = False
     if result.success and backend_handle and not warm_pool_handled:
         inst = db.get_warm_instance(backend_handle)
-        if inst is not None:
+        if inst is not None and inst.get("current_lease_run_id") != run_id:
+            # Instance exists in warm pool but is owned by a different run
+            # (or no run). Skip cleanup to avoid killing a recycled VM.
             skip_cleanup = True
 
     if result.success and backend_type and backend_handle and not skip_cleanup:

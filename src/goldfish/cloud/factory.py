@@ -591,6 +591,9 @@ def create_warm_pool_manager(
     Returns:
         WarmPoolManager instance, or None if warm pool is not enabled.
     """
+    if config.jobs.backend != "gce":
+        return None
+
     if not config.gce or not config.gce.warm_pool.enabled:
         return None
 

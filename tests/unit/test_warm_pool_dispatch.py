@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from goldfish.cloud.contracts import RunHandle, RunStatus
+from goldfish.cloud.contracts import RunHandle, RunSpec, RunStatus
 from goldfish.config import WarmPoolConfig
 from goldfish.db.database import Database
 from goldfish.state_machine.exit_code import ExitCodeResult
@@ -82,6 +82,43 @@ class TestTryClaim:
             stage_run_id="stage-run-001",
         )
         assert handle is None
+
+
+class TestWarmPoolClaimJobSpec:
+    def test_claim_job_spec_includes_goldfish_runtime_env(self):
+        from goldfish.cloud.adapters.gcp.run_backend import GCERunBackend
+
+        warm_pool = MagicMock()
+        warm_pool.try_claim.return_value = None
+
+        backend = GCERunBackend.__new__(GCERunBackend)
+        backend._launcher = MagicMock()
+        backend._project_id = "test-project"
+        backend._zones = ["us-central1-a"]
+        backend._bucket = "test-bucket"
+        backend._warm_pool = warm_pool
+        backend._profile_overrides = None
+
+        spec = RunSpec(
+            stage_run_id="stage-run-001",
+            workspace_name="w1",
+            stage_name="train",
+            image="test:latest",
+            profile="cpu-small",
+            machine_type="n1-standard-4",
+            inputs={},
+            env={"USER_ENV": "present"},
+            timeout_seconds=1800,
+        )
+
+        backend._try_warm_pool_claim(spec)
+
+        job_spec = warm_pool.try_claim.call_args.kwargs["job_spec"]
+        assert job_spec["env"]["USER_ENV"] == "present"
+        assert job_spec["env"]["GOLDFISH_STAGE_CONFIG"] == '{"inputs": {}, "compute": {"max_runtime_seconds": 1800}}'
+        assert job_spec["env"]["GOLDFISH_RUN_ID"] == "stage-run-001"
+        assert job_spec["env"]["GOLDFISH_INPUTS_DIR"] == "/mnt/inputs"
+        assert job_spec["env"]["GOLDFISH_OUTPUTS_DIR"] == "/mnt/outputs"
 
 
 # =============================================================================

@@ -109,10 +109,11 @@ class TestIdleLoopSection:
         assert "job_spec.json" in script
 
     def test_idle_loop_section_image_pull_conditional(self) -> None:
-        """Verify Docker image is only pulled when it changes."""
+        """Verify warm-pool jobs always refresh the requested image tag."""
         script = idle_loop_section(idle_timeout_seconds=1800)
         assert "CURRENT_IMAGE" in script
         assert "docker pull" in script
+        assert 'if [[ "$NEW_IMAGE" != "$CURRENT_IMAGE" ]]' not in script
 
 
 # =============================================================================
