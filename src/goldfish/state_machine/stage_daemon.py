@@ -512,7 +512,11 @@ class StageDaemon:
                     lease_run_id = inst.get("current_lease_run_id")
 
                     # If the lease is still active but the owning run is already
-                    # terminal (or missing/purged), finalize via controller.
+                    # terminal (or missing/purged), release the lease directly.
+                    # We can't use on_run_terminal here because JOB_FINISHED is
+                    # only valid from busy, not draining — the instance already
+                    # transitioned past busy. Just clear the stale lease so
+                    # drain-complete can proceed.
                     if lease_run_id:
                         run = self._db.get_stage_run(lease_run_id)
                         run_state = run.get("state", "") if run else None
@@ -522,13 +526,12 @@ class StageDaemon:
                             run_state = "terminated"
                         if run_state in non_owning:
                             logger.info(
-                                "Finalizing stale draining instance %s (run %s in %s)",
+                                "Releasing stale lease on draining instance %s (run %s in %s)",
                                 name,
                                 lease_run_id,
                                 run_state,
                             )
-                            controller.on_run_terminal(lease_run_id, run_state, source="daemon")
-                            # Re-read: on_run_terminal may have already transitioned
+                            controller._force_release_lease(name)
                             lease_run_id = None
 
                     # Check if VM reports idle_ready metadata AND no active lease

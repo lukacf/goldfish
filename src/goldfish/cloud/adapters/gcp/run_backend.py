@@ -377,6 +377,21 @@ class GCERunBackend:
             # Without this the row sits in launching forever, leaking capacity.
             if self._warm_pool and warm_pool_pre_registered:
                 try:
+                    # Discover actual zone: capacity search may have created the VM
+                    # in a zone other than the pre-registered default. If we leave
+                    # the wrong zone, the daemon's delete/liveness checks look in
+                    # the wrong place and the real VM runs untracked.
+                    try:
+                        found_zone = self._launcher._find_instance_zone(expected_instance_name)
+                        if found_zone:
+                            with self._warm_pool._db._conn() as conn:
+                                conn.execute(
+                                    "UPDATE warm_instances SET zone = ? WHERE instance_name = ?",
+                                    (found_zone, expected_instance_name),
+                                )
+                    except Exception:
+                        pass  # Best-effort zone discovery
+
                     self._warm_pool.controller.on_launch_failed(
                         expected_instance_name,
                         spec.stage_run_id,
