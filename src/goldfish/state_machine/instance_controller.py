@@ -163,8 +163,12 @@ class InstanceController:
                 instance_name,
                 result.details,
             )
-            # Always release even if transition failed — caller abandoned the claim
-            self._force_release_lease(instance_name)
+            # Only force-release if this run still owns the instance.
+            # If CLAIM_ACKED won the race (instance now busy with a valid
+            # lease for the running job), wiping the lease would strand it.
+            inst = self._db.get_warm_instance(instance_name)
+            if inst and inst.get("current_lease_run_id") == stage_run_id:
+                self._force_release_lease(instance_name)
         return result
 
     # =========================================================================

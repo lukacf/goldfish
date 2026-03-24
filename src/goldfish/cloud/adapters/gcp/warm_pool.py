@@ -103,6 +103,9 @@ class WarmPoolManager:
         """
         if not self._config.enabled:
             return None
+        if not self._bucket:
+            logger.warning("Warm pool claim skipped: no GCS bucket configured")
+            return None
 
         # 1. Find + claim with retry. find_claimable_instance is a SELECT (no lock),
         # so a concurrent claimer can win the CAS in on_claim_start. Retry with

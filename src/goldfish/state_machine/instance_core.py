@@ -163,12 +163,14 @@ def instance_transition(
         # 6. Append to instance_leases audit log if lease changed
         if set_lease_run_id is not _LEASE_UNCHANGED:
             if set_lease_run_id is not None:
-                # Acquiring lease — insert active record
+                # Acquiring lease — insert or reactivate if same pair was released
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO instance_leases
+                    INSERT INTO instance_leases
                         (instance_name, stage_run_id, lease_state, claimed_at)
                     VALUES (?, ?, 'active', ?)
+                    ON CONFLICT(instance_name, stage_run_id) DO UPDATE
+                        SET lease_state = 'active', claimed_at = excluded.claimed_at, released_at = NULL
                     """,
                     (instance_name, set_lease_run_id, timestamp_str),
                 )

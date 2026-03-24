@@ -653,7 +653,8 @@ class StageDaemon:
             from goldfish.cloud.factory import create_warm_pool_manager
 
             return create_warm_pool_manager(self._db, self._config)
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to create warm pool manager: %s", e)
             return None
 
     def get_active_runs(self, limit: int = DEFAULT_ACTIVE_RUNS_LIMIT) -> list[dict[str, Any]]:
