@@ -163,11 +163,11 @@ class InstanceController:
                 instance_name,
                 result.details,
             )
-            # Only force-release if this run still owns the instance.
-            # If CLAIM_ACKED won the race (instance now busy with a valid
-            # lease for the running job), wiping the lease would strand it.
+            # Only force-release if the instance is still in claimed state
+            # with this run's lease. If CLAIM_ACKED already moved it to busy,
+            # wiping the lease would strand a live running job.
             inst = self._db.get_warm_instance(instance_name)
-            if inst and inst.get("current_lease_run_id") == stage_run_id:
+            if inst and inst.get("state") == "claimed" and inst.get("current_lease_run_id") == stage_run_id:
                 self._force_release_lease(instance_name)
         return result
 

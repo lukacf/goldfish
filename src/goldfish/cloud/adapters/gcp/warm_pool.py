@@ -156,6 +156,18 @@ class WarmPoolManager:
                 # 6. ACK received → claimed → busy
                 ack_result = self._controller.on_claim_acked(instance_name, stage_run_id)
                 if not ack_result.success:
+                    # Clear metadata to prevent double-dispatch — the VM already
+                    # ACKed and has the job signal, so without this it will start
+                    # the job while the caller falls back to a fresh launch.
+                    try:
+                        self._set_instance_metadata(
+                            instance_name,
+                            zone,
+                            "goldfish",
+                            "",
+                        )
+                    except Exception:
+                        pass
                     logger.warning(
                         "on_claim_acked failed for %s: %s — deleting instance",
                         instance_name,
