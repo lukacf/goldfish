@@ -915,6 +915,36 @@ warm_pool_idle_loop() {{
             if [[ "$CMD" == "new_job" && -n "$REQ_ID" && "$REQ_ID" != "$LAST_JOB_REQ_ID" ]]; then
                 echo "=== NEW JOB RECEIVED: $REQ_ID ==="
 
+                # Construct exit code path from REQ_ID for early failure reporting.
+                # GCS paths are reset later (after validation), so early failures
+                # must write exit codes using the canonical runs/<REQ_ID> path.
+                local EARLY_EXIT_CODE_PATH="gs://$GCS_BUCKET/runs/$REQ_ID/logs/exit_code.txt"
+
+                # FIRST: Set busy metadata and clear stale exit code — before any slow work.
+                # goldfish_instance_state=busy tells the daemon the VM is working.
+                # Clearing goldfish_exit_code prevents get_status() from reading a
+                # stale value from the previous job and falsely reporting completion.
+                # Clearing goldfish and recording goldfish_active_run_id prevents a
+                # rebooted VM from re-consuming the same signal after pickup.
+                # If this write fails, abort the job — the daemon relies on seeing
+                # busy to know the VM picked up the signal. Without it, the daemon
+                # will see stale idle_ready and delete the instance after 5 minutes.
+                if ! gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+                    --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+                    --metadata "goldfish_instance_state=busy,goldfish_exit_code=,goldfish_exit_run_id=,goldfish_active_run_id=$REQ_ID,goldfish=" --quiet 2>/dev/null; then
+                    echo "ERROR: Failed to set busy metadata — aborting job to prevent daemon deletion"
+                    LAST_JOB_REQ_ID="$REQ_ID"
+                    mkdir -p "/mnt/gcs/runs/$REQ_ID/logs" 2>/dev/null || true
+                    echo "1" > "/mnt/gcs/runs/$REQ_ID/logs/exit_code.txt" 2>/dev/null || true
+                    echo "1" | gsutil cp - "$EARLY_EXIT_CODE_PATH" 2>/dev/null || true
+                    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+                        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+                        --metadata "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$REQ_ID,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
+                    IDLE_START=$(date +%s)
+                    sleep 1
+                    continue
+                fi
+
                 # Kill stale background processes with PID guards.
                 # KEEP watchdog alive — it tracks total instance lifetime from boot
                 # and should NOT be restarted per job. Kill only per-job processes.
@@ -925,17 +955,30 @@ warm_pool_idle_loop() {{
                     fi
                 done
 
-                # Download job spec from GCS BEFORE ACKing.
-                # ACK signals "ready to run" — must not fire until the spec is validated.
+                # Download job spec from GCS
                 if [[ -n "$SPEC_PATH" ]]; then
                     gsutil cp "$SPEC_PATH" /tmp/job_spec.json 2>/dev/null || {{
                         echo "ERROR: Failed to download job spec from $SPEC_PATH"
+                        LAST_JOB_REQ_ID="$REQ_ID"
+                        mkdir -p "/mnt/gcs/runs/$REQ_ID/logs" 2>/dev/null || true
+                        echo "1" > "/mnt/gcs/runs/$REQ_ID/logs/exit_code.txt" 2>/dev/null || true
+                        echo "1" | gsutil cp - "$EARLY_EXIT_CODE_PATH" 2>/dev/null || true
+                        gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+                            --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+                            --metadata "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$REQ_ID,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
                         IDLE_START=$(date +%s)
                         sleep 1
                         continue
                     }}
                 else
                     echo "ERROR: No spec_gcs_path in signal"
+                    LAST_JOB_REQ_ID="$REQ_ID"
+                    mkdir -p "/mnt/gcs/runs/$REQ_ID/logs" 2>/dev/null || true
+                    echo "1" > "/mnt/gcs/runs/$REQ_ID/logs/exit_code.txt" 2>/dev/null || true
+                    echo "1" | gsutil cp - "$EARLY_EXIT_CODE_PATH" 2>/dev/null || true
+                    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+                        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+                        --metadata "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$REQ_ID,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
                     IDLE_START=$(date +%s)
                     sleep 1
                     continue
@@ -949,32 +992,22 @@ warm_pool_idle_loop() {{
                 local NEW_SHM_SIZE=$(python3 -c "import json; print(json.load(open('/tmp/job_spec.json')).get('shm_size', '16g'))" 2>/dev/null)
                 local NEW_GPU_COUNT=$(python3 -c "import json; print(json.load(open('/tmp/job_spec.json')).get('gpu_count', 0))" 2>/dev/null)
 
-                # Validate required fields before ACKing
+                # Validate required fields
                 if [[ -z "$NEW_IMAGE" || -z "$NEW_RUN_PATH" ]]; then
                     echo "ERROR: Job spec missing required fields (image or run_path)"
+                    LAST_JOB_REQ_ID="$REQ_ID"
+                    mkdir -p "/mnt/gcs/runs/$REQ_ID/logs" 2>/dev/null || true
+                    echo "1" > "/mnt/gcs/runs/$REQ_ID/logs/exit_code.txt" 2>/dev/null || true
+                    echo "1" | gsutil cp - "$EARLY_EXIT_CODE_PATH" 2>/dev/null || true
+                    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+                        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+                        --metadata "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$REQ_ID,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
                     IDLE_START=$(date +%s)
                     sleep 1
                     continue
                 fi
 
-                # Clear stale idle_ready metadata BEFORE ACKing. This metadata is
-                # sticky from the previous cycle — without clearing it, the daemon
-                # can see the old value during the next draining phase and prematurely
-                # promote the instance to idle_ready before the new job has finished.
-                gcloud compute instances add-metadata "$INSTANCE_NAME" \\
-                    --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                    --metadata "goldfish_instance_state=busy" --quiet 2>/dev/null || true
-
-                # ACK AFTER spec download + parse validation.
-                # This ensures the claim only succeeds when the VM has a valid job to run.
-                if command -v gcloud >/dev/null 2>&1; then
-                    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
-                        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                        --metadata "goldfish_ack=$REQ_ID" --quiet 2>/dev/null || true
-                fi
-
-                # Commit the REQ_ID AFTER ACK so transient spec-download failures
-                # don't permanently suppress retries for the same request.
+                # Commit the REQ_ID so transient failures don't re-process the same request
                 LAST_JOB_REQ_ID="$REQ_ID"
 
                 # CRITICAL: Reset ALL GCS paths for new run BEFORE input staging.
@@ -997,6 +1030,7 @@ warm_pool_idle_loop() {{
                 LOCAL_SVS_DURING=/mnt/outputs/.goldfish/svs_findings_during.json
                 : > "$LOCAL_STDOUT"
                 : > "$LOCAL_STDERR"
+                : > "$LOCAL_STAGE_LOG"
 
                 # Write entrypoint script (same as first-boot: gce_launcher writes to /mnt/entrypoint.sh)
                 python3 -c "
@@ -1009,7 +1043,9 @@ with open('/mnt/entrypoint.sh', 'w') as f:
                 chmod +x /mnt/entrypoint.sh
 
                 # Stage inputs from GCS to /mnt/inputs/ (replicates gce_launcher input staging)
-                rm -rf /mnt/inputs/* 2>/dev/null || true
+                # Use find to remove dotfiles too (shell glob * skips hidden entries
+                # like .cache or lockfiles that can leak state across warm-pool runs).
+                find /mnt/inputs -mindepth 1 -maxdepth 1 -exec rm -rf {{}} \\; 2>/dev/null || true
                 mkdir -p /mnt/inputs /mnt/outputs
                 python3 -c "
 import json, subprocess, os
@@ -1036,7 +1072,7 @@ for name, uri in spec.get('inputs', {{}}).items():
                     upload_logs_with_retry "$LOCAL_STDERR" "$GCS_STDERR_PATH" || true
                     gcloud compute instances add-metadata "$INSTANCE_NAME" \\
                         --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                        --metadata "goldfish_instance_state=idle_ready" --quiet 2>/dev/null || true
+                        --metadata "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$REQ_ID,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
                     IDLE_START=$(date +%s)
                     continue
                 }}
@@ -1044,6 +1080,19 @@ for name, uri in spec.get('inputs', {{}}).items():
                 chown -h 1000:100 /mnt/inputs/* 2>/dev/null || true
 
 {cleanup_block}
+
+                # Re-authenticate Docker if the registry host changed. First-boot
+                # configures auth for the initial image's registry, but a reused job
+                # may target a different Artifact Registry hostname (e.g.,
+                # us-docker.pkg.dev vs europe-docker.pkg.dev).
+                NEW_REGISTRY=$(echo "$NEW_IMAGE" | cut -d/ -f1)
+                OLD_REGISTRY=$(echo "$CURRENT_IMAGE" | cut -d/ -f1)
+                if [[ "$NEW_REGISTRY" != "$OLD_REGISTRY" && "$NEW_REGISTRY" == *.* ]]; then
+                    echo "Registry changed ($OLD_REGISTRY -> $NEW_REGISTRY), refreshing Docker auth"
+                    if ! gcloud auth configure-docker "$NEW_REGISTRY" --quiet 2>/dev/null; then
+                        gcloud auth print-access-token 2>/dev/null | docker login -u oauth2accesstoken --password-stdin "https://$NEW_REGISTRY" || echo "Docker login failed for $NEW_REGISTRY"
+                    fi
+                fi
 
                 # Always refresh the requested image. Cold launches pull on every run,
                 # and warm reuse must not diverge for mutable tags like :latest.
@@ -1055,7 +1104,7 @@ for name, uri in spec.get('inputs', {{}}).items():
                     upload_logs_with_retry "$LOCAL_STDERR" "$GCS_STDERR_PATH" || true
                     gcloud compute instances add-metadata "$INSTANCE_NAME" \\
                         --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                        --metadata "goldfish_instance_state=idle_ready" --quiet 2>/dev/null || true
+                        --metadata "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$REQ_ID,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
                     IDLE_START=$(date +%s)
                     continue
                 }}
@@ -1171,7 +1220,7 @@ with open('/tmp/docker_cmd.sh', 'w') as f:
                 # The daemon treats exit_code as the completion signal, so it must be
                 # written LAST — after outputs, logs, and trap suspension. Otherwise
                 # finalization can release the VM to idle before it enters the poll loop,
-                # causing the next claim's ACK to time out.
+                # and the next job assignment may reach a VM that hasn't entered idle yet.
                 upload_logs_with_retry "$LOCAL_STDOUT" "$GCS_STDOUT_PATH" || true
                 upload_logs_with_retry "$LOCAL_STDERR" "$GCS_STDERR_PATH" || true
 
@@ -1190,16 +1239,8 @@ with open('/tmp/docker_cmd.sh', 'w') as f:
                 echo "$EXIT_CODE" | timeout 30 gsutil cp - "$GCS_EXIT_CODE_PATH" 2>/dev/null || true
                 gcloud compute instances add-metadata "$INSTANCE_NAME" \\
                     --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                    --metadata "goldfish_exit_code=$EXIT_CODE" --quiet 2>/dev/null || true
+                    --metadata "goldfish_exit_code=$EXIT_CODE,goldfish_exit_run_id=$REQ_ID,goldfish_active_run_id=,goldfish_instance_state=idle_ready,goldfish=" --quiet 2>/dev/null || true
                 upload_exit_code "$EXIT_CODE_FILE" "$GCS_EXIT_CODE_PATH" || true
-
-                # Signal the daemon that this instance is ready for reuse.
-                # The daemon's poll_warm_instances checks this metadata on draining
-                # instances to trigger DRAIN_COMPLETE → idle_ready transition.
-                # Without this, instances get stuck in draining forever.
-                gcloud compute instances add-metadata "$INSTANCE_NAME" \\
-                    --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                    --metadata "goldfish_instance_state=idle_ready" --quiet 2>/dev/null || true
 
                 echo "=== JOB $REQ_ID COMPLETE (exit=$EXIT_CODE) - RETURNING TO IDLE ==="
             fi
@@ -1426,6 +1467,34 @@ fi
         parts.append(f'CURRENT_IMAGE="{image}"')
         parts.append('LAST_JOB_REQ_ID=""')
 
+        # Define the idle loop function BEFORE the reboot guard so it's callable.
+        parts.append(
+            idle_loop_section(
+                idle_timeout_seconds=warm_pool_idle_timeout_seconds,  # type: ignore[arg-type]
+                preserve_paths=warm_pool_preserve_paths,
+            )
+        )
+
+        # Reboot guard: if this VM already completed its first-boot job and entered
+        # the idle loop, skip the baked-in Docker run on reboot. Without this, a GCE
+        # host-maintenance reboot re-executes the original stage_run_id, overwrites
+        # artifacts for a finished run, and then enters the idle loop again.
+        parts.append("""
+# Reboot guard: skip first-boot job if it already ran
+FIRST_BOOT_DONE=$(curl -sf -H "Metadata-Flavor: Google" \
+    http://metadata.google.internal/computeMetadata/v1/instance/attributes/goldfish_first_boot_done 2>/dev/null || echo "")
+if [[ "$FIRST_BOOT_DONE" == "true" ]]; then
+    echo "=== REBOOT DETECTED: first-boot job already completed — entering idle loop ==="
+    # Clear the stale goldfish signal so the idle loop doesn't re-process the
+    # last job. LAST_JOB_REQ_ID is an in-memory variable that was lost on reboot,
+    # so without clearing the signal the loop would treat it as a new job.
+    gcloud compute instances add-metadata "$INSTANCE_NAME" \
+        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \
+        --metadata "goldfish_instance_state=idle_ready,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
+    warm_pool_idle_loop
+fi
+""")
+
     # Pre-run commands
     for pre_cmd in pre_run_cmds:
         parts.append(pre_cmd)
@@ -1508,7 +1577,7 @@ if [[ -n "$INSTANCE_NAME" && -n "$INSTANCE_ZONE" && -n "$PROJECT_ID" ]]; then
     gcloud compute instances add-metadata "$INSTANCE_NAME" \\
         --zone="$INSTANCE_ZONE" \\
         --project="$PROJECT_ID" \\
-        --metadata "goldfish_exit_code=$EXIT_CODE" \\
+        --metadata "goldfish_exit_code=$EXIT_CODE,goldfish_exit_run_id=$GOLDFISH_RUN_ID,goldfish_active_run_id=" \\
         --quiet 2>/dev/null || echo "WARNING: Failed to set exit code metadata"
 fi
 """)
@@ -1533,14 +1602,8 @@ fi
     parts.append('log_stage "cleanup_begin"')
 
     if warm_pool_enabled:
-        # Include the idle loop function definition and call it instead of exiting
-        parts.append(
-            idle_loop_section(
-                idle_timeout_seconds=warm_pool_idle_timeout_seconds,  # type: ignore[arg-type]
-                preserve_paths=warm_pool_preserve_paths,
-            )
-        )
-        # Check metadata flag: if registration failed (pool full race), skip idle mode
+        # idle_loop_section is already defined above (before reboot guard).
+        # Check metadata flag: if registration failed (pool full race), skip idle mode.
         parts.append("""
 # Check if warm pool was disabled post-launch (registration failed due to race)
 WARM_DISABLED=$(curl -sf -H "Metadata-Flavor: Google" \
@@ -1550,6 +1613,14 @@ if [[ "$WARM_DISABLED" == "true" ]]; then
     exit $EXIT_CODE
 fi
 """)
+        # Mark first-boot as done BEFORE entering idle loop, so reboots skip the
+        # first-boot Docker run and go straight to the idle loop.
+        parts.append("""
+# Mark first-boot job as done (persists across reboots via instance metadata)
+gcloud compute instances add-metadata "$INSTANCE_NAME" \
+    --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \
+    --metadata "goldfish_first_boot_done=true" --quiet 2>/dev/null || true
+""")
         # Signal idle_ready BEFORE entering the loop. The daemon's poll_warm_instances
         # checks this metadata on draining instances to trigger DRAIN_COMPLETE → idle_ready.
         # Without this on first boot, the instance gets stuck in draining forever.
@@ -1557,7 +1628,7 @@ fi
 # Signal the daemon that first-boot job is done and VM is entering idle loop
 gcloud compute instances add-metadata "$INSTANCE_NAME" \
     --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \
-    --metadata "goldfish_instance_state=idle_ready" --quiet 2>/dev/null || true
+    --metadata "goldfish_instance_state=idle_ready,goldfish_active_run_id=" --quiet 2>/dev/null || true
 """)
         parts.append("warm_pool_idle_loop")
     else:

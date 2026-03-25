@@ -903,6 +903,7 @@ class TestGCERunBackendGetLogs:
             instance_name="stage-abc123",
             tail_lines=50,
             since=None,
+            serial_console_name="goldfish-stage-abc123",
         )
 
     def test_get_logs_passes_since_parameter(self, backend, mock_launcher, sample_handle):
@@ -915,6 +916,7 @@ class TestGCERunBackendGetLogs:
             instance_name="stage-abc123",
             tail_lines=100,
             since="2024-01-01T00:00:00Z",
+            serial_console_name="goldfish-stage-abc123",
         )
 
     def test_get_logs_with_since_none_does_not_filter(self, backend, mock_launcher, sample_handle):
@@ -936,6 +938,7 @@ class TestGCERunBackendGetLogs:
             instance_name="stage-abc123",
             tail_lines=None,
             since=None,
+            serial_console_name="goldfish-stage-abc123",
         )
 
     def test_get_logs_includes_error_on_failure(self, backend, mock_launcher, sample_handle):

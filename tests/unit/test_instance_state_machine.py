@@ -54,7 +54,6 @@ class TestInstanceTransitionTable:
             InstanceState.BUSY,
             InstanceState.DRAINING,
             InstanceState.IDLE_READY,
-            InstanceState.CLAIMED,
         }
         for state in deletable:
             t = find_instance_transition(state, InstanceEvent.DELETE_REQUESTED)
@@ -62,13 +61,12 @@ class TestInstanceTransitionTable:
             assert t.to_state == InstanceState.DELETING
 
     def test_happy_path_lifecycle(self):
-        """launching → busy → draining → idle_ready → claimed → busy."""
+        """launching → busy → draining → idle_ready → busy (via JOB_ASSIGNED)."""
         path = [
             (InstanceState.LAUNCHING, InstanceEvent.BOOT_REGISTERED, InstanceState.BUSY),
             (InstanceState.BUSY, InstanceEvent.JOB_FINISHED, InstanceState.DRAINING),
             (InstanceState.DRAINING, InstanceEvent.DRAIN_COMPLETE, InstanceState.IDLE_READY),
-            (InstanceState.IDLE_READY, InstanceEvent.CLAIM_SENT, InstanceState.CLAIMED),
-            (InstanceState.CLAIMED, InstanceEvent.CLAIM_ACKED, InstanceState.BUSY),
+            (InstanceState.IDLE_READY, InstanceEvent.JOB_ASSIGNED, InstanceState.BUSY),
         ]
         for from_state, event, expected_to in path:
             t = find_instance_transition(from_state, event)
@@ -86,19 +84,25 @@ class TestInstanceTransitionTable:
         assert t is not None
         assert t.to_state == InstanceState.DELETING
 
-    def test_claim_timeout_deletes(self):
-        t = find_instance_transition(InstanceState.CLAIMED, InstanceEvent.CLAIM_TIMEOUT)
-        assert t is not None
-        assert t.to_state == InstanceState.DELETING
-
-    def test_launch_failed_deletes(self):
+    def test_launch_failed_from_launching(self):
         t = find_instance_transition(InstanceState.LAUNCHING, InstanceEvent.LAUNCH_FAILED)
         assert t is not None
         assert t.to_state == InstanceState.DELETING
 
+    def test_launch_failed_from_busy(self):
+        """Dispatch failure for reuse: busy + LAUNCH_FAILED → deleting."""
+        t = find_instance_transition(InstanceState.BUSY, InstanceEvent.LAUNCH_FAILED)
+        assert t is not None
+        assert t.to_state == InstanceState.DELETING
+
+    def test_job_assigned_from_idle_ready(self):
+        t = find_instance_transition(InstanceState.IDLE_READY, InstanceEvent.JOB_ASSIGNED)
+        assert t is not None
+        assert t.to_state == InstanceState.BUSY
+
     def test_invalid_transition_returns_none(self):
-        """No transition from busy on CLAIM_SENT."""
-        t = find_instance_transition(InstanceState.BUSY, InstanceEvent.CLAIM_SENT)
+        """No transition from busy on JOB_ASSIGNED."""
+        t = find_instance_transition(InstanceState.BUSY, InstanceEvent.JOB_ASSIGNED)
         assert t is None
 
     def test_string_enum_coercion(self):
@@ -186,14 +190,14 @@ class TestInstanceTransitionCAS:
         result = instance_transition(
             test_db,
             "inst-1",
-            InstanceEvent.CLAIM_SENT,
+            InstanceEvent.DRAIN_COMPLETE,
             _make_ctx(),
         )
         assert not result.success
         assert result.reason == "no_transition"
 
     def test_idempotent_already_in_target(self, test_db):
-        """If already in target state for event, return success."""
+        """If already in target state for non-lease event, return success."""
         _insert_instance(test_db, "inst-1", "busy")
         # BOOT_REGISTERED: launching→busy. If already busy, idempotent.
         result = instance_transition(
@@ -204,6 +208,30 @@ class TestInstanceTransitionCAS:
         )
         assert result.success
         assert result.reason == "already_in_target_state"
+
+    def test_lease_mutating_event_rejects_stale_caller(self, test_db):
+        """JOB_ASSIGNED on already-busy instance must FAIL when lease is passed.
+
+        Two dispatchers race for the same idle VM. The winner's CAS succeeds
+        (idle_ready→busy + lease). The loser reads the row after it's busy.
+        The idempotency shortcut must NOT fire for lease-mutating events —
+        otherwise the loser would think it won and upload a second job spec.
+        """
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-winner")
+        result = instance_transition(
+            test_db,
+            "inst-1",
+            InstanceEvent.JOB_ASSIGNED,
+            _make_ctx(stage_run_id="stage-loser"),
+            set_lease_run_id="stage-loser",
+        )
+        assert not result.success
+        assert result.reason == "no_transition"
+
+        # Winner's lease must be unchanged
+        inst = test_db.get_warm_instance("inst-1")
+        assert inst is not None
+        assert inst["current_lease_run_id"] == "stage-winner"
 
     def test_audit_trail_recorded(self, test_db):
         _insert_instance(test_db, "inst-1", "launching")
@@ -230,8 +258,7 @@ class TestInstanceTransitionCAS:
             (InstanceEvent.BOOT_REGISTERED, InstanceState.BUSY),
             (InstanceEvent.JOB_FINISHED, InstanceState.DRAINING),
             (InstanceEvent.DRAIN_COMPLETE, InstanceState.IDLE_READY),
-            (InstanceEvent.CLAIM_SENT, InstanceState.CLAIMED),
-            (InstanceEvent.CLAIM_ACKED, InstanceState.BUSY),
+            (InstanceEvent.JOB_ASSIGNED, InstanceState.BUSY),
             (InstanceEvent.JOB_FINISHED, InstanceState.DRAINING),
             (InstanceEvent.DRAIN_COMPLETE, InstanceState.IDLE_READY),
             (InstanceEvent.DELETE_REQUESTED, InstanceState.DELETING),
@@ -243,7 +270,7 @@ class TestInstanceTransitionCAS:
             assert result.new_state == expected
 
     def test_preempted_from_any_active_state(self, test_db):
-        for state_val in ["launching", "busy", "draining", "idle_ready", "claimed", "deleting"]:
+        for state_val in ["launching", "busy", "draining", "idle_ready", "deleting"]:
             name = f"inst-{state_val}"
             _insert_instance(test_db, name, state_val)
             result = instance_transition(test_db, name, InstanceEvent.PREEMPTED, _make_ctx())
@@ -556,6 +583,23 @@ class TestLaunchFailureCleanup:
         )
         assert result.success
         assert result.new_state == InstanceState.GONE
+
+    def test_dispatch_failure_from_busy(self, test_db):
+        """LAUNCH_FAILED from busy (reuse dispatch failure) → deleting."""
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-run1")
+        result = instance_transition(
+            test_db,
+            "inst-1",
+            InstanceEvent.LAUNCH_FAILED,
+            _make_ctx(source="controller", error_message="spec upload failed"),
+            set_lease_run_id=None,
+        )
+        assert result.success
+        assert result.new_state == InstanceState.DELETING
+
+        inst = test_db.get_warm_instance("inst-1")
+        assert inst is not None
+        assert inst["current_lease_run_id"] is None
 
 
 # =============================================================================

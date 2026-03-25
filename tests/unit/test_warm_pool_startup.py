@@ -79,10 +79,55 @@ class TestIdleLoopSection:
         script = idle_loop_section(idle_timeout_seconds=3600)
         assert "IDLE_TIMEOUT=3600" in script
 
-    def test_idle_loop_section_new_job_ack(self) -> None:
-        """Verify ACK is sent immediately on new_job receipt."""
+    def test_idle_loop_section_new_job_sets_busy_first(self) -> None:
+        """Verify goldfish_instance_state=busy is set FIRST on new_job pickup."""
         script = idle_loop_section(idle_timeout_seconds=1800)
-        assert "goldfish_ack=$REQ_ID" in script
+        # busy metadata must be set before spec download
+        busy_idx = script.index("goldfish_instance_state=busy")
+        spec_idx = script.index("gsutil cp")
+        assert busy_idx < spec_idx, "busy metadata must be set before spec download"
+        assert "goldfish_active_run_id=$REQ_ID" in script
+        assert "goldfish_exit_run_id=" in script
+        assert "goldfish=" in script
+
+    def test_idle_loop_section_spec_failure_resets_and_writes_exit_code(self) -> None:
+        """On spec fetch/validation failure: write exit code, commit REQ_ID, reset metadata.
+
+        Exit code lets get_status() detect failure immediately.
+        Committing LAST_JOB_REQ_ID prevents re-consuming the stale signal.
+        Metadata reset lets the daemon clean up the instance.
+        """
+        script = idle_loop_section(idle_timeout_seconds=1800)
+
+        failure_sections = script.split("continue")
+        # Early sections (before Docker run) are the spec error paths.
+        idle_ready_resets = 0
+        exit_code_writes = 0
+        req_id_commits = 0
+        for section in failure_sections[:4]:
+            if "goldfish_instance_state=idle_ready" in section:
+                idle_ready_resets += 1
+            if "EARLY_EXIT_CODE_PATH" in section and "gsutil cp -" in section:
+                exit_code_writes += 1
+            if 'LAST_JOB_REQ_ID="$REQ_ID"' in section:
+                req_id_commits += 1
+        # At least 3 failure paths: download failure, no spec_path, validation failure
+        assert idle_ready_resets >= 3, f"Expected at least 3 idle_ready resets, found {idle_ready_resets}"
+        assert exit_code_writes >= 3, f"Expected at least 3 exit code writes, found {exit_code_writes}"
+        assert req_id_commits >= 3, f"Expected at least 3 REQ_ID commits, found {req_id_commits}"
+        assert "goldfish_exit_run_id=$REQ_ID" in script
+        assert "goldfish_active_run_id=" in script
+        assert "goldfish=" in script
+
+    def test_idle_loop_section_docker_auth_refresh_on_registry_change(self) -> None:
+        """Docker auth must be refreshed when the image registry host changes."""
+        script = idle_loop_section(idle_timeout_seconds=1800)
+
+        # Should extract registry from NEW_IMAGE and compare to CURRENT_IMAGE
+        assert "NEW_REGISTRY=" in script
+        assert "OLD_REGISTRY=" in script
+        assert "gcloud auth configure-docker" in script
+        assert "docker login" in script
 
     def test_idle_loop_section_docker_run(self) -> None:
         """Verify Docker run command is present for new jobs."""
@@ -101,6 +146,9 @@ class TestIdleLoopSection:
         """Verify idle timer is reset after job completion."""
         script = idle_loop_section(idle_timeout_seconds=1800)
         assert "RETURNING TO IDLE" in script
+        assert "goldfish_exit_run_id=$REQ_ID" in script
+        assert "goldfish_active_run_id=" in script
+        assert "goldfish=" in script
 
     def test_idle_loop_section_spec_download(self) -> None:
         """Verify job spec is downloaded from GCS."""

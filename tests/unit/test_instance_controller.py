@@ -54,15 +54,16 @@ class TestOnFreshLaunch:
         assert inst is not None
         assert inst["current_lease_run_id"] == "stage-abc"
 
-    def test_idempotent_if_already_busy(self, test_db, controller):
-        _insert_instance(test_db, "inst-1", "busy")
+    def test_idempotent_if_already_busy_with_same_lease(self, test_db, controller):
+        """True retry: instance already busy with this run's lease → idempotent success."""
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-abc")
         result = controller.on_fresh_launch("inst-1", "stage-abc")
         assert result.success
         assert result.reason == "already_in_target_state"
 
 
 class TestOnLaunchFailed:
-    def test_transitions_to_deleting(self, test_db, controller):
+    def test_transitions_to_deleting_from_launching(self, test_db, controller):
         _insert_instance(test_db, "inst-1", "launching", lease_run_id="stage-abc")
 
         result = controller.on_launch_failed("inst-1", "stage-abc", error="gcloud failed")
@@ -74,13 +75,26 @@ class TestOnLaunchFailed:
         assert inst is not None
         assert inst["current_lease_run_id"] is None
 
+    def test_transitions_to_deleting_from_busy(self, test_db, controller):
+        """Dispatch failure after JOB_ASSIGNED: busy → deleting."""
+        _insert_instance(test_db, "inst-1", "busy", lease_run_id="stage-abc")
 
-class TestOnClaimStart:
+        result = controller.on_launch_failed("inst-1", "stage-abc", error="spec upload failed")
+        assert result.success
+        assert result.new_state == InstanceState.DELETING
+
+        # Lease released atomically
+        inst = test_db.get_warm_instance("inst-1")
+        assert inst is not None
+        assert inst["current_lease_run_id"] is None
+
+
+class TestOnJobAssigned:
     def test_creates_lease_and_transitions(self, test_db, controller):
         _insert_instance(test_db, "inst-1", "idle_ready")
-        result = controller.on_claim_start("inst-1", "stage-xyz")
+        result = controller.on_job_assigned("inst-1", "stage-xyz")
         assert result.success
-        assert result.new_state == InstanceState.CLAIMED
+        assert result.new_state == InstanceState.BUSY
 
         # Lease set atomically on instance row
         inst = test_db.get_warm_instance("inst-1")
@@ -88,31 +102,9 @@ class TestOnClaimStart:
         assert inst["current_lease_run_id"] == "stage-xyz"
 
     def test_fails_if_not_idle_ready(self, test_db, controller):
-        _insert_instance(test_db, "inst-1", "busy")
-        result = controller.on_claim_start("inst-1", "stage-xyz")
+        _insert_instance(test_db, "inst-1", "draining")
+        result = controller.on_job_assigned("inst-1", "stage-xyz")
         assert not result.success
-
-
-class TestOnClaimAcked:
-    def test_transitions_to_busy(self, test_db, controller):
-        _insert_instance(test_db, "inst-1", "claimed", lease_run_id="stage-xyz")
-
-        result = controller.on_claim_acked("inst-1", "stage-xyz")
-        assert result.success
-        assert result.new_state == InstanceState.BUSY
-
-
-class TestOnClaimTimeout:
-    def test_transitions_to_deleting_and_releases_lease(self, test_db, controller):
-        _insert_instance(test_db, "inst-1", "claimed", lease_run_id="stage-xyz")
-
-        result = controller.on_claim_timeout("inst-1", "stage-xyz")
-        assert result.success
-        assert result.new_state == InstanceState.DELETING
-
-        inst = test_db.get_warm_instance("inst-1")
-        assert inst is not None
-        assert inst["current_lease_run_id"] is None
 
 
 class TestOnRunTerminal:
@@ -245,12 +237,8 @@ class TestFullLifecycleViaController:
         r = controller.on_drain_complete("inst-1")
         assert r.success and r.new_state == InstanceState.IDLE_READY
 
-        # Claim for reuse
-        r = controller.on_claim_start("inst-1", "stage-run2")
-        assert r.success and r.new_state == InstanceState.CLAIMED
-
-        # ACK received
-        r = controller.on_claim_acked("inst-1", "stage-run2")
+        # Assign job for reuse (atomic: idle_ready → busy)
+        r = controller.on_job_assigned("inst-1", "stage-run2")
         assert r.success and r.new_state == InstanceState.BUSY
 
         # Second run canceled
@@ -264,3 +252,34 @@ class TestFullLifecycleViaController:
         # Clean up
         test_db.delete_warm_instance("inst-1")
         assert test_db.get_warm_instance("inst-1") is None
+
+    def test_dispatch_failure_after_assignment_deletes_instance(self, test_db, controller):
+        """If spec upload fails after JOB_ASSIGNED, LAUNCH_FAILED → deleting."""
+        ok = test_db.pre_register_warm_instance(
+            instance_name="inst-1",
+            zone="us-central1-a",
+            project_id="p",
+            machine_type="m",
+            gpu_count=0,
+            image_family="f",
+            image_project="p",
+            max_instances=2,
+        )
+        assert ok
+
+        # Fresh launch + complete to idle_ready
+        controller.on_fresh_launch("inst-1", "stage-init")
+        controller.on_run_terminal("stage-init", "completed")
+        controller.on_drain_complete("inst-1")
+
+        # Assign job
+        r = controller.on_job_assigned("inst-1", "stage-run-001")
+        assert r.success and r.new_state == InstanceState.BUSY
+
+        # Dispatch fails (e.g., spec upload error)
+        r = controller.on_launch_failed("inst-1", "stage-run-001", error="spec upload failed")
+        assert r.success and r.new_state == InstanceState.DELETING
+
+        inst = test_db.get_warm_instance("inst-1")
+        assert inst is not None
+        assert inst["current_lease_run_id"] is None

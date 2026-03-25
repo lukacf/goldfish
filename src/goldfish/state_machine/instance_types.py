@@ -16,10 +16,9 @@ class InstanceState(str, Enum):
     """All possible states for a warm pool instance.
 
     launching   - VM booting (first boot, not yet in pool)
-    busy        - Executing a Docker job
+    busy        - Executing a Docker job (or assigned, waiting for VM pickup)
     draining    - Job done, uploading outputs/logs
-    idle_ready  - In idle loop, polling for signals, ready for claims
-    claimed     - Claim sent, waiting for ACK
+    idle_ready  - In idle loop, polling for signals, ready for assignment
     deleting    - gcloud delete issued
     gone        - Confirmed deleted (terminal, row removable)
     """
@@ -28,7 +27,6 @@ class InstanceState(str, Enum):
     BUSY = "busy"
     DRAINING = "draining"
     IDLE_READY = "idle_ready"
-    CLAIMED = "claimed"
     DELETING = "deleting"
     GONE = "gone"
 
@@ -41,9 +39,7 @@ class InstanceEvent(str, Enum):
     JOB_FINISHED = "job_finished"
     DRAIN_COMPLETE = "drain_complete"
     IDLE_READY = "idle_ready"
-    CLAIM_SENT = "claim_sent"
-    CLAIM_ACKED = "claim_acked"
-    CLAIM_TIMEOUT = "claim_timeout"
+    JOB_ASSIGNED = "job_assigned"
     LAUNCH_FAILED = "launch_failed"
     PREEMPTED = "preempted"
     DELETE_REQUESTED = "delete_requested"

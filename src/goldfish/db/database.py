@@ -695,7 +695,7 @@ class Database:
                                 image_project TEXT NOT NULL DEFAULT 'debian-cloud',
                                 preemptible INTEGER NOT NULL DEFAULT 0,
                                 state TEXT NOT NULL DEFAULT 'launching'
-                                    CHECK(state IN ('launching', 'busy', 'draining', 'idle_ready', 'claimed', 'deleting', 'gone')),
+                                    CHECK(state IN ('launching', 'busy', 'draining', 'idle_ready', 'deleting', 'gone')),
                                 image_tag TEXT,
                                 state_entered_at TEXT,
                                 current_lease_run_id TEXT,
@@ -712,7 +712,7 @@ class Database:
                                    CASE status
                                        WHEN 'idle' THEN 'idle_ready'
                                        WHEN 'running' THEN 'busy'
-                                       WHEN 'claimed' THEN 'claimed'
+                                       WHEN 'claimed' THEN 'deleting'
                                        WHEN 'deleting' THEN 'deleting'
                                        ELSE 'deleting'
                                    END,
@@ -726,6 +726,20 @@ class Database:
 
                 # Step 2: Create warm_instances v2 if it doesn't exist at all
                 # (covers fresh upgrades from main where no warm pool table existed)
+
+                # Migrate existing 'claimed' rows to 'deleting' (if table exists from prior version)
+                wi_exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='warm_instances'"
+                ).fetchone()
+                if wi_exists:
+                    claimed_count_row = conn.execute(
+                        "SELECT COUNT(*) as cnt FROM warm_instances WHERE state = 'claimed'"
+                    ).fetchone()
+                    if claimed_count_row and claimed_count_row["cnt"] > 0:
+                        conn.execute(
+                            "UPDATE warm_instances SET state = 'deleting', current_lease_run_id = NULL WHERE state = 'claimed'"
+                        )
+
                 conn.executescript("""
                     CREATE TABLE IF NOT EXISTS warm_instances (
                         instance_name TEXT PRIMARY KEY,
@@ -737,7 +751,7 @@ class Database:
                         image_project TEXT NOT NULL DEFAULT 'debian-cloud',
                         preemptible INTEGER NOT NULL DEFAULT 0,
                         state TEXT NOT NULL DEFAULT 'launching'
-                            CHECK(state IN ('launching', 'busy', 'draining', 'idle_ready', 'claimed', 'deleting', 'gone')),
+                            CHECK(state IN ('launching', 'busy', 'draining', 'idle_ready', 'deleting', 'gone')),
                         image_tag TEXT,
                         state_entered_at TEXT,
                         current_lease_run_id TEXT,
@@ -5793,32 +5807,61 @@ class Database:
         image_family: str,
         image_project: str,
         preemptible: bool = False,
+        allowed_zones: list[str] | None = None,
     ) -> WarmInstanceRow | None:
-        """Find an idle_ready instance matching hardware spec.
+        """Find an idle_ready instance matching hardware spec and zone constraints.
 
         Does NOT modify state — caller must use instance_transition() for
-        the CLAIM_SENT event.
+        the JOB_ASSIGNED event.
+
+        Args:
+            machine_type: Required machine type.
+            gpu_count: Required GPU count.
+            image_family: Required boot disk image family.
+            image_project: Required boot disk image project.
+            preemptible: Whether instance must be preemptible.
+            allowed_zones: If set, only match instances in these zones.
+                This enforces profile zone constraints (e.g., gce.profile_overrides.*.zones).
 
         Returns:
             WarmInstanceRow if found, None otherwise.
         """
         preemptible_int = 1 if preemptible else 0
         with self._conn() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM warm_instances
-                WHERE state = 'idle_ready'
-                  AND machine_type = ?
-                  AND gpu_count = ?
-                  AND image_family = ?
-                  AND image_project = ?
-                  AND preemptible = ?
-                  AND current_lease_run_id IS NULL
-                ORDER BY state_entered_at ASC
-                LIMIT 1
-                """,
-                (machine_type, gpu_count, image_family, image_project, preemptible_int),
-            ).fetchone()
+            if allowed_zones:
+                placeholders = ",".join("?" * len(allowed_zones))
+                row = conn.execute(
+                    f"""
+                    SELECT * FROM warm_instances
+                    WHERE state = 'idle_ready'
+                      AND machine_type = ?
+                      AND gpu_count = ?
+                      AND image_family = ?
+                      AND image_project = ?
+                      AND preemptible = ?
+                      AND current_lease_run_id IS NULL
+                      AND zone IN ({placeholders})
+                    ORDER BY state_entered_at ASC
+                    LIMIT 1
+                    """,
+                    (machine_type, gpu_count, image_family, image_project, preemptible_int, *allowed_zones),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT * FROM warm_instances
+                    WHERE state = 'idle_ready'
+                      AND machine_type = ?
+                      AND gpu_count = ?
+                      AND image_family = ?
+                      AND image_project = ?
+                      AND preemptible = ?
+                      AND current_lease_run_id IS NULL
+                    ORDER BY state_entered_at ASC
+                    LIMIT 1
+                    """,
+                    (machine_type, gpu_count, image_family, image_project, preemptible_int),
+                ).fetchone()
             return cast(WarmInstanceRow, dict(row)) if row else None
 
     # =========================================================================

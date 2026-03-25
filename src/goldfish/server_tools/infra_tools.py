@@ -297,8 +297,8 @@ def warm_pool_cleanup() -> dict:
     """Emergency cleanup: delete warm pool instances.
 
     Idle and deleting instances are deleted immediately.
-    Running/claimed instances with active runs are skipped (requires USER_CANCEL).
-    Running/claimed instances with no active run are deleted.
+    Busy instances with active runs are skipped (requires USER_CANCEL).
+    Busy instances with no active run are deleted.
 
     Returns:
         Dict with count of deleted instances and any skipped instances.
@@ -318,11 +318,13 @@ def warm_pool_cleanup() -> dict:
             if state in ("gone",):
                 continue
             if state == "deleting":
-                # Retry gcloud delete
-                if mgr.delete_gce_instance(name, inst["zone"]):
+                # Retry gcloud delete, then verify VM is actually gone
+                mgr.delete_gce_instance(name, inst["zone"])
+                if mgr.check_instance_status(name, inst["zone"]) == "not_found":
                     mgr.controller.on_delete_confirmed(name)
                     mgr._db.delete_warm_instance(name)
                     deleted += 1
+                # else: still exists, leave in deleting for daemon retry
                 continue
 
             # For instances with active leases, cancel the owning run first.
@@ -338,19 +340,35 @@ def warm_pool_cleanup() -> dict:
                     run_id,
                     reason="Emergency warm pool cleanup — instance being deleted",
                 )
-                if not cancel_result.get("success"):
+                if cancel_result.get("success"):
+                    # cancel_run already calls on_run_terminal via cancel.py,
+                    # which releases the lease and emits DELETE_REQUESTED for canceled runs.
+                    # Actual GCE deletion happens later via daemon polling.
+                    canceled += 1
+                else:
+                    # Cancel failed — run is missing, already terminal, or uncancelable.
+                    # This is the exact scenario operators reach for this tool: stale
+                    # leases from purged/crashed runs. Force-release the lease and
+                    # delete the instance directly instead of skipping it.
                     logger.warning(
-                        "warm_pool_cleanup: cancel_run rejected for %s (run=%s): %s — skipping instance",
+                        "warm_pool_cleanup: cancel_run failed for %s (run=%s): %s — force-releasing lease",
                         name,
                         run_id,
                         cancel_result.get("reason"),
                     )
-                    skipped.append(name)
-                    continue
-                # cancel_run already calls on_run_terminal via cancel.py,
-                # which releases the lease and emits DELETE_REQUESTED for canceled runs.
-                # Actual GCE deletion happens later via daemon polling.
-                canceled += 1
+                    mgr.controller._force_release_lease(name)
+                    result = mgr.controller.on_delete_requested(
+                        name,
+                        reason=f"emergency cleanup, cancel failed: {cancel_result.get('reason')}",
+                    )
+                    if result.success:
+                        mgr.delete_gce_instance(name, inst["zone"])
+                        if mgr.check_instance_status(name, inst["zone"]) == "not_found":
+                            mgr.controller.on_delete_confirmed(name)
+                            mgr._db.delete_warm_instance(name)
+                            deleted += 1
+                        else:
+                            canceled += 1
             else:
                 # No active lease — transition to deleting AND attempt GCE deletion now
                 result = mgr.controller.on_delete_requested(
@@ -358,12 +376,14 @@ def warm_pool_cleanup() -> dict:
                     reason="emergency cleanup",
                 )
                 if result.success:
-                    # Attempt immediate GCE deletion
-                    if mgr.delete_gce_instance(name, inst["zone"]):
+                    # Attempt GCE deletion, then verify VM is gone before removing row
+                    mgr.delete_gce_instance(name, inst["zone"])
+                    if mgr.check_instance_status(name, inst["zone"]) == "not_found":
                         mgr.controller.on_delete_confirmed(name)
                         mgr._db.delete_warm_instance(name)
                         deleted += 1
                     else:
+                        # Delete requested but VM still exists — daemon will retry
                         canceled += 1
 
         remaining = mgr.pool_status()

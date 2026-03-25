@@ -2,13 +2,14 @@
 
 Manages warm GCE instances for reuse between runs. All lifecycle
 decisions go through InstanceController — this module handles only
-GCE adapter operations (gcloud calls, metadata signaling, ACK polling).
+GCE adapter operations (gcloud calls, metadata signaling, spec upload).
 
 Key design principles:
 - Instance state machine is sole authority for instance lifecycle
 - InstanceController is the single entry point for state transitions
-- This module handles GCE operations only (claim signaling, deletion, liveness)
+- This module handles GCE operations only (job dispatch, deletion, liveness)
 - No direct warm_instances.state updates
+- No ACK polling — orchestrator assigns atomically, VM picks up
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-import time
 
 from goldfish.cloud.contracts import RunHandle
 from goldfish.config import WarmPoolConfig
@@ -96,10 +96,14 @@ class WarmPoolManager:
         preemptible: bool = False,
         stage_run_id: str = "",
         job_spec: dict | None = None,
+        allowed_zones: list[str] | None = None,
     ) -> RunHandle | None:
-        """Try to claim an idle_ready warm instance matching the hardware spec.
+        """Try to assign a job to an idle_ready warm instance matching the hardware spec.
 
-        Returns RunHandle if claimed successfully, None to fall through to fresh launch.
+        Protocol: find idle → JOB_ASSIGNED (atomic CAS) → upload spec → signal metadata → return handle.
+        No ACK polling. VM picks up the job from metadata and sets goldfish_instance_state=busy.
+
+        Returns RunHandle if assigned successfully, None to fall through to fresh launch.
         """
         if not self._config.enabled:
             return None
@@ -107,39 +111,39 @@ class WarmPoolManager:
             logger.warning("Warm pool claim skipped: no GCS bucket configured")
             return None
 
-        # 1. Find + claim with retry. find_claimable_instance is a SELECT (no lock),
-        # so a concurrent claimer can win the CAS in on_claim_start. Retry with
-        # a different idle instance if available.
+        # 1. Find + assign with retry. find_claimable_instance is a SELECT (no lock),
+        # so a concurrent caller can win the CAS in on_job_assigned. Keep retrying
+        # until find_claimable_instance returns nothing (pool exhausted) — a fixed
+        # retry cap would cause burst launches to fall through to cold VMs even
+        # when idle warm instances remain.
         instance_name: str | None = None
         zone: str | None = None
-        for _attempt in range(3):
+        while True:
             found = self._db.find_claimable_instance(
                 machine_type,
                 gpu_count,
                 image_family,
                 image_project,
                 preemptible=preemptible,
+                allowed_zones=allowed_zones,
             )
             if not found:
                 return None
 
-            result = self._controller.on_claim_start(found["instance_name"], stage_run_id)
+            result = self._controller.on_job_assigned(found["instance_name"], stage_run_id)
             if result.success:
                 instance_name = found["instance_name"]
                 zone = found["zone"]
                 break
-            # CAS race — another claimer won. Try again.
-            logger.debug("Claim race for %s, retrying", found["instance_name"])
-
-        if instance_name is None or zone is None:
-            return None
+            # CAS race — another caller won. Try next idle instance.
+            logger.debug("Assignment race for %s, retrying", found["instance_name"])
 
         try:
-            # 3. Upload job spec to GCS
+            # 2. Upload job spec to GCS
             spec_gcs_path = f"gs://{self._bucket}/warm_pool/{instance_name}/jobs/{stage_run_id}/spec.json"
             self._upload_job_spec(spec_gcs_path, job_spec or {})
 
-            # 4. Signal via metadata (flat structure — VM parser uses grep, not jq)
+            # 3. Signal via metadata (one-shot, no ACK expected)
             signal = json.dumps(
                 {
                     "command": "new_job",
@@ -149,72 +153,34 @@ class WarmPoolManager:
             )
             self._set_instance_metadata(instance_name, zone, "goldfish", signal)
 
-            # 5. Poll for ACK (30s timeout)
-            ack = self._wait_for_ack(instance_name, zone, stage_run_id, timeout_seconds=30)
-
-            if ack:
-                # 6. ACK received → claimed → busy
-                ack_result = self._controller.on_claim_acked(instance_name, stage_run_id)
-                if not ack_result.success:
-                    # Clear metadata to prevent double-dispatch — the VM already
-                    # ACKed and has the job signal, so without this it will start
-                    # the job while the caller falls back to a fresh launch.
-                    try:
-                        self._set_instance_metadata(
-                            instance_name,
-                            zone,
-                            "goldfish",
-                            "",
-                        )
-                    except Exception:
-                        pass
-                    logger.warning(
-                        "on_claim_acked failed for %s: %s — deleting instance",
-                        instance_name,
-                        ack_result.details,
-                    )
-                    self._controller.on_claim_timeout(instance_name, stage_run_id)
-                    return None
-                return RunHandle(
-                    stage_run_id=stage_run_id,
-                    backend_type="gce",
-                    backend_handle=instance_name,
-                    zone=zone,
-                )
-            else:
-                # 7. ACK timeout → claimed → deleting.
-                # Clear the goldfish metadata FIRST so the VM can't ACK late
-                # and start the job after we fall back to a fresh launch.
-                # Without this, both VMs run the same stage_run_id.
-                try:
-                    self._set_instance_metadata(
-                        instance_name,
-                        zone,
-                        "goldfish",
-                        "",
-                    )
-                except Exception:
-                    pass  # Best-effort — VM may be unreachable
-                logger.warning(
-                    "ACK timeout for warm instance %s — deleting to prevent double-dispatch",
-                    instance_name,
-                )
-                self._controller.on_claim_timeout(instance_name, stage_run_id)
-                return None
+            # 4. Return handle immediately — no waiting, no fallback
+            return RunHandle(
+                stage_run_id=stage_run_id,
+                backend_type="gce",
+                backend_handle=instance_name,
+                zone=zone,
+            )
 
         except Exception as e:
-            logger.warning("Warm pool claim failed for %s: %s — deleting instance", instance_name, e)
-            try:
-                self._set_instance_metadata(
-                    instance_name,
-                    zone,
-                    "goldfish",
-                    "",
+            # Dispatch failure after JOB_ASSIGNED: instance → deleting, lease released.
+            logger.warning("Warm pool dispatch failed for %s: %s — marking as launch failed", instance_name, e)
+            self._controller.on_launch_failed(instance_name, stage_run_id, error=str(e))
+
+            # If the VM is confirmed dead (preempted, manually deleted), there is
+            # zero double-dispatch risk — return None so the caller falls back to
+            # a fresh launch instead of failing the run. If the VM might still be
+            # alive (timeout, ambiguous error), re-raise to prevent double-dispatch.
+            # Check stderr from gcloud CalledProcessError for the GCE "not found" pattern.
+            vm_not_found = False
+            if hasattr(e, "stderr") and e.stderr:
+                stderr_lower = (
+                    e.stderr.lower() if isinstance(e.stderr, str) else e.stderr.decode(errors="replace").lower()
                 )
-            except Exception:
-                pass
-            self._controller.on_claim_timeout(instance_name, stage_run_id)
-            return None
+                vm_not_found = "was not found" in stderr_lower
+            if vm_not_found:
+                logger.info("Warm instance %s confirmed dead — falling back to fresh launch", instance_name)
+                return None
+            raise
 
     def get_instance(self, instance_name: str) -> WarmInstanceRow | None:
         """Get a warm instance by name."""
@@ -417,24 +383,6 @@ class WarmPoolManager:
             import os
 
             os.unlink(tmp_path)
-
-    def _wait_for_ack(
-        self,
-        instance_name: str,
-        zone: str,
-        stage_run_id: str,
-        timeout_seconds: int = 30,
-    ) -> bool:
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            try:
-                metadata = self.get_instance_metadata(instance_name, zone)
-                if metadata.get("goldfish_ack") == stage_run_id:
-                    return True
-            except Exception as e:
-                logger.debug("ACK poll error for %s: %s", instance_name, e)
-            time.sleep(2)
-        return False
 
     def _delete_gce_instance(self, instance_name: str, zone: str) -> bool:
         try:

@@ -93,14 +93,24 @@ def instance_transition(
         trans_def = find_instance_transition(current_state, event, context)
 
         # 3. Handle idempotency
+        # If the event's target state matches the current state AND either:
+        #   a) no lease change requested, OR
+        #   b) the requested lease matches the current one (true retry)
+        # then treat as idempotent. But if a DIFFERENT lease is requested,
+        # reject — this is a race where two dispatchers think they won the
+        # same instance. Without this guard, the loser's try_claim() would
+        # succeed and upload a second job spec to a VM it doesn't own.
         if trans_def is None:
-            for t in INSTANCE_TRANSITIONS:
-                if t.event == event and t.to_state == current_state and t.from_state != current_state:
-                    return InstanceTransitionResult(
-                        success=True,
-                        new_state=current_state,
-                        reason="already_in_target_state",
-                    )
+            current_lease = row["current_lease_run_id"]
+            lease_is_safe = set_lease_run_id is _LEASE_UNCHANGED or set_lease_run_id == current_lease
+            if lease_is_safe:
+                for t in INSTANCE_TRANSITIONS:
+                    if t.event == event and t.to_state == current_state and t.from_state != current_state:
+                        return InstanceTransitionResult(
+                            success=True,
+                            new_state=current_state,
+                            reason="already_in_target_state",
+                        )
 
             return InstanceTransitionResult(
                 success=False,

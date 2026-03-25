@@ -7,6 +7,7 @@ with a clean event-driven architecture that uses the state machine.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -474,24 +475,22 @@ class StageDaemon:
                     # Check liveness — spot VMs can be preempted while idle.
                     # Only count confirmed dead/not-found, not transient errors.
                     vm_status = warm_pool.check_instance_status(name, zone)
-                    if vm_status in ("not_found", "dead"):
+                    if vm_status == "not_found":
                         self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
                         if self._liveness_fail_counts[name] >= 3:
                             controller.on_preempted(name)
                             self._liveness_fail_counts.pop(name, None)
+                    elif vm_status == "dead":
+                        # VM exists but is stopped/terminated — route through deleting
+                        # so the daemon issues gcloud delete. Going straight to gone
+                        # would leave the stopped VM and its disks orphaned in GCE.
+                        self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
+                        if self._liveness_fail_counts[name] >= 3:
+                            controller.on_delete_requested(name, reason="VM stopped/terminated")
+                            self._liveness_fail_counts.pop(name, None)
                     elif vm_status == "alive":
                         self._liveness_fail_counts.pop(name, None)
                     # "error" — don't count, don't reset. Wait for a definitive answer.
-                    continue
-
-                if state == InstanceState.CLAIMED:
-                    # Check stale claims (30s ACK timeout + 60s buffer = 90s)
-                    if self._instance_timed_out(inst, 90):
-                        lease_run_id = inst.get("current_lease_run_id")
-                        if lease_run_id:
-                            controller.on_claim_timeout(name, lease_run_id)
-                        else:
-                            controller.on_delete_requested(name, reason="stale claim, no lease")
                     continue
 
                 if state == InstanceState.DELETING:
@@ -556,10 +555,15 @@ class StageDaemon:
 
                     # Check if VM is dead (only count confirmed dead/not-found)
                     vm_status = warm_pool.check_instance_status(name, zone)
-                    if vm_status in ("not_found", "dead"):
+                    if vm_status == "not_found":
                         self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
                         if self._liveness_fail_counts[name] >= 3:
                             controller.on_preempted(name)
+                            self._liveness_fail_counts.pop(name, None)
+                    elif vm_status == "dead":
+                        self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
+                        if self._liveness_fail_counts[name] >= 3:
+                            controller.on_delete_requested(name, reason="VM stopped/terminated")
                             self._liveness_fail_counts.pop(name, None)
                     elif vm_status == "alive":
                         self._liveness_fail_counts.pop(name, None)
@@ -571,7 +575,7 @@ class StageDaemon:
                     # But DO enforce a timeout: if the row has been in launching for
                     # too long (e.g. executor died before calling on_launch_failed),
                     # transition to deleting to prevent permanent capacity leak.
-                    _LAUNCHING_TIMEOUT_SECONDS = 900  # 15 minutes
+                    _LAUNCHING_TIMEOUT_SECONDS = int(os.getenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "1200"))
                     if self._instance_timed_out(inst, _LAUNCHING_TIMEOUT_SECONDS):
                         logger.warning(
                             "Instance %s stuck in launching for >%ds — transitioning to deleting",
@@ -608,12 +612,40 @@ class StageDaemon:
                             )
                             continue
 
+                    # Assignment-start deadline: if busy >5min and VM metadata
+                    # positively confirms idle_ready, the VM never picked up the job.
+                    # Only act on positive evidence — empty metadata (transient gcloud
+                    # failure) must NOT trigger deletion because the VM may be alive
+                    # and running a long job. The liveness check below handles dead VMs.
+                    _ASSIGNMENT_START_DEADLINE = 300  # 5 minutes
+                    if self._instance_timed_out(inst, _ASSIGNMENT_START_DEADLINE):
+                        metadata = warm_pool.get_instance_metadata(name, zone)
+                        vm_state = metadata.get("goldfish_instance_state")
+                        if vm_state == "idle_ready":
+                            logger.warning(
+                                "Instance %s busy >%ds but VM still idle_ready — job never picked up, deleting",
+                                name,
+                                _ASSIGNMENT_START_DEADLINE,
+                            )
+                            controller.on_delete_requested(name, reason="assignment pickup timeout")
+                            continue
+                        if vm_state == "busy":
+                            # VM confirmed working — reset any liveness failure count
+                            self._liveness_fail_counts.pop(name, None)
+                        # Empty metadata or unknown state: don't act — fall through to
+                        # the liveness check which uses check_instance_status (more reliable).
+
                     # Check if VM is dead (only count confirmed dead/not-found)
                     vm_status = warm_pool.check_instance_status(name, zone)
-                    if vm_status in ("not_found", "dead"):
+                    if vm_status == "not_found":
                         self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
                         if self._liveness_fail_counts[name] >= 3:
                             controller.on_preempted(name)
+                            self._liveness_fail_counts.pop(name, None)
+                    elif vm_status == "dead":
+                        self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
+                        if self._liveness_fail_counts[name] >= 3:
+                            controller.on_delete_requested(name, reason="VM stopped/terminated")
                             self._liveness_fail_counts.pop(name, None)
                     elif vm_status == "alive":
                         self._liveness_fail_counts.pop(name, None)

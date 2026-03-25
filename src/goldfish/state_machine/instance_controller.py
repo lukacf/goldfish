@@ -76,10 +76,11 @@ class InstanceController:
         error: str | None = None,
         source: InstanceSourceType = "controller",
     ) -> InstanceTransitionResult:
-        """Fresh launch failed: launching → deleting + release lease.
+        """Launch or dispatch failed: launching/busy → deleting + release lease.
 
-        The instance may be partially created, so we go to deleting
-        (not gone) to let the daemon retry gcloud delete.
+        For fresh launches: launching → deleting.
+        For reuse dispatch failures: busy → deleting (spec upload or signal failed
+        after JOB_ASSIGNED succeeded).
         """
         ctx = self._ctx(source=source, stage_run_id=stage_run_id, error_message=error)
         return instance_transition(
@@ -91,84 +92,35 @@ class InstanceController:
         )
 
     # =========================================================================
-    # Claim (reuse)
+    # Job assignment (reuse)
     # =========================================================================
 
-    def on_claim_start(
+    def on_job_assigned(
         self,
         instance_name: str,
         stage_run_id: str,
         *,
         source: InstanceSourceType = "controller",
     ) -> InstanceTransitionResult:
-        """Claim initiated: idle_ready → claimed + acquire lease."""
+        """Job assigned: idle_ready → busy + acquire lease atomically.
+
+        Single CAS UPDATE — no ACK handshake needed. The VM picks up the
+        job from metadata/GCS and sets goldfish_instance_state=busy.
+        """
         ctx = self._ctx(source=source, stage_run_id=stage_run_id)
         result = instance_transition(
             self._db,
             instance_name,
-            InstanceEvent.CLAIM_SENT,
+            InstanceEvent.JOB_ASSIGNED,
             ctx,
             set_lease_run_id=stage_run_id,
         )
         if not result.success:
             logger.warning(
-                "on_claim_start: CLAIM_SENT failed for %s: %s",
+                "on_job_assigned: JOB_ASSIGNED failed for %s: %s",
                 instance_name,
                 result.details,
             )
-        return result
-
-    def on_claim_acked(
-        self,
-        instance_name: str,
-        stage_run_id: str,
-        *,
-        source: InstanceSourceType = "controller",
-    ) -> InstanceTransitionResult:
-        """Claim ACKed: claimed → busy (lease already held)."""
-        ctx = self._ctx(source=source, stage_run_id=stage_run_id)
-        result = instance_transition(
-            self._db,
-            instance_name,
-            InstanceEvent.CLAIM_ACKED,
-            ctx,
-        )
-        if not result.success:
-            logger.warning(
-                "on_claim_acked: CLAIM_ACKED failed for %s: %s",
-                instance_name,
-                result.details,
-            )
-        return result
-
-    def on_claim_timeout(
-        self,
-        instance_name: str,
-        stage_run_id: str,
-        *,
-        source: InstanceSourceType = "controller",
-    ) -> InstanceTransitionResult:
-        """Claim timed out: claimed → deleting + release lease."""
-        ctx = self._ctx(source=source, stage_run_id=stage_run_id, reason="ACK timeout")
-        result = instance_transition(
-            self._db,
-            instance_name,
-            InstanceEvent.CLAIM_TIMEOUT,
-            ctx,
-            set_lease_run_id=None,  # Release lease atomically
-        )
-        if not result.success:
-            logger.warning(
-                "on_claim_timeout: CLAIM_TIMEOUT failed for %s: %s",
-                instance_name,
-                result.details,
-            )
-            # Only force-release if the instance is still in claimed state
-            # with this run's lease. If CLAIM_ACKED already moved it to busy,
-            # wiping the lease would strand a live running job.
-            inst = self._db.get_warm_instance(instance_name)
-            if inst and inst.get("state") == "claimed" and inst.get("current_lease_run_id") == stage_run_id:
-                self._force_release_lease(instance_name)
         return result
 
     # =========================================================================

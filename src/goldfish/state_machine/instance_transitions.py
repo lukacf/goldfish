@@ -25,7 +25,6 @@ ACTIVE_INSTANCE_STATES = frozenset(
         InstanceState.BUSY,
         InstanceState.DRAINING,
         InstanceState.IDLE_READY,
-        InstanceState.CLAIMED,
         InstanceState.DELETING,
     }
 )
@@ -37,7 +36,6 @@ DELETABLE_STATES = frozenset(
         InstanceState.BUSY,
         InstanceState.DRAINING,
         InstanceState.IDLE_READY,
-        InstanceState.CLAIMED,
     }
 )
 
@@ -50,19 +48,16 @@ INSTANCE_TRANSITIONS: list[InstanceTransitionDef] = [
     InstanceTransitionDef(InstanceState.LAUNCHING, InstanceEvent.BOOT_REGISTERED, InstanceState.BUSY),
     InstanceTransitionDef(InstanceState.LAUNCHING, InstanceEvent.LAUNCH_FAILED, InstanceState.DELETING),
     InstanceTransitionDef(InstanceState.LAUNCHING, InstanceEvent.DELETE_REQUESTED, InstanceState.DELETING),
+    # idle_ready
+    InstanceTransitionDef(InstanceState.IDLE_READY, InstanceEvent.JOB_ASSIGNED, InstanceState.BUSY),
+    InstanceTransitionDef(InstanceState.IDLE_READY, InstanceEvent.DELETE_REQUESTED, InstanceState.DELETING),
     # busy
     InstanceTransitionDef(InstanceState.BUSY, InstanceEvent.JOB_FINISHED, InstanceState.DRAINING),
+    InstanceTransitionDef(InstanceState.BUSY, InstanceEvent.LAUNCH_FAILED, InstanceState.DELETING),
     InstanceTransitionDef(InstanceState.BUSY, InstanceEvent.DELETE_REQUESTED, InstanceState.DELETING),
     # draining
     InstanceTransitionDef(InstanceState.DRAINING, InstanceEvent.DRAIN_COMPLETE, InstanceState.IDLE_READY),
     InstanceTransitionDef(InstanceState.DRAINING, InstanceEvent.DELETE_REQUESTED, InstanceState.DELETING),
-    # idle_ready
-    InstanceTransitionDef(InstanceState.IDLE_READY, InstanceEvent.CLAIM_SENT, InstanceState.CLAIMED),
-    InstanceTransitionDef(InstanceState.IDLE_READY, InstanceEvent.DELETE_REQUESTED, InstanceState.DELETING),
-    # claimed
-    InstanceTransitionDef(InstanceState.CLAIMED, InstanceEvent.CLAIM_ACKED, InstanceState.BUSY),
-    InstanceTransitionDef(InstanceState.CLAIMED, InstanceEvent.CLAIM_TIMEOUT, InstanceState.DELETING),
-    InstanceTransitionDef(InstanceState.CLAIMED, InstanceEvent.DELETE_REQUESTED, InstanceState.DELETING),
     # deleting
     InstanceTransitionDef(InstanceState.DELETING, InstanceEvent.DELETE_CONFIRMED, InstanceState.GONE),
     InstanceTransitionDef(InstanceState.DELETING, InstanceEvent.DELETE_FAILED, InstanceState.DELETING),
@@ -71,7 +66,6 @@ INSTANCE_TRANSITIONS: list[InstanceTransitionDef] = [
     InstanceTransitionDef(InstanceState.BUSY, InstanceEvent.PREEMPTED, InstanceState.GONE),
     InstanceTransitionDef(InstanceState.DRAINING, InstanceEvent.PREEMPTED, InstanceState.GONE),
     InstanceTransitionDef(InstanceState.IDLE_READY, InstanceEvent.PREEMPTED, InstanceState.GONE),
-    InstanceTransitionDef(InstanceState.CLAIMED, InstanceEvent.PREEMPTED, InstanceState.GONE),
     InstanceTransitionDef(InstanceState.DELETING, InstanceEvent.PREEMPTED, InstanceState.GONE),
 ]
 

@@ -1,9 +1,10 @@
 """Integration tests for warm pool lifecycle (v2: state-machine-driven).
 
 Tests full lifecycle through InstanceController:
-- Fresh launch → busy → draining → idle_ready → claim → busy → cancel → deleting → gone
+- Fresh launch → busy → draining → idle_ready → JOB_ASSIGNED → busy → cancel → deleting → gone
 - Pre-registration capacity gate
-- Multiple claim/reuse cycles
+- Multiple reuse cycles
+- Dispatch failure recovery
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ def controller(test_db) -> InstanceController:
 
 
 class TestFullLifecycle:
-    """Full lifecycle through two claim/reuse cycles."""
+    """Full lifecycle through two reuse cycles."""
 
     def test_full_lifecycle_two_reuse_cycles(self, test_db, controller):
         # 1. Pre-register instance
@@ -56,35 +57,29 @@ class TestFullLifecycle:
         r = controller.on_drain_complete("inst-1")
         assert r.success and r.new_state == InstanceState.IDLE_READY
 
-        # 5. Second run → claim
+        # 5. Second run → assign (atomic idle_ready → busy)
         found = test_db.find_claimable_instance("a3-highgpu-1g", 1, "debian-12", "debian-cloud")
         assert found is not None
 
-        r = controller.on_claim_start("inst-1", "stage-run-002")
-        assert r.success and r.new_state == InstanceState.CLAIMED
-
-        # 6. ACK → busy
-        r = controller.on_claim_acked("inst-1", "stage-run-002")
+        r = controller.on_job_assigned("inst-1", "stage-run-002")
         assert r.success and r.new_state == InstanceState.BUSY
 
-        # 7. Second run completes → draining
+        # 6. Second run completes → draining
         r = controller.on_run_terminal("stage-run-002", "completed")
         assert r is not None and r.success and r.new_state == InstanceState.DRAINING
 
-        # 8. Drain → idle_ready again
+        # 7. Drain → idle_ready again
         r = controller.on_drain_complete("inst-1")
         assert r.success and r.new_state == InstanceState.IDLE_READY
 
-        # 9. Third run → claim → ack → busy → canceled → deleting
-        r = controller.on_claim_start("inst-1", "stage-run-003")
-        assert r.success
-        r = controller.on_claim_acked("inst-1", "stage-run-003")
-        assert r.success
+        # 8. Third run → assign → busy → canceled → deleting
+        r = controller.on_job_assigned("inst-1", "stage-run-003")
+        assert r.success and r.new_state == InstanceState.BUSY
 
         r = controller.on_run_terminal("stage-run-003", "canceled")
         assert r is not None and r.success and r.new_state == InstanceState.DELETING
 
-        # 10. Delete confirmed → gone
+        # 9. Delete confirmed → gone
         r = controller.on_delete_confirmed("inst-1")
         assert r.success and r.new_state == InstanceState.GONE
 
@@ -92,8 +87,8 @@ class TestFullLifecycle:
         test_db.delete_warm_instance("inst-1")
         assert test_db.get_warm_instance("inst-1") is None
 
-    def test_ack_timeout_deletes_instance(self, test_db, controller):
-        """ACK timeout: claimed → deleting, lease released."""
+    def test_dispatch_failure_deletes_instance(self, test_db, controller):
+        """Dispatch failure after JOB_ASSIGNED: busy → deleting via LAUNCH_FAILED."""
         ok = test_db.pre_register_warm_instance(
             instance_name="inst-1",
             zone="us-central1-a",
@@ -111,12 +106,12 @@ class TestFullLifecycle:
         controller.on_run_terminal("stage-init", "completed")
         controller.on_drain_complete("inst-1")
 
-        # Claim starts
-        r = controller.on_claim_start("inst-1", "stage-run-001")
-        assert r.success and r.new_state == InstanceState.CLAIMED
+        # Assign job
+        r = controller.on_job_assigned("inst-1", "stage-run-001")
+        assert r.success and r.new_state == InstanceState.BUSY
 
-        # ACK times out
-        r = controller.on_claim_timeout("inst-1", "stage-run-001")
+        # Dispatch fails (e.g., spec upload error)
+        r = controller.on_launch_failed("inst-1", "stage-run-001", error="spec upload failed")
         assert r.success and r.new_state == InstanceState.DELETING
         assert test_db.get_active_lease_for_instance("inst-1") is None
 

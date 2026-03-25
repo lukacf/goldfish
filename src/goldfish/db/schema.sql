@@ -676,7 +676,7 @@ CREATE TABLE IF NOT EXISTS warm_instances (
     image_project TEXT NOT NULL DEFAULT 'debian-cloud',
     preemptible INTEGER NOT NULL DEFAULT 0,
     state TEXT NOT NULL DEFAULT 'launching'
-        CHECK(state IN ('launching', 'busy', 'draining', 'idle_ready', 'claimed', 'deleting', 'gone')),
+        CHECK(state IN ('launching', 'busy', 'draining', 'idle_ready', 'deleting', 'gone')),
     image_tag TEXT,
     state_entered_at TEXT,
     current_lease_run_id TEXT,

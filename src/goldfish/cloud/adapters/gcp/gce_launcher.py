@@ -853,17 +853,20 @@ class GCELauncher:
         tail_lines: int | None = None,
         since: str | None = None,
         retry_on_empty: bool = False,
+        serial_console_name: str | None = None,
     ) -> str:
         """Retrieve logs from GCE instance.
 
         Tries to fetch from GCS first, falls back to serial console.
 
         Args:
-            instance_name: Instance identifier
-            tail_lines: Number of lines from end to return
-            since: Only return logs after this ISO timestamp
+            instance_name: Identifier for GCS log paths (stage_run_id for warm pool reuse).
+            tail_lines: Number of lines from end to return.
+            since: Only return logs after this ISO timestamp.
             retry_on_empty: If True, retry once after delay if logs are empty
-                           (handles GCS eventual consistency)
+                           (handles GCS eventual consistency).
+            serial_console_name: Real GCE instance name for serial console fallback.
+                If None, falls back to instance_name.
 
         Returns:
             Instance logs as string
@@ -1030,10 +1033,11 @@ class GCELauncher:
         if result is not None:
             return result
 
-        # Fall back to serial console - find correct zone first
-        zone = self._find_instance_zone(instance_name)
+        # Fall back to serial console - use real GCE instance name
+        console_name = self._sanitize_name(serial_console_name) if serial_console_name else instance_name
+        zone = self._find_instance_zone(console_name)
         if not zone:
-            return f"Instance {instance_name} not found in any configured zone"
+            return f"Instance {console_name} not found in any configured zone"
 
         def _filter_serial_noise(lines: list[str]) -> list[str]:
             """Filter out noisy metadata syncer and startup script debug output."""
@@ -1071,7 +1075,7 @@ class GCELauncher:
                 "compute",
                 "instances",
                 "get-serial-port-output",
-                instance_name,
+                console_name,
                 f"--zone={zone}",
                 "--port=1",
             ]

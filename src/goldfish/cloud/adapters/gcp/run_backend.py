@@ -203,11 +203,23 @@ class GCERunBackend:
 
         # Try warm pool first — reuse an idle VM matching hardware spec
         if self._warm_pool and self._warm_pool.is_enabled_for(spec.profile):
-            warm_handle = self._try_warm_pool_claim(spec)
+            try:
+                warm_handle = self._try_warm_pool_claim(spec)
+            except Exception as e:
+                # Dispatch failure where the VM might still be alive (timeout,
+                # ambiguous gcloud error). The instance is transitioning to deleting
+                # but could have received the signal. Do NOT fall through to a fresh
+                # launch — that risks double-dispatch for the same stage_run_id.
+                # (Dead-VM failures return None from try_claim and fall through safely.)
+                raise LaunchError(
+                    f"Warm pool dispatch failed after assignment: {e}",
+                    stage_run_id=spec.stage_run_id,
+                    cause="warm_dispatch_failure",
+                ) from e
             if warm_handle is not None:
                 logger.info("Warm pool claim succeeded: %s → %s", spec.stage_run_id, warm_handle.backend_handle)
                 return warm_handle
-            logger.info("Warm pool claim failed for %s, falling through to fresh launch", spec.stage_run_id)
+            logger.info("No idle warm instance for %s, falling through to fresh launch", spec.stage_run_id)
 
         # Initialize warm-pool tracking variables BEFORE the try block so the
         # exception handler can safely reference them without UnboundLocalError.
@@ -351,16 +363,17 @@ class GCERunBackend:
                     spec.stage_run_id,
                 )
                 if not ctrl_result.success:
-                    # Controller couldn't take ownership. Remove the pre-registered
-                    # row and disable the idle loop via metadata so the VM self-deletes
-                    # after the first job instead of entering the untracked idle loop.
+                    # Controller couldn't take ownership. Disable the idle loop
+                    # via metadata FIRST so the VM self-deletes after the first job,
+                    # then remove the pre-registered row. Order matters: if we delete
+                    # the row first and the metadata call fails, the VM enters the
+                    # idle loop as an untracked warm instance that the daemon can't reap.
                     logger.warning(
                         "Controller on_fresh_launch failed for %s: %s — disabling idle loop",
                         actual_name,
                         ctrl_result.details,
                     )
                     try:
-                        self._warm_pool._db.delete_warm_instance(actual_name)
                         self._warm_pool._set_instance_metadata(
                             actual_name,
                             actual_zone,
@@ -368,7 +381,16 @@ class GCERunBackend:
                             "true",
                         )
                     except Exception:
-                        pass
+                        # Metadata set failed — do NOT delete the row. Keeping the row
+                        # ensures the daemon can still track and eventually delete this VM.
+                        logger.warning(
+                            "Failed to disable idle loop for %s — keeping DB row for daemon tracking",
+                            actual_name,
+                        )
+                        # Leave the row so daemon can reap it via launching timeout
+                        return handle
+                    # Metadata set succeeded — safe to remove the row now
+                    self._warm_pool._db.delete_warm_instance(actual_name)
 
             return handle
 
@@ -458,25 +480,26 @@ class GCERunBackend:
         else:
             docker_cmd = "/entrypoint.sh"
 
-        # Build env for the warm-pool job. This must preserve the same Goldfish
-        # runtime contract as a cold launch so goldfish.io and runtime helpers
-        # see the expected stage config, run id, and input/output mount paths.
+        # Build env for the warm-pool job. spec.env already contains the full
+        # GOLDFISH_STAGE_CONFIG from the executor (with per-signal config, format,
+        # schema, output definitions). Only fill in keys that aren't already set.
         warm_env = dict(spec.env)
-        warm_env.update(
-            {
-                "GOLDFISH_STAGE_CONFIG": json.dumps(
-                    {
-                        "inputs": serialized_inputs,
-                        "compute": {"max_runtime_seconds": spec.timeout_seconds},
-                    }
-                ),
-                "GOLDFISH_RUN_ID": spec.stage_run_id,
-                "GOLDFISH_INPUTS_DIR": "/mnt/inputs",
-                "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
-            }
+        warm_env.setdefault("GOLDFISH_RUN_ID", spec.stage_run_id)
+        warm_env.setdefault("GOLDFISH_INPUTS_DIR", "/mnt/inputs")
+        warm_env.setdefault("GOLDFISH_OUTPUTS_DIR", "/mnt/outputs")
+        warm_env.setdefault(
+            "GOLDFISH_STAGE_CONFIG",
+            json.dumps(
+                {
+                    "inputs": serialized_inputs,
+                    "compute": {"max_runtime_seconds": spec.timeout_seconds},
+                }
+            ),
         )
         if spec.gpu_count and spec.gpu_count > 0:
-            warm_env["LD_LIBRARY_PATH"] = "/tmp/cuda-symlinks:/usr/lib/x86_64-linux-gnu"
+            existing_ld = warm_env.get("LD_LIBRARY_PATH", "")
+            prefix = "/tmp/cuda-symlinks:/usr/lib/x86_64-linux-gnu"
+            warm_env["LD_LIBRARY_PATH"] = f"{prefix}:{existing_ld}" if existing_ld else prefix
 
         job_spec = {
             "image": spec.image,
@@ -497,6 +520,11 @@ class GCERunBackend:
             "max_runtime_seconds": spec.timeout_seconds,
         }
 
+        # Extract allowed zones from the resolved profile to enforce placement
+        # constraints. Without this, two profiles sharing hardware but pinning
+        # different zones could reuse each other's idle VMs.
+        profile_zones = profile.get("zones")
+
         return self._warm_pool.try_claim(
             machine_type=spec.machine_type or "n1-standard-4",
             gpu_count=spec.gpu_count,
@@ -505,6 +533,7 @@ class GCERunBackend:
             preemptible=spec.spot,
             stage_run_id=spec.stage_run_id,
             job_spec=job_spec,
+            allowed_zones=profile_zones,
         )
 
     def get_status(self, handle: RunHandle) -> BackendStatus:
@@ -532,15 +561,38 @@ class GCERunBackend:
                 # - Warm: exit code appears, VM enters idle loop instead of self-deleting
                 # CRITICAL: Use stage_run_id (not instance_name) because warm instances
                 # reuse the same VM for different stage_run_ids.
-                exit_result = self._launcher._get_exit_code(handle.stage_run_id)
-                if exit_result.exists and exit_result.code is not None:
-                    return BackendStatus.from_exit_code(exit_result.code)
+                # Only check if launcher has a bucket — without one, _get_exit_code()
+                # returns a synthetic code 0 which would misclassify running VMs as completed.
+                if self._launcher.bucket_uri:
+                    exit_result = self._launcher._get_exit_code(handle.stage_run_id)
+                    if exit_result.exists and exit_result.code is not None:
+                        return BackendStatus.from_exit_code(exit_result.code)
+
+                # Warm-pool fallback: if the per-run exit_code upload to GCS failed,
+                # the warm idle loop publishes the exit code and run ID in instance
+                # metadata before returning to idle. Only trust metadata when it is
+                # explicitly tagged with THIS stage_run_id; otherwise a stale exit
+                # code from a previous lease could misclassify a new run.
+                if self._warm_pool and handle.zone:
+                    try:
+                        metadata = self._warm_pool.get_instance_metadata(instance_name, handle.zone)
+                        if metadata.get("goldfish_exit_run_id") == handle.stage_run_id:
+                            exit_code_str = metadata.get("goldfish_exit_code")
+                            if isinstance(exit_code_str, str) and exit_code_str != "":
+                                return BackendStatus.from_exit_code(int(exit_code_str))
+                    except Exception as e:
+                        logger.debug("Warm-pool metadata exit-code check failed for %s: %s", instance_name, e)
+
                 return BackendStatus(status=RunStatus.RUNNING)
             elif status_str in (StageState.COMPLETED, StageState.FAILED):
                 # GCE instance is TERMINATED/STOPPED. get_instance_status derives
                 # COMPLETED/FAILED from the instance_name's exit code path, but for
                 # warm-pool instances that's the FIRST job's exit code, not the current one.
                 # Always re-check using the current stage_run_id to get the right exit code.
+                # Only check if launcher has a bucket — without one, _get_exit_code()
+                # returns a synthetic code 0 which would mask the real termination cause.
+                if not self._launcher.bucket_uri:
+                    return BackendStatus(status=RunStatus.FAILED, exit_code=1)
                 exit_result = self._launcher._get_exit_code(handle.stage_run_id)
                 if exit_result.exists and exit_result.code is not None:
                     return BackendStatus.from_exit_code(exit_result.code)
@@ -561,6 +613,10 @@ class GCERunBackend:
             elif status_str == "not_found":
                 # Instance is gone - try to recover exit code from GCS
                 # This handles spot preemption where instance disappears but wrote exit code
+                # Only check if launcher has a bucket — without one, _get_exit_code()
+                # returns a synthetic code 0 which would mask the not-found condition.
+                if not self._launcher.bucket_uri:
+                    raise NotFoundError(f"instance:{instance_name}")
                 exit_result = self._launcher._get_exit_code(handle.stage_run_id)
                 if exit_result.exists and exit_result.code is not None:
                     # Exit code found - instance ran and terminated
@@ -605,15 +661,18 @@ class GCERunBackend:
         Returns:
             Log content as string.
         """
-        # Use stage_run_id for GCS log paths, not instance_name.
-        # Warm-pool reuse uploads logs under runs/<stage_run_id>/, not runs/<instance_name>/.
+        # Use stage_run_id for GCS log paths (warm-pool reuse uploads under
+        # runs/<stage_run_id>/), but pass backend_handle for serial console
+        # fallback (the real GCE instance name).
         log_key = handle.stage_run_id or handle.backend_handle
+        serial_name = handle.backend_handle if handle.stage_run_id else None
 
         try:
             return self._launcher.get_instance_logs(
                 instance_name=log_key,
                 tail_lines=tail if tail > 0 else None,
                 since=since,
+                serial_console_name=serial_name,
             )
         except Exception as e:
             logger.warning("Error getting logs for %s: %s", log_key, e)
