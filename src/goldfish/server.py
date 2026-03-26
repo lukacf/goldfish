@@ -287,6 +287,8 @@ from goldfish.server_tools.experiment_tools import (  # noqa: F401, E402
 from goldfish.server_tools.infra_tools import (  # noqa: F401, E402
     get_build_status,
     manage_base_images,
+    warm_pool_cleanup,
+    warm_pool_status,
 )
 from goldfish.server_tools.logging_tools import (  # noqa: F401, E402
     search_goldfish_logs,

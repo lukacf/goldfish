@@ -660,3 +660,67 @@ CREATE TABLE IF NOT EXISTS project_image_versions (
 CREATE INDEX IF NOT EXISTS idx_project_image_versions_project_type ON project_image_versions(project_name, image_type);
 CREATE INDEX IF NOT EXISTS idx_project_image_versions_current ON project_image_versions(project_name, image_type, is_current)
     WHERE is_current = 1;
+
+
+-- =============================================================================
+-- Warm Pool Instances (v2: state-machine-driven)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS warm_instances (
+    instance_name TEXT PRIMARY KEY,
+    zone TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    machine_type TEXT NOT NULL,
+    gpu_count INTEGER NOT NULL DEFAULT 0,
+    image_family TEXT NOT NULL DEFAULT 'debian-12',
+    image_project TEXT NOT NULL DEFAULT 'debian-cloud',
+    preemptible INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL DEFAULT 'launching'
+        CHECK(state IN ('launching', 'busy', 'draining', 'idle_ready', 'deleting', 'gone')),
+    image_tag TEXT,
+    state_entered_at TEXT,
+    current_lease_run_id TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_warm_instances_state ON warm_instances(state);
+CREATE INDEX IF NOT EXISTS idx_warm_instances_match
+    ON warm_instances(machine_type, gpu_count, image_family, image_project, preemptible)
+    WHERE state = 'idle_ready';
+CREATE INDEX IF NOT EXISTS idx_warm_instances_idle ON warm_instances(state_entered_at)
+    WHERE state = 'idle_ready';
+
+
+-- Instance state transitions (audit trail)
+CREATE TABLE IF NOT EXISTS instance_state_transitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_name TEXT NOT NULL,
+    from_state TEXT NOT NULL,
+    to_state TEXT NOT NULL,
+    event TEXT NOT NULL,
+    stage_run_id TEXT,
+    error_message TEXT,
+    reason TEXT,
+    source TEXT NOT NULL CHECK(source IN ('controller', 'daemon', 'executor', 'warm_pool')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_instance_transitions_name
+    ON instance_state_transitions(instance_name, created_at);
+
+
+-- Instance leases (explicit run↔instance ownership)
+CREATE TABLE IF NOT EXISTS instance_leases (
+    instance_name TEXT NOT NULL,
+    stage_run_id TEXT NOT NULL,
+    lease_state TEXT NOT NULL CHECK(lease_state IN ('active', 'released')),
+    claimed_at TEXT NOT NULL,
+    released_at TEXT,
+    PRIMARY KEY (instance_name, stage_run_id)
+);
+
+-- At most one active lease per instance
+CREATE UNIQUE INDEX IF NOT EXISTS idx_instance_leases_active
+    ON instance_leases(instance_name) WHERE lease_state = 'active';
+CREATE INDEX IF NOT EXISTS idx_instance_leases_run
+    ON instance_leases(stage_run_id);

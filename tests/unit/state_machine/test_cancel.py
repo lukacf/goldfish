@@ -475,6 +475,151 @@ class TestCancelRunIdValidation:
             cancel_run(test_db, "", "Valid reason over 15 chars")
 
 
+class TestCancelWarmPoolLaunchingInstance:
+    """Tests for cancel during warm pool instance launch."""
+
+    def test_cancel_cleans_up_launching_warm_instance(self, test_db: Database) -> None:
+        """Cancel during launch should clean up even when lease is NULL.
+
+        During fresh launch, the warm instance row is pre-registered with
+        current_lease_run_id=NULL (on_fresh_launch sets it later). If the
+        user cancels before that, the cleanup guard must NOT skip cleanup
+        just because the lease doesn't match the run_id.
+        """
+        now = datetime.now(UTC).isoformat()
+        run_id = _create_run_in_state(
+            test_db,
+            StageState.LAUNCHING,
+            backend_type="gce",
+            backend_handle="goldfish-warm-001",
+        )
+
+        # Pre-register warm instance with NULL lease (simulating pre on_fresh_launch)
+        with test_db._conn() as conn:
+            conn.execute(
+                """INSERT INTO warm_instances
+                (instance_name, zone, project_id, machine_type, gpu_count,
+                 image_family, image_project, preemptible, state, state_entered_at,
+                 current_lease_run_id, created_at)
+                VALUES ('goldfish-warm-001', 'us-central1-a', 'proj', 'a3-highgpu-1g', 1,
+                        'debian-12', 'debian-cloud', 0, 'launching', ?, NULL, ?)""",
+                (now, now),
+            )
+
+        with patch("goldfish.state_machine.cancel._cleanup_backend") as mock_cleanup:
+            result = cancel_run(test_db, run_id, "User cancellation during launch")
+
+            assert result["success"] is True
+            # Cleanup MUST be called — the VM is ours even though lease is NULL
+            mock_cleanup.assert_called_once_with(run_id, "gce", "goldfish-warm-001")
+
+            # The warm_instances row must be transitioned to deleting so it stops
+            # consuming pool capacity immediately (not waiting 15-min daemon timeout)
+            inst = test_db.get_warm_instance("goldfish-warm-001")
+            assert inst is not None
+            assert inst["state"] == "deleting"
+
+    def test_cancel_skips_cleanup_for_warm_instance_owned_by_other_run(self, test_db: Database) -> None:
+        """Cancel should NOT clean up a warm instance owned by a different run."""
+        now = datetime.now(UTC).isoformat()
+        run_id = _create_run_in_state(
+            test_db,
+            StageState.RUNNING,
+            backend_type="gce",
+            backend_handle="goldfish-warm-001",
+        )
+
+        # Warm instance exists but is leased to a different run
+        with test_db._conn() as conn:
+            conn.execute(
+                """INSERT INTO warm_instances
+                (instance_name, zone, project_id, machine_type, gpu_count,
+                 image_family, image_project, preemptible, state, state_entered_at,
+                 current_lease_run_id, created_at)
+                VALUES ('goldfish-warm-001', 'us-central1-a', 'proj', 'a3-highgpu-1g', 1,
+                        'debian-12', 'debian-cloud', 0, 'busy', ?, 'stage-other-run', ?)""",
+                (now, now),
+            )
+
+        with patch("goldfish.state_machine.cancel._cleanup_backend") as mock_cleanup:
+            result = cancel_run(test_db, run_id, "User cancellation test reason")
+
+            assert result["success"] is True
+            # Cleanup must NOT be called — instance belongs to another run
+            mock_cleanup.assert_not_called()
+
+    def test_cancel_finalized_run_does_not_kill_idle_warm_vm(self, test_db: Database) -> None:
+        """Cancel after finalization must NOT delete an idle warm VM.
+
+        When a run reaches awaiting_user_finalization, the executor releases
+        the lease and the instance returns to idle_ready for reuse. If the
+        user cancels instead of finalizing, the NULL lease must NOT be treated
+        as "still launching" — the instance is already back in the pool.
+        """
+        now = datetime.now(UTC).isoformat()
+        run_id = _create_run_in_state(
+            test_db,
+            StageState.AWAITING_USER_FINALIZATION,
+            backend_type="gce",
+            backend_handle="goldfish-warm-001",
+        )
+
+        # Instance is idle_ready with NULL lease (lease released during finalization)
+        with test_db._conn() as conn:
+            conn.execute(
+                """INSERT INTO warm_instances
+                (instance_name, zone, project_id, machine_type, gpu_count,
+                 image_family, image_project, preemptible, state, state_entered_at,
+                 current_lease_run_id, created_at)
+                VALUES ('goldfish-warm-001', 'us-central1-a', 'proj', 'a3-highgpu-1g', 1,
+                        'debian-12', 'debian-cloud', 0, 'idle_ready', ?, NULL, ?)""",
+                (now, now),
+            )
+
+        with patch("goldfish.state_machine.cancel._cleanup_backend") as mock_cleanup:
+            result = cancel_run(test_db, run_id, "User canceled instead of finalizing")
+
+            assert result["success"] is True
+            # Cleanup must NOT be called — instance is back in the pool
+            mock_cleanup.assert_not_called()
+
+            # Instance must remain idle_ready (not deleted)
+            inst = test_db.get_warm_instance("goldfish-warm-001")
+            assert inst is not None
+            assert inst["state"] == "idle_ready"
+
+    def test_cancel_running_warm_instance_still_does_best_effort_cleanup(self, test_db: Database) -> None:
+        """Even after controller finalization, cancel should still terminate the live VM promptly."""
+        now = datetime.now(UTC).isoformat()
+        run_id = _create_run_in_state(
+            test_db,
+            StageState.RUNNING,
+            backend_type="gce",
+            backend_handle="goldfish-warm-001",
+        )
+
+        with test_db._conn() as conn:
+            conn.execute(
+                """INSERT INTO warm_instances
+                (instance_name, zone, project_id, machine_type, gpu_count,
+                 image_family, image_project, preemptible, state, state_entered_at,
+                 current_lease_run_id, created_at)
+                VALUES ('goldfish-warm-001', 'us-central1-a', 'proj', 'a3-highgpu-1g', 1,
+                        'debian-12', 'debian-cloud', 0, 'busy', ?, ?, ?)""",
+                (now, run_id, now),
+            )
+
+        with patch("goldfish.state_machine.cancel._cleanup_backend") as mock_cleanup:
+            result = cancel_run(test_db, run_id, "User canceled a running warm-pool job")
+
+            assert result["success"] is True
+            mock_cleanup.assert_called_once_with(run_id, "gce", "goldfish-warm-001")
+
+            inst = test_db.get_warm_instance("goldfish-warm-001")
+            assert inst is not None
+            assert inst["state"] == "deleting"
+
+
 class TestCancelNonexistentRun:
     """Tests for canceling non-existent runs."""
 

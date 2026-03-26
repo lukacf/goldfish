@@ -180,7 +180,7 @@ class StageExecutor:
 
         # Initialize cloud abstraction layer via AdapterFactory
         # This provides protocol-based adapters for storage, compute, and signaling
-        self._adapter_factory = AdapterFactory(config)
+        self._adapter_factory = AdapterFactory(config, db=db)
         # Support protocol injection for testing - if provided, use directly
         # Otherwise, lazily initialize via factory
         self._storage: ObjectStorage | None = storage
@@ -224,7 +224,7 @@ class StageExecutor:
         Returns:
             StageExecutor with adapters configured based on backend type
         """
-        factory = AdapterFactory(config)
+        factory = AdapterFactory(config, db=db)
 
         return cls(
             db=db,
@@ -2814,6 +2814,19 @@ echo "Stage completed successfully"
         except Exception:
             warnings.append("CLEANUP failed")
             pass  # Container may already be removed
+
+        # Warm pool lifecycle: route through InstanceController.
+        # Re-read fresh state after state machine transition.
+        try:
+            fresh_run = self.db.get_stage_run(stage_run_id)
+            terminal_state = fresh_run.get("state", "") if fresh_run else ""
+            if terminal_state:
+                from goldfish.state_machine.instance_controller import InstanceController
+
+                controller = InstanceController(self.db)
+                controller.on_run_terminal(stage_run_id, terminal_state, source="executor")
+        except Exception:
+            pass  # Warm pool lifecycle failure should not break finalization
 
     def wait_for_completion(self, stage_run_id: str, poll_interval: int = 5, timeout: int = 3600) -> str:
         """Wait for stage run to complete.

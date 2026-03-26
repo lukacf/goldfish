@@ -273,3 +273,21 @@ class TestGCSProjectWarning:
 
         # Should NOT have logged a warning about missing project
         assert not any("project" in record.message.lower() for record in caplog.records)
+
+
+class TestCreateWarmPoolManager:
+    def test_skips_manager_for_local_backend_even_if_warm_pool_enabled(self) -> None:
+        from goldfish.cloud.factory import create_warm_pool_manager
+        from goldfish.config import GCEConfig, GoldfishConfig, JobsConfig, WarmPoolConfig
+
+        mock_config = MagicMock(spec=GoldfishConfig)
+        mock_config.jobs = MagicMock(spec=JobsConfig)
+        mock_config.jobs.backend = "local"
+        mock_config.gce = MagicMock(spec=GCEConfig)
+        mock_config.gce.warm_pool = WarmPoolConfig(enabled=True, max_instances=2)
+        mock_config.gce.project_id = "test-project"
+        mock_config.gce.project = None
+        mock_config.gcs = None
+
+        mgr = create_warm_pool_manager(MagicMock(), mock_config)
+        assert mgr is None

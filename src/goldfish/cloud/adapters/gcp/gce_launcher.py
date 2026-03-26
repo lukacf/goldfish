@@ -146,6 +146,9 @@ class GCELauncher:
         use_capacity_search: bool = True,
         goldfish_env: dict[str, str] | None = None,
         preemptible: bool | None = None,
+        warm_pool_idle_timeout_seconds: int | None = None,
+        warm_pool_preserve_paths: list[str] | None = None,
+        warm_pool_watchdog_seconds: int | None = None,
         capacity_wait_seconds: int | None = None,
     ) -> GCELaunchResult:
         """Launch GCE instance for stage run.
@@ -165,6 +168,14 @@ class GCELauncher:
             use_capacity_search: Use ResourceLauncher for capacity search
             goldfish_env: Goldfish environment variables (metrics, provenance, etc.)
             preemptible: Force spot (True), on-demand (False), or auto (None)
+            warm_pool_idle_timeout_seconds: If set, VM enters idle loop after
+                first job instead of self-deleting. Value is idle timeout in seconds.
+            warm_pool_preserve_paths: Glob patterns for paths to preserve between
+                warm pool jobs.
+            warm_pool_watchdog_seconds: Total VM lifetime budget for warm-pool
+                instances. This is separate from the per-job runtime cap.
+            capacity_wait_seconds: Override capacity-search timeout for this
+                launch. None uses the launcher default.
 
         Returns:
             GCELaunchResult with instance_name and zone
@@ -188,6 +199,7 @@ class GCELauncher:
             "GOLDFISH_RUN_ID": stage_run_id,
             "GOLDFISH_INPUTS_DIR": "/mnt/inputs",
             "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
+            "GOLDFISH_DOCKER_CONTAINER_NAME": f"goldfish-{stage_run_id}",
         }
 
         # Add Goldfish environment variables (metrics, provenance, etc.)
@@ -355,13 +367,24 @@ class GCELauncher:
             gcsfuse=True,
             pre_run_cmds=pre_run_cmds,
             post_run_cmds=post_run_cmds,
-            # Cost protection - ALWAYS set max_runtime to prevent runaway instances
-            max_runtime_seconds=max_runtime,
+            # Cost protection for warm pool VMs:
+            # - Watchdog = warm_pool_watchdog_seconds (total VM lifetime, e.g. 6h).
+            #   Must NOT be per-stage max_runtime or the VM dies after the first job.
+            # - Per-stage timeout = enforced by the idle loop's JOB_TIMER for reused jobs,
+            #   AND by build_startup_script for the first job (see first_job_timeout below).
+            # For non-warm-pool: single watchdog = per-stage max_runtime (existing behavior).
+            max_runtime_seconds=(warm_pool_watchdog_seconds if warm_pool_watchdog_seconds else max_runtime),
             heartbeat_timeout_seconds=heartbeat_timeout,
             # Real-time log visibility - sync logs to GCS every N seconds
             log_sync_interval=log_sync_interval,
             # GPU flag - profile-based, not runtime nvidia-smi detection
             gpu_count=gpu_count or 0,
+            # Warm pool - VM enters idle loop after first job instead of self-deleting
+            warm_pool_idle_timeout_seconds=warm_pool_idle_timeout_seconds,
+            warm_pool_preserve_paths=warm_pool_preserve_paths,
+            # Per-stage timeout for the first job on a warm pool VM.
+            # The instance-level watchdog uses watchdog_seconds; this kills just Docker.
+            warm_pool_first_job_timeout=max_runtime if warm_pool_idle_timeout_seconds else None,
         )
 
         if use_capacity_search and self.resources:
@@ -865,17 +888,20 @@ class GCELauncher:
         tail_lines: int | None = None,
         since: str | None = None,
         retry_on_empty: bool = False,
+        serial_console_name: str | None = None,
     ) -> str:
         """Retrieve logs from GCE instance.
 
         Tries to fetch from GCS first, falls back to serial console.
 
         Args:
-            instance_name: Instance identifier
-            tail_lines: Number of lines from end to return
-            since: Only return logs after this ISO timestamp
+            instance_name: Identifier for GCS log paths (stage_run_id for warm pool reuse).
+            tail_lines: Number of lines from end to return.
+            since: Only return logs after this ISO timestamp.
             retry_on_empty: If True, retry once after delay if logs are empty
-                           (handles GCS eventual consistency)
+                           (handles GCS eventual consistency).
+            serial_console_name: Real GCE instance name for serial console fallback.
+                If None, falls back to instance_name.
 
         Returns:
             Instance logs as string
@@ -1042,10 +1068,11 @@ class GCELauncher:
         if result is not None:
             return result
 
-        # Fall back to serial console - find correct zone first
-        zone = self._find_instance_zone(instance_name)
+        # Fall back to serial console - use real GCE instance name
+        console_name = self._sanitize_name(serial_console_name) if serial_console_name else instance_name
+        zone = self._find_instance_zone(console_name)
         if not zone:
-            return f"Instance {instance_name} not found in any configured zone"
+            return f"Instance {console_name} not found in any configured zone"
 
         def _filter_serial_noise(lines: list[str]) -> list[str]:
             """Filter out noisy metadata syncer and startup script debug output."""
@@ -1083,7 +1110,7 @@ class GCELauncher:
                 "compute",
                 "instances",
                 "get-serial-port-output",
-                instance_name,
+                console_name,
                 f"--zone={zone}",
                 "--port=1",
             ]

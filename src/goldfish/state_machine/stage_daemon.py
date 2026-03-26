@@ -7,6 +7,7 @@ with a clean event-driven architecture that uses the state machine.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -96,6 +97,10 @@ class StageDaemon:
 
         self._leader = DaemonLeaderElection(db)
 
+        # Consecutive liveness failure counts per instance.
+        # Prevents transient gcloud/API errors from marking live VMs as preempted.
+        self._liveness_fail_counts: dict[str, int] = {}
+
     def poll_active_runs(self) -> None:
         """Poll active runs and emit events.
 
@@ -113,6 +118,9 @@ class StageDaemon:
 
             for run in runs:
                 self._process_run(run)
+
+            # Poll warm instances (replaces reap_idle, recover, retry_deleting)
+            self.poll_warm_instances()
 
         except Exception as e:
             logger.exception("Error polling active runs: %s", e)
@@ -140,6 +148,11 @@ class StageDaemon:
                     run.get("state"),
                 )
                 self._transition(run_id, event, context)
+
+                # After daemon-driven transition, route through InstanceController.
+                # The executor handles its own finalization; daemon-driven transitions
+                # (e.g., after restart) also need to release/delete warm instances.
+                self._try_instance_controller_finalize(run_id)
 
         except Exception as e:
             logger.exception("Error processing run %s: %s", run_id, e)
@@ -225,7 +238,7 @@ class StageDaemon:
             return None
 
         try:
-            backend = AdapterFactory(self._config).create_run_backend()
+            backend = AdapterFactory(self._config, db=self._db).create_run_backend()
         except Exception as e:
             logger.warning("Failed to create run backend for stage daemon (%s): %s", backend_type, e)
             return None
@@ -391,6 +404,290 @@ class StageDaemon:
 
         except (ValueError, TypeError):
             return False
+
+    def _try_instance_controller_finalize(self, run_id: str) -> None:
+        """Route run terminal event through InstanceController.
+
+        Called after daemon-driven transitions. The executor handles its own
+        finalization, but daemon-driven transitions (restart recovery, timeouts)
+        also need to release/delete warm instances.
+        """
+        try:
+            run = self._db.get_stage_run(run_id)
+            if not run:
+                return
+            state = run.get("state", "")
+
+            # Only finalize for terminal or non-owning states
+            terminal_values = {s.value for s in TERMINAL_STATES}
+            non_owning = terminal_values | {"awaiting_user_finalization"}
+            if state not in non_owning:
+                return
+
+            from goldfish.state_machine.instance_controller import InstanceController
+
+            controller = InstanceController(self._db)
+            controller.on_run_terminal(run_id, state, source="daemon")
+        except Exception as e:
+            logger.debug("Instance controller finalize skipped for %s: %s", run_id, e)
+
+    def poll_warm_instances(self) -> None:
+        """Poll warm instances and emit events based on observed facts.
+
+        Replaces recover_after_restart(), reap_idle(), retry_deleting().
+        Observes GCE API, metadata, leases, timestamps → emits events.
+        """
+        if self._config is None:
+            return
+
+        # Get warm pool manager (if available)
+        warm_pool = self._get_warm_pool_manager()
+        if warm_pool is None:
+            return
+
+        from goldfish.state_machine.instance_types import InstanceState
+
+        controller = warm_pool.controller
+        instances = self._db.list_warm_instances()
+
+        for inst in instances:
+            try:
+                name = inst["instance_name"]
+                state_str = inst["state"]
+                zone = inst["zone"]
+
+                try:
+                    state = InstanceState(state_str)
+                except ValueError:
+                    continue
+
+                if state == InstanceState.GONE:
+                    # Clean up gone rows
+                    self._db.delete_warm_instance(name)
+                    self._liveness_fail_counts.pop(name, None)
+                    continue
+
+                if state == InstanceState.IDLE_READY:
+                    # Check idle timeout
+                    if self._instance_timed_out(inst, warm_pool._config.idle_timeout_minutes * 60):
+                        controller.on_delete_requested(name, reason="idle timeout")
+                        continue
+                    # Check liveness — spot VMs can be preempted while idle.
+                    # Only count confirmed dead/not-found, not transient errors.
+                    vm_status = warm_pool.check_instance_status(name, zone)
+                    if vm_status == "not_found":
+                        self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
+                        if self._liveness_fail_counts[name] >= 3:
+                            controller.on_preempted(name)
+                            self._liveness_fail_counts.pop(name, None)
+                    elif vm_status == "dead":
+                        # VM exists but is stopped/terminated — route through deleting
+                        # so the daemon issues gcloud delete. Going straight to gone
+                        # would leave the stopped VM and its disks orphaned in GCE.
+                        self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
+                        if self._liveness_fail_counts[name] >= 3:
+                            controller.on_delete_requested(name, reason="VM stopped/terminated")
+                            self._liveness_fail_counts.pop(name, None)
+                    elif vm_status == "alive":
+                        self._liveness_fail_counts.pop(name, None)
+                    # "error" — don't count, don't reset. Wait for a definitive answer.
+                    continue
+
+                if state == InstanceState.DELETING:
+                    # Issue delete (15s timeout), then verify the VM is gone.
+                    # Success only means gcloud accepted the request, not that
+                    # deletion completed, so we verify via liveness check.
+                    warm_pool.delete_gce_instance(name, zone)
+                    status = warm_pool.check_instance_status(name, zone)
+                    if status == "not_found":
+                        # VM confirmed gone — safe to remove tracking
+                        controller.on_delete_confirmed(name)
+                        self._db.delete_warm_instance(name)
+                        self._liveness_fail_counts.pop(name, None)
+                    # "alive", "dead" (terminated but still exists), or "error" —
+                    # leave in deleting, retry next poll.
+                    continue
+
+                if state == InstanceState.DRAINING:
+                    # Timeout: if draining for too long (metadata update may have
+                    # failed while VM stays alive), delete to avoid permanent leak.
+                    _DRAINING_TIMEOUT_SECONDS = 1800  # 30 minutes
+                    if self._instance_timed_out(inst, _DRAINING_TIMEOUT_SECONDS):
+                        logger.warning(
+                            "Instance %s stuck in draining for >%ds — deleting",
+                            name,
+                            _DRAINING_TIMEOUT_SECONDS,
+                        )
+                        controller.on_delete_requested(name, reason="draining timeout")
+                        continue
+
+                    lease_run_id = inst.get("current_lease_run_id")
+
+                    # If the lease is still active but the owning run is already
+                    # terminal (or missing/purged), release the lease directly.
+                    # We can't use on_run_terminal here because JOB_FINISHED is
+                    # only valid from busy, not draining — the instance already
+                    # transitioned past busy. Just clear the stale lease so
+                    # drain-complete can proceed.
+                    if lease_run_id:
+                        run = self._db.get_stage_run(lease_run_id)
+                        run_state = run.get("state", "") if run else None
+                        terminal_values = {s.value for s in TERMINAL_STATES}
+                        non_owning = terminal_values | {"awaiting_user_finalization"}
+                        if run is None:
+                            run_state = "terminated"
+                        if run_state in non_owning:
+                            logger.info(
+                                "Releasing stale lease on draining instance %s (run %s in %s)",
+                                name,
+                                lease_run_id,
+                                run_state,
+                            )
+                            controller._force_release_lease(name)
+                            lease_run_id = None
+
+                    # Check if VM reports idle_ready metadata AND no active lease
+                    if not lease_run_id:
+                        metadata = warm_pool.get_instance_metadata(name, zone)
+                        if metadata.get("goldfish_instance_state") == "idle_ready":
+                            controller.on_drain_complete(name)
+                            continue
+
+                    # Check if VM is dead (only count confirmed dead/not-found)
+                    vm_status = warm_pool.check_instance_status(name, zone)
+                    if vm_status == "not_found":
+                        self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
+                        if self._liveness_fail_counts[name] >= 3:
+                            controller.on_preempted(name)
+                            self._liveness_fail_counts.pop(name, None)
+                    elif vm_status == "dead":
+                        self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
+                        if self._liveness_fail_counts[name] >= 3:
+                            controller.on_delete_requested(name, reason="VM stopped/terminated")
+                            self._liveness_fail_counts.pop(name, None)
+                    elif vm_status == "alive":
+                        self._liveness_fail_counts.pop(name, None)
+                    continue
+
+                if state == InstanceState.LAUNCHING:
+                    # Don't check liveness on launching instances — the VM is still
+                    # booting and the executor handles launch failures via on_launch_failed().
+                    # But DO enforce a timeout: if the row has been in launching for
+                    # too long (e.g. executor died before calling on_launch_failed),
+                    # transition to deleting to prevent permanent capacity leak.
+                    _LAUNCHING_TIMEOUT_SECONDS = int(os.getenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "1200"))
+                    if self._instance_timed_out(inst, _LAUNCHING_TIMEOUT_SECONDS):
+                        logger.warning(
+                            "Instance %s stuck in launching for >%ds — transitioning to deleting",
+                            name,
+                            _LAUNCHING_TIMEOUT_SECONDS,
+                        )
+                        controller.on_delete_requested(name, reason="launching timeout")
+                    continue
+
+                if state == InstanceState.BUSY:
+                    # If the owning run is already terminal (or missing/purged)
+                    # but the executor crashed before calling on_run_terminal, finalize here.
+                    lease_run_id = inst.get("current_lease_run_id")
+                    if lease_run_id:
+                        run = self._db.get_stage_run(lease_run_id)
+                        run_state = run.get("state", "") if run else None
+                        terminal_values = {s.value for s in TERMINAL_STATES}
+                        non_owning = terminal_values | {"awaiting_user_finalization"}
+                        # Missing run → treat as "terminated" (not "completed") so
+                        # the controller emits DELETE_REQUESTED instead of JOB_FINISHED
+                        if run is None:
+                            run_state = "terminated"
+                        if run_state in non_owning:
+                            logger.info(
+                                "Finalizing stale busy instance %s (run %s in %s)",
+                                name,
+                                lease_run_id,
+                                run_state,
+                            )
+                            controller.on_run_terminal(
+                                lease_run_id,
+                                run_state,
+                                source="daemon",
+                            )
+                            continue
+
+                    # Assignment-start deadline: if busy >5min and VM metadata
+                    # positively confirms idle_ready, the VM never picked up the job.
+                    # Only act on positive evidence — empty metadata (transient gcloud
+                    # failure) must NOT trigger deletion because the VM may be alive
+                    # and running a long job. The liveness check below handles dead VMs.
+                    _ASSIGNMENT_START_DEADLINE = 300  # 5 minutes
+                    if self._instance_timed_out(inst, _ASSIGNMENT_START_DEADLINE):
+                        metadata = warm_pool.get_instance_metadata(name, zone)
+                        vm_state = metadata.get("goldfish_instance_state")
+                        if vm_state == "idle_ready":
+                            logger.warning(
+                                "Instance %s busy >%ds but VM still idle_ready — job never picked up, deleting",
+                                name,
+                                _ASSIGNMENT_START_DEADLINE,
+                            )
+                            controller.on_delete_requested(name, reason="assignment pickup timeout")
+                            continue
+                        if vm_state == "busy":
+                            # VM confirmed working — reset any liveness failure count
+                            self._liveness_fail_counts.pop(name, None)
+                        # Empty metadata or unknown state: don't act — fall through to
+                        # the liveness check which uses check_instance_status (more reliable).
+
+                    # Check if VM is dead (only count confirmed dead/not-found)
+                    vm_status = warm_pool.check_instance_status(name, zone)
+                    if vm_status == "not_found":
+                        self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
+                        if self._liveness_fail_counts[name] >= 3:
+                            controller.on_preempted(name)
+                            self._liveness_fail_counts.pop(name, None)
+                    elif vm_status == "dead":
+                        self._liveness_fail_counts[name] = self._liveness_fail_counts.get(name, 0) + 1
+                        if self._liveness_fail_counts[name] >= 3:
+                            controller.on_delete_requested(name, reason="VM stopped/terminated")
+                            self._liveness_fail_counts.pop(name, None)
+                    elif vm_status == "alive":
+                        self._liveness_fail_counts.pop(name, None)
+                    continue
+
+            except Exception as e:
+                logger.debug("poll_warm_instances error for %s: %s", inst.get("instance_name", "?"), e)
+
+    def _instance_timed_out(self, inst: dict[str, Any] | Any, timeout_seconds: float) -> bool:
+        """Check if an instance has been in its current state longer than timeout_seconds."""
+        entered_at_str = inst.get("state_entered_at")
+        if not entered_at_str:
+            return False
+        try:
+            from datetime import UTC, datetime
+
+            entered_at = datetime.fromisoformat(entered_at_str)
+            if entered_at.tzinfo is None:
+                entered_at = entered_at.replace(tzinfo=UTC)
+            elapsed = (datetime.now(UTC) - entered_at).total_seconds()
+            return elapsed > timeout_seconds
+        except (ValueError, TypeError):
+            return False
+
+    def _get_warm_pool_manager(self) -> Any:
+        """Get the WarmPoolManager if available."""
+        if self._config is None:
+            return None
+        gce = getattr(self._config, "gce", None)
+        if gce is None:
+            return None
+        warm_pool_cfg = getattr(gce, "warm_pool", None)
+        if warm_pool_cfg is None or not warm_pool_cfg.enabled:
+            return None
+
+        try:
+            from goldfish.cloud.factory import create_warm_pool_manager
+
+            return create_warm_pool_manager(self._db, self._config)
+        except Exception as e:
+            logger.warning("Failed to create warm pool manager: %s", e)
+            return None
 
     def get_active_runs(self, limit: int = DEFAULT_ACTIVE_RUNS_LIMIT) -> list[dict[str, Any]]:
         """Get all runs in active states.

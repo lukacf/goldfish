@@ -1,7 +1,9 @@
 """Goldfish MCP tools - Infrastructure Tools
 
-Docker base image management for project-level customization.
+Docker base image management and warm pool management for project-level customization.
 """
+
+from __future__ import annotations
 
 import logging
 
@@ -253,4 +255,147 @@ def get_build_status(build_id: str) -> dict:
         return {"success": False, "error": e.message, "details": e.details}
     except Exception as e:
         logger.exception(f"Unexpected error in get_build_status: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# =============================================================================
+# Warm Pool Tools
+# =============================================================================
+
+
+def _get_warm_pool_manager():
+    """Get WarmPoolManager from context, or None if not enabled."""
+    if not has_context():
+        return None
+    ctx = get_context()
+    from goldfish.cloud.factory import create_warm_pool_manager
+
+    return create_warm_pool_manager(ctx.db, ctx.config)
+
+
+@mcp.tool()
+def warm_pool_status() -> dict:
+    """Show warm pool status: config, instances, and summary counts.
+
+    Returns:
+        Dict with warm pool configuration, instance list, and counts by status.
+        If warm pool is not enabled, returns {enabled: False}.
+    """
+    try:
+        mgr = _get_warm_pool_manager()
+        if not mgr:
+            return {"enabled": False, "message": "Warm pool is not enabled"}
+        result: dict = mgr.pool_status()
+        return result
+    except Exception as e:
+        logger.exception(f"warm_pool_status failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def warm_pool_cleanup() -> dict:
+    """Emergency cleanup: delete warm pool instances.
+
+    Deleting instances are retried immediately.
+    Leased instances are canceled first when possible; stale leases are force-released.
+    Unleased instances are transitioned to deleting and removed once GCE confirms deletion.
+
+    Returns:
+        Dict with count of deleted instances and any skipped instances.
+    """
+    try:
+        mgr = _get_warm_pool_manager()
+        if not mgr:
+            return {"enabled": False, "message": "Warm pool is not enabled"}
+
+        ctx = get_context()
+        instances = mgr.list_instances()
+        deleted = 0  # Actually removed from GCE
+        canceled = 0  # Run canceled, deletion pending via daemon
+        skipped: list[str] = []
+        for inst in instances:
+            name = inst["instance_name"]
+            state = inst["state"]
+            if state in ("gone",):
+                continue
+            if state == "deleting":
+                # Retry gcloud delete, then verify VM is actually gone
+                mgr.delete_gce_instance(name, inst["zone"])
+                if mgr.check_instance_status(name, inst["zone"]) == "not_found":
+                    mgr.controller.on_delete_confirmed(name)
+                    mgr.delete_tracking_row(name)
+                    deleted += 1
+                # else: still exists, leave in deleting for daemon retry
+                continue
+
+            # For instances with active leases, cancel the owning run first.
+            # This synchronizes the run state machine before releasing the lease,
+            # preventing orphaned runs that think they still have a VM.
+            lease_run_id = inst.get("current_lease_run_id")
+            if lease_run_id:
+                from goldfish.state_machine.cancel import cancel_run
+
+                run_id = lease_run_id
+                cancel_result = cancel_run(
+                    ctx.db,
+                    run_id,
+                    reason="Emergency warm pool cleanup — instance being deleted",
+                )
+                if cancel_result.get("success"):
+                    # cancel_run already calls on_run_terminal via cancel.py,
+                    # which releases the lease and emits DELETE_REQUESTED for canceled runs.
+                    # Actual GCE deletion happens later via daemon polling.
+                    canceled += 1
+                else:
+                    # Cancel failed — run is missing, already terminal, or uncancelable.
+                    # This is the exact scenario operators reach for this tool: stale
+                    # leases from purged/crashed runs. Force-release the lease and
+                    # delete the instance directly instead of skipping it.
+                    logger.warning(
+                        "warm_pool_cleanup: cancel_run failed for %s (run=%s): %s — force-releasing lease",
+                        name,
+                        run_id,
+                        cancel_result.get("reason"),
+                    )
+                    mgr.force_release_lease(name)
+                    result = mgr.controller.on_delete_requested(
+                        name,
+                        reason=f"emergency cleanup, cancel failed: {cancel_result.get('reason')}",
+                    )
+                    if result.success:
+                        mgr.delete_gce_instance(name, inst["zone"])
+                        if mgr.check_instance_status(name, inst["zone"]) == "not_found":
+                            mgr.controller.on_delete_confirmed(name)
+                            mgr.delete_tracking_row(name)
+                            deleted += 1
+                        else:
+                            canceled += 1
+            else:
+                # No active lease — transition to deleting AND attempt GCE deletion now
+                result = mgr.controller.on_delete_requested(
+                    name,
+                    reason="emergency cleanup",
+                )
+                if result.success:
+                    # Attempt GCE deletion, then verify VM is gone before removing row
+                    mgr.delete_gce_instance(name, inst["zone"])
+                    if mgr.check_instance_status(name, inst["zone"]) == "not_found":
+                        mgr.controller.on_delete_confirmed(name)
+                        mgr.delete_tracking_row(name)
+                        deleted += 1
+                    else:
+                        # Delete requested but VM still exists — daemon will retry
+                        canceled += 1
+
+        remaining = mgr.pool_status()
+        return {
+            "success": True,
+            "deleted": deleted,
+            "deletion_pending": canceled,
+            "skipped": skipped,
+            "remaining": remaining["total"],
+            "remaining_instances": remaining.get("instances", []),
+        }
+    except Exception as e:
+        logger.exception(f"warm_pool_cleanup failed: {e}")
         return {"success": False, "error": str(e)}

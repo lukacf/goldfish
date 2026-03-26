@@ -85,13 +85,65 @@ def cancel_run(
     # Format response
     response = format_transition_result(result, run_id, previous_state)
 
-    # Best-effort backend cleanup (only if transition succeeded)
-    if result.success and backend_type and backend_handle:
+    # Route through InstanceController for warm pool lifecycle.
+    if result.success:
+        try:
+            from goldfish.state_machine.instance_controller import InstanceController
+
+            controller = InstanceController(db)
+            ctrl_result = controller.on_run_terminal(run_id, "canceled", source="controller")
+            if ctrl_result is not None and ctrl_result.success:
+                # Controller successfully transitioned the instance → DELETE_REQUESTED.
+                # We still issue direct backend cleanup below for immediate termination.
+                pass
+        except Exception as e:
+            logger.debug("Instance controller on_run_terminal skipped for %s: %s", run_id, e)
+
+    # Best-effort backend cleanup.
+    # Skip cleanup if the backend_handle is a warm-pool instance owned by a
+    # different run. The VM may have been recycled — deleting it would kill
+    # that unrelated work. But if the lease is NULL (instance still launching,
+    # before on_fresh_launch sets the lease) or matches this run, proceed.
+    skip_cleanup = False
+    if result.success and backend_handle:
+        inst = db.get_warm_instance(backend_handle)
+        if inst is not None:
+            lease = inst.get("current_lease_run_id")
+            if lease is not None and lease != run_id:
+                # Instance owned by a different run — skip cleanup
+                skip_cleanup = True
+            elif lease is None:
+                # NULL lease has three meanings:
+                # 1. Instance in "launching" — pre on_fresh_launch, belongs to this run
+                # 2. Instance in "busy"/"deleting" — controller already released the
+                #    lease for THIS canceled run, but best-effort backend cleanup
+                #    should still terminate the VM immediately
+                # 3. Instance in "idle_ready"/"draining" — lease already released by
+                #    executor finalization, instance returned to pool for reuse
+                # Only case 3 should skip deletion. Cases 1 and 2 still belong to
+                # this run's cancellation flow.
+                inst_state = inst.get("state")
+                if inst_state == "launching":
+                    try:
+                        from goldfish.state_machine.instance_controller import InstanceController
+
+                        ctrl = InstanceController(db)
+                        ctrl.on_delete_requested(
+                            backend_handle,
+                            reason="run canceled before lease acquired",
+                            source="controller",
+                        )
+                    except Exception as e:
+                        logger.debug("Failed to transition launching instance %s: %s", backend_handle, e)
+                elif inst_state in {"idle_ready", "draining"}:
+                    # Instance already released — don't delete it
+                    skip_cleanup = True
+
+    if result.success and backend_type and backend_handle and not skip_cleanup:
         try:
             _cleanup_backend(run_id, backend_type, backend_handle)
         except Exception as e:
             logger.warning("Failed to cleanup backend for %s (%s:%s): %s", run_id, backend_type, backend_handle, e)
-            # Sanitized error - don't expose raw exception details to API response
             response["cleanup_error"] = "Backend cleanup failed"
 
     return response
