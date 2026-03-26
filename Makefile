@@ -52,9 +52,11 @@ lint-imports:
 
 audit:
 	@echo "$(GREEN)Running dependency security audit...$(NC)"
-	# CVE-2026-4539 is a currently accepted false positive for our editable local
-	# development install path; keep audit strict for everything else.
-	pip-audit --strict --desc --skip-editable --ignore-vuln CVE-2026-4539
+	# Audit pinned installed deps while excluding the editable local goldfish package
+	# itself, which pip-audit still mishandles in some editable-install environments.
+	# CVE-2026-4539 is a currently accepted false positive; keep audit strict otherwise.
+	uv pip freeze --system | grep -Evi "^(goldfish|goldfish-ml)[ =@]|^-e .*goldfish([^[:alnum:]_-]|$$)" > /tmp/audit-requirements.txt
+	pip-audit --strict --desc -r /tmp/audit-requirements.txt --no-deps --ignore-vuln CVE-2026-4539
 
 test:
 	$(PYTEST) tests/unit tests/contracts -q --tb=short -m "not slow"

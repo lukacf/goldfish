@@ -4,6 +4,36 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-26
+
+### Added
+- **State-machine-driven warm pool for GCE** — Goldfish now supports reusable GCE
+  workers through an explicit instance lifecycle (`launching`, `busy`, `draining`,
+  `idle_ready`, `deleting`, `gone`) and atomic lease tracking instead of the older
+  ad hoc status updates.
+- **Warm-pool daemon reconciliation and operator tooling** — added background
+  reconciliation for preemption, stale launches, idle timeout, and deletion retry, plus
+  MCP tools for warm-pool status and emergency cleanup.
+- **Comprehensive warm-pool regression coverage** — added end-to-end tests for claim
+  dispatch, startup loop behavior, cancellation, daemon reconciliation, cleanup
+  ownership, launch failure, and full lifecycle reuse.
+
+### Changed
+- **Warm-job pickup protocol simplified** — reusable workers now pick jobs up from GCS
+  without the old ACK handshake, eliminating the `claimed` handshake state and the class
+  of double-dispatch / late-ACK races it caused.
+- **GCE launch tuning and capacity search** — warm-pool launches integrate with the
+  newer capacity-search controls and preserve profile-specific placement and instance
+  matching semantics.
+
+### Fixed
+- **Warm-pool lifecycle hardening before release** — fixed multiple edge cases across
+  cancellation, cleanup, stale metadata, reboot behavior, exit-code fallback, registry
+  auth refresh, timing-log isolation, and CI audit alignment so reusable workers behave
+  consistently under real GCE failure modes.
+- **MCP tool registration gaps** — ensured newly added warm-pool infra tools are
+  registered in `server.py`, with regression coverage preventing missing-tool drift.
+
 ## [0.3.16] - 2026-03-23
 
 ### Fixed

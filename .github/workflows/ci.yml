@@ -78,7 +78,7 @@ jobs:
           # (not on PyPI yet). pip-audit -r mode only audits the file.
           # CVE-2026-4539 is a currently accepted false positive for our editable
           # local development dependency set; keep CI aligned with `make audit`.
-          uv pip freeze --system | grep -vi "^goldfish[ =@]" > /tmp/audit-requirements.txt
+          uv pip freeze --system | grep -Evi "^(goldfish|goldfish-ml)[ =@]|^-e .*goldfish([^[:alnum:]_-]|$)" > /tmp/audit-requirements.txt
           pip-audit --strict --desc -r /tmp/audit-requirements.txt --no-deps --ignore-vuln CVE-2026-4539
 
   unit-tests:
