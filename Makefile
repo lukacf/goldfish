@@ -52,6 +52,8 @@ lint-imports:
 
 audit:
 	@echo "$(GREEN)Running dependency security audit...$(NC)"
+	# CVE-2026-4539 is a currently accepted false positive for our editable local
+	# development install path; keep audit strict for everything else.
 	pip-audit --strict --desc --skip-editable --ignore-vuln CVE-2026-4539
 
 test:

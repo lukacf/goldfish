@@ -296,9 +296,9 @@ def warm_pool_status() -> dict:
 def warm_pool_cleanup() -> dict:
     """Emergency cleanup: delete warm pool instances.
 
-    Idle and deleting instances are deleted immediately.
-    Busy instances with active runs are skipped (requires USER_CANCEL).
-    Busy instances with no active run are deleted.
+    Deleting instances are retried immediately.
+    Leased instances are canceled first when possible; stale leases are force-released.
+    Unleased instances are transitioned to deleting and removed once GCE confirms deletion.
 
     Returns:
         Dict with count of deleted instances and any skipped instances.
@@ -308,7 +308,8 @@ def warm_pool_cleanup() -> dict:
         if not mgr:
             return {"enabled": False, "message": "Warm pool is not enabled"}
 
-        instances = mgr._db.list_warm_instances()
+        ctx = get_context()
+        instances = mgr.list_instances()
         deleted = 0  # Actually removed from GCE
         canceled = 0  # Run canceled, deletion pending via daemon
         skipped: list[str] = []
@@ -322,7 +323,7 @@ def warm_pool_cleanup() -> dict:
                 mgr.delete_gce_instance(name, inst["zone"])
                 if mgr.check_instance_status(name, inst["zone"]) == "not_found":
                     mgr.controller.on_delete_confirmed(name)
-                    mgr._db.delete_warm_instance(name)
+                    mgr.delete_tracking_row(name)
                     deleted += 1
                 # else: still exists, leave in deleting for daemon retry
                 continue
@@ -336,7 +337,7 @@ def warm_pool_cleanup() -> dict:
 
                 run_id = lease_run_id
                 cancel_result = cancel_run(
-                    mgr._db,
+                    ctx.db,
                     run_id,
                     reason="Emergency warm pool cleanup — instance being deleted",
                 )
@@ -356,7 +357,7 @@ def warm_pool_cleanup() -> dict:
                         run_id,
                         cancel_result.get("reason"),
                     )
-                    mgr.controller._force_release_lease(name)
+                    mgr.force_release_lease(name)
                     result = mgr.controller.on_delete_requested(
                         name,
                         reason=f"emergency cleanup, cancel failed: {cancel_result.get('reason')}",
@@ -365,7 +366,7 @@ def warm_pool_cleanup() -> dict:
                         mgr.delete_gce_instance(name, inst["zone"])
                         if mgr.check_instance_status(name, inst["zone"]) == "not_found":
                             mgr.controller.on_delete_confirmed(name)
-                            mgr._db.delete_warm_instance(name)
+                            mgr.delete_tracking_row(name)
                             deleted += 1
                         else:
                             canceled += 1
@@ -380,7 +381,7 @@ def warm_pool_cleanup() -> dict:
                     mgr.delete_gce_instance(name, inst["zone"])
                     if mgr.check_instance_status(name, inst["zone"]) == "not_found":
                         mgr.controller.on_delete_confirmed(name)
-                        mgr._db.delete_warm_instance(name)
+                        mgr.delete_tracking_row(name)
                         deleted += 1
                     else:
                         # Delete requested but VM still exists — daemon will retry

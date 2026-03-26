@@ -119,6 +119,8 @@ class TestWarmPoolClaimJobSpec:
         assert job_spec["env"]["GOLDFISH_RUN_ID"] == "stage-run-001"
         assert job_spec["env"]["GOLDFISH_INPUTS_DIR"] == "/mnt/inputs"
         assert job_spec["env"]["GOLDFISH_OUTPUTS_DIR"] == "/mnt/outputs"
+        assert job_spec["stage_run_id"] == "stage-run-001"
+        assert job_spec["container_name"] == "goldfish-stage-run-001"
 
     def test_claim_preserves_executor_stage_config(self):
         """Warm-pool dispatch must preserve the full GOLDFISH_STAGE_CONFIG from the executor."""

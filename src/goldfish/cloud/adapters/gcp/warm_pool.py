@@ -48,6 +48,18 @@ class WarmPoolManager:
         """Access the instance controller for external callers."""
         return self._controller
 
+    def get_idle_timeout_seconds(self) -> int:
+        """Return the warm-pool idle timeout in seconds."""
+        return self._config.idle_timeout_minutes * 60
+
+    def get_preserve_paths(self) -> list[str] | None:
+        """Return configured preserve_paths for warm-pool cleanup."""
+        return self._config.preserve_paths or None
+
+    def get_watchdog_seconds(self) -> int | None:
+        """Return the warm-pool watchdog budget, if configured."""
+        return self._config.watchdog_seconds
+
     def is_enabled_for(self, profile_name: str) -> bool:
         """Check if warm pool is enabled for this profile.
 
@@ -186,6 +198,35 @@ class WarmPoolManager:
         """Get a warm instance by name."""
         return self._db.get_warm_instance(instance_name)
 
+    def list_instances(self) -> list[WarmInstanceRow]:
+        """List all tracked warm instances."""
+        return self._db.list_warm_instances()
+
+    def update_instance_zone(self, instance_name: str, zone: str) -> None:
+        """Update the stored zone for a warm instance."""
+        with self._db._conn() as conn:
+            conn.execute(
+                "UPDATE warm_instances SET zone = ? WHERE instance_name = ?",
+                (zone, instance_name),
+            )
+
+    def delete_tracking_row(self, instance_name: str) -> None:
+        """Remove a warm-instance row from the database."""
+        self._db.delete_warm_instance(instance_name)
+
+    def force_release_lease(self, instance_name: str) -> None:
+        """Force-release an instance lease for emergency cleanup."""
+        self._controller._force_release_lease(instance_name)
+
+    def disable_idle_loop(self, instance_name: str, zone: str) -> None:
+        """Tell a freshly launched VM to self-delete after its first job."""
+        self._set_instance_metadata(
+            instance_name,
+            zone,
+            "goldfish_warm_pool_disabled",
+            "true",
+        )
+
     def delete_instance(self, instance_name: str) -> None:
         """Delete VM via gcloud, routing through the instance controller.
 
@@ -256,10 +297,11 @@ class WarmPoolManager:
         return status == "alive"
 
     def check_instance_status(self, instance_name: str, zone: str) -> str:
-        """Check GCE instance status with tri-state return.
+        """Check GCE instance status with four-state return.
 
         Returns:
             "alive" — VM exists and is RUNNING/STAGING/PROVISIONING
+            "dead" — VM exists but is STOPPED/TERMINATED/SUSPENDED
             "not_found" — VM confirmed not to exist (404 / "not found" in stderr)
             "error" — transient/unknown failure (auth, network, timeout, etc.)
         """

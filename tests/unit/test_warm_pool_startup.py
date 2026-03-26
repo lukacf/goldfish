@@ -51,6 +51,7 @@ class TestIdleLoopSection:
         assert "EXIT_CODE_FILE=" in script
         assert "LOCAL_STDOUT=" in script
         assert "LOCAL_STDERR=" in script
+        assert "abort_warm_job()" in script
 
     def test_idle_loop_section_preserve_paths(self) -> None:
         """With preserve_paths, cleanup should skip those paths."""
@@ -84,37 +85,24 @@ class TestIdleLoopSection:
         script = idle_loop_section(idle_timeout_seconds=1800)
         # busy metadata must be set before spec download
         busy_idx = script.index("goldfish_instance_state=busy")
-        spec_idx = script.index("gsutil cp")
+        spec_idx = script.index('gsutil cp "$SPEC_PATH" /tmp/job_spec.json')
         assert busy_idx < spec_idx, "busy metadata must be set before spec download"
         assert "goldfish_active_run_id=$REQ_ID" in script
         assert "goldfish_exit_run_id=" in script
         assert "goldfish=" in script
 
     def test_idle_loop_section_spec_failure_resets_and_writes_exit_code(self) -> None:
-        """On spec fetch/validation failure: write exit code, commit REQ_ID, reset metadata.
-
-        Exit code lets get_status() detect failure immediately.
-        Committing LAST_JOB_REQ_ID prevents re-consuming the stale signal.
-        Metadata reset lets the daemon clean up the instance.
-        """
+        """Spec fetch/validation failures should funnel through the shared abort helper."""
         script = idle_loop_section(idle_timeout_seconds=1800)
 
-        failure_sections = script.split("continue")
-        # Early sections (before Docker run) are the spec error paths.
-        idle_ready_resets = 0
-        exit_code_writes = 0
-        req_id_commits = 0
-        for section in failure_sections[:4]:
-            if "goldfish_instance_state=idle_ready" in section:
-                idle_ready_resets += 1
-            if "EARLY_EXIT_CODE_PATH" in section and "gsutil cp -" in section:
-                exit_code_writes += 1
-            if 'LAST_JOB_REQ_ID="$REQ_ID"' in section:
-                req_id_commits += 1
-        # At least 3 failure paths: download failure, no spec_path, validation failure
-        assert idle_ready_resets >= 3, f"Expected at least 3 idle_ready resets, found {idle_ready_resets}"
-        assert exit_code_writes >= 3, f"Expected at least 3 exit code writes, found {exit_code_writes}"
-        assert req_id_commits >= 3, f"Expected at least 3 REQ_ID commits, found {req_id_commits}"
+        # The helper itself performs the reset and exit-code write.
+        assert "abort_warm_job()" in script
+        assert 'LAST_JOB_REQ_ID="$req_id"' in script
+        assert 'echo "1" | gsutil cp - "$exit_code_path"' in script
+        assert "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$req_id" in script
+
+        # All early spec failures should delegate to the helper instead of duplicating logic.
+        assert script.count('abort_warm_job "$REQ_ID" "$EARLY_EXIT_CODE_PATH"') >= 4
         assert "goldfish_exit_run_id=$REQ_ID" in script
         assert "goldfish_active_run_id=" in script
         assert "goldfish=" in script
@@ -133,8 +121,15 @@ class TestIdleLoopSection:
         """Verify Docker run command is present for new jobs."""
         script = idle_loop_section(idle_timeout_seconds=1800)
         assert "docker run" in script
+        assert "--name" in script
         assert "--rm" in script
         assert "--ipc=host" in script
+
+    def test_idle_loop_section_job_timeout_targets_current_container_only(self) -> None:
+        """Warm-job timeout should kill only the current container, not every Docker container."""
+        script = idle_loop_section(idle_timeout_seconds=1800)
+        assert 'docker kill "$NEW_CONTAINER_NAME"' in script
+        assert "docker kill $(docker ps -q)" not in script
 
     def test_idle_loop_section_exit_trap_restored_for_job(self) -> None:
         """Verify EXIT trap is restored during job execution."""
@@ -265,3 +260,15 @@ class TestBuildStartupScriptWarmPool:
         script = build_startup_script(**kwargs)
 
         assert "/tmp/triton*" in script
+
+    def test_build_startup_script_first_job_timeout_targets_current_container_only(self) -> None:
+        """First-job warm-pool timeout should kill only the stage container."""
+        kwargs = self._build_default_kwargs()
+        kwargs["warm_pool_idle_timeout_seconds"] = 1800
+        kwargs["warm_pool_first_job_timeout"] = 600
+
+        script = build_startup_script(**kwargs)
+
+        assert 'docker kill "$GOLDFISH_DOCKER_CONTAINER_NAME"' in script
+        assert "docker run --rm $DOCKER_GPU_ARGS \\" in script
+        assert '--name "$GOLDFISH_DOCKER_CONTAINER_NAME"' in script

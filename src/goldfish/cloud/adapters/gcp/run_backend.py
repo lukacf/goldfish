@@ -10,7 +10,7 @@ import json
 import logging
 import shlex
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from goldfish.cloud.contracts import (
     BackendCapabilities,
@@ -144,6 +144,16 @@ class GCERunBackend:
 
         return resources
 
+    def _resolve_profile(self, profile_name: str) -> dict[str, Any]:
+        """Resolve a compute profile for warm-pool and fresh-launch decisions."""
+        from goldfish.cloud.adapters.gcp.profiles import ProfileResolver
+
+        resolver = ProfileResolver(
+            profile_overrides=self._profile_overrides,
+            global_zones=self._zones,
+        )
+        return cast(dict[str, Any], resolver.resolve(profile_name))
+
     @property
     def capabilities(self) -> BackendCapabilities:
         """Return GCE backend capabilities.
@@ -201,10 +211,14 @@ class GCERunBackend:
                     field=input_name,
                 )
 
+        resolved_profile: dict[str, Any] | None = None
+        if self._warm_pool and self._warm_pool.is_enabled_for(spec.profile):
+            resolved_profile = self._resolve_profile(spec.profile)
+
         # Try warm pool first — reuse an idle VM matching hardware spec
         if self._warm_pool and self._warm_pool.is_enabled_for(spec.profile):
             try:
-                warm_handle = self._try_warm_pool_claim(spec)
+                warm_handle = self._try_warm_pool_claim(spec, resolved_profile)
             except Exception as e:
                 # Dispatch failure where the VM might still be alive (timeout,
                 # ambiguous gcloud error). The instance is transitioning to deleting
@@ -286,13 +300,9 @@ class GCERunBackend:
             warm_pool_watchdog_seconds: int | None = None
             if self._warm_pool and self._warm_pool.is_enabled_for(spec.profile):
                 from goldfish.cloud.adapters.gcp.gce_launcher import GCELauncher
-                from goldfish.cloud.adapters.gcp.profiles import ProfileResolver
 
-                resolver = ProfileResolver(
-                    profile_overrides=self._profile_overrides,
-                    global_zones=self._zones,
-                )
-                profile = resolver.resolve(spec.profile)
+                assert resolved_profile is not None
+                profile = resolved_profile
                 image_family = profile.get("boot_disk", {}).get("image_family", "debian-12")
                 image_project = profile.get("boot_disk", {}).get("image_project", "debian-cloud")
 
@@ -312,9 +322,9 @@ class GCERunBackend:
                     preemptible=spec.spot,
                 )
                 if warm_pool_pre_registered:
-                    warm_pool_idle_timeout_seconds = self._warm_pool._config.idle_timeout_minutes * 60
-                    warm_pool_preserve_paths = self._warm_pool._config.preserve_paths or None
-                    warm_pool_watchdog_seconds = self._warm_pool._config.watchdog_seconds
+                    warm_pool_idle_timeout_seconds = self._warm_pool.get_idle_timeout_seconds()
+                    warm_pool_preserve_paths = self._warm_pool.get_preserve_paths()
+                    warm_pool_watchdog_seconds = self._warm_pool.get_watchdog_seconds()
                 else:
                     logger.info("Warm pool full — fresh launch will self-delete normally")
 
@@ -346,17 +356,13 @@ class GCERunBackend:
             # The pre-registered name matches the launcher's naming (both use _sanitize_name).
             # Only update zone if the launcher chose a different zone (capacity search).
             if self._warm_pool and warm_pool_pre_registered:
-                actual_name = result.instance_name  # type: ignore[attr-defined]
-                actual_zone = result.zone  # type: ignore[attr-defined]
+                actual_name = result.instance_name
+                actual_zone = result.zone
 
                 # Update zone if launcher picked a different one during capacity search
-                inst = self._warm_pool._db.get_warm_instance(actual_name)
+                inst = self._warm_pool.get_instance(actual_name)
                 if inst and inst["zone"] != actual_zone:
-                    with self._warm_pool._db._conn() as conn:
-                        conn.execute(
-                            "UPDATE warm_instances SET zone = ? WHERE instance_name = ?",
-                            (actual_zone, actual_name),
-                        )
+                    self._warm_pool.update_instance_zone(actual_name, actual_zone)
 
                 ctrl_result = self._warm_pool.controller.on_fresh_launch(
                     actual_name,
@@ -374,12 +380,7 @@ class GCERunBackend:
                         ctrl_result.details,
                     )
                     try:
-                        self._warm_pool._set_instance_metadata(
-                            actual_name,
-                            actual_zone,
-                            "goldfish_warm_pool_disabled",
-                            "true",
-                        )
+                        self._warm_pool.disable_idle_loop(actual_name, actual_zone)
                     except Exception:
                         # Metadata set failed — do NOT delete the row. Keeping the row
                         # ensures the daemon can still track and eventually delete this VM.
@@ -390,7 +391,7 @@ class GCERunBackend:
                         # Leave the row so daemon can reap it via launching timeout
                         return handle
                     # Metadata set succeeded — safe to remove the row now
-                    self._warm_pool._db.delete_warm_instance(actual_name)
+                    self._warm_pool.delete_tracking_row(actual_name)
 
             return handle
 
@@ -407,11 +408,7 @@ class GCERunBackend:
                     try:
                         found_zone = self._launcher._find_instance_zone(expected_instance_name)
                         if found_zone:
-                            with self._warm_pool._db._conn() as conn:
-                                conn.execute(
-                                    "UPDATE warm_instances SET zone = ? WHERE instance_name = ?",
-                                    (found_zone, expected_instance_name),
-                                )
+                            self._warm_pool.update_instance_zone(expected_instance_name, found_zone)
                     except Exception:
                         pass  # Best-effort zone discovery
 
@@ -439,17 +436,14 @@ class GCERunBackend:
                 cause="gce_error",
             ) from e
 
-    def _try_warm_pool_claim(self, spec: RunSpec) -> RunHandle | None:
+    def _try_warm_pool_claim(
+        self,
+        spec: RunSpec,
+        resolved_profile: dict[str, Any] | None = None,
+    ) -> RunHandle | None:
         """Try to claim a warm pool instance for the given spec."""
         assert self._warm_pool is not None
-
-        from goldfish.cloud.adapters.gcp.profiles import ProfileResolver
-
-        resolver = ProfileResolver(
-            profile_overrides=self._profile_overrides,
-            global_zones=self._zones,
-        )
-        profile = resolver.resolve(spec.profile)
+        profile = resolved_profile if resolved_profile is not None else self._resolve_profile(spec.profile)
         image_family = profile.get("boot_disk", {}).get("image_family", "debian-12")
         image_project = profile.get("boot_disk", {}).get("image_project", "debian-cloud")
 
@@ -503,6 +497,8 @@ class GCERunBackend:
 
         job_spec = {
             "image": spec.image,
+            "stage_run_id": spec.stage_run_id,
+            "container_name": f"goldfish-{spec.stage_run_id}",
             "run_path": f"runs/{spec.stage_run_id}",
             "entrypoint_script": entrypoint_script,
             "docker_entrypoint": "/bin/bash",

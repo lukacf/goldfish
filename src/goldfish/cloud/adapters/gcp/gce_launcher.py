@@ -159,6 +159,8 @@ class GCELauncher:
                 first job instead of self-deleting. Value is idle timeout in seconds.
             warm_pool_preserve_paths: Glob patterns for paths to preserve between
                 warm pool jobs.
+            warm_pool_watchdog_seconds: Total VM lifetime budget for warm-pool
+                instances. This is separate from the per-job runtime cap.
 
         Returns:
             GCELaunchResult with instance_name and zone
@@ -182,6 +184,7 @@ class GCELauncher:
             "GOLDFISH_RUN_ID": stage_run_id,
             "GOLDFISH_INPUTS_DIR": "/mnt/inputs",
             "GOLDFISH_OUTPUTS_DIR": "/mnt/outputs",
+            "GOLDFISH_DOCKER_CONTAINER_NAME": f"goldfish-{stage_run_id}",
         }
 
         # Add Goldfish environment variables (metrics, provenance, etc.)

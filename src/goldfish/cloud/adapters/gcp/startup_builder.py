@@ -647,6 +647,7 @@ DOCKER_GPU_ARGS="{gpu_args}"
 
 DOCKER_CMD=(
   docker run --rm $DOCKER_GPU_ARGS \\
+  --name "$GOLDFISH_DOCKER_CONTAINER_NAME" \\
   --ipc=host \\
   --ulimit memlock=-1 --ulimit stack=67108864 \\
   --shm-size={shm_size} \\
@@ -893,6 +894,26 @@ warm_pool_idle_loop() {{
 
     echo "=== ENTERING WARM POOL IDLE LOOP (timeout=${{IDLE_TIMEOUT}}s) ==="
 
+    abort_warm_job() {{
+        local req_id="$1"
+        local exit_code_path="$2"
+        local upload_logs="${{3:-}}"
+
+        LAST_JOB_REQ_ID="$req_id"
+        mkdir -p "/mnt/gcs/runs/$req_id/logs" 2>/dev/null || true
+        echo "1" > "/mnt/gcs/runs/$req_id/logs/exit_code.txt" 2>/dev/null || true
+        echo "1" | gsutil cp - "$exit_code_path" 2>/dev/null || true
+        if [[ "$upload_logs" == "upload_logs" ]]; then
+            upload_logs_with_retry "$LOCAL_STDOUT" "$GCS_STDOUT_PATH" || true
+            upload_logs_with_retry "$LOCAL_STDERR" "$GCS_STDERR_PATH" || true
+        fi
+        gcloud compute instances add-metadata "$INSTANCE_NAME" \\
+            --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
+            --metadata "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$req_id,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
+        IDLE_START=$(date +%s)
+        sleep 1
+    }}
+
     while true; do
         # Check idle timeout
         local ELAPSED=$(($(date +%s) - IDLE_START))
@@ -933,15 +954,7 @@ warm_pool_idle_loop() {{
                     --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
                     --metadata "goldfish_instance_state=busy,goldfish_exit_code=,goldfish_exit_run_id=,goldfish_active_run_id=$REQ_ID,goldfish=" --quiet 2>/dev/null; then
                     echo "ERROR: Failed to set busy metadata — aborting job to prevent daemon deletion"
-                    LAST_JOB_REQ_ID="$REQ_ID"
-                    mkdir -p "/mnt/gcs/runs/$REQ_ID/logs" 2>/dev/null || true
-                    echo "1" > "/mnt/gcs/runs/$REQ_ID/logs/exit_code.txt" 2>/dev/null || true
-                    echo "1" | gsutil cp - "$EARLY_EXIT_CODE_PATH" 2>/dev/null || true
-                    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
-                        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                        --metadata "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$REQ_ID,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
-                    IDLE_START=$(date +%s)
-                    sleep 1
+                    abort_warm_job "$REQ_ID" "$EARLY_EXIT_CODE_PATH"
                     continue
                 fi
 
@@ -959,28 +972,12 @@ warm_pool_idle_loop() {{
                 if [[ -n "$SPEC_PATH" ]]; then
                     gsutil cp "$SPEC_PATH" /tmp/job_spec.json 2>/dev/null || {{
                         echo "ERROR: Failed to download job spec from $SPEC_PATH"
-                        LAST_JOB_REQ_ID="$REQ_ID"
-                        mkdir -p "/mnt/gcs/runs/$REQ_ID/logs" 2>/dev/null || true
-                        echo "1" > "/mnt/gcs/runs/$REQ_ID/logs/exit_code.txt" 2>/dev/null || true
-                        echo "1" | gsutil cp - "$EARLY_EXIT_CODE_PATH" 2>/dev/null || true
-                        gcloud compute instances add-metadata "$INSTANCE_NAME" \\
-                            --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                            --metadata "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$REQ_ID,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
-                        IDLE_START=$(date +%s)
-                        sleep 1
+                        abort_warm_job "$REQ_ID" "$EARLY_EXIT_CODE_PATH"
                         continue
                     }}
                 else
                     echo "ERROR: No spec_gcs_path in signal"
-                    LAST_JOB_REQ_ID="$REQ_ID"
-                    mkdir -p "/mnt/gcs/runs/$REQ_ID/logs" 2>/dev/null || true
-                    echo "1" > "/mnt/gcs/runs/$REQ_ID/logs/exit_code.txt" 2>/dev/null || true
-                    echo "1" | gsutil cp - "$EARLY_EXIT_CODE_PATH" 2>/dev/null || true
-                    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
-                        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                        --metadata "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$REQ_ID,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
-                    IDLE_START=$(date +%s)
-                    sleep 1
+                    abort_warm_job "$REQ_ID" "$EARLY_EXIT_CODE_PATH"
                     continue
                 fi
 
@@ -991,19 +988,12 @@ warm_pool_idle_loop() {{
                 local NEW_CMD=$(python3 -c "import json; print(json.load(open('/tmp/job_spec.json')).get('docker_cmd', '/entrypoint.sh'))" 2>/dev/null)
                 local NEW_SHM_SIZE=$(python3 -c "import json; print(json.load(open('/tmp/job_spec.json')).get('shm_size', '16g'))" 2>/dev/null)
                 local NEW_GPU_COUNT=$(python3 -c "import json; print(json.load(open('/tmp/job_spec.json')).get('gpu_count', 0))" 2>/dev/null)
+                local NEW_CONTAINER_NAME=$(python3 -c "import json; print(json.load(open('/tmp/job_spec.json')).get('container_name', 'goldfish-warm-job'))" 2>/dev/null)
 
                 # Validate required fields
                 if [[ -z "$NEW_IMAGE" || -z "$NEW_RUN_PATH" ]]; then
                     echo "ERROR: Job spec missing required fields (image or run_path)"
-                    LAST_JOB_REQ_ID="$REQ_ID"
-                    mkdir -p "/mnt/gcs/runs/$REQ_ID/logs" 2>/dev/null || true
-                    echo "1" > "/mnt/gcs/runs/$REQ_ID/logs/exit_code.txt" 2>/dev/null || true
-                    echo "1" | gsutil cp - "$EARLY_EXIT_CODE_PATH" 2>/dev/null || true
-                    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
-                        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                        --metadata "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$REQ_ID,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
-                    IDLE_START=$(date +%s)
-                    sleep 1
+                    abort_warm_job "$REQ_ID" "$EARLY_EXIT_CODE_PATH"
                     continue
                 fi
 
@@ -1067,13 +1057,7 @@ for name, uri in spec.get('inputs', {{}}).items():
             print(f'Copied {{name}} from {{uri}}')
 " 2>&1 || {{
                     echo "ERROR: Input staging failed — aborting job"
-                    echo "1" | gsutil cp - "$GCS_EXIT_CODE_PATH" 2>/dev/null || true
-                    upload_logs_with_retry "$LOCAL_STDOUT" "$GCS_STDOUT_PATH" || true
-                    upload_logs_with_retry "$LOCAL_STDERR" "$GCS_STDERR_PATH" || true
-                    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
-                        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                        --metadata "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$REQ_ID,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
-                    IDLE_START=$(date +%s)
+                    abort_warm_job "$REQ_ID" "$GCS_EXIT_CODE_PATH" "upload_logs"
                     continue
                 }}
                 chown 1000:100 /mnt/inputs /mnt/outputs 2>/dev/null || true
@@ -1099,13 +1083,7 @@ for name, uri in spec.get('inputs', {{}}).items():
                 echo "Pulling image for warm job: $NEW_IMAGE (previous: $CURRENT_IMAGE)"
                 docker pull "$NEW_IMAGE" || {{
                     echo "ERROR: Failed to pull $NEW_IMAGE"
-                    echo "1" | gsutil cp - "$GCS_EXIT_CODE_PATH" 2>/dev/null || true
-                    upload_logs_with_retry "$LOCAL_STDOUT" "$GCS_STDOUT_PATH" || true
-                    upload_logs_with_retry "$LOCAL_STDERR" "$GCS_STDERR_PATH" || true
-                    gcloud compute instances add-metadata "$INSTANCE_NAME" \\
-                        --zone="$INSTANCE_ZONE" --project="$PROJECT_ID" \\
-                        --metadata "goldfish_instance_state=idle_ready,goldfish_exit_code=1,goldfish_exit_run_id=$REQ_ID,goldfish_active_run_id=,goldfish=" --quiet 2>/dev/null || true
-                    IDLE_START=$(date +%s)
+                    abort_warm_job "$REQ_ID" "$GCS_EXIT_CODE_PATH" "upload_logs"
                     continue
                 }}
                 CURRENT_IMAGE="$NEW_IMAGE"
@@ -1147,6 +1125,7 @@ for host, container in spec.get('mounts', []):
 import json, shlex
 spec = json.load(open('/tmp/job_spec.json'))
 parts = ['docker', 'run', '--rm']
+parts.extend(['--name', spec.get('container_name', 'goldfish-warm-job')])
 gpu = spec.get('gpu_count', 0)
 if int(gpu) > 0:
     parts.extend(['--gpus', 'all'])
@@ -1181,7 +1160,7 @@ with open('/tmp/docker_cmd.sh', 'w') as f:
                     (
                         sleep "$JOB_TIMEOUT"
                         echo "=== PER-JOB TIMEOUT (${{JOB_TIMEOUT}}s) — KILLING DOCKER ==="
-                        docker kill $(docker ps -q) 2>/dev/null || true
+                        docker kill "$NEW_CONTAINER_NAME" 2>/dev/null || true
                     ) &
                     JOB_TIMER_PID=$!
                 fi
@@ -1539,7 +1518,7 @@ FIRST_JOB_TIMEOUT={warm_pool_first_job_timeout}
 (
     sleep $FIRST_JOB_TIMEOUT
     echo "=== FIRST JOB TIMEOUT (${{FIRST_JOB_TIMEOUT}}s) — KILLING DOCKER ==="
-    docker kill $(docker ps -q) 2>/dev/null || true
+    docker kill "$GOLDFISH_DOCKER_CONTAINER_NAME" 2>/dev/null || true
 ) &
 FIRST_JOB_TIMER_PID=$!
 """)
