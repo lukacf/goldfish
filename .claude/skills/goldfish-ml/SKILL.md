@@ -40,6 +40,22 @@ Goldfish manages ML experiments through **seven key abstractions** (with a new E
 - **Pre-run review**: The configured SVS agent reviews your code before execution to catch bugs early
 - **Experiment Records** hide the run/version split in normal UX (use record_id or tags)
 
+### Keep Warm / Warm Pool
+
+Goldfish can keep GCE workers warm between runs so later stages reuse an already
+booted VM instead of paying full startup time again.
+
+- This is a **project-level GCE feature**, not a `run()` flag.
+- Enable it in `goldfish.yaml` under `gce.warm_pool`.
+- Claude still calls `run()` normally. Goldfish decides whether a run reuses a
+  warm VM or launches a fresh one.
+- Warm reuse is profile-aware: only profiles listed in `gce.warm_pool.profiles`
+  participate. An empty list means "all profiles".
+- Operational visibility is via `warm_pool_status()` and `warm_pool_cleanup()`.
+
+Use warm pool when startup latency dominates iteration time, especially for
+expensive GPU profiles like `h100-spot` or `a100-on-demand`.
+
 **CRITICAL: Never use git directly.**
 Goldfish manages all version control internally via a hidden dev repo. **Never run git commands** on the user's project directory or the dev repo (`*-dev/`). Direct git operations will corrupt Goldfish's state and break provenance tracking. Use Goldfish tools instead:
 - `save_version()` instead of `git commit`
@@ -256,6 +272,10 @@ Missing or invalid metadata is rejected.
        "context": "Baseline LSTM, 25M params. Focus on directional accuracy."
    })
 
+   # If gce.warm_pool is enabled for this profile, Goldfish may reuse
+   # an already-booted VM automatically. There is no separate keep-warm
+   # argument on run().
+
 5. Finalize results (required once run is terminal)
    finalize_run("stage-abc123", {
        "primary_metric": "dir_acc_binary",
@@ -418,6 +438,20 @@ def main():
 
     # Final output (batched at stage completion)
     save_output("model", model_dir)
+
+### 3.2 Warm Pool Guidance
+
+When `gce.warm_pool.enabled: true`:
+
+- Prefer stable `compute.profile` values on stages you want to benefit from reuse.
+- Expect the **first** run on a VM to pay normal startup cost; later compatible
+  runs may reuse that worker automatically.
+- Keep stage code restart-safe. Warm reuse reduces startup time, but spot/preemptible
+  behavior still exists and checkpoints are still the right reliability mechanism.
+- Use `warm_pool_status()` if runs seem slower than expected or if you want to
+  confirm whether compatible idle workers exist.
+- Use `warm_pool_cleanup()` only for operator recovery. It is an emergency tool,
+  not part of the normal experiment loop.
 ```
 
 **Key differences:**

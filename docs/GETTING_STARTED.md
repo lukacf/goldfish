@@ -24,6 +24,7 @@ You've been here before:
 | "My model trained on corrupted data" | SVS entropy checks catch mode collapse. Null ratio checks catch data corruption. Pre-run AI review catches logic bugs. Before GPU hours are wasted. |
 | "Claude forgot what we were doing" | STATE.md persists goals, hypotheses, best results, and config invariants across context resets. `status()` recovers everything. |
 | "I just want a GPU" | `profile: "h100-spot"` in your config. Goldfish handles Docker, GCS, spot pricing, and multi-zone failover. |
+| "Every run spends minutes just booting another GPU VM" | `gce.warm_pool` keeps compatible GCE workers warm so later runs can reuse them automatically. |
 
 ---
 
@@ -238,6 +239,33 @@ jobs:
 ```
 
 > **Note**: `defaults.backend` controls compute (where stages run). `storage.backend` controls storage (where artifacts are stored). They can be configured independently.
+
+### Optional: Keep Warm on GCE
+
+If you want Goldfish to reuse already-booted compatible GCE workers between runs,
+add `gce.warm_pool`:
+
+```yaml
+gce:
+  project_id: your-project-id
+  zones: ["us-central1-a", "us-central1-b"]
+  warm_pool:
+    enabled: true
+    max_instances: 2
+    idle_timeout_minutes: 30
+    profiles:
+      - h100-spot
+      - a100-on-demand
+    watchdog_seconds: 21600
+```
+
+Guidance:
+
+- This is a **project-level** setting, not a `run()` argument.
+- Reuse only applies to the `gce` backend.
+- `profiles: []` means all compatible GCE profiles may reuse warm workers.
+- Use `warm_pool_status()` to inspect the pool and `warm_pool_cleanup()` only for
+  emergency operator recovery.
 
 ### Advanced: Multi-Backend Storage
 

@@ -55,9 +55,10 @@ Returns a structured summary organized for quick action.
 
 ---
 
-### create_workspace(name, goal, reason)
+### create_workspace(name, goal, reason, from_workspace, from_version)
 
-Create a new experiment workspace from main.
+Create a new experiment workspace from the default base branch, from another
+workspace head, or from a specific saved version.
 
 **Parameters:**
 | Parameter | Type | Required | Description |
@@ -65,6 +66,8 @@ Create a new experiment workspace from main.
 | `name` | str | Yes | Workspace identifier (alphanumeric + underscore/hyphen) |
 | `goal` | str | Yes | Clear description of experiment objective |
 | `reason` | str | Yes | Why this workspace is needed (min 15 chars) |
+| `from_workspace` | str | No | Branch from another workspace's current head |
+| `from_version` | str | No | Branch from a specific saved version in `from_workspace` |
 
 ---
 
@@ -415,6 +418,44 @@ Initialize a new Goldfish project in the specified directory. **First-time setup
 ### reload_config()
 
 Reload configuration from `goldfish.yaml` without restarting the server.
+
+---
+
+## Infrastructure / Warm Pool Tools
+
+### warm_pool_status()
+
+Show warm-pool configuration and current instance state.
+
+Use this when:
+- GCE warm pool is enabled and you want to confirm whether reuse is happening
+- runs seem to be paying full startup time unexpectedly
+- you need to inspect counts by state such as `launching`, `busy`, `draining`,
+  `idle_ready`, or `deleting`
+
+**Returns:**
+```python
+{
+  "enabled": True,
+  "max_instances": 2,
+  "idle_timeout_minutes": 30,
+  "total": 1,
+  "by_state": {"idle_ready": 1},
+  "instances": [...]
+}
+```
+
+### warm_pool_cleanup()
+
+Emergency cleanup for warm-pool instances.
+
+Use this only for operator recovery when warm workers are stuck or you need to
+drain the pool. It is not part of the normal experiment workflow.
+
+Behavior:
+- deleting instances are retried immediately
+- leased instances are canceled first when possible
+- stale leases may be force-released during emergency cleanup
 
 ---
 

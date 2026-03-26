@@ -22,9 +22,11 @@
 | Document | Purpose |
 |----------|---------|
 | [SKILL.md](../.claude/skills/goldfish-ml/SKILL.md) | Complete MCP tool reference |
+| [Config Reference](../.claude/skills/goldfish-ml/references/config_reference.md) | `goldfish.yaml` reference, including `gce.warm_pool` |
 | [Pipeline Guide](../.claude/skills/goldfish-ml/references/pipeline_guide.md) | Signal types and stage wiring |
 | [Stage Authoring](../.claude/skills/goldfish-ml/references/stage_authoring.md) | Writing training code |
 | [End-to-End Example](../.claude/skills/goldfish-ml/references/end_to_end_example.md) | Full LLM training walkthrough |
+| [Tools Reference](../.claude/skills/goldfish-ml/references/tools_reference.md) | MCP tool surface, including `warm_pool_status()` and `warm_pool_cleanup()` |
 
 ## Other
 

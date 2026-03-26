@@ -89,6 +89,7 @@ Tools like W&B and MLflow weren't designed for agents. Goldfish is—built aroun
 | **Institutional learning** | Failed experiments become searchable knowledge. Patterns are extracted, approved, and applied. The same mistake never happens twice. |
 | **Instant comparison** | What made run B better than run A? Config diff, metric deltas, outcome tracking—all captured automatically, recallable instantly. |
 | **One-line compute** | Write `profile: h100-spot` and run. Local Docker for iteration, GCE for cloud GPUs. Backend-agnostic design supports AWS, Azure, Kubernetes. |
+| **Keep warm on GCE** | Reuse already-booted compatible GCE workers between runs with `gce.warm_pool`, cutting repeated startup cost for expensive GPU profiles. |
 
 ---
 
@@ -110,6 +111,7 @@ Goldfish ends the "Garbage In, Garbage Out" cycle by enforcing rigorous data con
 Goldfish abstracts away "GCP compatibility matrix hell" and Docker plumbing so the agent can focus on science.
 - **Multi-Backend Execution:** Seamlessly switch between Local Docker for iteration and GCE (H100/A100) for heavy training with a single command.
 - **Resource Profiles:** Hardware constraints are managed via high-level profiles (`h100-spot`, `cpu-large`), preventing configuration drift.
+- **Reusable Warm Workers:** Optional GCE warm pool support keeps compatible workers alive between runs and reuses them automatically when possible.
 - **Managed Storage:** Handles the complex bridging between GCS buckets and high-performance hyperdisks automatically.
 
 ### Narrative Context Recovery (Persistent Research Memory)
@@ -223,6 +225,25 @@ Example with Claude Code:
 ```bash
 claude mcp add goldfish -- uv run --directory /path/to/goldfish goldfish serve
 ```
+
+### 4. Optional: Keep GCE Workers Warm
+
+If you're using GCE and repeated startup latency is hurting iteration speed, enable
+the warm pool in `goldfish.yaml`:
+
+```yaml
+gce:
+  project_id: your-project-id
+  zones: ["us-central1-a", "us-central1-b"]
+  warm_pool:
+    enabled: true
+    max_instances: 2
+    idle_timeout_minutes: 30
+    profiles: ["h100-spot", "a100-on-demand"]
+```
+
+Goldfish still uses the normal `run()` flow. There is no per-run keep-warm flag:
+compatible GCE runs reuse warm workers automatically when available.
 
 ---
 

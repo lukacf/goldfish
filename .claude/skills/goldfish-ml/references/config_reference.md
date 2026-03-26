@@ -112,6 +112,18 @@ gce:
   search_timeout_sec: 900           # Default: 900
   max_attempts: 150                 # Default: 150
 
+  # Optional: keep compatible GCE workers warm for reuse between runs
+  warm_pool:
+    enabled: true
+    max_instances: 2                # 1-10, default: 2
+    idle_timeout_minutes: 30        # 5-120, default: 30
+    profiles:
+      - h100-spot                   # Empty list = all profiles
+      - a100-on-demand
+    watchdog_seconds: 21600         # Total VM lifetime budget, default: 6h
+    preserve_paths:
+      - /tmp/triton*                # Optional: paths to keep between warm jobs
+
 # STATE.md settings
 state_md:
   path: STATE.md                    # Default: "STATE.md"
@@ -228,6 +240,38 @@ defaults:
 | `backend` | `local` | Default compute backend (`local` or `gce`) |
 
 These defaults can be overridden per-stage in the stage config files.
+
+### gce.warm_pool (optional)
+
+Warm pool keeps GCE workers alive after a run so later compatible runs can reuse
+them instead of booting from scratch.
+
+```yaml
+gce:
+  warm_pool:
+    enabled: true
+    max_instances: 2
+    idle_timeout_minutes: 30
+    profiles: [h100-spot, a100-on-demand]
+    watchdog_seconds: 21600
+    preserve_paths: [/tmp/triton*]
+```
+
+Important behavior:
+
+- This is a **project-level** feature. There is no per-run `keep_warm` flag.
+- It only affects the `gce` backend.
+- Reuse is profile-matched. If `profiles` is empty, all compatible GCE profiles
+  may reuse warm workers.
+- `idle_timeout_minutes` controls how long an unused worker stays available.
+- `watchdog_seconds` is the total VM lifetime budget for a warm worker.
+- `preserve_paths` is for advanced cases where specific caches should survive
+  between jobs. Leave it empty unless you explicitly need it.
+
+Operational tools:
+
+- `warm_pool_status()` — inspect current pool state
+- `warm_pool_cleanup()` — emergency deletion/recovery tool
 
 ### storage (optional, preferred over legacy gcs)
 

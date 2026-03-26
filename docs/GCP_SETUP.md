@@ -69,6 +69,43 @@ gcloud artifacts repositories create goldfish \
   --description="Goldfish Docker images"
 ```
 
+## Optional: Warm Pool for Reusable GCE Workers
+
+If startup time is dominating your experiment loop, Goldfish can keep compatible
+GCE workers warm between runs.
+
+Example `goldfish.yaml`:
+
+```yaml
+gce:
+  project_id: your-project-id
+  zones: ["us-central1-a", "us-central1-b"]
+  warm_pool:
+    enabled: true
+    max_instances: 2
+    idle_timeout_minutes: 30
+    profiles:
+      - h100-spot
+      - a100-on-demand
+    watchdog_seconds: 21600
+    preserve_paths: []
+```
+
+What the main knobs do:
+
+- `max_instances`: maximum warm workers Goldfish will keep tracked for reuse
+- `idle_timeout_minutes`: how long an unused worker can sit idle before cleanup
+- `profiles`: which compute profiles participate; empty list means all compatible
+  GCE profiles
+- `watchdog_seconds`: total VM lifetime budget for a warm worker
+- `preserve_paths`: advanced cache-preservation setting; leave empty unless you
+  explicitly need it
+
+Operational tools once enabled:
+
+- `warm_pool_status()` — inspect current warm-pool state
+- `warm_pool_cleanup()` — emergency drain/delete path for stuck workers
+
 ## GCS Bucket Setup
 
 Create a bucket for artifacts (inputs, outputs, wheels):
@@ -184,3 +221,14 @@ gcloud projects add-iam-policy-binding {PROJECT_ID} \
   --member="serviceAccount:{PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
   --role="roles/artifactregistry.writer"
 ```
+
+### Warm pool is enabled but runs still cold-start
+
+Check:
+
+1. `defaults.backend` or per-stage config is actually using `gce`
+2. the stage `compute.profile` is included in `gce.warm_pool.profiles` (or the list is empty)
+3. `warm_pool_status()` shows compatible instances reaching `idle_ready`
+
+If workers are stuck or leaked, use `warm_pool_cleanup()` as an operator recovery
+tool.
