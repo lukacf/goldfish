@@ -955,6 +955,36 @@ def _import_meerkat() -> Any:
     return meerkat
 
 
+def _capture_rkat_stderr(client: object, error: Exception) -> None:
+    """Read rkat-rpc stderr for crash diagnostics.
+
+    The Meerkat SDK pipes stderr but never reads it. When rkat-rpc crashes
+    during initialization, the actual error reason is lost. This function
+    reads stderr before the process is cleaned up and logs it.
+    """
+    proc = getattr(client, "_process", None)
+    if proc is None or proc.returncode is None:
+        return  # Process still running or not started
+    stderr_pipe = proc.stderr
+    if stderr_pipe is None:
+        return
+    try:
+        # Use a raw read — process is already dead so data is available immediately
+        stderr_bytes = stderr_pipe._buffer if hasattr(stderr_pipe, "_buffer") else b""  # noqa: SLF001
+        if not stderr_bytes:
+            # Try reading synchronously from the transport
+            stderr_bytes = stderr_pipe._transport.get_pipe_transport(2) if hasattr(stderr_pipe, "_transport") else b""  # type: ignore[assignment]  # noqa: SLF001
+        if stderr_bytes and isinstance(stderr_bytes, bytes | bytearray):
+            stderr_text = bytes(stderr_bytes).decode(errors="replace").strip()
+            if stderr_text:
+                logger.error("rkat-rpc crashed (exit=%s): %s", proc.returncode, stderr_text)
+                return
+    except Exception:
+        pass
+    # Fallback: log what we know
+    logger.error("rkat-rpc crashed (exit=%s, error=%s) — stderr unavailable", proc.returncode, error)
+
+
 class MeerkatProvider:
     """Provider that uses the Meerkat SDK for vendor-neutral AI reviews.
 
@@ -996,7 +1026,10 @@ class MeerkatProvider:
                 Returns:
                     Tuple of (response_text, session_id).
                 """
-                async with meerkat.MeerkatClient() as client:
+                client = meerkat.MeerkatClient()
+                try:
+                    await client.connect()
+
                     create_kwargs: dict[str, Any] = {
                         "prompt": agent_request.prompt,
                         "system_prompt": (
@@ -1019,6 +1052,13 @@ class MeerkatProvider:
                         logger.debug("Failed to archive Meerkat session %s: %s", session_id, archive_err)
 
                     return text, session_id
+                except Exception as e:
+                    # Capture rkat-rpc stderr before process cleanup — the SDK
+                    # pipes stderr but never reads it, so crash reasons are lost.
+                    _capture_rkat_stderr(client, e)
+                    raise
+                finally:
+                    await client.close()
 
             # Bridge async SDK to sync run() interface.
             # If called from an existing async context (e.g., async MCP server),

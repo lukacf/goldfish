@@ -23,6 +23,17 @@ logger = logging.getLogger("goldfish.server")
 
 
 @mcp.tool()
+def goldfish_version() -> dict:
+    """Return the running Goldfish server version.
+
+    Use this to verify which version is deployed before debugging issues.
+    """
+    import goldfish
+
+    return {"version": goldfish.__version__}
+
+
+@mcp.tool()
 def initialize_project(project_name: str, project_root: str, from_existing: str | None = None) -> dict:
     """Initialize a new Goldfish project in the specified directory.
 

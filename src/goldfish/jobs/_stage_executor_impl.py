@@ -1986,13 +1986,20 @@ class StageExecutor:
         if profile_name:
             profile = resolve_compute_profile(self.config, profile_name)
             # Determine image type from profile to get version from DB
+            # Use max(DB version, shipped default) so Goldfish upgrades
+            # (e.g., glibc bumps) aren't blocked by stale DB entries.
             profile_base_image = profile.get("base_image")
             base_image_version = None
             if profile_base_image in (BASE_IMAGE_GPU, BASE_IMAGE_CPU):
                 image_type = "gpu" if profile_base_image == BASE_IMAGE_GPU else "cpu"
                 version_info = self.db.get_current_base_image_version(image_type)
                 if version_info:
-                    base_image_version = str(version_info["version"])
+                    from goldfish.cloud.image_versions import BASE_IMAGE_VERSION_DEFAULT, _version_gte
+
+                    db_ver = str(version_info["version"])
+                    base_image_version = (
+                        db_ver if _version_gte(db_ver, BASE_IMAGE_VERSION_DEFAULT) else BASE_IMAGE_VERSION_DEFAULT
+                    )
             base_image = resolve_profile_base_image(profile, self.artifact_registry, base_image_version)
 
         # Determine build backend based on capabilities
@@ -2462,13 +2469,19 @@ echo "Stage completed successfully"
         # Extract timeout from stage config (compute.max_runtime_seconds)
         # Falls back to defaults.timeout_seconds if not specified
         timeout_seconds: int | None = None
+        capacity_wait_seconds: int | None = None
         compute_config = stage_config_yaml.get("compute", {})
         if compute_config and isinstance(compute_config, dict):
             max_runtime = compute_config.get("max_runtime_seconds")
             if max_runtime is not None:
                 timeout_seconds = int(max_runtime)
+            capacity_wait = compute_config.get("capacity_wait_seconds")
+            if capacity_wait is not None:
+                capacity_wait_seconds = int(capacity_wait)
         if timeout_seconds is None:
             timeout_seconds = self.config.defaults.timeout_seconds
+        if capacity_wait_seconds is None:
+            capacity_wait_seconds = self.config.defaults.capacity_wait_seconds
 
         # Build command from entrypoint
         entrypoint_script = self._build_entrypoint_script(stage_name, runtime, entrypoint)
@@ -2517,6 +2530,7 @@ echo "Stage completed successfully"
             output_uri=output_uri,
             spot=spot,
             timeout_seconds=timeout_seconds,
+            capacity_wait_seconds=capacity_wait_seconds,
         )
 
         # Launch via run_backend protocol

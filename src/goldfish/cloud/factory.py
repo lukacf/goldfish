@@ -250,6 +250,10 @@ class AdapterFactory:
                 service_account=gce_config.service_account if gce_config else None,
                 profile_overrides=gce_config.effective_profile_overrides if gce_config else None,
                 warm_pool=warm_pool,
+                search_timeout_sec=gce_config.search_timeout_sec if gce_config else 600,
+                initial_backoff_sec=gce_config.initial_backoff_sec if gce_config else 5,
+                backoff_multiplier=gce_config.backoff_multiplier if gce_config else 1.5,
+                max_attempts=gce_config.max_attempts if gce_config else 100,
             )
 
         else:

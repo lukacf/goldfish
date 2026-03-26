@@ -17,13 +17,19 @@ from typing import Any
 from goldfish.errors import GoldfishError
 
 # Capacity error patterns from GCE
+# These are matched as substrings (lowered) against gcloud stderr.
+# IMPORTANT: GCE uses "enough resources" (not "sufficient") in zone
+# resource pool exhaustion errors. Missing patterns cause spot launches
+# to fail on the first zone without retrying others.
 CAPACITY_PATTERNS = (
     "zone_resource_pool_exhausted",
     "does not have sufficient resources",
+    "does not have enough resources",
     "quota",
     "was not able to fulfil",
     "resource is not available",
     "insufficient",
+    "is not available in zone",
 )
 
 
@@ -373,73 +379,90 @@ class ResourceLauncher:
         timings: dict[str, float] | None = None
 
         try:
-            for resource in self.ordered_resources:
-                candidate_zones = [
-                    z for z in resource.get("zones", []) if not self.zone_filter or z in self.zone_filter
-                ]
+            # Outer loop: cycle through all resources/modes/zones repeatedly
+            # until deadline or max_attempts. This enables long capacity waits
+            # (e.g., 1 hour) where zone A may free up after zones B/C were tried.
+            while selection is None and attempts < self.max_attempts and time.time() < deadline:
+                made_attempt = False
+                # Reset backoff each cycle so zone A gets retried promptly
+                # after exhausting all zones, not after minutes of exponential sleep.
+                backoff = self.initial_backoff
 
-                if not candidate_zones:
-                    continue
+                for resource in self.ordered_resources:
+                    candidate_zones = [
+                        z for z in resource.get("zones", []) if not self.zone_filter or z in self.zone_filter
+                    ]
 
-                mode_seq = mode_order(resource, self.preemptible_preference, self.force_preemptible)
+                    if not candidate_zones:
+                        continue
 
-                if not mode_seq:
-                    continue
+                    mode_seq = mode_order(resource, self.preemptible_preference, self.force_preemptible)
 
-                for mode in mode_seq:
-                    preemptible = mode == "spot"
+                    if not mode_seq:
+                        continue
 
-                    for zone in candidate_zones:
+                    for mode in mode_seq:
+                        preemptible = mode == "spot"
+
+                        for zone in candidate_zones:
+                            if selection is not None or attempts >= self.max_attempts or time.time() > deadline:
+                                break
+
+                            attempts += 1
+                            made_attempt = True
+                            attempt_entry = {
+                                "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                                "resource": resource["name"],
+                                "zone": zone,
+                                "preemptible": preemptible,
+                            }
+
+                            try:
+                                sel, timing = self._attempt_launch(
+                                    resource=resource,
+                                    zone=zone,
+                                    preemptible=preemptible,
+                                    disk_name=disk_name,
+                                    instance_name=instance_name,
+                                    startup_path=startup_path,
+                                    snapshot=snapshot,
+                                    extra_disks=extra_disks or [],
+                                    data_disk_mode=data_disk_mode,
+                                )
+
+                                selection = sel
+                                timings = timing
+                                attempt_entry.update(
+                                    {
+                                        "status": "success",
+                                        "disk_create_sec": timing.get("disk_create_sec"),
+                                        "instance_create_sec": timing.get("instance_create_sec"),
+                                    }
+                                )
+                                attempt_log.append(attempt_entry)
+                                break
+
+                            except CapacityError as exc:
+                                attempt_entry["status"] = "capacity"
+                                attempt_entry["error"] = str(exc)[:500]
+                                attempt_log.append(attempt_entry)
+
+                                sleep_time = min(backoff, max(0, deadline - time.time()))
+                                if sleep_time > 0:
+                                    time.sleep(sleep_time)
+
+                                backoff = min(backoff * self.backoff_multiplier, self.search_timeout)
+                                continue
+
                         if selection is not None or attempts >= self.max_attempts or time.time() > deadline:
                             break
 
-                        attempts += 1
-                        attempt_entry = {
-                            "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                            "resource": resource["name"],
-                            "zone": zone,
-                            "preemptible": preemptible,
-                        }
-
-                        try:
-                            sel, timing = self._attempt_launch(
-                                resource=resource,
-                                zone=zone,
-                                preemptible=preemptible,
-                                disk_name=disk_name,
-                                instance_name=instance_name,
-                                startup_path=startup_path,
-                                snapshot=snapshot,
-                                extra_disks=extra_disks or [],
-                                data_disk_mode=data_disk_mode,
-                            )
-
-                            selection = sel
-                            timings = timing
-                            attempt_entry.update(
-                                {
-                                    "status": "success",
-                                    "disk_create_sec": timing.get("disk_create_sec"),
-                                    "instance_create_sec": timing.get("instance_create_sec"),
-                                }
-                            )
-                            attempt_log.append(attempt_entry)
-                            break
-
-                        except CapacityError as exc:
-                            attempt_entry["status"] = "capacity"
-                            attempt_entry["error"] = str(exc)[:500]
-                            attempt_log.append(attempt_entry)
-
-                            sleep_time = min(backoff, max(0, deadline - time.time()))
-                            if sleep_time > 0:
-                                time.sleep(sleep_time)
-
-                            backoff = min(backoff * self.backoff_multiplier, self.search_timeout)
-                            continue
-
                     if selection is not None or attempts >= self.max_attempts or time.time() > deadline:
                         break
+
+                # No valid resource/mode/zone combinations exist — don't spin forever
+                if not made_attempt:
+                    break
 
             if selection is None or timings is None:
                 snippet = json.dumps(attempt_log[-3:], indent=2) if attempt_log else "none"

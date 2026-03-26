@@ -4,6 +4,79 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.3.16] - 2026-03-23
+
+### Fixed
+- **MCP tools registered but not wired** — `goldfish_version`, `dashboard`,
+  `get_workspace_thoughts`, and `get_lineage` were decorated with `@mcp.tool()` but
+  not imported in `server.py`, causing "Unknown tool" errors. Added regression test
+  that catches any `@mcp.tool()` function missing from `server.py` imports.
+
+## [0.3.15] - 2026-03-23
+
+### Added
+- **`goldfish_version` MCP tool** — Returns the running server version so you stop
+  guessing whether a fix is deployed.
+
+## [0.3.14] - 2026-03-23
+
+### Fixed
+- **Base image upgrades blocked by stale DB entries** — The image version resolver used
+  precedence config → DB → default. When Goldfish bumped `BASE_IMAGE_VERSION_DEFAULT`
+  (v10→v12 for Ubuntu 24.04/glibc 2.39), existing DB entries (`v10`) took priority and
+  blocked the upgrade. Every run kept building `FROM goldfish-base-gpu:v10` despite the
+  code shipping v12. Fix: DB version is now capped at `max(DB, shipped_default)` so
+  base image upgrades propagate automatically. This was the root cause of the rkat-rpc
+  glibc crash — the 0.3.9 base image fix and 0.3.13 constant bump never took effect.
+
+## [0.3.13] - 2026-03-23
+
+### Fixed
+- **rkat-rpc crash in production (glibc 2.35 vs 2.39)** — `BASE_IMAGE_VERSION_DEFAULT`
+  was never bumped from `v10` to `v12` when the base GPU image was rebuilt on Ubuntu 24.04
+  (0.3.9). The v12 image existed in Artifact Registry but workspace images kept using
+  `goldfish-base-gpu:v10` (Ubuntu 22.04, glibc 2.35). rkat-rpc requires glibc 2.39 and
+  crashed on every during-run AI review attempt, disabling SVS after 3 failures.
+- **rkat-rpc crash diagnostics** — Captures rkat-rpc stderr on crash. The Meerkat SDK
+  pipes stderr but never reads it, so crash reasons were lost. Now logged as
+  `rkat-rpc crashed (exit=N): <stderr>`.
+
+## [0.3.12] - 2026-03-22
+
+### Added
+- **`capacity_wait_seconds`** — Configurable GPU capacity search timeout. When GPU
+  capacity is tight, Goldfish now keeps retrying across zones automatically instead of
+  failing on the first unavailable zone. Set per-stage (`compute.capacity_wait_seconds`)
+  or globally (`defaults.capacity_wait_seconds`). Default: 600s (10 min). The capacity
+  search cycles back through all zones with reset backoff, so zone A gets retried after
+  zones B/C/D are exhausted.
+
+### Fixed
+- **GCEConfig search params were loaded but never used** — `gce.search_timeout_sec`,
+  `gce.initial_backoff_sec`, `gce.backoff_multiplier`, and `gce.max_attempts` from
+  `goldfish.yaml` were parsed into config but never wired to `ResourceLauncher`. Now
+  they are.
+
+## [0.3.11] - 2026-03-22
+
+### Fixed
+- **Spot launches fail without retrying zones** — GCE's zone resource pool exhaustion
+  error says "does not have enough resources" but `CAPACITY_PATTERNS` only matched
+  "does not have sufficient resources". This caused spot launches to fail on the first
+  unavailable zone without trying others, reporting "no capacity" even when other zones
+  had spot capacity. Added missing patterns for actual GCE error messages.
+
+## [0.3.10] - 2026-03-22
+
+### Fixed
+- **Docker exit 125 on GPU VMs** — `docker run --gpus all` intermittently failed with
+  exit 125 ("daemon failed to start the container") due to a race condition: the startup
+  script waited for `nvidia-smi` (driver level) but not for Docker's nvidia runtime plugin
+  to register after `systemctl restart docker`. Two fixes: (1) new GPU runtime readiness
+  gate verifies `docker info` shows nvidia before launching the container, with retries and
+  Docker daemon restart; (2) exit 125 retry loop restarts Docker and re-attempts container
+  launch up to 3 times.
+
 ## [0.3.9] - 2026-03-22
 
 ### Fixed

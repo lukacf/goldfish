@@ -40,6 +40,7 @@ class DefaultsConfig(BaseModel):
           timeout_seconds: 7200    # 2 hours
           log_sync_interval: 15    # Sync logs every 15 seconds
           backend: gce             # Default compute backend
+          capacity_wait_seconds: 3600  # Keep trying for 1 hour
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -47,6 +48,7 @@ class DefaultsConfig(BaseModel):
     timeout_seconds: int = Field(default=3600, gt=0)  # 1 hour default
     log_sync_interval: int = Field(default=10, gt=0)  # 10 seconds default
     backend: Literal["local", "gce", "kubernetes"] = "local"
+    capacity_wait_seconds: int = Field(default=600, gt=0)  # 10 min default
 
 
 class LocalStorageConfig(BaseModel):

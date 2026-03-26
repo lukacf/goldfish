@@ -25,12 +25,16 @@ Usage:
 
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from goldfish.config import GoldfishConfig
     from goldfish.db.database import Database
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Default Version Constants
@@ -40,7 +44,7 @@ if TYPE_CHECKING:
 # This should match the latest stable goldfish-base-{cpu,gpu} version
 # NOTE: Only BASE images have defaults (Goldfish ships them).
 #       Project images do NOT have defaults - they're user-built.
-BASE_IMAGE_VERSION_DEFAULT = "v10"
+BASE_IMAGE_VERSION_DEFAULT = "v12"
 
 # Base image names (short names, resolved with artifact_registry)
 BASE_IMAGE_CPU = "goldfish-base-cpu"
@@ -52,6 +56,16 @@ PUBLIC_BASE_IMAGE_GPU = "nvcr.io/nvidia/pytorch:24.01-py3"
 
 # Bare Python fallback (requires requirements.txt)
 FALLBACK_BASE_IMAGE = "python:3.11-slim"
+
+
+def _version_gte(a: str, b: str) -> bool:
+    """Check if version a >= version b. Versions are like 'v10', 'v12'."""
+
+    def _num(v: str) -> int:
+        m = re.search(r"\d+", v)
+        return int(m.group()) if m else 0
+
+    return _num(a) >= _num(b)
 
 
 # =============================================================================
@@ -150,7 +164,7 @@ class ImageVersionResolver:
             raise ValueError(f"Invalid image_layer: {image_layer}. Must be 'base' or 'project'")
 
     def _resolve_base_version(self, image_type: str) -> ImageVersion:
-        """Resolve base image version with precedence: config -> DB -> default.
+        """Resolve base image version with precedence: config -> max(DB, default) -> default.
 
         Args:
             image_type: "cpu" or "gpu"
@@ -167,14 +181,25 @@ class ImageVersionResolver:
                 registry_tag=self._make_registry_tag("base", image_type, config_version),
             )
 
-        # Priority 2: Database current version
+        # Priority 2: Database current version — but never older than the shipped default.
+        # When Goldfish bumps BASE_IMAGE_VERSION_DEFAULT (e.g., for a glibc upgrade),
+        # existing DB entries must not pin users to the old version.
         if self.db is not None:
             db_info = self.db.get_current_base_image_version(image_type)
             if db_info is not None:
-                return ImageVersion(
-                    version=str(db_info["version"]),
-                    source="database",
-                    registry_tag=db_info.get("registry_tag"),
+                db_version = str(db_info["version"])
+                if _version_gte(db_version, BASE_IMAGE_VERSION_DEFAULT):
+                    return ImageVersion(
+                        version=db_version,
+                        source="database",
+                        registry_tag=db_info.get("registry_tag"),
+                    )
+                # DB version is older than shipped default — use default
+                logger.info(
+                    "Base image %s DB version %s is older than shipped default %s, using default",
+                    image_type,
+                    db_version,
+                    BASE_IMAGE_VERSION_DEFAULT,
                 )
 
         # Priority 3: Default constant

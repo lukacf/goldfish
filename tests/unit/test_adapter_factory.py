@@ -174,6 +174,10 @@ class TestOperatorPrecedenceFix:
         mock_config.gce.zones = ["us-central1-a"]
         mock_config.gce.gpu_preference = ["h100"]
         mock_config.gce.service_account = None
+        mock_config.gce.search_timeout_sec = 900
+        mock_config.gce.initial_backoff_sec = 10
+        mock_config.gce.backoff_multiplier = 1.5
+        mock_config.gce.max_attempts = 150
         mock_config.gcs = MagicMock(spec=GCSConfig)
         mock_config.gcs.bucket = "my-bucket"
         mock_config.storage = None

@@ -280,6 +280,7 @@ class RunSpec:
     # Options
     spot: bool = False  # Request spot/preemptible
     timeout_seconds: int | None = None  # Max run duration
+    capacity_wait_seconds: int | None = None  # How long to keep searching for capacity
 
 
 @dataclass
