@@ -4,6 +4,33 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-03-27
+
+### Fixed
+- **Dead VMs during LAUNCHING now detected in ~3 minutes** — Previously, if a GCE
+  VM died during launch (GPU attachment failure, immediate preemption, quota error),
+  Goldfish would not detect it until the 20-minute state timeout. Now a liveness
+  check runs after a 3-minute grace period (avoiding false positives from GCE API
+  propagation delay), detecting dead VMs ~6x faster.
+- **Executor crash no longer misclassifies completed LAUNCHING runs** — If the
+  executor crashed after `launch()` but before emitting `LAUNCH_OK`, a completed
+  job would be misclassified as `INSTANCE_LOST` instead of recovering its exit code.
+  The daemon now checks exit codes for LAUNCHING state before checking liveness.
+- **LAUNCHING state timeout raised to 45 minutes** — The previous 20-minute timeout
+  was shorter than `capacity_wait_seconds` (up to 60 min) plus boot time (20-30 min
+  for a3-megagpu-8g). The daemon would kill the run while the capacity search was
+  still retrying or the VM was still booting. Now configurable via
+  `defaults.launch_timeout_seconds` in `goldfish.yaml`.
+- **8-GPU profile per-attempt timeout raised to 20 minutes** — The `h100-on-demand`
+  profile (a3-highgpu-8g) had the default 10-minute per-attempt `gcloud` timeout,
+  which could be too tight for 8-GPU provisioning.
+
+### Changed
+- **Launch timeouts now configured via `goldfish.yaml`** — Replaced
+  `GOLDFISH_GCE_LAUNCH_TIMEOUT` env var with `defaults.launch_timeout_seconds`
+  config (env vars don't work for MCP servers). Validated at load time to be >=
+  `capacity_wait_seconds`.
+
 ## [0.4.0] - 2026-03-26
 
 ### Added
