@@ -64,6 +64,21 @@ class TestDefaultsConfigModel:
             DefaultsConfig(backend="invalid")  # type: ignore[arg-type]
         assert "backend" in str(exc_info.value)
 
+    def test_defaults_config_launch_timeout_default(self) -> None:
+        """DefaultsConfig has a 45-minute launch timeout default."""
+        defaults = DefaultsConfig()
+        assert defaults.launch_timeout_seconds == 2700
+
+    def test_defaults_config_launch_timeout_must_exceed_capacity_wait(self) -> None:
+        """launch_timeout_seconds must be >= capacity_wait_seconds."""
+        with pytest.raises(ValidationError, match="launch_timeout_seconds"):
+            DefaultsConfig(capacity_wait_seconds=3600, launch_timeout_seconds=1800)
+
+    def test_defaults_config_launch_timeout_equal_to_capacity_wait_is_ok(self) -> None:
+        """launch_timeout_seconds == capacity_wait_seconds is accepted."""
+        defaults = DefaultsConfig(capacity_wait_seconds=600, launch_timeout_seconds=600)
+        assert defaults.launch_timeout_seconds == 600
+
     def test_defaults_config_rejects_unknown_fields(self) -> None:
         """DefaultsConfig follows extra=forbid pattern."""
         with pytest.raises(ValidationError) as exc_info:

@@ -3,7 +3,7 @@
 import logging
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -41,6 +41,7 @@ class DefaultsConfig(BaseModel):
           log_sync_interval: 15    # Sync logs every 15 seconds
           backend: gce             # Default compute backend
           capacity_wait_seconds: 3600  # Keep trying for 1 hour
+          launch_timeout_seconds: 2700  # 45 min for large GPU VMs
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -49,6 +50,19 @@ class DefaultsConfig(BaseModel):
     log_sync_interval: int = Field(default=10, gt=0)  # 10 seconds default
     backend: Literal["local", "gce", "kubernetes"] = "local"
     capacity_wait_seconds: int = Field(default=600, gt=0)  # 10 min default
+    launch_timeout_seconds: int = Field(default=2700, gt=0)  # Total LAUNCHING state budget (capacity search + boot).
+    # Must exceed capacity_wait_seconds. Per-attempt gcloud timeout is separate
+    # (600s GPU default, configurable per profile via gce.profile_overrides.*.launch_timeout_seconds).
+
+    @model_validator(mode="after")
+    def _validate_launch_timeout_exceeds_capacity_wait(self) -> Self:
+        if self.launch_timeout_seconds < self.capacity_wait_seconds:
+            raise ValueError(
+                f"launch_timeout_seconds ({self.launch_timeout_seconds}) must be >= "
+                f"capacity_wait_seconds ({self.capacity_wait_seconds}); "
+                f"the launch timeout is the total budget including capacity search + boot"
+            )
+        return self
 
 
 class LocalStorageConfig(BaseModel):

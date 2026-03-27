@@ -7,7 +7,6 @@ with a clean event-driven architecture that uses the state machine.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -53,7 +52,8 @@ UNKNOWN_RUN_ID = "unknown"
 STATE_TIMEOUTS: dict[StageState, timedelta] = {
     StageState.PREPARING: timedelta(minutes=15),
     StageState.BUILDING: timedelta(minutes=30),
-    StageState.LAUNCHING: timedelta(minutes=20),
+    StageState.LAUNCHING: timedelta(minutes=45),  # Generous: a3-megagpu-8g boots in 20-30 min;
+    # liveness check in event_emission.py catches dead VMs at 3 min
     StageState.RUNNING: timedelta(hours=24),
     StageState.POST_RUN: timedelta(minutes=30),  # v1.2: renamed from FINALIZING
     # Note: AWAITING_USER_FINALIZATION has no timeout - it requires user action
@@ -322,8 +322,12 @@ class StageDaemon:
             except ValueError:
                 pass
 
-        # 1) RUNNING: check for exit code (success/failure/missing) first
-        if state == StageState.RUNNING:
+        # 1) RUNNING / LAUNCHING: check for exit code first.
+        # LAUNCHING is included because if the executor crashes after launch()
+        # but before LAUNCH_OK, the job may complete while the DB row is still
+        # in LAUNCHING. Checking exit codes here recovers the result instead of
+        # misclassifying it as INSTANCE_LOST.
+        if state in (StageState.RUNNING, StageState.LAUNCHING):
             exit_result: ExitCodeResult | None = None
             backend_handle = run.get("backend_handle")
             backend_type = run.get("backend_type", "local")
@@ -392,6 +396,11 @@ class StageDaemon:
         timeout = STATE_TIMEOUTS.get(state)
         if timeout is None:
             return False
+        # LAUNCHING timeout must accommodate capacity search + boot time.
+        # capacity_wait_seconds can be up to 3600s; boot can take 30 min for
+        # large GPU VMs. launch_timeout_seconds is the total budget.
+        if state == StageState.LAUNCHING and self._config:
+            timeout = timedelta(seconds=self._config.defaults.launch_timeout_seconds)
 
         try:
             state_entered_at = datetime.fromisoformat(state_entered_at_str)
@@ -575,7 +584,7 @@ class StageDaemon:
                     # But DO enforce a timeout: if the row has been in launching for
                     # too long (e.g. executor died before calling on_launch_failed),
                     # transition to deleting to prevent permanent capacity leak.
-                    _LAUNCHING_TIMEOUT_SECONDS = int(os.getenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "1200"))
+                    _LAUNCHING_TIMEOUT_SECONDS = self._config.defaults.launch_timeout_seconds if self._config else 2700
                     if self._instance_timed_out(inst, _LAUNCHING_TIMEOUT_SECONDS):
                         logger.warning(
                             "Instance %s stuck in launching for >%ds — transitioning to deleting",

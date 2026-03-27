@@ -2917,7 +2917,7 @@ echo "Stage completed successfully"
 
                     # Longer timeout for BUILD/LAUNCH phases.
                     # not_found_timeout (600s) covers CPU VMs with data_disk provisioning.
-                    launch_timeout = int(os.getenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "1200"))
+                    launch_timeout = self.config.defaults.launch_timeout_seconds
                     if not_found_timeout <= 0:
                         effective_timeout = 0
                     else:

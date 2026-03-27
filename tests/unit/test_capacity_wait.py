@@ -161,5 +161,5 @@ class TestDefaultsConfig:
         """DefaultsConfig.capacity_wait_seconds can be overridden."""
         from goldfish.config import DefaultsConfig
 
-        config = DefaultsConfig(capacity_wait_seconds=3600)
+        config = DefaultsConfig(capacity_wait_seconds=3600, launch_timeout_seconds=3600)
         assert config.capacity_wait_seconds == 3600
