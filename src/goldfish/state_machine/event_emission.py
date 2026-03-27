@@ -29,11 +29,10 @@ logger = logging.getLogger(__name__)
 # GCS outage threshold before giving up (1 hour)
 GCS_OUTAGE_THRESHOLD = timedelta(hours=1)
 
-# Grace period before checking liveness during LAUNCHING.
-# GCE API has propagation delay: a VM may not be visible via the compute API
-# for the first 5-60 seconds after creation (especially GPU VMs like a3-highgpu-8g).
-# After this grace period, if the instance is still not found, it's truly dead.
-LAUNCHING_GRACE_PERIOD = timedelta(minutes=3)
+# Default grace period before checking liveness during LAUNCHING.
+# Configurable via defaults.launching_grace_seconds in goldfish.yaml.
+# Must exceed the longest VM boot time (a3-megagpu-8g: 5-7 min GPU driver loading).
+DEFAULT_LAUNCHING_GRACE_SECONDS = 600  # 10 minutes
 
 
 def determine_exit_event(
@@ -462,6 +461,7 @@ def check_ai_stop_requested(
 def determine_instance_event(
     run: dict[str, Any],
     project_id: str | None = None,
+    launching_grace_seconds: int | None = None,
 ) -> tuple[StageEvent, EventContext] | None:
     """Determine if instance has been lost.
 
@@ -526,21 +526,23 @@ def determine_instance_event(
                 return None
 
             # LAUNCHING: check liveness only after a grace period.
-            # GCE API has propagation delay — GPU VMs can take 5-60s to appear
-            # in the compute API. But after 3 minutes, if the instance
-            # is still not found, it's dead (quota failure, immediate preemption,
-            # failed boot). Without this, async GCE runs hang in LAUNCHING until
-            # the 10-minute state timeout because wait_for_completion() only runs
-            # in synchronous mode.
+            # Must exceed the longest VM boot time (a3-megagpu-8g: 5-7 min
+            # for GPU driver loading). Configurable via goldfish.yaml
+            # defaults.launching_grace_seconds (default 10 min).
             if state == StageState.LAUNCHING:
                 entered_str = run.get("state_entered_at")
                 if not entered_str:
                     return None  # No timestamp — can't determine age, skip conservatively
+                grace = timedelta(
+                    seconds=launching_grace_seconds
+                    if launching_grace_seconds is not None
+                    else DEFAULT_LAUNCHING_GRACE_SECONDS
+                )
                 try:
                     entered_at = datetime.fromisoformat(entered_str)
                     if entered_at.tzinfo is None:
                         entered_at = entered_at.replace(tzinfo=UTC)
-                    if datetime.now(UTC) - entered_at < LAUNCHING_GRACE_PERIOD:
+                    if datetime.now(UTC) - entered_at < grace:
                         return None  # Still within grace period
                 except (ValueError, TypeError):
                     return None  # Unparseable timestamp — skip conservatively

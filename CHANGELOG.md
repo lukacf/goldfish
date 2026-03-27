@@ -4,6 +4,15 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-03-27
+
+### Fixed
+- **0.4.1 regression: live VMs killed during boot** — The 3-minute LAUNCHING
+  grace period was shorter than the a3-megagpu-8g boot time (5-7 min for GPU
+  driver loading). `verify_instance_stopped()` false-positived on VMs still in
+  STAGING/PROVISIONING, causing the daemon to kill every multi-GPU run ~3 minutes
+  after launch. Grace period raised to 10 minutes.
+
 ## [0.4.1] - 2026-03-27
 
 ### Fixed

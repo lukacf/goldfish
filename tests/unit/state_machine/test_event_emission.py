@@ -687,13 +687,13 @@ class TestInstanceLostEvent:
         Without this, runs hang in LAUNCHING until the 10-minute state timeout.
         """
         from goldfish.state_machine.event_emission import (
-            LAUNCHING_GRACE_PERIOD,
+            DEFAULT_LAUNCHING_GRACE_SECONDS,
             determine_instance_event,
         )
         from goldfish.state_machine.types import StageEvent, StageState
 
         # Instance entered LAUNCHING well past the grace period
-        old = (datetime.now(UTC) - LAUNCHING_GRACE_PERIOD - timedelta(seconds=30)).isoformat()
+        old = (datetime.now(UTC) - timedelta(seconds=DEFAULT_LAUNCHING_GRACE_SECONDS + 30)).isoformat()
         run = {
             "id": "stage-123",
             "state": StageState.LAUNCHING.value,
@@ -719,12 +719,12 @@ class TestInstanceLostEvent:
     def test_launching_state_after_grace_period_alive_vm_no_event(self) -> None:
         """LAUNCHING state after grace period: if VM is alive, no event emitted."""
         from goldfish.state_machine.event_emission import (
-            LAUNCHING_GRACE_PERIOD,
+            DEFAULT_LAUNCHING_GRACE_SECONDS,
             determine_instance_event,
         )
         from goldfish.state_machine.types import StageState
 
-        old = (datetime.now(UTC) - LAUNCHING_GRACE_PERIOD - timedelta(seconds=30)).isoformat()
+        old = (datetime.now(UTC) - timedelta(seconds=DEFAULT_LAUNCHING_GRACE_SECONDS + 30)).isoformat()
         run = {
             "id": "stage-123",
             "state": StageState.LAUNCHING.value,
