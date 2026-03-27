@@ -649,24 +649,26 @@ class TestInstanceLostEvent:
             assert result is None  # Must not emit any event
             mock_verify.assert_not_called()  # Must not even check instance status
 
-    def test_launching_state_with_handle_skips_instance_lost(self) -> None:
-        """LAUNCHING state must skip INSTANCE_LOST even with backend_handle.
+    def test_launching_state_within_grace_period_skips_instance_lost(self) -> None:
+        """LAUNCHING state within the GCE API propagation grace period must skip INSTANCE_LOST.
 
         Bug (stage-3a4ce565): Daemon emitted INSTANCE_LOST 5 seconds after launch
         because gcloud couldn't find the instance yet (GCE API propagation delay).
         GPU VMs (a3-highgpu-8g) can take 5+ seconds to appear in `gcloud instances list`.
 
-        The executor handles launch timeouts in wait_for_completion() with the
-        1200s launch_timeout. The daemon should not interfere during LAUNCHING.
+        During the grace period, the daemon should not check liveness at all.
         """
         from goldfish.state_machine.event_emission import determine_instance_event
         from goldfish.state_machine.types import StageState
 
+        # Instance entered LAUNCHING 30 seconds ago — well within grace period
+        recent = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
         run = {
             "id": "stage-123",
             "state": StageState.LAUNCHING.value,
+            "state_entered_at": recent,
             "backend_type": "gce",
-            "backend_handle": "instance-123",  # Handle exists - instance was created
+            "backend_handle": "instance-123",
         }
 
         with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
@@ -674,8 +676,91 @@ class TestInstanceLostEvent:
 
             result = determine_instance_event(run, project_id="test-project")
 
-            assert result is None  # Must not emit any event during LAUNCHING
-            mock_verify.assert_not_called()  # Must not even check instance status
+            assert result is None  # Must not emit during grace period
+            mock_verify.assert_not_called()
+
+    def test_launching_state_after_grace_period_checks_liveness(self) -> None:
+        """LAUNCHING state after the grace period must check liveness and emit INSTANCE_LOST.
+
+        If a VM dies during launch (quota failure, immediate preemption, failed boot)
+        and the GCE API grace period has passed, the daemon should detect it.
+        Without this, runs hang in LAUNCHING until the 10-minute state timeout.
+        """
+        from goldfish.state_machine.event_emission import (
+            LAUNCHING_GRACE_PERIOD,
+            determine_instance_event,
+        )
+        from goldfish.state_machine.types import StageEvent, StageState
+
+        # Instance entered LAUNCHING well past the grace period
+        old = (datetime.now(UTC) - LAUNCHING_GRACE_PERIOD - timedelta(seconds=30)).isoformat()
+        run = {
+            "id": "stage-123",
+            "state": StageState.LAUNCHING.value,
+            "state_entered_at": old,
+            "backend_type": "gce",
+            "backend_handle": "instance-123",
+        }
+
+        with (
+            patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify,
+            patch("goldfish.state_machine.event_emission.detect_termination_cause") as mock_cause,
+        ):
+            mock_verify.return_value = True  # Instance is dead
+            mock_cause.return_value = "unknown"
+
+            result = determine_instance_event(run, project_id="test-project")
+
+            assert result is not None
+            event, context = result
+            assert event == StageEvent.INSTANCE_LOST
+            mock_verify.assert_called_once()
+
+    def test_launching_state_after_grace_period_alive_vm_no_event(self) -> None:
+        """LAUNCHING state after grace period: if VM is alive, no event emitted."""
+        from goldfish.state_machine.event_emission import (
+            LAUNCHING_GRACE_PERIOD,
+            determine_instance_event,
+        )
+        from goldfish.state_machine.types import StageState
+
+        old = (datetime.now(UTC) - LAUNCHING_GRACE_PERIOD - timedelta(seconds=30)).isoformat()
+        run = {
+            "id": "stage-123",
+            "state": StageState.LAUNCHING.value,
+            "state_entered_at": old,
+            "backend_type": "gce",
+            "backend_handle": "instance-123",
+        }
+
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            mock_verify.return_value = False  # Instance is alive
+
+            result = determine_instance_event(run, project_id="test-project")
+
+            assert result is None
+            mock_verify.assert_called_once()
+
+    def test_launching_state_missing_state_entered_at_skips_check(self) -> None:
+        """LAUNCHING with no state_entered_at should skip liveness (conservative)."""
+        from goldfish.state_machine.event_emission import determine_instance_event
+        from goldfish.state_machine.types import StageState
+
+        run = {
+            "id": "stage-123",
+            "state": StageState.LAUNCHING.value,
+            "state_entered_at": None,
+            "backend_type": "gce",
+            "backend_handle": "instance-123",
+        }
+
+        with patch("goldfish.state_machine.event_emission.verify_instance_stopped") as mock_verify:
+            mock_verify.return_value = True
+
+            result = determine_instance_event(run, project_id="test-project")
+
+            assert result is None
+            mock_verify.assert_not_called()
 
     def test_awaiting_user_finalization_state_never_emits_instance_lost(self) -> None:
         """AWAITING_USER_FINALIZATION state must never emit INSTANCE_LOST.
@@ -770,7 +855,7 @@ class TestEdgeCases:
         assert result is None
 
     def test_non_running_state_returns_none(self) -> None:
-        """Non-RUNNING state must return None (already transitioned)."""
+        """Terminal state must return None (already transitioned)."""
         from goldfish.state_machine.event_emission import determine_exit_event
         from goldfish.state_machine.exit_code import ExitCodeResult
         from goldfish.state_machine.types import StageState
@@ -781,6 +866,42 @@ class TestEdgeCases:
 
         result = determine_exit_event(run, exit_result)
         assert result is None
+
+    def test_launching_state_with_exit_code_returns_event(self) -> None:
+        """LAUNCHING state with exit code must return event (executor crash recovery).
+
+        If the executor crashes after launch() but before LAUNCH_OK, the job
+        may complete while the DB row is still in LAUNCHING. The daemon must
+        recover the exit code instead of misclassifying as INSTANCE_LOST.
+        """
+        from goldfish.state_machine.event_emission import determine_exit_event
+        from goldfish.state_machine.exit_code import ExitCodeResult
+        from goldfish.state_machine.types import StageEvent, StageState
+
+        run = {"id": "stage-123", "state": StageState.LAUNCHING.value}
+        exit_result = ExitCodeResult.from_code(0)
+
+        result = determine_exit_event(run, exit_result, db=MagicMock())
+
+        assert result is not None
+        event, context = result
+        assert event == StageEvent.EXIT_SUCCESS
+        assert context.exit_code == 0
+
+    def test_launching_state_with_failure_exit_returns_failure_event(self) -> None:
+        """LAUNCHING with non-zero exit must return EXIT_FAILURE."""
+        from goldfish.state_machine.event_emission import determine_exit_event
+        from goldfish.state_machine.exit_code import ExitCodeResult
+        from goldfish.state_machine.types import StageEvent, StageState
+
+        run = {"id": "stage-123", "state": StageState.LAUNCHING.value}
+        exit_result = ExitCodeResult.from_code(1)
+
+        result = determine_exit_event(run, exit_result, db=MagicMock())
+
+        assert result is not None
+        event, context = result
+        assert event == StageEvent.EXIT_FAILURE
 
 
 class TestAIStopDetection:

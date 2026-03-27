@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -124,8 +123,8 @@ class StageExecutor(_StageExecutorImpl):
             db_backend="sqlite",
             log_format="console",
             log_level="INFO",
-            stage_timeout=int(os.getenv("GOLDFISH_STAGE_TIMEOUT", "3600")),
-            gce_launch_timeout=int(os.getenv("GOLDFISH_GCE_LAUNCH_TIMEOUT", "1200")),
+            stage_timeout=self.config.defaults.timeout_seconds,
+            gce_launch_timeout=self.config.defaults.launch_timeout_seconds,
         )
 
     def _placeholder_context(self, stage_run_id: str) -> StageRunContext:

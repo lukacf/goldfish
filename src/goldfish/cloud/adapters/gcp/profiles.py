@@ -166,6 +166,8 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
             "accelerator": "nvidia-h100-80gb",
             "count": 8,
         },
+        # 8-GPU provisioning can take 10+ minutes; default 600s is too tight
+        "launch_timeout_seconds": 1200,
         "preemptible_allowed": False,
         "on_demand_allowed": True,
         "zones": [

@@ -23,6 +23,7 @@ def daemon() -> StageDaemon:
     """Create a StageDaemon with mock dependencies for testing."""
     mock_config = MagicMock()
     mock_config.gce = None
+    mock_config.defaults.launch_timeout_seconds = 2700  # 45 min default
     return StageDaemon(db=MagicMock(), config=mock_config)
 
 
@@ -98,7 +99,7 @@ class TestDetermineEvent:
         run = {
             "id": "stage-123",
             "state": StageState.LAUNCHING.value,
-            "state_entered_at": (datetime.now(UTC) - timedelta(minutes=25)).isoformat(),
+            "state_entered_at": (datetime.now(UTC) - timedelta(minutes=50)).isoformat(),
             "backend_type": "gce",
         }
         daemon._db.get_stage_run.return_value = run
@@ -586,11 +587,11 @@ class TestCheckTimeout:
 
         assert daemon._check_timeout(run) is True
 
-    def test_launching_timeout_20min(self, daemon: StageDaemon) -> None:
-        """LAUNCHING should timeout after 20 minutes."""
+    def test_launching_timeout_45min(self, daemon: StageDaemon) -> None:
+        """LAUNCHING should timeout after 45 minutes (a3-megagpu-8g boots in 20-30 min)."""
         run = {
             "state": StageState.LAUNCHING.value,
-            "state_entered_at": (datetime.now(UTC) - timedelta(minutes=21)).isoformat(),
+            "state_entered_at": (datetime.now(UTC) - timedelta(minutes=46)).isoformat(),
         }
 
         assert daemon._check_timeout(run) is True
@@ -1343,7 +1344,7 @@ class TestStateTimeoutsConstant:
         # Verify specific timeout values from implementation
         assert STATE_TIMEOUTS[StageState.PREPARING] == timedelta(minutes=15)
         assert STATE_TIMEOUTS[StageState.BUILDING] == timedelta(minutes=30)
-        assert STATE_TIMEOUTS[StageState.LAUNCHING] == timedelta(minutes=20)
+        assert STATE_TIMEOUTS[StageState.LAUNCHING] == timedelta(minutes=45)
         assert STATE_TIMEOUTS[StageState.RUNNING] == timedelta(hours=24)
         assert STATE_TIMEOUTS[StageState.POST_RUN] == timedelta(minutes=30)
         assert STATE_TIMEOUTS[StageState.UNKNOWN] == timedelta(hours=24)

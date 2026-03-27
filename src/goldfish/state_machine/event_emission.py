@@ -29,6 +29,12 @@ logger = logging.getLogger(__name__)
 # GCS outage threshold before giving up (1 hour)
 GCS_OUTAGE_THRESHOLD = timedelta(hours=1)
 
+# Grace period before checking liveness during LAUNCHING.
+# GCE API has propagation delay: a VM may not be visible via the compute API
+# for the first 5-60 seconds after creation (especially GPU VMs like a3-highgpu-8g).
+# After this grace period, if the instance is still not found, it's truly dead.
+LAUNCHING_GRACE_PERIOD = timedelta(minutes=3)
+
 
 def determine_exit_event(
     run: dict[str, Any],
@@ -53,9 +59,12 @@ def determine_exit_event(
     if exit_result is None:
         return None
 
-    # Only emit exit events for RUNNING state
+    # Only emit exit events for states where a backend handle exists and
+    # the job may have run. LAUNCHING is included to recover exit codes
+    # when the executor crashes after launch() but before LAUNCH_OK.
     state = run.get("state")
-    if state and state != StageState.RUNNING.value:
+    allowed_states = {StageState.RUNNING.value, StageState.LAUNCHING.value}
+    if state and state not in allowed_states:
         return None
 
     now = datetime.now(UTC)
@@ -505,25 +514,38 @@ def determine_instance_event(
     if state_str:
         try:
             state = StageState(state_str)
-            # States where INSTANCE_LOST should NOT be emitted
-            # NOTE: LAUNCHING is NOT in this list because preemption CAN occur during
-            # LAUNCHING (after instance is created but before ACK). If backend_handle
-            # exists, we should check if the instance was lost. The backend_handle check
-            # below (line 674-675) guards against checking before instance exists.
+            # States where INSTANCE_LOST should NEVER be emitted
             states_skip_instance_lost = {
                 StageState.PREPARING,  # No instance yet
                 StageState.BUILDING,  # No instance yet
-                StageState.LAUNCHING,  # Instance may not be visible in GCE API yet;
-                # executor handles launch timeouts via wait_for_completion().
-                # Removed in 075dc23 to detect preemption during launch, but
-                # that caused false INSTANCE_LOST within 5s of launch on GPU VMs
-                # where the GCE API has propagation delay for instance visibility.
                 StageState.POST_RUN,  # Instance stopping is EXPECTED after exit
                 StageState.AWAITING_USER_FINALIZATION,  # Instance may be cleaned up
                 StageState.UNKNOWN,  # Can't assume anything
             }
             if state in states_skip_instance_lost:
                 return None
+
+            # LAUNCHING: check liveness only after a grace period.
+            # GCE API has propagation delay — GPU VMs can take 5-60s to appear
+            # in the compute API. But after 3 minutes, if the instance
+            # is still not found, it's dead (quota failure, immediate preemption,
+            # failed boot). Without this, async GCE runs hang in LAUNCHING until
+            # the 10-minute state timeout because wait_for_completion() only runs
+            # in synchronous mode.
+            if state == StageState.LAUNCHING:
+                entered_str = run.get("state_entered_at")
+                if not entered_str:
+                    return None  # No timestamp — can't determine age, skip conservatively
+                try:
+                    entered_at = datetime.fromisoformat(entered_str)
+                    if entered_at.tzinfo is None:
+                        entered_at = entered_at.replace(tzinfo=UTC)
+                    if datetime.now(UTC) - entered_at < LAUNCHING_GRACE_PERIOD:
+                        return None  # Still within grace period
+                except (ValueError, TypeError):
+                    return None  # Unparseable timestamp — skip conservatively
+                # Grace period elapsed — fall through to liveness check below
+
         except ValueError:
             pass  # Unknown state string, proceed with check
 
