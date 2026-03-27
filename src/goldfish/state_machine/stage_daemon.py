@@ -365,7 +365,8 @@ class StageDaemon:
                 return event_ctx
 
         # 2) Any active state: instance/container lost
-        instance_event = determine_instance_event(run, project_id=project_id)
+        grace = self._config.defaults.launching_grace_seconds if self._config else None
+        instance_event = determine_instance_event(run, project_id=project_id, launching_grace_seconds=grace)
         if instance_event is not None:
             return instance_event
 

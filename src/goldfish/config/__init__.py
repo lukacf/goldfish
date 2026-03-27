@@ -53,6 +53,10 @@ class DefaultsConfig(BaseModel):
     launch_timeout_seconds: int = Field(default=2700, gt=0)  # Total LAUNCHING state budget (capacity search + boot).
     # Must exceed capacity_wait_seconds. Per-attempt gcloud timeout is separate
     # (600s GPU default, configurable per profile via gce.profile_overrides.*.launch_timeout_seconds).
+    launching_grace_seconds: int = Field(default=600, ge=60)  # Grace period before checking
+    # liveness during LAUNCHING. Must exceed the longest VM boot time (a3-megagpu-8g: 5-7 min
+    # for GPU driver loading). Too short → kills live VMs mid-boot. Too long → delays dead VM
+    # detection. Default 10 min covers multi-GPU boot with margin.
 
     @model_validator(mode="after")
     def _validate_launch_timeout_exceeds_capacity_wait(self) -> Self:
