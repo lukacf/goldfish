@@ -1064,13 +1064,18 @@ warm_pool_idle_loop() {{
                 : > "$LOCAL_STAGE_LOG"
 
                 # Write entrypoint script (same as first-boot: gce_launcher writes to /mnt/entrypoint.sh)
+                rm -f /mnt/entrypoint.sh
                 python3 -c "
 import json
 spec = json.load(open('/tmp/job_spec.json'))
 script = spec.get('entrypoint_script', 'echo No entrypoint')
 with open('/mnt/entrypoint.sh', 'w') as f:
     f.write(script)
-" 2>/dev/null
+" 2>&1 || {{
+                    echo "ERROR: Failed to write entrypoint script"
+                    abort_warm_job "$REQ_ID" "$GCS_EXIT_CODE_PATH" "upload_logs"
+                    continue
+                }}
                 chmod +x /mnt/entrypoint.sh
 
                 # Stage inputs from GCS to /mnt/inputs/ (replicates gce_launcher input staging)
@@ -1162,6 +1167,11 @@ for host, container in spec.get('mounts', []):
                 # NEW_CMD may contain embedded quotes (e.g., GPU CUDA wrapper:
                 # -c 'mkdir -p /tmp/cuda-symlinks && ... && exec /entrypoint.sh')
                 # that would be broken by shell word splitting if used unquoted.
+                #
+                # IMPORTANT: Remove stale docker_cmd.sh BEFORE regeneration.
+                # If the Python block fails, we must not eval the previous job's command
+                # (which would run the wrong Docker image).
+                rm -f /tmp/docker_cmd.sh
                 python3 -c "
 import json, shlex
 spec = json.load(open('/tmp/job_spec.json'))
@@ -1189,7 +1199,16 @@ with open('/tmp/docker_cmd.sh', 'w') as f:
     if cmd:
         f.write(' ' + cmd)  # Append unquoted — already shell-formatted
     f.write(' > >(tee -a \"$LOCAL_STDOUT\") 2> >(tee -a \"$LOCAL_STDERR\") &')
-" 2>/dev/null
+" 2>&1 || {{
+                    echo "ERROR: Failed to build docker run command"
+                    abort_warm_job "$REQ_ID" "$GCS_EXIT_CODE_PATH" "upload_logs"
+                    continue
+                }}
+                if [[ ! -f /tmp/docker_cmd.sh ]]; then
+                    echo "ERROR: /tmp/docker_cmd.sh not generated"
+                    abort_warm_job "$REQ_ID" "$GCS_EXIT_CODE_PATH" "upload_logs"
+                    continue
+                fi
                 eval "$(cat /tmp/docker_cmd.sh)"
                 DOCKER_PID=$!
 
