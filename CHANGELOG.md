@@ -4,6 +4,16 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-03-28
+
+### Fixed
+- **Warm pool reuse ran the previous workspace's Docker image** — The Python block
+  that generates the `docker run` command suppressed errors with `2>/dev/null`. If it
+  failed silently, `/tmp/docker_cmd.sh` was never overwritten and `eval` executed the
+  previous job's command — with the wrong image. Fixed by deleting stale files before
+  regeneration, surfacing errors, and aborting on failure. Same fix applied to the
+  entrypoint script writer.
+
 ## [0.4.2] - 2026-03-27
 
 ### Fixed
