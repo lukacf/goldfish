@@ -26,8 +26,8 @@ class TestTransitionTable:
     """Tests for the TRANSITIONS constant."""
 
     def test_transition_count(self) -> None:
-        """Verify we have exactly 34 transitions (v1.2: added AWAITING_USER_FINALIZATION)."""
-        assert len(TRANSITIONS) == 34
+        """Verify we have exactly 36 transitions (v1.2 + USER_FINALIZE from RUNNING/POST_RUN)."""
+        assert len(TRANSITIONS) == 36
 
     def test_all_active_states_have_transitions(self) -> None:
         """Every active state should have at least one outgoing transition."""
@@ -295,6 +295,12 @@ class TestRunningTransitions:
         assert t is not None
         assert t.to_state == StageState.TERMINATED
 
+    def test_user_finalize(self, user_finalize_context: EventContext) -> None:
+        """USER_FINALIZE → COMPLETED (orphaned run recovery)."""
+        t = find_transition(StageState.RUNNING, StageEvent.USER_FINALIZE, user_finalize_context)
+        assert t is not None
+        assert t.to_state == StageState.COMPLETED
+
 
 class TestPostRunTransitions:
     """Tests for POST_RUN state transitions (v1.2: renamed from FINALIZING)."""
@@ -316,6 +322,12 @@ class TestPostRunTransitions:
         t = find_transition(StageState.POST_RUN, StageEvent.USER_CANCEL, user_cancel_context)
         assert t is not None
         assert t.to_state == StageState.CANCELED
+
+    def test_user_finalize(self, user_finalize_context: EventContext) -> None:
+        """USER_FINALIZE → COMPLETED (orphaned run recovery)."""
+        t = find_transition(StageState.POST_RUN, StageEvent.USER_FINALIZE, user_finalize_context)
+        assert t is not None
+        assert t.to_state == StageState.COMPLETED
 
 
 class TestAwaitingUserFinalizationTransitions:
@@ -465,9 +477,9 @@ class TestUtilityFunctions:
         assert all(t.from_state == StageState.PREPARING for t in transitions)
 
     def test_get_transitions_from_post_run(self) -> None:
-        """get_transitions_from_state returns correct transitions for POST_RUN (v1.2)."""
+        """get_transitions_from_state returns correct transitions for POST_RUN."""
         transitions = get_transitions_from_state(StageState.POST_RUN)
-        assert len(transitions) == 8  # Includes AI_STOP
+        assert len(transitions) == 9  # Includes AI_STOP, USER_FINALIZE
         assert all(t.from_state == StageState.POST_RUN for t in transitions)
 
     def test_get_transitions_from_awaiting_user_finalization(self) -> None:
@@ -505,11 +517,16 @@ class TestUtilityFunctions:
         assert to_states == {StageState.FAILED, StageState.AWAITING_USER_FINALIZATION}
 
     def test_get_transitions_for_user_finalize(self) -> None:
-        """get_transitions_for_event returns USER_FINALIZE transition (v1.2: new event)."""
+        """get_transitions_for_event returns USER_FINALIZE transitions from 3 states."""
         transitions = get_transitions_for_event(StageEvent.USER_FINALIZE)
-        assert len(transitions) == 1
-        assert transitions[0].from_state == StageState.AWAITING_USER_FINALIZATION
-        assert transitions[0].to_state == StageState.COMPLETED
+        assert len(transitions) == 3
+        from_states = {t.from_state for t in transitions}
+        assert from_states == {
+            StageState.RUNNING,
+            StageState.POST_RUN,
+            StageState.AWAITING_USER_FINALIZATION,
+        }
+        assert all(t.to_state == StageState.COMPLETED for t in transitions)
 
 
 class TestGuardEvaluationOrder:

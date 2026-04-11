@@ -300,8 +300,9 @@ class DockerBuilder:
         """Check if the configured SVS agent provider is meerkat."""
         return self._get_svs_provider_name() == "meerkat"
 
-    # Pin rkat-rpc version for reproducible Docker builds.
-    # Bump this when upgrading meerkat-sdk in pyproject.toml.
+    # Single source of truth for the Meerkat version used in Docker images.
+    # Both meerkat-sdk (pip) and rkat-rpc (binary) are pinned to this version.
+    # Bump this when upgrading — both must always match.
     RKAT_RPC_VERSION = "v0.4.12"
 
     # GitHub repo hosting rkat-rpc release artifacts.
@@ -318,7 +319,7 @@ class DockerBuilder:
         return (
             f"{header}{user_prefix}"
             "# Install meerkat-sdk Python package and rkat-rpc binary\n"
-            f"RUN pip install --no-cache-dir 'meerkat-sdk>={semver}'\n"
+            f"RUN pip install --no-cache-dir 'meerkat-sdk=={semver}'\n"
             "# Detect architecture at build time using uname (works with standard docker build and buildx)\n"
             "RUN MACHINE=$(uname -m) && \\\n"
             '    case "${MACHINE}" in x86_64) ARCH=x86_64-unknown-linux-gnu;; aarch64) ARCH=aarch64-unknown-linux-gnu;; *) ARCH=${MACHINE};; esac && \\\n'
