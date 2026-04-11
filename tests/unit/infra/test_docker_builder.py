@@ -6,7 +6,10 @@ import json
 import logging
 import subprocess
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from goldfish.config import GCEConfig, GoldfishConfig
 from goldfish.infra import docker_builder as docker_builder_module
@@ -242,6 +245,72 @@ def test_resolve_base_image_digest_success(monkeypatch, caplog) -> None:
         assert resolve_base_image_digest("us-docker.pkg.dev/test-proj/repo/image:tag") == digest
 
     assert not caplog.records
+
+
+class TestGoldfishRustPathResolution:
+    """Tests for goldfish-rust crate path resolution.
+
+    The goldfish-rust crate must be found whether Goldfish is installed:
+    - From git (editable): crate at repo_root/goldfish-rust/
+    - From PyPI wheel: crate bundled at goldfish/_bundled/goldfish-rust/
+    """
+
+    def test_bundled_path_preferred_over_repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When bundled crate exists, it takes precedence over repo-relative path."""
+        # Simulate bundled location
+        bundled = tmp_path / "goldfish" / "_bundled" / "goldfish-rust"
+        bundled.mkdir(parents=True)
+        (bundled / "Cargo.toml").write_text("[package]\nname = 'goldfish-rust'\n")
+
+        # Also create repo-relative location
+        repo_rust = tmp_path / "goldfish-rust"
+        repo_rust.mkdir()
+        (repo_rust / "Cargo.toml").write_text("[package]\nname = 'repo-version'\n")
+
+        monkeypatch.setattr(
+            docker_builder_module,
+            "_GOLDFISH_PACKAGE_DIR",
+            tmp_path / "goldfish",
+        )
+
+        result = docker_builder_module.resolve_goldfish_rust_path()
+        assert result is not None
+        assert "_bundled" in str(result)
+
+    def test_falls_back_to_repo_relative(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When no bundled crate, falls back to repo-relative path (editable install)."""
+        # Only repo-relative location exists
+        repo_rust = tmp_path / "goldfish-rust"
+        repo_rust.mkdir()
+        (repo_rust / "Cargo.toml").write_text("[package]\nname = 'goldfish-rust'\n")
+
+        # Package dir without bundled crate
+        pkg_dir = tmp_path / "src" / "goldfish"
+        pkg_dir.mkdir(parents=True)
+
+        monkeypatch.setattr(
+            docker_builder_module,
+            "_GOLDFISH_PACKAGE_DIR",
+            pkg_dir,
+        )
+
+        result = docker_builder_module.resolve_goldfish_rust_path()
+        assert result is not None
+        assert "goldfish-rust" in str(result)
+
+    def test_returns_none_when_not_found(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Returns None when goldfish-rust is not found anywhere."""
+        pkg_dir = tmp_path / "site-packages" / "goldfish"
+        pkg_dir.mkdir(parents=True)
+
+        monkeypatch.setattr(
+            docker_builder_module,
+            "_GOLDFISH_PACKAGE_DIR",
+            pkg_dir,
+        )
+
+        result = docker_builder_module.resolve_goldfish_rust_path()
+        assert result is None
 
 
 class TestMeerkatInstallBlock:

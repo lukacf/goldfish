@@ -32,7 +32,37 @@ GOLDFISH_VALIDATION_PATH = Path(__file__).parent.parent / "validation.py"
 GOLDFISH_ERRORS_PATH = Path(__file__).parent.parent / "errors.py"
 GOLDFISH_UTILS_PATH = Path(__file__).parent.parent / "utils"
 GOLDFISH_CONFIG_PATH = Path(__file__).parent.parent / "config"
-GOLDFISH_RUST_PATH = Path(__file__).parent.parent.parent.parent / "goldfish-rust"
+# Base directory for the goldfish package (used by path resolution helpers).
+_GOLDFISH_PACKAGE_DIR = Path(__file__).parent.parent
+
+
+def resolve_goldfish_rust_path() -> Path | None:
+    """Resolve the goldfish-rust crate path.
+
+    Checks two locations in order:
+    1. Bundled in wheel: goldfish/_bundled/goldfish-rust/ (PyPI installs)
+    2. Repo-relative: ../../goldfish-rust/ from package dir (editable installs)
+
+    Returns:
+        Path to goldfish-rust directory, or None if not found.
+    """
+    # 1. Bundled in wheel (PyPI / uvx installs)
+    bundled = _GOLDFISH_PACKAGE_DIR / "_bundled" / "goldfish-rust"
+    if bundled.exists():
+        return bundled
+
+    # 2. Repo-relative (editable / development installs)
+    # _GOLDFISH_PACKAGE_DIR = src/goldfish/ → repo root is ../../
+    repo_root = _GOLDFISH_PACKAGE_DIR.parent.parent
+    repo_relative = repo_root / "goldfish-rust"
+    if repo_relative.exists():
+        return repo_relative
+
+    return None
+
+
+# Resolved once at import time; None if the crate is not available.
+GOLDFISH_RUST_PATH = resolve_goldfish_rust_path()
 
 # Default base image when none specified (backwards compatibility)
 DEFAULT_BASE_IMAGE = "python:3.11-slim"
@@ -131,9 +161,14 @@ def compute_goldfish_runtime_hash(goldfish_root: Path | None = None) -> str:
         else:
             files.append((path.relative_to(root).as_posix(), path))
 
-    repo_root = root.parent.parent
-    rust_root = repo_root / "goldfish-rust"
-    if rust_root.exists():
+    # When goldfish_root is explicitly provided (e.g. tests), derive rust path
+    # relative to it. Otherwise use the globally resolved path.
+    rust_root: Path | None
+    if goldfish_root is not None:
+        rust_root = goldfish_root.parent.parent / "goldfish-rust"
+    else:
+        rust_root = GOLDFISH_RUST_PATH
+    if rust_root is not None and rust_root.exists():
         rust_include_paths = [
             rust_root / "Cargo.toml",
             rust_root / "Cargo.lock",
@@ -372,7 +407,7 @@ class DockerBuilder:
         has_requirements = (workspace_dir / "requirements.txt").exists()
         has_loaders = (workspace_dir / "loaders").exists()
         has_entrypoints = (workspace_dir / "entrypoints").exists()
-        has_goldfish_rust = GOLDFISH_RUST_PATH.exists()
+        has_goldfish_rust = GOLDFISH_RUST_PATH is not None and GOLDFISH_RUST_PATH.exists()
 
         # Detect image type to determine user handling
         # - Jupyter images (quay.io/jupyter/*) run as non-root user (jovyan, uid 1000)
@@ -808,7 +843,7 @@ CMD ["/bin/bash"]
         if (workspace_dir / "entrypoints").exists():
             shutil.copytree(workspace_dir / "entrypoints", build_context / "entrypoints")
 
-        if GOLDFISH_RUST_PATH.exists():
+        if GOLDFISH_RUST_PATH is not None and GOLDFISH_RUST_PATH.exists():
             shutil.copytree(
                 GOLDFISH_RUST_PATH,
                 build_context / "goldfish-rust",

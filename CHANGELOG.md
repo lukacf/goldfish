@@ -4,7 +4,7 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
-## [0.4.4] - 2026-04-11
+## [0.4.5] - 2026-04-11
 
 ### Fixed
 - **Meerkat SDK/binary version drift in Docker images** — The generated Dockerfile
@@ -19,6 +19,11 @@ All notable changes to Goldfish.
   dashboard clarity and required manual DB fixes. Added `USER_FINALIZE` transitions
   from `RUNNING` and `POST_RUN` states so `finalize_run()` always completes the
   state machine.
+- **Rust stages failed from PyPI installs** — The `goldfish-rust` crate was
+  resolved relative to the git repo root, which doesn't exist when installed
+  via `uvx`/pip from PyPI. The crate is now bundled inside the wheel at
+  `goldfish/_bundled/goldfish-rust/` and the path resolver checks the bundled
+  location first, falling back to repo-relative for editable installs.
 
 ## [0.4.3] - 2026-03-28
 
