@@ -149,6 +149,7 @@ TRANSITIONS: list[TransitionDef] = [
     TransitionDef(StageState.RUNNING, StageEvent.TIMEOUT, StageState.TERMINATED),
     TransitionDef(StageState.RUNNING, StageEvent.USER_CANCEL, StageState.CANCELED),
     TransitionDef(StageState.RUNNING, StageEvent.AI_STOP, StageState.TERMINATED),
+    TransitionDef(StageState.RUNNING, StageEvent.USER_FINALIZE, StageState.COMPLETED),
     # =========================================================================
     # POST_RUN (8 transitions) - v1.2: renamed from FINALIZING
     # =========================================================================
@@ -188,6 +189,7 @@ TRANSITIONS: list[TransitionDef] = [
     ),
     TransitionDef(StageState.POST_RUN, StageEvent.USER_CANCEL, StageState.CANCELED),
     TransitionDef(StageState.POST_RUN, StageEvent.AI_STOP, StageState.TERMINATED),
+    TransitionDef(StageState.POST_RUN, StageEvent.USER_FINALIZE, StageState.COMPLETED),
     # =========================================================================
     # AWAITING_USER_FINALIZATION (2 transitions) - v1.2: new state
     # =========================================================================

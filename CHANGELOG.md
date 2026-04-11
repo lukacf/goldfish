@@ -4,6 +4,22 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-04-11
+
+### Fixed
+- **Meerkat SDK/binary version drift in Docker images** — The generated Dockerfile
+  installed `meerkat-sdk>=0.4.12` (open upper bound) while the rkat-rpc binary was
+  hard-pinned to v0.4.12. When pip resolved the SDK to 0.5.1, the during-run AI
+  review failed with `Server version 0.4.12 incompatible with SDK 0.5.1` and was
+  disabled after 3 retries. Fixed by pinning the SDK with `==` so both components
+  always match `RKAT_RPC_VERSION`. Added regression tests.
+- **`finalize_run()` left orphaned runs in `running` state** — When the executor
+  was gone (crash, preemption) and the user called `finalize_run()`, results were
+  recorded but `stage_runs.state` was never transitioned. The zombies blocked
+  dashboard clarity and required manual DB fixes. Added `USER_FINALIZE` transitions
+  from `RUNNING` and `POST_RUN` states so `finalize_run()` always completes the
+  state machine.
+
 ## [0.4.3] - 2026-03-28
 
 ### Fixed

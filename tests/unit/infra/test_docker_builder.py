@@ -244,6 +244,49 @@ def test_resolve_base_image_digest_success(monkeypatch, caplog) -> None:
     assert not caplog.records
 
 
+class TestMeerkatInstallBlock:
+    """Tests for _render_meerkat_install_block version pinning.
+
+    The meerkat-sdk Python package and the rkat-rpc binary must always be
+    the same version.  Using >= for the SDK lets pip resolve a newer SDK
+    than the pinned binary, causing 'Server version X incompatible with
+    SDK Y' at runtime.
+    """
+
+    def test_sdk_pinned_exactly_to_binary_version(self) -> None:
+        """meerkat-sdk must use == (not >=) matching RKAT_RPC_VERSION."""
+        config = GoldfishConfig(project_name="test", dev_repo_path=".")
+        builder = DockerBuilder(config)
+        block = builder._render_meerkat_install_block(is_nonroot_image=False)
+
+        semver = builder.RKAT_RPC_VERSION.lstrip("v")
+        assert f"meerkat-sdk=={semver}" in block, f"Expected exact pin meerkat-sdk=={semver}, got: {block}"
+        assert "meerkat-sdk>=" not in block, "Open-ended >= pin allows SDK/binary version drift"
+
+    def test_sdk_and_binary_use_same_version(self) -> None:
+        """Both the pip install and the binary download must reference the same version."""
+        config = GoldfishConfig(project_name="test", dev_repo_path=".")
+        builder = DockerBuilder(config)
+        block = builder._render_meerkat_install_block(is_nonroot_image=False)
+
+        semver = builder.RKAT_RPC_VERSION.lstrip("v")
+        # SDK exact pin
+        assert f"meerkat-sdk=={semver}" in block
+        # Binary download URL
+        assert f"rkat-rpc-{semver}" in block
+
+    def test_nonroot_image_still_pins_exactly(self) -> None:
+        """Non-root image variant must also use exact SDK pinning."""
+        config = GoldfishConfig(project_name="test", dev_repo_path=".")
+        builder = DockerBuilder(config)
+        block = builder._render_meerkat_install_block(is_nonroot_image=True)
+
+        semver = builder.RKAT_RPC_VERSION.lstrip("v")
+        assert f"meerkat-sdk=={semver}" in block
+        assert "USER root" in block
+        assert "USER 1000" in block
+
+
 def test_generate_dockerfile_writes_pip_freeze(tmp_path) -> None:
     """The generated Dockerfile must capture pip freeze into /app/pip-freeze.txt."""
     workspace_path = tmp_path / "workspace"

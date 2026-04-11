@@ -392,6 +392,85 @@ class TestFinalizeRunStateMachine:
             assert row["state"] == "completed"
             assert row["completed_with_warnings"] == 1  # Should be preserved
 
+    def test_finalize_transitions_running_to_completed(self, test_db: Database) -> None:
+        """finalize_run on a RUNNING run should transition state to COMPLETED.
+
+        This covers the orphaned-run scenario: executor is gone, run is stuck
+        in 'running' state, but user has results and wants to finalize.
+        """
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(
+            test_db,
+            "stage-orphan-running",
+            "test_ws",
+            "v1",
+            status="running",
+            state="running",
+        )
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(
+            workspace_name="test_ws",
+            version="v1",
+            stage_run_id="stage-orphan-running",
+        )
+
+        results = {
+            "primary_metric": "accuracy",
+            "direction": "maximize",
+            "value": 0.72,
+            "dataset_split": "val",
+            "ml_outcome": "partial",
+            "notes": "Run was orphaned but produced usable results.",
+        }
+        manager.finalize_run("stage-orphan-running", results)
+
+        # State must transition — no more zombies
+        with test_db._conn() as conn:
+            row = conn.execute(
+                "SELECT state FROM stage_runs WHERE id = ?",
+                ("stage-orphan-running",),
+            ).fetchone()
+            assert row is not None
+            assert row["state"] == "completed"
+
+    def test_finalize_transitions_post_run_to_completed(self, test_db: Database) -> None:
+        """finalize_run on a POST_RUN run should transition state to COMPLETED."""
+        _setup_workspace_and_version(test_db, "test_ws", "v1")
+        _setup_stage_run(
+            test_db,
+            "stage-orphan-postrun",
+            "test_ws",
+            "v1",
+            status="running",
+            state="post_run",
+        )
+
+        manager = ExperimentRecordManager(test_db)
+        manager.create_run_record(
+            workspace_name="test_ws",
+            version="v1",
+            stage_run_id="stage-orphan-postrun",
+        )
+
+        results = {
+            "primary_metric": "accuracy",
+            "direction": "maximize",
+            "value": 0.68,
+            "dataset_split": "val",
+            "ml_outcome": "miss",
+            "notes": "Post-run got stuck, finalizing manually.",
+        }
+        manager.finalize_run("stage-orphan-postrun", results)
+
+        with test_db._conn() as conn:
+            row = conn.execute(
+                "SELECT state FROM stage_runs WHERE id = ?",
+                ("stage-orphan-postrun",),
+            ).fetchone()
+            assert row is not None
+            assert row["state"] == "completed"
+
 
 class TestFinalizationGate:
     """Tests for finalization gate behavior."""
