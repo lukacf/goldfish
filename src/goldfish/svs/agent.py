@@ -10,7 +10,7 @@ This module defines the core abstractions for agent-based code review:
 - NullProvider: Test double for unit testing
 
 Providers:
-- MeerkatProvider: Vendor-neutral default using Meerkat SDK (meerkat-sdk>=0.4)
+- MeerkatProvider: Vendor-neutral default using Meerkat SDK (meerkat-sdk>=0.7.23)
 - AnthropicAPIProvider: Claude Agent SDK with tool access
 - CodexCLIProvider: OpenAI Codex CLI
 - GeminiCLIProvider: Google Gemini CLI
@@ -993,7 +993,7 @@ class MeerkatProvider:
     provider, so no API key configuration is needed at the Goldfish level.
 
     Requires:
-        - meerkat-sdk>=0.4 installed: pip install "meerkat-sdk>=0.4"
+        - meerkat-sdk>=0.7.23 installed: pip install "meerkat-sdk>=0.7.23"
 
     Environment variables:
         - GOLDFISH_MEERKAT_MODEL: Optional model override (e.g., "claude-sonnet-4-5-20250514")
@@ -1006,7 +1006,7 @@ class MeerkatProvider:
         try:
             meerkat = _import_meerkat()
         except ImportError:
-            logger.error("meerkat-sdk package not installed. Install with: pip install 'meerkat-sdk>=0.4'")
+            logger.error("meerkat-sdk package not installed. Install with: pip install 'meerkat-sdk>=0.7.23'")
             return ReviewResult(
                 decision="approved",
                 findings=["WARNING: meerkat-sdk not installed. Review skipped (fail-open)."],

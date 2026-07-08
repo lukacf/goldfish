@@ -27,7 +27,7 @@ dependencies = [
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
     "google-cloud-storage>=2.16.0",
-    "meerkat-sdk>=0.4.12",
+    "meerkat-sdk>=0.7.23",
 ]
 
 [project.urls]

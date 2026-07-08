@@ -338,7 +338,7 @@ class DockerBuilder:
     # Single source of truth for the Meerkat version used in Docker images.
     # Both meerkat-sdk (pip) and rkat-rpc (binary) are pinned to this version.
     # Bump this when upgrading — both must always match.
-    RKAT_RPC_VERSION = "v0.4.12"
+    RKAT_RPC_VERSION = "v0.7.23"
 
     # GitHub repo hosting rkat-rpc release artifacts.
     RKAT_REPO = "lukacf/meerkat"
