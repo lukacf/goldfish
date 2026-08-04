@@ -319,7 +319,9 @@ def _register_proxy_tools() -> None:
 
     from goldfish.server import mcp as original_mcp
 
-    tools = asyncio.run(original_mcp._list_tools())
+    # Use FastMCP's context-free middleware entrypoint. Calling _list_tools()
+    # directly requires a request context in FastMCP 2.13+.
+    tools = asyncio.run(original_mcp._list_tools_middleware())
     for tool in tools:
         tool_name = tool.name
         original_fn = tool.fn
