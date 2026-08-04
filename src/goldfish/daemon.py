@@ -484,8 +484,9 @@ class GoldfishDaemon:
 
         from goldfish.server import mcp
 
-        # Get all registered tools from FastMCP (3.x uses async _list_tools)
-        tools = asyncio.run(mcp._list_tools())
+        # Use FastMCP's context-free middleware entrypoint. Calling
+        # _list_tools() directly requires a request context in FastMCP 2.13+.
+        tools = asyncio.run(mcp._list_tools_middleware())
         for tool in tools:
             self.tools[tool.name] = tool.fn
             logger.debug("Registered tool: %s", tool.name)
