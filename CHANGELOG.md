@@ -4,6 +4,19 @@ All notable changes to Goldfish.
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-09-30
+
+### Changed
+- Upgrade the Meerkat SDK requirement and Docker SDK/runtime pair to 0.8.47.
+  Add compatibility coverage for review results, session parsing, and archival.
+
+### Fixed
+- Update the bundled Rust SDK's `ethnum` dependency to 1.5.3 for compatibility
+  with Rust 1.97.
+- Upgrade the security audit runner's setuptools to a patched version and add
+  a regression check for the audit setup.
+- Include `pytest-order` in the test and development dependencies.
+
 ## [0.4.5] - 2026-04-11
 
 ### Fixed
