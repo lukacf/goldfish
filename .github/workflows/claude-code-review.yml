@@ -54,3 +54,11 @@ jobs:
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
           claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
+
+      - name: Report review failure
+        if: failure() && steps.claude-review.outputs.execution_file != ''
+        env:
+          EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
+        run: |
+          # Keep tool output private; print only the failed result's diagnostic.
+          jq -r '.[] | select(.type == "result" and .is_error == true) | .result // (.errors // ["Review failed without an error message"] | join("\n"))' "$EXECUTION_FILE"
