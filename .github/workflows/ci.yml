@@ -70,6 +70,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install uv
+          # The audit includes preinstalled runner tooling as well as project dependencies.
+          uv pip install --system "setuptools>=83.0.0"
           uv pip install --system ".[test]"
 
       - name: Run pip-audit
