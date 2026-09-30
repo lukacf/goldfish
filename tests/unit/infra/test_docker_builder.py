@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -321,6 +322,22 @@ class TestMeerkatInstallBlock:
     than the pinned binary, causing 'Server version X incompatible with
     SDK Y' at runtime.
     """
+
+    def test_project_dependency_matches_docker_sdk_version(self) -> None:
+        """Host installs and stage images must share the same minimum SDK version."""
+        project_root = Path(__file__).resolve().parents[3]
+        project = tomllib.loads((project_root / "pyproject.toml").read_text())
+        semver = DockerBuilder.RKAT_RPC_VERSION.lstrip("v")
+
+        assert f"meerkat-sdk>={semver}" in project["project"]["dependencies"]
+
+    def test_locked_sdk_matches_docker_binary_version(self) -> None:
+        """Locked development installs must exercise the SDK shipped in stage images."""
+        project_root = Path(__file__).resolve().parents[3]
+        lock = tomllib.loads((project_root / "uv.lock").read_text())
+        sdk = next(package for package in lock["package"] if package["name"] == "meerkat-sdk")
+
+        assert sdk["version"] == DockerBuilder.RKAT_RPC_VERSION.lstrip("v")
 
     def test_sdk_pinned_exactly_to_binary_version(self) -> None:
         """meerkat-sdk must use == (not >=) matching RKAT_RPC_VERSION."""
